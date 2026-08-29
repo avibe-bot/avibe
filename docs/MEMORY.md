@@ -85,6 +85,25 @@ diagnostics. It contains no Memory payload and is not a delivery queue or
 recovery state machine. The later sections define the product behavior at these
 seams.
 
+## Optional package and upgrades
+
+The implementation is the optional `avibe-memory` distribution. Avibe loads it
+in-process only when Memory is required; a missing, incompatible, or failed
+package degrades Memory without making Avibe or its Agent unavailable.
+
+Forward upgrades preserve the Memory package when Memory is enabled or the
+package is already present. A successful upgrade schedules the ordinary Avibe
+restart when the runtime is active. Package resolution, installation, upgrade,
+or restart failures are structured terminal results, and a later explicit
+attempt is allowed. Avibe performs no automatic package rollback and keeps no
+rollback plan, lifecycle reservation, quarantine, Gate 5 lifecycle verifier, or
+recovery bootstrap.
+
+Published Memory Runtime artifacts retain their manifest, hash, fetch, verify,
+and backup availability safeguards. Those checks protect immutable release
+assets and manual recovery inputs; they do not compensate for or reverse an
+installed-package transition.
+
 ## User and Agent memory ownership
 
 Automatic capture of a user's messages continues to target that user's Memory
@@ -106,10 +125,8 @@ Existing Memory data is not moved. Agent-recorded facts written before this
 split remain under the user owner and are still searchable there. A newer
 installation preserves the released four-field provider-session shape, but
 delivery remains process-local; pending Agent-owner work may be lost across restart,
-rollback, or runtime replacement and is never replayed from an older queue.
-On rollback, already-delivered Agent-owner memories remain stored but are hidden
-from an older reader until Avibe is upgraded again. Already submitted provider
-outcomes are never replayed by this path.
+or runtime replacement and is never replayed from an older queue. Already
+submitted provider outcomes are never replayed by this path.
 
 ## IM attachment capture
 

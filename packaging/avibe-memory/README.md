@@ -48,4 +48,9 @@ constant, and the EverOS artifact manifest remains available as
 `vibe/memory_runtime_manifest.json`. Runtime, storage, configuration, and data
 formats are unchanged, so a source-compatible Avibe release can load the same
 persisted state. Release failures stop at the failed forward step; this contract
-does not add automatic package rollback, lifecycle reservation, or recovery.
+does not add automatic package rollback, a rollback plan, lifecycle reservation,
+quarantine, a Gate 5 lifecycle verifier, or recovery bootstrap. Successful
+upgrades follow the ordinary Avibe restart path. Package installation, upgrade,
+and restart failures are structured terminal results and do not prevent a later
+explicit attempt. Manifest/hash/fetch/verify and backup safeguards remain release
+asset availability controls, not installed-package rollback machinery.

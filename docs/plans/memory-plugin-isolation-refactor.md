@@ -1,15 +1,15 @@
 # Memory Optional Package Isolation Refactor
 
-> Status: proposed, revised after PM review
+> Status: complete (2026-08-29)
 >
-> Baseline: `origin/master` at `36118911b` (2026-08-25)
+> Completion baseline: `origin/dev` at `8033662fa` (post-#1774)
 >
-> `docs/MEMORY.md` remains the current product contract until this plan is
-> implemented.
+> `docs/MEMORY.md` is the current product contract. This plan records the
+> completed isolation waves and their retained boundaries.
 
 ## Decision
 
-Memory runtime implementation will move into an independently published,
+Memory runtime implementation now lives in an independently published,
 optional Python package loaded in the Avibe process only when Memory is enabled.
 EverOS remains the one Memory child process. This refactor does not add another
 sidecar, UDS protocol, process supervisor, generic plugin host, or dynamic plugin
@@ -62,26 +62,24 @@ arbitrary infinite CPU loop inside Python. A second process is considered only
 after a reproducible fault shows that the in-process adapter cannot meet the
 bounded contract.
 
-## Current Gaps
+## Completed Scope
 
-The current implementation already keeps capture outside Agent completion and
-makes `/new` and archive barriers best effort. The remaining independence gaps
-are more specific:
+The waves closed the following independence gaps without changing Memory product
+behavior:
 
-1. Controller imports Memory implementation at module import time.
-2. Controller constructs `MemoryRuntime` when `memory.enabled` is false.
-3. Disabled construction opens `memory.sqlite` and creates attachment, state,
+1. Controller no longer imports Memory implementation at module import time.
+2. Disabled startup does not construct `MemoryRuntime`.
+3. Disabled startup does not open `memory.sqlite` or create attachment, state,
    and lock directories.
-4. Controller and `MessageHandler` own Memory admission, capture tasks,
-   capacity reservations, and attachment-specific scheduling.
-5. Workbench and delivery persistence write `_memory_*` metadata, and queue
-   segmentation depends on it.
-6. Memory task and destructive-operation shutdown paths contain unbounded waits.
-7. Generic helpers and host contracts live under `core.memory`, so deleting the
-   implementation package also deletes code needed by archive, UI auth, config,
-   and internal clients.
-8. The install/upgrade path assumes Memory implementation ships inside the
-   `avibe-os` wheel.
+4. The optional adapter owns Memory admission, capture tasks, capacity, and
+   attachment scheduling.
+5. New Workbench and delivery persistence does not write `_memory_*` metadata or
+   depend on it for queue segmentation.
+6. Memory task and destructive-operation shutdown paths are bounded.
+7. Generic helpers and host contracts needed by archive, UI auth, config, and
+   internal clients live outside the optional implementation.
+8. Install and upgrade paths resolve `avibe-memory` as an optional independent
+   distribution.
 
 The refactor targets these gaps. It does not reimplement working Memory product
 behavior.
@@ -256,7 +254,7 @@ host continues to enforce:
 - `transition_notice_pending`, applied embedding identity, and organization
   transition behavior;
 - `legacy_needs_repair` / `repair_required`; and
-- rollback-compatible serialization of released config shapes.
+- compatible loading of released config shapes.
 
 The optional package receives a validated config snapshot. This plan does not
 make the Memory mapping opaque and does not change config behavior.
@@ -326,7 +324,7 @@ existing functional owner.
 
 ## Installation and Upgrade Contract
 
-The package split must not silently disable Memory for existing users.
+The package split does not silently disable Memory for existing users.
 
 1. Publish `avibe-memory` before the first `avibe-os` release that can load it.
 2. Add an `avibe-os[memory]` extra that resolves a host-compatible
@@ -334,11 +332,12 @@ The package split must not silently disable Memory for existing users.
 3. The existing upgrade planner chooses the extra when either Memory is enabled
    or the optional package is already installed. Disabled core-only installs
    continue upgrading without it.
-4. Record whether the optional package was present in `RollbackTarget`; a pinned
-   rollback restores the matching core-only or core-plus-Memory shape.
-5. An enabled upgrade fails before replacing the current installation if the
+4. An enabled upgrade fails before replacing the current installation if the
    compatible optional package cannot be resolved. It does not install a new
    core and silently drop Memory.
+5. A successful upgrade schedules the ordinary Avibe restart when the runtime is
+   active. Install, upgrade, or restart failures are structured terminal results;
+   they do not block a later explicit attempt.
 6. The existing Dependencies/Memory install action may explicitly reinstall the
    current tool with the Memory extra. Controller startup never installs or
    downloads Python packages.
@@ -347,18 +346,24 @@ The package split must not silently disable Memory for existing users.
 8. EverOS runtime download/install remains an explicit Memory dependency action,
    but its manifest and implementation move with `avibe-memory`.
 
+There is no automatic package rollback, rollback plan, package-lifecycle
+reservation, quarantine, Gate 5 lifecycle verifier, or recovery bootstrap. The
+retained manifest, hash, fetch, verify, and backup safeguards protect published
+Memory Runtime artifact availability; they do not mutate installed Python
+packages or recover an upgrade attempt.
+
 Core and optional-package protocol compatibility is checked at lazy load. A
 mismatch selects `DisabledMemoryAdapter` and reports
 `memory_plugin_incompatible`; it never fails service startup.
 
-## Migration Waves
+## Completed Migration Waves
 
-Each wave is a focused, green PR. Tests are written red and fixed in the same PR;
-the repository does not merge placeholder scenario IDs or permanent xfails.
+Each wave landed as a focused, green PR. The repository did not merge placeholder
+scenario IDs or permanent xfails.
 
-### Wave 0: Make disabled Memory truly off
+### Wave 0: Make disabled Memory truly off (complete)
 
-Scope:
+Delivered:
 
 - choose `DisabledMemoryAdapter` before importing or constructing Memory runtime;
 - stop opening Memory store, attachments, artifact state, and operation locks
@@ -371,7 +376,7 @@ Scope:
 - preserve asynchronous cleanup of pre-existing owned EverOS processes without
   creating new Memory state.
 
-Add scenarios when the fixes land:
+Evidence added:
 
 - `MEMORY-INDEP-013`: disabled fresh startup has zero Memory filesystem/process
   side effects;
@@ -379,15 +384,14 @@ Add scenarios when the fixes land:
   implementation imports are blocked; and
 - `MEMORY-INDEP-015`: a frozen Memory task cannot make Avibe shutdown unbounded.
 
-Exit gate: these scenarios and existing `MEMORY-INDEP-001..012` pass. No enabled
+Completion evidence: these scenarios and existing `MEMORY-INDEP-001..012` pass. No enabled
 Memory product behavior changes.
 
-Rollback: restore eager construction only; no persisted format changes occur in
-this wave.
+Compatibility: this wave introduced no persisted format change.
 
-### Wave 1: Return message and session ownership to core
+### Wave 1: Return message and session ownership to core (complete)
 
-Scope:
+Delivered:
 
 - rename archive to a core session operation and keep its Memory observation
   after commit;
@@ -401,7 +405,7 @@ Scope:
   scheduling behind the enabled adapter; and
 - preserve the exact attachment, prompt, config, and explicit-route behavior.
 
-Add:
+Evidence added:
 
 - `MEMORY-INDEP-016`: new rows use author/message-kind merge identity and contain
   no Memory-private metadata;
@@ -409,15 +413,15 @@ Add:
   forwarded/edited input, scheduled delivery, and legacy/new queued rows; and
 - attachment tests proving retain/pin/text-only fallback behavior is unchanged.
 
-Exit gate: removing or forcing the adapter to raise does not change chat,
+Completion evidence: removing or forcing the adapter to raise does not change chat,
 `/new`, archive, queue grouping, or Agent attachment delivery.
 
-Rollback: re-enable the legacy metadata writer while the compatibility reader is
-still present. No bulk data migration exists to reverse.
+Compatibility: the legacy metadata reader remains; no bulk data migration was
+introduced.
 
-### Wave 2: Extract the optional in-process package
+### Wave 2: Extract the optional in-process package (complete)
 
-Scope:
+Delivered:
 
 - introduce the fixed lazy loader and enabled adapter implementation;
 - move implementation modules listed above to `avibe-memory` without changing
@@ -428,7 +432,7 @@ Scope:
 - fail closed to `DisabledMemoryAdapter` on absent package, import failure,
   incompatible protocol, or construction failure.
 
-Add:
+Evidence added:
 
 - `MEMORY-INDEP-017`: core-only installation imports and runs chat, `/new`,
   archive, UI server, internal server, CLI help, and shutdown;
@@ -436,40 +440,40 @@ Add:
 - package import/construction failure containment; and
 - core-plus-Memory parity for all existing Memory scenarios.
 
-Exit gate: the Avibe process imports no optional implementation when disabled;
+Completion evidence: the Avibe process imports no optional implementation when disabled;
 blocking `avibe_memory` imports leaves all core scenarios green; enabled Memory
 passes its existing suite against unchanged data.
 
-Rollback: the package move is source-compatible and keeps current data/config
-formats; the previous release can load the same state.
+Compatibility: the package move kept current data and config formats readable.
 
-### Wave 3: Ship the package split and delete compatibility code
+### Wave 3: Ship the package split and delete compatibility code (complete)
 
-Scope:
+Delivered:
 
 - publish the matched optional distribution and `avibe-os[memory]` extra;
-- update forward upgrade and rollback plans to preserve plugin presence;
+- update forward upgrades to preserve plugin presence;
 - move runtime manifest/build/release guard ownership;
 - add core-only and core-plus-Memory wheel matrices;
 - remove `core.memory`, temporary adapters, new-write legacy metadata paths, and
   duplicate tests after the legacy read window; and
 - update `docs/MEMORY.md` and user installation documentation.
 
-Add:
+Evidence added:
 
 - the retired `MEMORY-INDEP-018` package-shape assignment remains historical
   lineage only and is not an implementation target;
 - wheel-content assertions proving `avibe-os` contains no Memory runtime
   implementation or EverOS artifact manifest; and
-- packaged install smoke for missing, disabled, enabled, incompatible, upgrade,
-  and rollback cases.
+- packaged install smoke for missing, disabled, enabled, incompatible, and
+  upgrade cases.
 
-Exit gate: both package matrices pass CI; local Incus `master` regression passes
+Completion evidence: both package matrices pass CI; local Incus `master` regression passes
 Workbench and Slack/Discord/Telegram/Feishu/WeChat capture; service health is
 verified; no temporary fallback implementation remains.
 
-The proposed Wave 3c lifecycle, rollback, and Gate 5 transition designs were
-abandoned and their detailed contracts were retired. Historical scenario IDs
+The proposed Wave 3c rollback plan, lifecycle reservation, quarantine, Gate 5
+verifier, and recovery bootstrap were abandoned and retired. Historical
+scenario IDs
 `MEMORY-INDEP-018` through `020`, `022`, and `023` remain unassigned and must not
 be repurposed. Current executable import and package-shape evidence is owned by
 the scenario catalog under `MEMORY-INDEP-021` and `MEMORY-INDEP-024`.
@@ -487,7 +491,7 @@ the scenario catalog under `MEMORY-INDEP-021` and `MEMORY-INDEP-024`.
 | Attachments | current lease, pin, integrity, fallback, and cleanup scenarios remain green |
 | Config | stale write, confirm-loss, cloud transition, repair fence, and released-shape fixtures remain green |
 | Explicit surfaces | UI, named internal routes, CLI output/exit codes, and prompt routing retain parity |
-| Packaging | core-only, core-plus-Memory, enabled upgrade, disabled upgrade, and rollback matrices |
+| Packaging | core-only, core-plus-Memory, enabled upgrade, disabled upgrade, terminal failure, and retry evidence |
 
 ## Complexity Guardrails
 
@@ -519,7 +523,7 @@ The refactor is complete when:
 - core session and delivery state no longer depends on Memory-private metadata;
 - attachment, config safety, prompt, UI, CLI, and enabled Memory behavior remain
   unchanged;
-- existing enabled users receive the compatible package during upgrade and can
-  roll back without data movement;
+- existing enabled users receive the compatible package during forward upgrade,
+  and a terminal failure does not prevent a later attempt;
 - `core.memory` and every temporary migration adapter are deleted; and
 - no second sidecar or generic plugin framework was introduced.
