@@ -126,7 +126,8 @@ SHOW_RUNTIME_CONTEXT_HEADER = "X-Avibe-Show-Context"
 SHOW_RUNTIME_BASE_HEADER = "x-vibe-show-base"
 SHOW_RUNTIME_TARGET_HEADER = "x-vibe-show-target"
 SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
-SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY = "render_markdown"
+SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY = "render_markdown_ssr"
+# Phase 2.1 measured ~2 s cold against a 10 s Runtime module-load budget; this margin has no browser-install allowance.
 SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS = 30.0
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
@@ -1391,12 +1392,10 @@ class ShowRuntimeManager:
 
         protocol = payload.get("protocol", _MISSING)
         capability = payload.get(SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY, _MISSING)
-        if protocol is not _MISSING and (isinstance(protocol, bool) or not isinstance(protocol, int)):
-            return None
-        if capability is not _MISSING and not isinstance(capability, bool):
-            return None
-        return bool(
-            protocol == SHOW_RUNTIME_PROTOCOL_VERSION
+        return (
+            isinstance(protocol, int)
+            and not isinstance(protocol, bool)
+            and protocol == SHOW_RUNTIME_PROTOCOL_VERSION
             and capability is True
         )
 
