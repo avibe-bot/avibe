@@ -33,7 +33,7 @@ FORWARD_PACKAGE_SHAPE_IMPORTS = {
         pytest.param(OSError("unreadable"), True, None, id="unreadable"),
     ],
 )
-def test_memory_indep_024_forward_memory_package_inspection(
+def test_memory_indep_024_forward_package_shape_and_import_contract(
     monkeypatch: pytest.MonkeyPatch,
     metadata_result: object,
     expected_present: bool,
@@ -50,6 +50,13 @@ def test_memory_indep_024_forward_memory_package_inspection(
 
     assert memory_package_installed() is expected_present
     assert installed_memory_package_version() == expected_version
+
+    package_shape_imports, reservation_imports = _production_imports()
+
+    assert reservation_imports == []
+    assert package_shape_imports == {
+        "vibe/upgrade.py": FORWARD_PACKAGE_SHAPE_IMPORTS,
+    }
 
 
 def _imported_modules(node: ast.Import | ast.ImportFrom) -> set[str]:
@@ -165,12 +172,3 @@ def _production_imports() -> tuple[dict[str, set[str]], list[str]]:
                 if _imports_retired_reservation(node):
                     reservation_imports.append(relative)
     return package_shape_imports, reservation_imports
-
-
-def test_memory_indep_024_production_imports_only_forward_package_shape() -> None:
-    package_shape_imports, reservation_imports = _production_imports()
-
-    assert reservation_imports == []
-    assert package_shape_imports == {
-        "vibe/upgrade.py": FORWARD_PACKAGE_SHAPE_IMPORTS,
-    }

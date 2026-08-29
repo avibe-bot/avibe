@@ -145,4 +145,4 @@ scenarios:
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_024_forward_memory_package_inspection
+    test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_024_forward_package_shape_and_import_contract
