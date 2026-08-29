@@ -30,7 +30,8 @@ const selectableModels = (agent: AgentSupply, sources: Source[]): MenuModel[] =>
   const standardVendors = new Set(agent.standard_vendors ?? []);
   const namesById = new Map<string, Set<string>>();
   const sourceNames = new Map(sources.map((source) => [source.id, source.display_name]));
-  for (const source of eligibleSources(sources, agent)) {
+  const eligibleById = new Map(eligibleSources(sources, agent).map((source) => [source.id, source]));
+  for (const source of eligibleById.values()) {
     for (const model of source.models) {
       if (model.retired) continue;
       const id = buildIdentifier(source.vendor, model.id, standardVendors);
@@ -38,6 +39,16 @@ const selectableModels = (agent: AgentSupply, sources: Source[]): MenuModel[] =>
       names.add(source.display_name);
       namesById.set(id, names);
     }
+  }
+  for (const [id, route] of Object.entries(agent.routes ?? {})) {
+    const names = new Set(namesById.get(id));
+    for (const hop of route.hops) {
+      const source = eligibleById.get(hop.source_id);
+      if (source?.models.some((model) => model.id === hop.model_id && !model.retired)) {
+        names.add(source.display_name);
+      }
+    }
+    if (names.size > 0) namesById.set(id, names);
   }
   for (const id of agent.menu?.checked ?? []) {
     if (namesById.has(id)) continue;

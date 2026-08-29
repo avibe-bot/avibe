@@ -1133,6 +1133,50 @@ def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(
     )
 
 
+def test_opencode_menu_reselects_a_dormant_route_alias_with_an_eligible_exact_hop(tmp_path):
+    source = _source("src_opencode05", ("upstream-model",), vendor="openai")
+    config = _config([source])
+    opencode = config.agents["opencode"]
+    opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": []},
+            {"view": "featured", "checked": ["openai/menu-model"]},
+        )
+    )
+
+    saved = store.load().agents["opencode"]
+    assert saved.menu.checked == ["openai/menu-model"]
+    assert saved.routes["openai/menu-model"].hops == (
+        ModelHubRouteHopConfig(source.id, "upstream-model"),
+    )
+
+
+def test_opencode_menu_rejects_a_dormant_route_alias_with_a_stale_exact_hop(tmp_path):
+    source = _source("src_opencode06", (), vendor="openai")
+    config = _config([source])
+    config.agents["opencode"].routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_opencode_menu(
+                {"view": "featured", "checked": []},
+                {"view": "featured", "checked": ["openai/menu-model"]},
+            )
+        )
+
+    assert exc.value.code == "mapping_target_unavailable"
+    assert exc.value.status == 409
+    assert store.load().agents["opencode"].menu.checked == []
+
+
 def test_opencode_menu_applies_local_intent_to_the_latest_saved_menu(tmp_path):
     source = _source(
         "src_opencode03",

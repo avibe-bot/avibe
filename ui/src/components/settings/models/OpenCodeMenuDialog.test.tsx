@@ -164,6 +164,41 @@ describe('OpenCodeMenuDialog', () => {
     ));
   });
 
+  it('reselects a dormant route alias backed by an eligible exact hop', async () => {
+    const user = userEvent.setup();
+    const configured = {
+      ...agent,
+      menu: { view: 'featured' as const, checked: [] },
+      routes: { 'openai/menu-model': { hops: [{ source_id: 'src_openai', model_id: 'gpt-5.6-sol' }] } },
+    };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(configured);
+    const putMenu = vi.spyOn(modelsApi, 'putMenu').mockResolvedValue({
+      ...configured,
+      menu: { view: 'featured', checked: ['openai/menu-model'] },
+    });
+    render(
+      <I18nextProvider i18n={i18n}>
+        <OpenCodeMenuDialog
+          open
+          sourceReads={{ readValue: vi.fn().mockResolvedValue(sources) }}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+          onObserved={vi.fn()}
+          menuWrite={{ pending: false, track: async (work) => work() }}
+        />
+      </I18nextProvider>,
+    );
+
+    const alias = await screen.findByRole('checkbox', { name: /openai\/menu-model/i });
+    expect(alias.getAttribute('aria-checked')).toBe('false');
+    await user.click(alias);
+    await user.click(screen.getByRole('button', { name: 'Save selection' }));
+    await waitFor(() => expect(putMenu).toHaveBeenCalledWith(
+      { view: 'featured', checked: [] },
+      { view: 'featured', checked: ['openai/menu-model'] },
+    ));
+  });
+
   it('preserves a checked cross-model route while saving an unrelated addition', async () => {
     const user = userEvent.setup();
     const configured = {
