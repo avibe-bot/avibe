@@ -44,25 +44,25 @@ jobs:
           mkdir -p "$candidate_dir"
           : > "$records_file"
           : > "$excluded_file"
-          while IFS= read -r candidate_tag; do
+          while IFS=$'\t' read -r candidate_tag manifest_owner wheel_pattern; do
             rm -rf "$candidate_dir"
             mkdir -p "$candidate_dir"
             if ! gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
-              --pattern 'avibe_memory-*.whl' --dir "$candidate_dir" >/dev/null 2>&1; then
+              --pattern "$wheel_pattern" --dir "$candidate_dir" >/dev/null 2>&1; then
               jq -nc --arg release_tag "$candidate_tag" \
-                --arg reason "published wheel could not be downloaded" \
+                --arg reason "published $manifest_owner wheel could not be downloaded" \
                 '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             fi
             set +e
-            CANDIDATE_TAG="$candidate_tag" CANDIDATE_DIR="$candidate_dir" \
+            CANDIDATE_TAG="$candidate_tag" CANDIDATE_DIR="$candidate_dir" WHEEL_PATTERN="$wheel_pattern" \
               python3 - <<'PY'
           import json
           import os
           import zipfile
           from pathlib import Path
 
-          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_memory-*.whl"))
+          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob(os.environ["WHEEL_PATTERN"]))
           if len(wheels) != 1:
               raise SystemExit(1)
           with zipfile.ZipFile(wheels[0]) as wheel:
@@ -77,12 +77,19 @@ jobs:
           PY
             manifest_status=$?
             set -e
-            # Memory wheels without a manifest predate Memory Runtime and are not scope exclusions.
+            # Only legacy core wheels may predate Memory Runtime. Once the
+            # Memory wheel exists, it is authoritative and must not fall back.
             if [ "$manifest_status" -eq 4 ]; then
+              if [ "$manifest_owner" = "avibe-os" ]; then
+                continue
+              fi
+              jq -nc --arg release_tag "$candidate_tag" \
+                --arg reason "$manifest_owner wheel does not contain a self-pinned published manifest" \
+                '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             elif [ "$manifest_status" -ne 0 ]; then
               jq -nc --arg release_tag "$candidate_tag" \
-                --arg reason "wheel does not contain a self-pinned published manifest" \
+                --arg reason "$manifest_owner wheel does not contain a valid self-pinned published manifest" \
                 '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             fi
@@ -97,7 +104,9 @@ jobs:
             set -e
             if [ "$policy_status" -eq 0 ]; then
               jq -nc --arg release_tag "$candidate_tag" --arg sha256 "$manifest_sha" \
-                '{release_tag: $release_tag, sha256: $sha256}' >> "$records_file"
+                --arg manifest_owner "$manifest_owner" --arg wheel_pattern "$wheel_pattern" \
+                '{release_tag: $release_tag, sha256: $sha256, manifest_owner: $manifest_owner,
+                  wheel_pattern: $wheel_pattern}' >> "$records_file"
             elif [ "$policy_status" -eq 2 ]; then
               policy_reason="$(jq -r '.error // "manifest excluded by policy"' <<<"$policy_output")"
               jq -nc --arg release_tag "$candidate_tag" --arg reason "$policy_reason" \
@@ -108,7 +117,15 @@ jobs:
             fi
           done < <(
             gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(any(.assets[]?; (.name | startswith("avibe_memory-")) and (.name | endswith(".whl")))) | .tag_name'
+              --jq '
+                .[] |
+                if any(.assets[]?; (.name | startswith("avibe_memory-")) and (.name | endswith(".whl"))) then
+                  [.tag_name, "avibe-memory", "avibe_memory-*.whl"] | @tsv
+                elif any(.assets[]?; (.name | startswith("avibe_os-")) and (.name | endswith(".whl"))) then
+                  [.tag_name, "avibe-os", "avibe_os-*.whl"] | @tsv
+                else
+                  empty
+                end'
           )
           RECORDS_FILE="$records_file" EXCLUDED_FILE="$excluded_file" python3 - <<'PY'
           import json
@@ -172,6 +189,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ matrix.manifest.release_tag }}
           EXPECTED_SHA256: ${{ matrix.manifest.sha256 }}
+          MANIFEST_OWNER: ${{ matrix.manifest.manifest_owner }}
+          WHEEL_PATTERN: ${{ matrix.manifest.wheel_pattern }}
         shell: bash
         run: |
           set -euo pipefail
@@ -179,17 +198,18 @@ jobs:
           rm -rf "$manifest_dir"
           mkdir -p "$manifest_dir"
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'avibe_memory-*.whl' --dir "$manifest_dir" >/dev/null
+            --pattern "$WHEEL_PATTERN" --dir "$manifest_dir" >/dev/null
           CANDIDATE_TAG="$RELEASE_TAG" CANDIDATE_DIR="$manifest_dir" \
+            MANIFEST_OWNER="$MANIFEST_OWNER" WHEEL_PATTERN="$WHEEL_PATTERN" \
             python3 - <<'PY'
           import json
           import os
           import zipfile
           from pathlib import Path
 
-          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_memory-*.whl"))
+          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob(os.environ["WHEEL_PATTERN"]))
           if len(wheels) != 1:
-              raise SystemExit("expected exactly one avibe_memory wheel")
+              raise SystemExit(f"expected exactly one {os.environ['MANIFEST_OWNER']} wheel")
           with zipfile.ZipFile(wheels[0]) as wheel:
               manifest = wheel.read("vibe/memory_runtime_manifest.json")
           payload = json.loads(manifest)

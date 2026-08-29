@@ -90,29 +90,35 @@ does not remove older supported entries. A manifest with unsupported provenance
 is excluded visibly by `check-policy`; it is not treated as a byte-recovery
 failure.
 
-Published `avibe-memory` wheels that predate the Memory Runtime manifest are
-skipped by the scheduled inventory. A wheel that contains a candidate manifest
-must self-pin the selected release tag and pass current policy before it enters
-guarded backup and recovery coverage. Changes to a shipped manifest shape
-require compatible loading or a deliberate visible exclusion, never startup or
-workflow failure by accident.
+For split releases, the `avibe-memory` wheel is the authoritative manifest
+owner. A published release may fall back to its legacy `avibe-os` wheel only
+when no `avibe-memory` wheel exists. A present but missing or invalid Memory
+manifest is excluded visibly and never masked by the legacy fallback. Legacy
+core wheels that predate the Memory Runtime manifest are skipped by the
+scheduled inventory. Any candidate manifest must self-pin the selected release
+tag and pass current policy before it enters guarded backup and recovery
+coverage. Changes to a shipped manifest shape require compatible loading or a
+deliberate visible exclusion, never startup or workflow failure by accident.
 
 ## Availability, Backup, And Recovery
 
 The scheduled `Memory Runtime Release Guard` preserves the managed-runtime
 availability contract:
 
-1. Enumerate published releases with an `avibe-memory` wheel and extract each
-   self-pinned Memory Runtime manifest from that wheel.
-2. Record the exact manifest hash, run `check-policy`, and report guarded and
+1. Enumerate published releases with either distribution wheel. Prefer
+   `avibe-memory`; select `avibe-os` only for a release with no Memory wheel.
+2. Extract the manifest from that selected wheel, record its owner, exact wheel
+   pattern, and manifest hash, then run `check-policy` and report guarded and
    excluded releases separately.
-3. Run `fetch` for every guarded manifest. A successful fetch is the public
+3. Re-download the exact recorded owner during verification instead of
+   rediscovering package ownership.
+4. Run `fetch` for every guarded manifest. A successful fetch is the public
    availability and integrity check.
-4. Keep a verified backup artifact keyed by the exact manifest SHA-256.
-5. On a byte failure, locate the latest non-expired matching backup, run
+5. Keep a verified backup artifact keyed by the exact manifest SHA-256.
+6. On a byte failure, locate the latest non-expired matching backup, run
    `verify` on it, and upload only asset names that are missing from the release.
    Existing names are never clobbered; a same-name integrity failure stops.
-6. Run `fetch` again after recovery so restored public bytes must pass the same
+7. Run `fetch` again after recovery so restored public bytes must pass the same
    release-tag, manifest, archive, and hash checks.
 
 The backup lookup follows the artifact identity rather than a fixed recent-run

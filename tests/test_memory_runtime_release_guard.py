@@ -371,11 +371,47 @@ def test_guard_workflow_reports_and_verifies_supported_published_manifests() -> 
     assert "matrix.manifest.release_tag" in workflow
 
 
-def test_guard_workflow_reads_manifests_from_memory_distribution() -> None:
-    workflow = (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text(encoding="utf-8")
+def _guard_workflow() -> str:
+    return (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text(encoding="utf-8")
 
-    assert workflow.count("--pattern 'avibe_memory-*.whl'") == 2
-    assert workflow.count('glob("avibe_memory-*.whl")') == 2
-    assert 'startsWith("avibe_memory-")' not in workflow
-    assert 'startswith("avibe_memory-")' in workflow
-    assert "avibe_os-*.whl" not in workflow
+
+def test_guard_workflow_prefers_memory_distribution_for_split_releases() -> None:
+    workflow = _guard_workflow()
+    memory_selection = '[.tag_name, "avibe-memory", "avibe_memory-*.whl"] | @tsv'
+    legacy_selection = '[.tag_name, "avibe-os", "avibe_os-*.whl"] | @tsv'
+
+    assert memory_selection in workflow
+    assert legacy_selection in workflow
+    assert workflow.index(memory_selection) < workflow.index(legacy_selection)
+
+
+def test_guard_workflow_keeps_legacy_core_only_releases_guarded() -> None:
+    workflow = _guard_workflow()
+
+    assert 'elif any(.assets[]?; (.name | startswith("avibe_os-"))' in workflow
+    assert '[.tag_name, "avibe-os", "avibe_os-*.whl"] | @tsv' in workflow
+    assert 'if [ "$manifest_owner" = "avibe-os" ]; then' in workflow
+
+
+def test_guard_workflow_never_falls_back_from_an_invalid_memory_owner() -> None:
+    workflow = _guard_workflow()
+    resolution = workflow.split("- name: Resolve every published Memory Runtime manifest", 1)[1]
+    resolution = resolution.split("  guard:", 1)[0]
+
+    assert resolution.count("gh release download") == 1
+    assert '--pattern "$wheel_pattern"' in resolution
+    assert "Memory wheel exists, it is authoritative and must not fall back." in resolution
+    assert '$manifest_owner wheel does not contain a valid self-pinned published manifest' in resolution
+
+
+def test_guard_workflow_verification_consumes_recorded_manifest_owner() -> None:
+    workflow = (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text(encoding="utf-8")
+    verification = workflow.split("- name: Resolve selected published Memory Runtime manifest", 1)[1]
+    verification = verification.split("- name: Fetch and verify published assets", 1)[0]
+
+    assert "manifest_owner: $manifest_owner" in workflow
+    assert "wheel_pattern: $wheel_pattern" in workflow
+    assert "MANIFEST_OWNER: ${{ matrix.manifest.manifest_owner }}" in verification
+    assert "WHEEL_PATTERN: ${{ matrix.manifest.wheel_pattern }}" in verification
+    assert '--pattern "$WHEEL_PATTERN"' in verification
+    assert 'glob(os.environ["WHEEL_PATTERN"])' in verification
