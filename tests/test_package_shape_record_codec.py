@@ -7,7 +7,6 @@ import os
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -28,7 +27,6 @@ from vibe.package_shape import (
     encode_resolved_rollback_plan_record,
 )
 from vibe.runtime import ServiceLauncher
-from vibe.upgrade import rollback_target
 
 
 def _captured() -> package_shape.CapturedPackageShape:
@@ -295,53 +293,6 @@ def test_memory_indep_019_rejects_invalid_distribution_names(
     )
     with pytest.raises(PackageShapeRecordError, match="name is invalid"):
         decode_resolved_rollback_plan_record(payload)
-
-
-def test_memory_indep_019_rollback_target_skips_unrelated_invalid_distribution_names(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    launcher = ServiceLauncher(
-        python="/opt/avibe/bin/python",
-        main="/opt/avibe/site-packages/vibe/service_main.py",
-    )
-    unrelated = SimpleNamespace(metadata={"Name": "broken/name"})
-    core = SimpleNamespace(
-        metadata={"Name": "avibe-os"},
-        version="3.0.14",
-        _path=tmp_path / "avibe_os-3.0.14.dist-info",
-        requires=('avibe-memory>=3.0.14.dev0,<3.1; extra == "memory"',),
-    )
-    monkeypatch.setattr("vibe.__version__", "3.0.14")
-    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
-    monkeypatch.setattr("importlib.metadata.distributions", lambda: (unrelated, core))
-
-    target = rollback_target()
-
-    assert target is not None
-    assert target.core_provider.name == "avibe-os"
-    assert target.core_provider.version == "3.0.14"
-
-
-def test_memory_indep_019_rollback_target_rejects_relevant_invalid_distribution_names(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    relevant_but_invalid = SimpleNamespace(
-        metadata={"Name": "avibe-os "},
-        version="3.0.14",
-        _path=tmp_path / "avibe_os-3.0.14.dist-info",
-        requires=(),
-    )
-    monkeypatch.setattr("vibe.__version__", "3.0.14")
-    monkeypatch.setattr(
-        "vibe.runtime.current_service_launcher",
-        lambda: ServiceLauncher(python="/opt/avibe/bin/python", main="/opt/avibe/vibe/service_main.py"),
-    )
-    monkeypatch.setattr("importlib.metadata.distributions", lambda: (relevant_but_invalid,))
-
-    with pytest.raises(PackageShapeError, match="installed distribution name is invalid"):
-        rollback_target()
 
 
 def test_memory_indep_019_artifact_fact_construction_rejects_invalid_state(

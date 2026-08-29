@@ -185,6 +185,50 @@ def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch
     }
 
 
+def test_entry_point_accepts_and_ignores_retired_rollback_argv(monkeypatch):
+    from vibe import cli
+
+    ran = {}
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: ran.update(kwargs) or 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vibe",
+            "__restart-supervisor",
+            "--job-id",
+            "legacy-upgrade",
+            "--trigger",
+            "upgrade",
+            "--rollback-to",
+            "3.0.14",
+            "--rollback-package",
+            "avibe-os",
+            "--rollback-memory-package",
+            "--rollback-memory-version",
+            "3.0.14",
+            "--rollback-python",
+            "/opt/avibe/bin/python",
+            "--rollback-main",
+            "/opt/avibe/vibe/service_main.py",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+
+    assert exit_info.value.code == 0
+    assert ran == {
+        "job_id": "legacy-upgrade",
+        "delay_seconds": 0.0,
+        "vibe_path": None,
+        "trigger": "upgrade",
+        "scope": "all",
+        "prepare_show_runtime": False,
+    }
+
+
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
     # The "scheduled" status is seeded before spawning; if the spawn fails, no
     # child will overwrite it, so schedule_restart must mark it failed (otherwise
