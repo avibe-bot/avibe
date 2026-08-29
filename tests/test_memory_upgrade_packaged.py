@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from vibe import restart_supervisor, runtime
-from vibe.upgrade import RollbackTarget, build_upgrade_plan, execute_upgrade_plan
+from vibe.upgrade import build_upgrade_plan, execute_upgrade_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,12 +228,11 @@ assert not any(
 
 
 @pytest.mark.integration
-def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollback(
+def test_packaged_memory_shape_survives_synchronous_upgrade(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     packaged_dependency_seed: Path,
 ) -> None:
-    """Run the public planner/executor, then the existing supervisor rollback path."""
+    """Run the public planner and executor across a paired package upgrade."""
 
     if not (ROOT / "vibe" / "show_runtime_manifest.json").is_file():
         pytest.fail("packaged wheel smoke requires the prepared local Show Runtime manifest")
@@ -266,42 +264,6 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
     upgraded = _installed_versions(python)
     assert upgraded["avibe-os"] == "3.0.15"
     assert upgraded["avibe-memory"] == "3.0.15"
-
-    launcher = runtime.ServiceLauncher(python=str(python), main=str(ROOT / "main.py"))
-    rollback_target = RollbackTarget(
-        version="3.0.14",
-        package="avibe-os",
-        launcher=launcher,
-        memory_package=True,
-        memory_version="3.0.14",
-    )
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
-    monkeypatch.setenv("PIP_NO_INDEX", "1")
-    monkeypatch.setenv("PIP_FIND_LINKS", str(wheelhouse))
-    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: (True, {}, 0, None, True, 0))
-    monkeypatch.setattr(restart_supervisor, "_failed_generation_still_running", lambda **kwargs: False)
-    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor.runtime, "wait_for_service_ready", lambda *args, **kwargs: 901)
-    monkeypatch.setattr(restart_supervisor.runtime, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(
-        restart_supervisor,
-        "_start_runtime_processes",
-        lambda **kwargs: restart_supervisor.StartedRuntime(901, None, None),
-    )
-    events: list[dict] = []
-    rollback = restart_supervisor._roll_back_failed_upgrade(
-        rollback_to=rollback_target,
-        vibe_path=None,
-        start_ui=False,
-        backup_watermark=None,
-        write=lambda message: None,
-        record=lambda payload: events.append(dict(payload)),
-    )
-    assert rollback["state"] == "succeeded"
-    restored = _installed_versions(python)
-    assert restored["avibe-os"] == "3.0.14"
-    assert restored["avibe-memory"] == "3.0.14"
-    assert any(event.get("install", {}).get("ok") is True for event in events)
 
 
 @pytest.mark.integration

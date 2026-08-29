@@ -6500,13 +6500,6 @@ def version():
     return jsonify(api.get_version_info())
 
 
-@app.route("/api/version/local")
-def local_version():
-    from vibe import api
-
-    return jsonify(api.get_local_version_info())
-
-
 # =============================================================================
 # POST Endpoints
 # =============================================================================

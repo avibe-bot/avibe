@@ -12,7 +12,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -25,22 +25,11 @@ from packaging.utils import (
 )
 from packaging.version import InvalidVersion, Version
 
-from vibe import runtime as runtime_mod
 from vibe.package_shape import (
     CORE_PACKAGE_NAME,
     LEGACY_CORE_PACKAGE_NAME,
     MEMORY_PACKAGE_NAME as SHAPE_MEMORY_PACKAGE_NAME,
     MEMORY_SPLIT_MIN_VERSION,
-    CapturedPackageShape,
-    DistributionProvider,
-    DuplicateDistributionProviderError,
-    ReleaseFamily,
-    ResolvedRollbackPlan,
-    RollbackResolutionError,
-    capture_installed_package_shape,
-    capture_package_shape,
-    inspect_installed_distribution_providers,
-    resolve_rollback_plan,
 )
 
 
@@ -97,28 +86,11 @@ class MemoryRequirementUnreadableError(ValueError):
 
 @dataclass(frozen=True)
 class UpgradePlan:
-    """A command that installs a version of avibe, and what it will replace.
-
-    `rollback_to` travels with the command because of WHEN it has to be taken,
-    not because the two are related ideas. It describes the install this command
-    is about to overwrite, and running the command is what destroys the evidence
-    it is read from -- so the only safe moment to take it is before there is a
-    command to run.
-
-    Left as a function the caller was told to call early, both call sites called
-    it late: after `subprocess.run(plan.command)` had already installed
-    `avibe-os` over a `vibe-remote` machine, so the question "what was this
-    install published as" had two answers and returned neither, and the rollback
-    pinned `avibe-os==2.x`, a release that was never published under that name.
-    Writing the ordering rule into a docstring is what failed; a field cannot be
-    called late, because there is no plan without the measurement and no install
-    without the plan.
-    """
+    """A validated package-install command and its execution metadata."""
 
     command: list[str]
     env: dict[str, str] | None
     method: str
-    rollback_to: CapturedPackageShape | RollbackTarget | None = None
     preflight_command: list[str] | None = None
     preflight_fallback_command: list[str] | None = None
     cleanup_command: list[str] | None = None
@@ -135,7 +107,7 @@ def execute_upgrade_plan(
 
     The caller owns package mutation sequencing. This helper deliberately does
     not acquire a lifecycle lock: callers can run the plan synchronously while
-    the existing restart supervisor owns any later activation or rollback.
+    the existing restart supervisor owns any later activation.
     """
 
     preflight = preflight_upgrade_plan(plan, run=run, **run_kwargs)
@@ -807,57 +779,6 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
-@dataclass(frozen=True)
-class RollbackTarget:
-    """The install being replaced, described completely enough to restore it.
-
-    Every field travels with the others because they are one measurement, and
-    splitting them is exactly how this went wrong, repeatedly and in the same
-    shape each time: the version was read in the process that predates the
-    install and the distribution in the one that follows it, so a `vibe-remote`
-    machine pinned `avibe-os==2.9.4`, a release that never existed. Then the same
-    seam reappeared one step later -- the right distribution reinstalled, and the
-    service started from whatever interpreter the restarting process happened to
-    be running, which after a rename is the tool that replaced this one. It put
-    the failed release back up and reported the rollback a success.
-
-    So the rule is that nothing about the replaced install is looked up again
-    later. Anything a rollback needs to know about it is measured here, once, in
-    the only process that can still see it, and carried. There is no constructor
-    that reads one field. The one compatibility exception is argv emitted by a
-    released scheduler before it carried an exact Memory version: that form is
-    normalized to a falsey, rollback-unavailable target so restart still runs.
-    """
-
-    version: str
-    package: str | None
-    launcher: runtime_mod.ServiceLauncher
-    memory_package: bool = False
-    memory_version: str | None = None
-    _rollback_available: bool = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        rollback_available = self.memory_package == (self.memory_version is not None)
-        normalized_memory_version = self.memory_version
-        if rollback_available and normalized_memory_version is not None:
-            try:
-                normalized_memory_version = str(Version(normalized_memory_version))
-            except InvalidVersion:
-                rollback_available = False
-
-        # Released schedulers could emit Memory presence without its version.
-        # Keep their restart job runnable, but make the incomplete target falsey
-        # so no rollback path can consume or persist it as restorable evidence.
-        if not rollback_available:
-            object.__setattr__(self, "memory_package", False)
-            normalized_memory_version = None
-        object.__setattr__(self, "memory_version", normalized_memory_version)
-        object.__setattr__(self, "_rollback_available", rollback_available)
-
-    def __bool__(self) -> bool:
-        return self._rollback_available
-
-
 def _names_a_published_release(version: str) -> bool:
     """Whether an index could serve `version`, as opposed to it naming this tree.
 
@@ -879,45 +800,6 @@ def _names_a_published_release(version: str) -> bool:
     if match is None:
         return False
     return not (match.group("dev") or match.group("local"))
-
-
-def rollback_target() -> CapturedPackageShape | None:
-    """The install a failed restart of THIS process could be put back on.
-
-    Everything here is measured from the running process, and that is the whole
-    point rather than an implementation detail: this describes the install the
-    upgrade is about to replace, and once it has been replaced there is nothing
-    left on the machine to measure. Calling this from the detached restart job
-    would answer for the install that did the replacing, which is not a rollback.
-
-    Which is why the only caller is :func:`build_upgrade_plan`, and why the
-    answer reaches everyone else as `UpgradePlan.rollback_to`. As a function
-    anyone could reach, it was reached at the wrong time -- both upgrade paths
-    called it after the install they were describing had already been overwritten.
-
-    So: the version from this process's already-bound `__version__`, which the
-    install on disk cannot change underneath it; the distribution from this
-    install's own metadata; and the launcher that started this process, because
-    reinstalling a distribution does not tell anyone how to run it and a rollback
-    that crosses the `vibe-remote` -> `avibe-os` rename lands in a different tool
-    directory than the one this process is running out of.
-
-    `None` when the running tree reports no release an index could serve -- a
-    source checkout, an editable install, a regression build. Handing that string
-    on as a target would spend the one recovery attempt on a round-trip that
-    fails, and then report a broken rollback mechanism to whoever is looking at a
-    dark instance, when the truth is that this install never had a release to go
-    back to.
-    """
-
-    from vibe import __version__
-
-    if not _names_a_published_release(__version__):
-        return None
-    return capture_installed_package_shape(
-        core_version=__version__,
-        launcher=runtime_mod.current_service_launcher(),
-    )
 
 
 def _with_memory_extra(package_spec: str) -> str:
@@ -1063,11 +945,6 @@ def build_upgrade_plan(
     """
 
     executable = python_executable or sys.executable
-    # Taken here, before the command below exists, because that command is what
-    # makes it unanswerable. A pinned plan is itself a rollback and has none of
-    # its own: the process building one is the release that failed, so measuring
-    # there would carry the failure forward as its own recovery target.
-    rollback_to = None if version else rollback_target()
     # A caller targeting another interpreter (for example a test-owned venv)
     # can provide an explicit package-shape measurement.  Only infer from this
     # process when the caller did not provide one; otherwise ambient metadata
@@ -1122,7 +999,6 @@ def build_upgrade_plan(
             command=command,
             env=env,
             method="uv",
-            rollback_to=rollback_to,
             preflight_command=preflight_command,
         )
 
@@ -1199,7 +1075,6 @@ def build_upgrade_plan(
         command=command,
         env=dict(base_env or os.environ),
         method="pip",
-        rollback_to=rollback_to,
         preflight_command=preflight_command,
         preflight_fallback_command=preflight_fallback_command,
         cleanup_command=cleanup_command,

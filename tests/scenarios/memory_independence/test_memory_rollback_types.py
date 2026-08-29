@@ -531,7 +531,7 @@ def _call_inventory(function_name: str) -> dict[str, int]:
 
 
 def test_memory_indep_019_full_tree_caller_inventory_keeps_ownership_private() -> None:
-    assert _call_inventory("capture_installed_package_shape") == {"vibe/upgrade.py": 1}
+    assert _call_inventory("capture_installed_package_shape") == {}
     assert _call_inventory("resolve_rollback_plan") == {}
     assert _call_inventory("ResolvedRollbackPlan") == {}
 
@@ -569,18 +569,3 @@ def test_memory_indep_019_no_resolved_target_has_presence_without_version(tmp_pa
     )
     assert plan.captured.memory_package is False
     assert plan.captured.memory_version is None
-
-
-def test_memory_indep_019_legacy_target_marks_presence_without_version_unavailable() -> None:
-    from vibe.upgrade import RollbackTarget
-
-    target = RollbackTarget(
-        version="3.0.14",
-        package="avibe-os",
-        launcher=LAUNCHER,
-        memory_package=True,
-        memory_version=None,
-    )
-    assert not target
-    assert target.memory_package is False
-    assert target.memory_version is None
