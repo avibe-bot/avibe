@@ -1575,6 +1575,68 @@ def test_authenticated_gateway_validation_failure_is_correlated(
     asyncio.run(exercise())
 
 
+def test_opencode_gateway_round_trips_aliased_tool_names(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        handle = LiveInvokeHandle(
+            _outcome(RawOutcomeKind.SUCCESS, stream_started=True),
+            (
+                b'data: {"choices":[{"delta":{"tool_calls":[{"function":'
+                b'{"name":"avibe_todo_write","arguments":"{}"}}]}}]}\n\n',
+                b"data: [DONE]\n\n",
+            ),
+        )
+        service = _service(
+            tmp_path,
+            sources=[
+                _source(
+                    "src_primary01",
+                    "Anthropic relay",
+                    vendor="custom",
+                    protocol="anthropic",
+                )
+            ],
+            live_handles=[handle],
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "opencode",
+            process_scope="opencode:shared-server",
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/chat/completions",
+                    json={
+                        "model": "openai/shared-model",
+                        "messages": [{"role": "user", "content": "update the list"}],
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "todowrite",
+                                    "parameters": {"type": "object"},
+                                },
+                            }
+                        ],
+                        "stream": True,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 200
+                body = await response.read()
+        finally:
+            await gateway.close()
+
+        adapter = service.adapter
+        assert isinstance(adapter, ProbeAdapter)
+        forwarded = adapter.requests[0]
+        assert forwarded["tools"][0]["function"]["name"] == "avibe_todo_write"
+        assert b'"name":"todowrite"' in body
+        assert b'"name":"avibe_todo_write"' not in body
+
+    asyncio.run(exercise())
+
+
 def test_gateway_terminalizer_records_pre_observer_engine_down_before_return(
     tmp_path: Path,
 ) -> None:
