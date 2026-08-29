@@ -5,8 +5,10 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import { openCodeMenuBaselineReady } from './menuBaseline';
 import { modelsApi } from './modelsApi';
 import { OpenCodeMenuDialog } from './OpenCodeMenuDialog';
+import { failRegionRead, readyRegion } from './regionRead';
 import type { AgentSupply, Source } from './types';
 
 const source = (overrides: Partial<Source> & Pick<Source, 'id' | 'vendor' | 'display_name'>): Source => ({
@@ -82,7 +84,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={agent}
           sources={sources}
-          inventoryReady
+          baselineReady
           onClose={onClose}
           onSaved={onSaved}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -114,7 +116,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={{ ...agent, menu: { view: 'full', checked: ['openai/gpt-5.6-sol'] } }}
           sources={sources}
-          inventoryReady
+          baselineReady
           onClose={vi.fn()}
           onSaved={vi.fn()}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -137,7 +139,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={{ ...agent, menu: { view: 'featured', checked: ['openai/missing-model'] } }}
           sources={sources}
-          inventoryReady
+          baselineReady
           onClose={vi.fn()}
           onSaved={vi.fn()}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -159,7 +161,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={{ ...agent, menu: { view: 'featured', checked: ['openai/gpt-5.6-luna'] } }}
           sources={[]}
-          inventoryReady={false}
+          baselineReady={false}
           onClose={vi.fn()}
           onSaved={vi.fn()}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -168,10 +170,19 @@ describe('OpenCodeMenuDialog', () => {
     );
 
     expect(screen.getByText('1 selected')).toBeTruthy();
-    expect(screen.getByText('Model inventory is unavailable. Retry the source list before editing this selection.')).toBeTruthy();
+    expect(screen.getByText('Model menu data is not current. Wait for refresh, or retry the failed section before editing.')).toBeTruthy();
     const save = screen.getByRole('button', { name: 'Save selection' });
     expect(save.hasAttribute('disabled')).toBe(true);
     await user.click(save);
     expect(putMenu).not.toHaveBeenCalled();
+  });
+
+  it('requires current AgentSupply and Source inventory for the menu baseline', () => {
+    const supply = readyRegion([agent]);
+    const inventory = readyRegion(sources);
+
+    expect(openCodeMenuBaselineReady(supply, inventory)).toBe(true);
+    expect(openCodeMenuBaselineReady(failRegionRead(supply), inventory)).toBe(false);
+    expect(openCodeMenuBaselineReady(supply, failRegionRead(inventory))).toBe(false);
   });
 });

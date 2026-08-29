@@ -1488,7 +1488,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.menu.search` `[derived]` | 搜索模型或供应商 | Search models or sources |
 | `gateway.menu.selected` `[derived]` | 已选 {{selected}} / {{total}} | {{selected}} of {{total}} selected |
 | `gateway.menu.empty` `[derived]` | 没有可供 OpenCode 选择的模型 | No eligible source models are available |
-| `gateway.menu.inventoryUnavailable` `[derived]` | 暂时无法读取模型清单，请先重试供应商列表，再编辑此选择。 | Model inventory is unavailable. Retry the source list before editing this selection. |
+| `gateway.menu.baselineUnavailable` `[derived]` | 模型菜单数据暂未更新，请等待刷新完成，或重试读取失败的区域后再编辑。 | Model menu data is not current. Wait for refresh, or retry the failed section before editing. |
 | `gateway.menu.noMatch` `[derived]` | 没有匹配的模型 | No models match this search |
 | `gateway.menu.save` `[derived]` | 保存选择 | Save selection |
 | `gateway.menu.saving` `[derived]` | 正在保存… | Saving… |
@@ -1869,10 +1869,12 @@ OpenCode identifier. Saving performs `PUT /api/models/agents/opencode/menu`; a s
 model with no Route then appears as an ordinary row whose current-text slot reads
 `gateway.group.status.unconfigured`, and that row opens frame 02. The dialog preserves
 the saved menu view, blocks dismissal while its write is outstanding, and retains the
-draft after a failed save. The Source inventory must be an authoritative ready read before
-the dialog enables search, selection, or save. An unread or failed inventory preserves the
-stored `menu.checked` values, shows `gateway.menu.inventoryUnavailable`, and cannot issue
-the menu `PUT`; stale or absent inventory is never interpreted as an empty selection.
+draft after a failed save. Both inputs to the whole-menu write must be authoritative ready
+reads before the dialog enables search, selection, or save: `AgentSupply` owns `menu`,
+`standard_vendors` and eligibility, while `Source[]` owns the candidate inventory. Either
+input being loading, unread or degraded preserves the stored `menu.checked` values, shows
+`gateway.menu.baselineUnavailable`, and cannot issue the menu `PUT`; stale or absent data
+is never interpreted as an empty selection.
 
 **Extreme data**
 
