@@ -452,7 +452,10 @@ class CodexEventHandler:
             return
 
         digest = hashlib.sha256(image).hexdigest()
-        destination = thread_dir / f"image-{digest[:24]}{extension}"
+        item_id = item.get("id")
+        identity = f"{item_id}:{digest}" if isinstance(item_id, str) and item_id else digest
+        filename_digest = hashlib.sha256(identity.encode()).hexdigest()
+        destination = thread_dir / f"image-{filename_digest[:24]}{extension}"
 
         temp_path: Path | None = None
         try:

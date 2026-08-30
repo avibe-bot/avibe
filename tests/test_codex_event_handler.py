@@ -775,7 +775,7 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         result = agent.emit_result_message.await_args.args[1]
         assert "![generated image](" in result
 
-    async def test_completed_inline_image_is_persisted_and_appended_to_text_result(self):
+    async def test_completed_inline_images_are_bound_to_call_and_appended_to_text_result(self):
         agent = _StubAgent()
         handler = CodexEventHandler(agent)
         request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
@@ -789,18 +789,20 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"CODEX_HOME": tmpdir}):
             handler.snapshot_generated_images("thread-1", "session-1")
             handler.bind_generated_image_snapshot("thread-1", "turn-1", "session-1")
-            await handler._on_item_completed(
-                {
-                    "threadId": "thread-1",
-                    "turnId": "turn-1",
-                    "item": {
-                        "type": "imageGeneration",
-                        "status": "completed",
-                        "result": base64.b64encode(image).decode(),
+            for item_id in ("image-call-1", "image-call-2"):
+                await handler._on_item_completed(
+                    {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {
+                            "id": item_id,
+                            "type": "imageGeneration",
+                            "status": "completed",
+                            "result": base64.b64encode(image).decode(),
+                        },
                     },
-                },
-                request,
-            )
+                    request,
+                )
             await handler._on_turn_completed(
                 {
                     "threadId": "thread-1",
@@ -810,11 +812,12 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             )
 
             generated = list((Path(tmpdir) / "generated_images" / "thread-1").glob("*.png"))
-            assert len(generated) == 1
-            assert generated[0].read_bytes() == image
+            assert len(generated) == 2
+            assert all(path.read_bytes() == image for path in generated)
 
         result = agent.emit_result_message.await_args.args[1]
         assert result.startswith("Image ready.\n\n![generated image](file://")
+        assert result.count("![generated image](") == 2
 
     async def test_inline_image_rejects_invalid_or_unsupported_payloads(self):
         agent = _StubAgent()
