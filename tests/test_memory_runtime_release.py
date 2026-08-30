@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from core.memory.artifact_contract import ColdArtifactAdmissionResult
 from scripts import build_memory_runtime as runtime_builder
 from scripts import generate_memory_runtime_manifest as manifest_generator
 from scripts.build_memory_runtime import (
@@ -29,6 +30,19 @@ from scripts.build_memory_runtime import (
 
 
 PLATFORMS = ("darwin-arm64", "linux-arm64", "linux-x64")
+
+
+def test_release_builder_imports_without_project_dependencies() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-S", "scripts/build_memory_runtime.py", "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_memory_runtime_release_platform_contract_excludes_darwin_x64() -> None:
@@ -186,6 +200,29 @@ def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
     return archive, binary
 
 
+def test_final_archive_verification_uses_shared_cold_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, binary = _write_archive(tmp_path, "linux-arm64")
+    observed: list[Path] = []
+
+    def admit(path: Path) -> ColdArtifactAdmissionResult:
+        observed.append(path)
+        return ColdArtifactAdmissionResult(ok=True, reason=None, duration_ms=41_000)
+
+    monkeypatch.setattr(runtime_builder, "run_cold_artifact_admission", admit)
+    monkeypatch.setattr(runtime_builder, "_sidecar_health_smoke", lambda *_args, **_kwargs: None)
+
+    runtime_builder.verify_archive(
+        archive,
+        binary_sha256=hashlib.sha256(binary).hexdigest(),
+    )
+
+    assert len(observed) == 1
+    assert observed[0].parts[-2:] == ("bin", "python")
+
+
 def test_generate_memory_runtime_manifest_records_verified_platform_archives(tmp_path: Path) -> None:
     expected: dict[str, tuple[Path, bytes]] = {
         platform: _write_archive(tmp_path, platform) for platform in PLATFORMS
@@ -258,6 +295,11 @@ def test_build_outputs_metadata_accepted_by_manifest_generator(
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(runtime_builder, "_run", fake_run)
+    monkeypatch.setattr(
+        runtime_builder,
+        "run_cold_artifact_admission",
+        lambda _binary: ColdArtifactAdmissionResult(ok=True, reason=None, duration_ms=1),
+    )
     monkeypatch.setattr(runtime_builder, "_sidecar_health_smoke", lambda *args, **kwargs: None)
 
     for platform in PLATFORMS:

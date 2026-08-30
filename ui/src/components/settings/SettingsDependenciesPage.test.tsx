@@ -103,4 +103,20 @@ describe('SettingsDependenciesPage Memory runtime', () => {
       'listDependencies',
     ]);
   });
+
+  it.each([
+    'memory_runtime_preparation_failed',
+    'memory_runtime_preparation_import_timeout',
+    'memory_runtime_preparation_import_failed',
+    'memory_runtime_preparation_scrubber_timeout',
+    'memory_runtime_preparation_scrubber_failed',
+    'memory_runtime_preparation_sync_contract_failed',
+  ])('localizes the bounded preparation reason %s', async (reason) => {
+    api.installDependency.mockResolvedValue({ ok: false, reason });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.repair' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(`errors.${reason}`, 'error'));
+  });
 });

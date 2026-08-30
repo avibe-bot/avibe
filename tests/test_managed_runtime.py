@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tarfile
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ from core.managed_runtime import (
 )
 from core.memory import artifact as memory_artifact
 from core.memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
+from core.memory.artifact_contract import COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON
 from core.memory.provider_root import ProviderRootError
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
@@ -942,6 +944,235 @@ def test_memory_selected_contract_failure_preserves_admitted_install(
     assert pointer_path.read_bytes() == pointer_before
     assert manager.status()["installed"] is True
     assert manager.resolve_python() == Path(installed["path"])
+
+
+def test_memory_preparation_timeout_reclaims_staging_and_persists_latest_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    runtime_dir = tmp_path / "memory-runtime"
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        "memory",
+        manifest_path,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_prepare_binary",
+        lambda _binary, **_kwargs: {
+            "ok": False,
+            "reason": COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON,
+        },
+    )
+
+    failed = manager.ensure()
+
+    assert failed["ok"] is False
+    assert failed["reason"] == COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON
+    assert not any(path.name.startswith("install-") for path in runtime_dir.iterdir())
+    failure_path = runtime_dir / "last-install-failure.json"
+    assert json.loads(failure_path.read_text(encoding="utf-8")) == {
+        "reason": COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON,
+        "status": "error",
+    }
+
+    restarted = _subclass_runtime_manager(
+        tmp_path,
+        "memory",
+        manifest_path,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+    restarted_status = restarted.status()
+    assert restarted_status["installed"] is False
+    assert restarted_status["status"] == "error"
+    assert restarted_status["reason"] == COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON
+
+    succeeded = restarted.ensure()
+    assert succeeded["ok"] is True
+    assert failure_path.exists() is False
+    assert restarted.status()["reason"] is None
+
+
+def test_memory_scrubber_timeout_keeps_its_preparation_stage_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing.json",
+        provider_root=tmp_path / "provider-root",
+    )
+
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", timeout)
+
+    assert manager._admit_error_scrubbers(tmp_path / "runtime" / "bin" / "python") == (
+        "memory_runtime_preparation_scrubber_timeout"
+    )
+
+
+def test_memory_sync_contract_failure_keeps_its_preparation_stage_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing.json",
+        provider_root=tmp_path / "provider-root",
+    )
+    monkeypatch.setattr(
+        memory_artifact,
+        "run_cold_artifact_admission",
+        lambda _binary: SimpleNamespace(ok=True, reason=None, duration_ms=1),
+    )
+    monkeypatch.setattr(manager, "_admit_error_scrubbers", lambda _binary: None)
+    monkeypatch.setattr(manager, "_admit_sync_contract", lambda _binary, _expected: False)
+
+    result = manager._prepare_binary(
+        tmp_path / "runtime" / "bin" / "python",
+        sync_contract=(1, ("write",), "a" * 64, "b" * 64),
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "memory_runtime_preparation_sync_contract_failed",
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"{",
+        b"[]",
+        b'{"reason":"memory_runtime_preparation_import_timeout"}',
+        b'{"status":"failed","reason":"memory_runtime_preparation_import_timeout"}',
+        b'{"status":"error","reason":42}',
+        b"x" * (4 * 1024 + 1),
+    ],
+)
+def test_memory_latest_install_failure_safely_ignores_malformed_or_older_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: bytes,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    runtime_dir = tmp_path / "memory-runtime"
+    runtime_dir.mkdir(mode=0o700)
+    failure_path = runtime_dir / "last-install-failure.json"
+    failure_path.write_bytes(content)
+    failure_path.chmod(0o600)
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        "memory",
+        manifest_path,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+
+    status_payload = manager.status()
+
+    assert status_payload["installed"] is False
+    assert status_payload["status"] == "missing"
+    assert status_payload["reason"] is None
+
+
+def test_memory_latest_install_failure_rejects_symlink_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    runtime_dir = tmp_path / "memory-runtime"
+    runtime_dir.mkdir(mode=0o700)
+    outside = tmp_path / "outside.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "status": "error",
+                "reason": COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "last-install-failure.json").symlink_to(outside)
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        "memory",
+        manifest_path,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+
+    status_payload = manager.status()
+
+    assert status_payload["status"] == "missing"
+    assert status_payload["reason"] is None
+    assert outside.is_file()
+
+
+def test_memory_reuse_clears_latest_install_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert manager.ensure()["ok"] is True
+    failure_path = manager.runtime_dir / "last-install-failure.json"
+    manager._write_latest_install_failure(COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON)
+    assert failure_path.is_file()
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert failure_path.exists() is False
+
+
+def test_memory_skipped_install_does_not_persist_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing.json",
+        provider_root=tmp_path / "provider-root",
+    )
+
+    result = manager._failure(
+        manager._reason("install_already_running"),
+        skipped=True,
+    )
+
+    assert result["skipped"] is True
+    assert (manager.runtime_dir / "last-install-failure.json").exists() is False
+
+
+def test_memory_install_failure_persistence_bounds_unsafe_reason(
+    tmp_path: Path,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing.json",
+        provider_root=tmp_path / "provider-root",
+    )
+
+    manager._failure("unsafe reason " + "x" * 1024)
+
+    persisted = json.loads(
+        (manager.runtime_dir / "last-install-failure.json").read_text(encoding="utf-8")
+    )
+    assert persisted == {
+        "status": "error",
+        "reason": "memory_runtime_preparation_failed",
+    }
 
 
 def test_memory_force_pointer_failure_preserves_active_install_and_retry_repairs_contract(
