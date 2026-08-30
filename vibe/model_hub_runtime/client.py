@@ -6,6 +6,7 @@ import json
 import logging
 import socket
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -128,6 +129,12 @@ class _StreamPrelude:
         self._file.write(data)
         self._stored_bytes += len(data)
 
+    async def write_async(self, data: bytes) -> None:
+        if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
+            self.write(data)
+            return
+        await asyncio.to_thread(self.write, data)
+
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._closed:
             return
@@ -135,8 +142,8 @@ class _StreamPrelude:
             if self._memory:
                 yield bytes(self._memory)
             return
-        self._file.seek(0)
-        while chunk := self._file.read(_STREAM_CHUNK_BYTES):
+        await asyncio.to_thread(self._file.seek, 0)
+        while chunk := await asyncio.to_thread(self._file.read, _STREAM_CHUNK_BYTES):
             yield chunk
 
     def close(self) -> None:
@@ -167,6 +174,11 @@ class _StreamPrelude:
             return bytes(self._memory[:limit])
         self._file.seek(0)
         return self._file.read(limit)
+
+    async def prefix_async(self, limit: int) -> bytes:
+        if self._file is None:
+            return self.prefix(limit)
+        return await asyncio.to_thread(self.prefix, limit)
 
 
 @dataclass(frozen=True)
@@ -359,7 +371,7 @@ class EngineClient:
                         error_body.reader(),
                         machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
                     )
-                    payload = error_body.prefix(_ERROR_OBSERVATION_BYTES)
+                    payload = await error_body.prefix_async(_ERROR_OBSERVATION_BYTES)
                 except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                     observed_payload = ProtocolObservation()
@@ -402,7 +414,7 @@ class EngineClient:
             if not stream:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
-                buffered_body.write(first)
+                await buffered_body.write_async(first)
                 await asyncio.wait_for(
                     _read_response_into(response.content, buffered_body),
                     timeout=self.timeout,
@@ -550,6 +562,8 @@ class EngineClient:
         timeout: float | None = None,
     ) -> _ProjectedJSON:
         url = self._url(path, query=query)
+        request_timeout = timeout or self.timeout
+        deadline = time.monotonic() + request_timeout
         data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
         request_headers = dict(headers or {})
         if data is not None:
@@ -560,9 +574,9 @@ class EngineClient:
                 urllib.request.ProxyHandler({}),
                 _NoRedirectHandler(),
             )
-            with opener.open(request, timeout=timeout or self.timeout) as response:
+            with opener.open(request, timeout=request_timeout) as response:
                 with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
-                    _copy_sync_response(response, response_body)
+                    _copy_sync_response(response, response_body, deadline=deadline)
                     response_body.seek(0)
                     try:
                         return projector(response_body)
@@ -572,10 +586,16 @@ class EngineClient:
                             error_type="invalid_json",
                         ) from None
         except urllib.error.HTTPError as exc:
-            with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
-                _copy_sync_response(exc, response_body)
-                response_body.seek(0)
-                error_type, error_code, error_candidates = _project_raw_error_fields(response_body)
+            try:
+                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
+                    _copy_sync_response(exc, response_body, deadline=deadline)
+                    response_body.seek(0)
+                    error_type, error_code, error_candidates = _project_raw_error_fields(response_body)
+            except (TimeoutError, socket.timeout, OSError) as read_error:
+                raise EngineClientError(
+                    "engine API is unavailable",
+                    error_type=type(read_error).__name__,
+                ) from None
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
                 status_code=exc.code,
@@ -629,7 +649,7 @@ async def probe_models(
                     )
                 with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
                     while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
-                        payload.write(chunk)
+                        await asyncio.to_thread(payload.write, chunk)
                     payload.seek(0)
                     projected = await asyncio.to_thread(_project_model_inventory, payload)
     except asyncio.TimeoutError:
@@ -741,9 +761,29 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _copy_sync_response(source: BinaryIO, target: BinaryIO) -> None:
-    while chunk := source.read(_STREAM_CHUNK_BYTES):
+def _copy_sync_response(
+    source: BinaryIO,
+    target: BinaryIO,
+    *,
+    deadline: float,
+) -> None:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("engine API response exceeded its request deadline")
+        _set_sync_response_timeout(source, remaining)
+        chunk = source.read(_STREAM_CHUNK_BYTES)
+        if not chunk:
+            return
         target.write(chunk)
+
+
+def _set_sync_response_timeout(source: BinaryIO, timeout: float) -> None:
+    fp = getattr(source, "fp", None)
+    raw = getattr(fp, "raw", None)
+    response_socket = getattr(raw, "_sock", None)
+    if response_socket is not None:
+        response_socket.settimeout(max(timeout, 0.001))
 
 
 def _load_json_object(reader: BinaryIO) -> dict[str, Any]:
@@ -873,7 +913,7 @@ async def _read_response_into(
     target: _StreamPrelude,
 ) -> None:
     while chunk := await content.read(_STREAM_CHUNK_BYTES):
-        target.write(chunk)
+        await target.write_async(chunk)
 
 
 async def _read_stream_prelude(
@@ -934,7 +974,7 @@ async def _received(
     """Observe delivered bytes, then retain their exact replay without truncation."""
 
     await wire_state.observe_async(chunk)
-    prelude.write(chunk)
+    await prelude.write_async(chunk)
 
 
 def _prelude_ended_outcome(

@@ -536,6 +536,8 @@ def test_first_model_output_has_one_table_backed_owner() -> None:
 
 def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
     # Review 4914187655: buffered and streamed facts cannot bypass observation.
+    # The engine adapter reads buffered protocol facts once; the gateway consumes
+    # its RawCallOutcome instead of independently interpreting the same body.
     client_tree = _tree(CLIENT)
     stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
     gateway_tree = _tree(TURN_GATEWAY)
@@ -551,10 +553,7 @@ def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
     )
     assert "class ProtocolFactProjector" in stream_source
     assert "observation = frame.observation" in stream_source
-    buffered_owners = (
-        _functions(client_tree)["invoke"],
-        _functions(gateway_tree)["_resolved_response"],
-    )
+    buffered_owner = _functions(client_tree)["invoke"]
     buffered_calls = [
         node
         for tree in (client_tree, gateway_tree)
@@ -563,8 +562,13 @@ def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
         and node.id == "observe_buffered_protocol_response"
         and isinstance(node.ctx, ast.Load)
     ]
-    assert len(buffered_calls) == 3
-    assert all(any(call in set(ast.walk(owner)) for owner in buffered_owners) for call in buffered_calls)
+    assert len(buffered_calls) == 2
+    assert all(call in set(ast.walk(buffered_owner)) for call in buffered_calls)
+    assert not any(
+        isinstance(node, ast.Name)
+        and node.id == "observe_buffered_protocol_response"
+        for node in ast.walk(gateway_tree)
+    )
     reducer = _functions(client_tree)["_reduce_protocol_observation"]
     assert all(call in set(ast.walk(reducer)) for call in _protocol_outcome_calls(client_tree))
     constructor_owner = _functions(client_tree)["_outcome"]
@@ -657,28 +661,33 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
 def test_settling_a_turn_is_what_meters_it_for_every_ending_there_will_be() -> None:
     # Review 4970...: metering was positioned relative to bookkeeping rather than to
     # the upstream call, and each ending paid for it differently — one settled first
-    # and skipped the row when settlement raised, one never metered at all. Naming
-    # the class instead of its endings: there is one function that ends a metered
-    # turn, the recorder is its first statement, and no ending can settle without
-    # going through it. An ending added later inherits the order rather than
-    # restating it, because there is nowhere else to state it.
+    # and skipped the row when settlement raised, one never metered at all. The
+    # handle settlement owner is also the sole adapter-outcome reader, so it can
+    # record the complete upstream facts immediately before service settlement.
+    # An ending added later inherits that order instead of restating it.
     gateway_tree = _tree(TURN_GATEWAY)
     functions = _functions(gateway_tree)
-    owner = functions["_settle_metered_turn"]
+    owner = functions["_settle_consumed_handle"]
     recorded = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_record_usage"]
     assert len(recorded) == 1
     assert recorded[0] in set(ast.walk(owner))
-    # The first *executable* statement, and the statement itself rather than
-    # anything nested in one: metering under a condition is what every ending that
-    # got this wrong already did.
-    body = [node for node in owner.body if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))]
-    assert isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Await)
-    assert body[0].value.value is recorded[0]
-    # And the settlement it wraps is reachable only through it, so "settled here"
-    # cannot come apart from "metered here" at a call site the next round adds.
+    outcome_reads = [node for node in ast.walk(gateway_tree) if _call_name(node) == "outcome"]
+    service_settlements = [node for node in ast.walk(gateway_tree) if _call_name(node) == "settle_handle_outcome"]
+    assert len(outcome_reads) == 1
+    assert len(service_settlements) == 1
+    assert outcome_reads[0] in set(ast.walk(owner))
+    assert service_settlements[0] in set(ast.walk(owner))
+    assert outcome_reads[0].lineno < recorded[0].lineno < service_settlements[0].lineno
+    # And every turn ending still reaches that owner through the single settlement
+    # wrapper, so "settled here" cannot come apart from "metered here".
+    settlement_wrapper = functions["_settle_metered_turn"]
+    handle_wrapper = functions["_settle_turn_handle"]
     settlements = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_turn_handle"]
     assert len(settlements) == 1
-    assert settlements[0] in set(ast.walk(owner))
+    assert settlements[0] in set(ast.walk(settlement_wrapper))
+    consumed = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_consumed_handle"]
+    assert len(consumed) == 1
+    assert consumed[0] in set(ast.walk(handle_wrapper))
     endings = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_metered_turn"]
     assert len(endings) >= 2
     assert all(
@@ -1685,11 +1694,11 @@ def test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them() 
     """
 
     source = CLIENT.read_text(encoding="utf-8")
-    assert source.count("prelude.write(") == 1
+    assert source.count("prelude.write_async(") == 1
     owner = ast.get_source_segment(source, _functions(_tree(CLIENT))["_received"])
     assert owner is not None
-    assert "prelude.write(" in owner
-    assert owner.index("wire_state.observe_async(") < owner.index("prelude.write(")
+    assert "prelude.write_async(" in owner
+    assert owner.index("wire_state.observe_async(") < owner.index("prelude.write_async(")
 
 
 def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:

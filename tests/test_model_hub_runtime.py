@@ -288,6 +288,51 @@ def test_engine_json_responses_are_read_in_bounded_chunks(
     assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
 
 
+def test_engine_json_response_spooling_uses_one_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads = 0
+    socket_timeouts: list[float] = []
+
+    class ResponseSocket:
+        def settimeout(self, timeout: float) -> None:
+            socket_timeouts.append(timeout)
+
+    class Response:
+        fp = SimpleNamespace(raw=SimpleNamespace(_sock=ResponseSocket()))
+
+        def read(self, size: int = -1) -> bytes:
+            nonlocal reads
+            assert size == client_module._STREAM_CHUNK_BYTES
+            reads += 1
+            return b" "
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    ticks = iter((10.0, 10.1, 10.6, 11.1))
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: Response()),
+    )
+    client = EngineClient(
+        EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+        timeout=1.0,
+    )
+
+    with pytest.raises(EngineClientError) as caught:
+        client.management_request("GET", "/fixture")
+
+    assert caught.value.error_type == "TimeoutError"
+    assert reads == 2
+    assert socket_timeouts == pytest.approx([0.9, 0.4])
+
+
 def test_engine_health_projects_only_required_facts_from_large_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

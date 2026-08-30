@@ -38,11 +38,9 @@ from .provenance import (
 )
 from .request import ModelHubRequest
 from .stream_wire import (
-    ProtocolObservation,
     ProtocolSSEState,
     ProtocolUsageReport,
     StreamTerminalOutcome,
-    observe_buffered_protocol_response,
     render_protocol_terminal_event,
     render_protocol_terminal_frame,
 )
@@ -110,11 +108,10 @@ class _TurnExecution:
     # without reaching the end of the chunk loop can still read the tokens the
     # upstream had already reported.
     wire_state: ProtocolSSEState | None = None
-    # The same two facts for a response the gateway buffered whole, which has no
-    # wire tracker to read them from.
-    buffered_usage: ProtocolUsageReport | None = None
-    buffered_outcome: StreamTerminalOutcome | None = None
-    buffered_projection_task: asyncio.Task[ProtocolObservation] | None = None
+    # A buffered response is already classified by the engine before its body is
+    # handed to this gateway. Keep that adapter-owned result instead of parsing
+    # the same bytes a second time at a weaker lifecycle boundary.
+    handle_outcome: RawCallOutcome | None = None
     # When the upstream body ended, published here for the same reason the two
     # facts above are: it is the instant the call belongs to, and everything after
     # it is bookkeeping whose duration is not the call's. A settlement that hangs
@@ -161,7 +158,9 @@ class _TurnExecution:
             return upstream.usage
         if self.wire_state is not None:
             return self.wire_state.usage
-        return self.buffered_usage
+        if self.handle_outcome is not None:
+            return self.handle_outcome.usage
+        return None
 
     @property
     def reached_model(self) -> bool:
@@ -174,18 +173,17 @@ class _TurnExecution:
         buffered turn never has, so a complete upstream body that reported no
         tokens counted as never having reached the model.
 
-        The buffered half is the observation the gateway already made of the whole
-        body: a complete model answer was served upstream exactly as a stream that
-        reached its terminal was, and an error envelope reached no model exactly as
-        a stream that forwarded no output did.
+        The engine adapter classifies a buffered body before handing it over. A
+        complete model answer is served there exactly as a stream that reached its
+        terminal is; an error envelope reaches no model exactly as a stream that
+        forwarded no output does. The gateway therefore retains that outcome
+        instead of parsing the same bytes a second time.
 
-        Both halves are observations *of the body* this gateway made itself, and
-        the turn can end before either one exists: the gateway adopts the body
-        first, and only then prepares the downstream response and starts reading.
-        A client that goes away in that gap leaves neither behind — which is why
-        the engine's own observation is asked first, here and in `reported_usage`.
-        It read the same body earlier than we did, so it is the one answer that
-        exists in that window rather than a weaker stand-in for it.
+        A streaming turn can still end before the gateway's wire tracker exists:
+        the gateway adopts the body first, and only then prepares the downstream
+        response and starts reading. The engine's live observation is asked first
+        because it already exists in that window and stays at least as current as
+        the gateway tracker afterwards.
 
         The adoption itself remains the floor, for a handle that tokenized no
         stream to hand over. It is an answer, not a guess: the engine hands this
@@ -201,8 +199,11 @@ class _TurnExecution:
             return True
         if self.wire_state is not None:
             return self.wire_state.reached_model
-        if self.buffered_outcome is not None:
-            return self.buffered_outcome == "served"
+        if self.handle_outcome is not None:
+            return (
+                self.handle_outcome.kind is RawOutcomeKind.SUCCESS
+                or self.handle_outcome.stream_started
+            )
         return self.handle is not None
 
     @property
@@ -472,16 +473,6 @@ class ModelHubTurnGateway:
                 # Only the request is canceled. Owned teardown and settlement
                 # are shielded and drained before this boundary re-raises.
                 drain_deadline = asyncio.get_running_loop().time() + self._transport_timeout
-                projection_task = execution.buffered_projection_task
-                if projection_task is not None:
-                    while not projection_task.done():
-                        with suppress(asyncio.CancelledError):
-                            await asyncio.shield(projection_task)
-                    with suppress(BaseException):
-                        observation = projection_task.result()
-                        execution.buffered_usage = observation.usage
-                        execution.buffered_outcome = observation.outcome
-                    execution.buffered_projection_task = None
                 if not request_task.done():
                     request_task.cancel()
                 while not request_task.done() and asyncio.get_running_loop().time() < drain_deadline:
@@ -748,17 +739,8 @@ class ModelHubTurnGateway:
                 max_size=_BUFFERED_RESPONSE_MEMORY_BYTES
             ) as payload:
                 async for chunk in handle.stream:
-                    payload.write(chunk)
+                    await asyncio.to_thread(payload.write, chunk)
                 execution.completed_at = self._now()
-                payload.seek(0)
-                projection_task = asyncio.create_task(
-                    asyncio.to_thread(observe_buffered_protocol_response, protocol, payload)
-                )
-                execution.buffered_projection_task = projection_task
-                observation = await asyncio.shield(projection_task)
-                execution.buffered_usage = observation.usage
-                execution.buffered_outcome = observation.outcome
-                execution.buffered_projection_task = None
                 outcome, settlement, rendered = await self._settle_metered_turn(
                     execution,
                     terminalizer,
@@ -805,7 +787,10 @@ class ModelHubTurnGateway:
                         },
                     )
                     await self._downstream_io(response.prepare(request))
-                    while chunk := response_payload.read(_RESPONSE_CHUNK_BYTES):
+                    while chunk := await asyncio.to_thread(
+                        response_payload.read,
+                        _RESPONSE_CHUNK_BYTES,
+                    ):
                         await self._downstream_io(response.write(chunk))
                     await self._downstream_io(response.write_eof())
                     return response
@@ -966,8 +951,8 @@ class ModelHubTurnGateway:
         One owner for the order, because the order is the whole property. Metering
         used to be each ending's own step, and every ending placed it after its
         bookkeeping — where a settlement that raised skipped it entirely, for a call
-        the vendor had already billed. It cannot be placed wrongly here: it is this
-        function's first statement, and there is nowhere else to place it.
+        the vendor had already billed. The settlement owner now captures the adapter
+        outcome and records usage before service settlement can raise.
 
         Bookkeeping after metering is also why the recorder needs no ending to be
         careful. A settlement is a fact about a handle and the settlement owner
@@ -983,7 +968,6 @@ class ModelHubTurnGateway:
         the same thing the projection choke would have handed it.
         """
 
-        await self._record_usage(execution)
         if execution.settlement_recorded:
             return None, None, execution.rendered_turn_outcome
         if termination_origin == "upstream_terminal" and execution.handle is None:
@@ -1131,6 +1115,8 @@ class ModelHubTurnGateway:
             termination_origin = "upstream_terminal"
             execution.settlement_origin = termination_origin
         outcome = await handle.outcome() if handle is not None and handle.outcome_available else None
+        execution.handle_outcome = outcome
+        await self._record_usage(execution)
 
         def record_attempt(
             terminal_outcome: RawCallOutcome,

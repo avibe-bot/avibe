@@ -4,6 +4,7 @@ import ast
 import asyncio
 import inspect
 import json
+import tempfile
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -7112,7 +7113,7 @@ def _usage_of(service: ModelHubService, source_id: str) -> dict:
     return matches[0] if matches else {}
 
 
-def test_gateway_meters_a_buffered_served_turn_from_the_upstream_body(
+def test_gateway_meters_a_buffered_served_turn_from_the_adapter_outcome(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -7132,7 +7133,16 @@ def test_gateway_meters_a_buffered_served_turn_from_the_upstream_body(
             sources=[source],
             live_handles=[
                 LiveInvokeHandle(
-                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        usage=ProtocolUsageReport.of(
+                            input_tokens=4096,
+                            cached_input_tokens=3072,
+                            output_tokens=128,
+                        ),
+                    ),
                     (body,),
                 )
             ],
@@ -7184,6 +7194,11 @@ def test_gateway_spools_and_replays_a_large_buffered_response(
                         status=200,
                         source_id=source.id,
                         stream_started=True,
+                        usage=ProtocolUsageReport.of(
+                            input_tokens=4096,
+                            cached_input_tokens=3072,
+                            output_tokens=128,
+                        ),
                     ),
                     (body[:200_000], body[200_000:400_000], body[400_000:]),
                 )
@@ -7200,9 +7215,36 @@ def test_gateway_spools_and_replays_a_large_buffered_response(
         )
         downstream = FakeStreamResponse()
 
-        with patch(
-            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
-            return_value=downstream,
+        event_loop_thread = threading.get_ident()
+        write_threads: list[int] = []
+        spooled_file = tempfile.SpooledTemporaryFile
+
+        class TrackingSpool:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self._file = spooled_file(*args, **kwargs)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                self._file.close()
+
+            def write(self, data: bytes) -> int:
+                write_threads.append(threading.get_ident())
+                return self._file.write(data)
+
+            def __getattr__(self, name: str):
+                return getattr(self._file, name)
+
+        with (
+            patch(
+                "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+                return_value=downstream,
+            ),
+            patch(
+                "core.handlers.model_hub.turn_gateway.tempfile.SpooledTemporaryFile",
+                TrackingSpool,
+            ),
         ):
             result = await gateway._handle_request(request)
 
@@ -7215,6 +7257,8 @@ def test_gateway_spools_and_replays_a_large_buffered_response(
         assert metered["input_tokens"] == 4096
         assert metered["cached_input_tokens"] == 3072
         assert metered["output_tokens"] == 128
+        assert write_threads
+        assert event_loop_thread not in write_threads
 
     asyncio.run(exercise())
 
@@ -7343,6 +7387,11 @@ def test_a_buffered_response_cancelled_while_settling_is_still_metered(
                         status=200,
                         source_id=source.id,
                         stream_started=True,
+                        usage=ProtocolUsageReport.of(
+                            input_tokens=704,
+                            cached_input_tokens=0,
+                            output_tokens=21,
+                        ),
                     ),
                     (b'{"usage":{"input_tokens":704,"output_tokens":21}}',),
                 )
@@ -7384,39 +7433,46 @@ def test_a_buffered_response_cancelled_while_settling_is_still_metered(
     asyncio.run(exercise())
 
 
-def test_a_buffered_projection_is_drained_before_cancellation_settlement(
+def test_buffered_adapter_facts_survive_cancellation_before_body_consumption(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
         source = _source("src_meterproj1", "Cancelled projection")
+        body_started = asyncio.Event()
+
+        class BufferedHandle(LiveInvokeHandle):
+            async def _blocked_body(self):
+                body_started.set()
+                await asyncio.Event().wait()
+                if False:
+                    yield b""
+
+            def __init__(self, outcome: RawCallOutcome) -> None:
+                self._outcome = outcome
+                self._observed = None
+                self._stream = self._blocked_body()
+
         service = _service(
             tmp_path,
             sources=[source],
             live_handles=[
-                LiveInvokeHandle(
+                BufferedHandle(
                     _outcome(
                         RawOutcomeKind.SUCCESS,
                         status=200,
                         source_id=source.id,
                         stream_started=True,
+                        usage=ProtocolUsageReport.of(
+                            input_tokens=901,
+                            cached_input_tokens=0,
+                            output_tokens=22,
+                        ),
                     ),
-                    (b'{"usage":{"input_tokens":901,"output_tokens":22}}',),
                 )
             ],
         )
-        projection_started = threading.Event()
-        release_projection = threading.Event()
-        from core.handlers.model_hub.stream_wire import (
-            observe_buffered_protocol_response as observe,
-        )
-
-        def blocked_projection(protocol, reader):
-            projection_started.set()
-            assert release_projection.wait(2)
-            return observe(protocol, reader)
-
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
-        gateway = ModelHubTurnGateway(service)
+        gateway = ModelHubTurnGateway(service, transport_timeout=0.2)
         request = _prepared_gateway_request(
             gateway,
             turn_id="turn_meter_projection_cancel",
@@ -7425,18 +7481,11 @@ def test_a_buffered_projection_is_drained_before_cancellation_settlement(
             stream=False,
         )
 
-        with patch(
-            "core.handlers.model_hub.turn_gateway.observe_buffered_protocol_response",
-            side_effect=blocked_projection,
-        ):
-            turn = asyncio.create_task(gateway._handle_request(request))
-            assert await asyncio.to_thread(projection_started.wait, 1)
-            turn.cancel()
-            await asyncio.sleep(0)
-            assert not turn.done()
-            release_projection.set()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(turn, timeout=2)
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(body_started.wait(), timeout=1)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=1)
 
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 1
@@ -7527,7 +7576,16 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
             sources=[source],
             live_handles=[
                 LiveInvokeHandle(
-                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        usage=ProtocolUsageReport.of(
+                            input_tokens=512,
+                            cached_input_tokens=0,
+                            output_tokens=16,
+                        ),
+                    ),
                     (b'{"usage":{"input_tokens":512,"output_tokens":16}}',),
                 )
             ],
@@ -8331,6 +8389,15 @@ def test_a_settlement_that_raises_still_meters_the_call_it_was_settling(
                         status=200,
                         source_id=source.id,
                         stream_started=stream,
+                        usage=(
+                            None
+                            if stream
+                            else ProtocolUsageReport.of(
+                                input_tokens=256,
+                                cached_input_tokens=0,
+                                output_tokens=12,
+                            )
+                        ),
                     ),
                     chunks,
                 )
@@ -8390,7 +8457,16 @@ def test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open(
             sources=[source],
             live_handles=[
                 LiveInvokeHandle(
-                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        usage=ProtocolUsageReport.of(
+                            input_tokens=64,
+                            cached_input_tokens=0,
+                            output_tokens=4,
+                        ),
+                    ),
                     (body,),
                 )
             ],
