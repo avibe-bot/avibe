@@ -17,7 +17,7 @@ def test_retained_memory_lifecycle_scenarios_do_not_depend_on_retired_delivery_a
     )
     assert "non-blocking" in scenario["name"].lower()
     assert scenario["test"].endswith(
-        "test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_capture"
+        "test_reset_and_archive_events_preserve_barriers"
     )
 
     test_source = (ROOT / "tests/test_session_delivery_fsm.py").read_text()

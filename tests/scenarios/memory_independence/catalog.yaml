@@ -37,19 +37,19 @@ scenarios:
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops
+    test: tests/test_memory_adapter.py::test_session_and_shutdown_cancellation_release_active_leases
   - id: MEMORY-INDEP-002
     name: A capture admitted before /new or archive is discarded after the transition
     status: covered
     kind: correctness
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_capture_admitted_before_new_is_discarded_after_transition
+    test: tests/test_memory_adapter.py::test_worker_failure_and_stale_lifecycle_each_release_exactly_once
   - id: MEMORY-INDEP-003
     name: Idle-session capture still attributes while shutdown may drop volatile work
     status: covered
     kind: regression_keep
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_idle_session_capture_attributes_while_shutdown_may_drop
+    test: tests/test_memory_adapter.py::test_session_and_shutdown_cancellation_release_active_leases
   - id: MEMORY-INDEP-004
     name: Shared delivery imports do not load Memory implementations
     status: covered
@@ -67,7 +67,7 @@ scenarios:
     status: covered
     kind: correctness
     layer: contract
-    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_text_memory_capture_setup_failure_is_best_effort
+    test: tests/test_memory_adapter.py::test_capture_scheduling_failure_releases_retained_lease
   - id: MEMORY-INDEP-007
     name: Archive releases process-local Memory authorization after one non-blocking barrier offer
     status: covered
@@ -91,7 +91,7 @@ scenarios:
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_capture
+    test: tests/test_memory_adapter.py::test_reset_and_archive_events_preserve_barriers
   - id: MEMORY-INDEP-011
     name: Streaming waiters release lifecycle snapshots after handler admission
     status: covered

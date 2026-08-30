@@ -23,9 +23,6 @@ import time
 from typing import Protocol
 
 from avibe_memory.attachments import workbench_capture_attachments
-from avibe_memory.im_attachments import (
-    select_memory_attachments,
-)
 from avibe_memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
@@ -77,7 +74,6 @@ class InboundTurnFacts:
     attachment_capture_status: object = None
     attachment_config_generation: object = None
     attachment_selection: object = None
-    memory_enabled: bool = False
 
 
 class CaptureAdmission:
@@ -144,8 +140,7 @@ class CaptureAdmission:
 
         platform = self.platform_of(facts)
         return bool(
-            _asserted_true(facts.memory_enabled)
-            and platform in IM_ATTACHMENT_CAPTURE_PLATFORMS
+            platform in IM_ATTACHMENT_CAPTURE_PLATFORMS
             and _nonempty_str(facts.message_id)
             and _nonempty_str(facts.session_id)
             and _asserted_true(facts.is_ordinary_attachment)
@@ -156,8 +151,6 @@ class CaptureAdmission:
     def decide(self, facts: InboundTurnFacts) -> CaptureRequest | CaptureSkipped:
         """Turn one classified turn into the capture it earns, or a skip."""
 
-        if not _asserted_true(facts.memory_enabled):
-            return CaptureSkipped(reason="memory_disabled")
         platform = self.platform_of(facts)
         if platform is None:
             return CaptureSkipped(reason="memory_access_denied")
@@ -199,9 +192,7 @@ class CaptureAdmission:
                     try:
                         selection = facts.attachment_selection
                         if selection is None:
-                            # Production IM callers precompute selection off the
-                            # event loop. This fallback serves direct callers only.
-                            selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
+                            raise ValueError("attachment preparation unavailable")
                     except Exception as error:
                         logger.warning(
                             "memory_attachment_selection_failed "

@@ -18,7 +18,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
 from avibe_memory import CaptureRequest, CaptureSkipped
-from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter, TurnAccepted
+from core.memory_adapter import DisabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
@@ -189,13 +189,21 @@ async def offer_capture() -> None:
         is_original_human_text=True,
     )
     before = set(asyncio.all_tasks())
-    controller.memory_adapter.offer(
-        TurnAccepted(context, "remember nothing", "session-1", None)
+    event = TurnAccepted(
+        platform="avibe",
+        user_id="user-1",
+        message_id="message-1",
+        session_id="session-1",
+        text="remember nothing",
+        files=(),
+        is_dm=False,
+        is_ordinary_text=True,
+        is_ordinary_attachment=False,
+        lifecycle_snapshot=None,
     )
+    controller.memory_adapter.offer(event)
     created = set(asyncio.all_tasks()).difference(before)
-    assert offered == [
-        TurnAccepted(context, "remember nothing", "session-1", None)
-    ]
+    assert offered == [event]
     assert not any(task.get_name().startswith("memory-") for task in created)
 
 
@@ -634,6 +642,40 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
             self.module = object()
             self.available = True
             self.closed = False
+            self.capture_adapter = self._CaptureAdapter()
+
+        class _CaptureAdapter:
+            def __init__(self) -> None:
+                self.task: asyncio.Task[None] | None = None
+
+            def start(self) -> bool:
+                return True
+
+            def offer(self, _event: object) -> None:
+                async def capture() -> None:
+                    capture_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        capture_stopped.set()
+
+                self.task = asyncio.create_task(capture())
+
+            def quiesce_memory_capture_tasks(self) -> None:
+                return None
+
+            async def cancel_memory_capture_tasks(self) -> None:
+                if self.task is None:
+                    return
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+
+            def cancel_memory_capture_tasks_nowait(self) -> None:
+                if self.task is not None:
+                    self.task.cancel()
+
+        def start_capture_adapter(self) -> bool:
+            return self.capture_adapter.start()
 
         async def reconcile(self, config) -> dict[str, object]:
             return {
@@ -662,6 +704,16 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     controller.memory_runtime = None
     controller.memory_module = None
     controller._memory_disabled_cleanup_unproved = True
+    controller.settings_manager = types.SimpleNamespace(
+        is_enabled_user=lambda *_args, **_kwargs: True
+    )
+    controller.session_turns = types.SimpleNamespace(
+        session_lifecycle_snapshot_matches=lambda *_args: True,
+        acquire_lifecycle_admission=lambda *_args: asyncio.sleep(
+            0,
+            result=types.SimpleNamespace(release=lambda: None),
+        ),
+    )
 
     enabled = replace(controller.config.memory, enabled=True)
     assert await controller.reconcile_memory(enabled) == {
@@ -671,20 +723,22 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     assert created == [enabled]
     assert controller.memory_runtime is runtime
     assert controller.memory_module is runtime.module
-    assert isinstance(controller.memory_adapter, EnabledMemoryAdapter)
+    assert controller.memory_adapter is runtime.capture_adapter
     assert controller.config.memory.enabled is True
 
-    async def capture_user_memory(*_args, **_kwargs) -> None:
-        capture_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            capture_stopped.set()
-
-    controller.reserve_memory_capture_capacity = lambda *_args: None
-    controller.capture_user_memory = capture_user_memory
     controller.memory_adapter.offer(
-        TurnAccepted(object(), "remember this", "session-1", 0)
+        TurnAccepted(
+            platform="slack",
+            user_id="user-1",
+            message_id="native-1",
+            session_id="session-1",
+            text="remember this",
+            files=(),
+            is_dm=True,
+            is_ordinary_text=True,
+            is_ordinary_attachment=False,
+            lifecycle_snapshot=0,
+        )
     )
     await capture_started.wait()
 

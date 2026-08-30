@@ -7,7 +7,6 @@ import concurrent.futures
 import json
 import logging
 import threading
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -46,7 +45,6 @@ from core.message_output import MessageOutput
 from core.memory_adapter import (
     DisabledCaptureReceipt,
     DisabledMemoryAdapter,
-    EnabledMemoryAdapter,
     MemoryCaptureAdapter,
     SessionArchived,
 )
@@ -64,7 +62,6 @@ from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
-from core.attachment_telemetry import log_attachment_capture
 from core.memory_loader import load_memory_runtime
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.memory_contract import (
@@ -84,14 +81,6 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
-
-
-def _load_memory_admission_module() -> Any:
-    """Import Memory admission only after the enabled loader has succeeded."""
-
-    from avibe_memory import admission
-
-    return admission
 
 
 def _load_memory_capture_types() -> tuple[type, type, type]:
@@ -123,40 +112,6 @@ def _memory_reconfigure_changes_identity(
         and expected_config.cloud.applied_embedding_identity
         != candidate_config.cloud.applied_embedding_identity
     )
-
-
-@dataclass
-class _MemoryAttachmentCaptureReservation:
-    """Single-owner bridge from SessionTurn registration to Memory execution."""
-
-    module: object
-    token: object | None
-    config_generation: int | None
-    capacity_token: object | None = None
-    capacity_outcome: str | None = None
-    active: bool = True
-
-    def release(self) -> None:
-        if not self.active:
-            return
-        self.active = False
-        if self.token is not None:
-            cancel = getattr(self.module, "cancel_capture_reservation", None)
-            if callable(cancel):
-                cancel(self.token)
-        release_capacity = getattr(self.module, "release_capture_capacity", None)
-        if callable(release_capacity) and self.capacity_token is not None:
-            release_capacity(self.capacity_token)
-
-    @property
-    def capacity_full(self) -> bool:
-        return self.capacity_outcome == "full"
-
-    @property
-    def capacity_blocked(self) -> bool:
-        """Whether admission must drop the capture before scheduling it."""
-
-        return self.capacity_outcome in {"full", "unavailable", "disabled"}
 
 
 class _SettingsUserBindings:
@@ -567,7 +522,7 @@ class Controller:
         self.processing_indicator = ProcessingIndicatorService(self)
         self.audio_asr_service = AudioAsrService(self.config)
         memory_config = getattr(self.config, "memory", None) or MemoryConfig()
-        self.memory_adapter: MemoryCaptureAdapter | None = DisabledMemoryAdapter()
+        self.memory_adapter: MemoryCaptureAdapter = DisabledMemoryAdapter()
         self.memory_runtime = None
         self.memory_module = None
         self._memory_plugin_error: MemoryPluginUnavailableError | MemoryPluginIncompatibleError | None = None
@@ -580,7 +535,7 @@ class Controller:
                 logger.warning("Memory plugin unavailable during startup: %s", exc)
             else:
                 self.memory_module = self.memory_runtime.module
-                self.memory_adapter = EnabledMemoryAdapter(self)
+                self.memory_adapter = self.memory_runtime.capture_adapter
                 self._memory_runtime_generation = 1
         self._migrate_discord_guild_scope_from_config()
 
@@ -618,6 +573,13 @@ class Controller:
             allow_disabled=allow_disabled,
             processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
+            is_enabled_user=self.settings_manager.is_enabled_user,
+            lifecycle_snapshot_matches=(
+                self.session_turns.session_lifecycle_snapshot_matches
+            ),
+            acquire_lifecycle_admission=(
+                self.session_turns.acquire_lifecycle_admission
+            ),
         )
 
     @staticmethod
@@ -870,8 +832,8 @@ class Controller:
         self.memory_module = runtime.module
         self._memory_plugin_error = None
         if capture_enabled:
-            if not isinstance(self.memory_adapter, EnabledMemoryAdapter):
-                self.memory_adapter = EnabledMemoryAdapter(self)
+            self.memory_adapter = runtime.capture_adapter
+            runtime.start_capture_adapter()
         else:
             self.memory_adapter = DisabledMemoryAdapter()
 
@@ -1087,8 +1049,8 @@ class Controller:
                     await self._close_memory_runtime_locked(runtime, retire=False)
                     self._recheck_disabled_memory_cleanup_locked()
                 else:
-                    if not isinstance(self.memory_adapter, EnabledMemoryAdapter):
-                        self.memory_adapter = EnabledMemoryAdapter(self)
+                    self.memory_adapter = runtime.capture_adapter
+                    runtime.start_capture_adapter()
             return result
 
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
@@ -3045,13 +3007,6 @@ class Controller:
     def _memory_turn_facts(
         self,
         context: MessageContext,
-        *,
-        text: object = None,
-        session_id: object = None,
-        attachment_lease: object = None,
-        attachment_capture_status: object = None,
-        attachment_config_generation: object = None,
-        include_workdir: bool = True,
     ) -> InboundTurnFacts:
         from avibe_memory.admission import InboundTurnFacts
 
@@ -3067,19 +3022,10 @@ class Controller:
             if platform == "avibe"
             else getattr(context, "user_id", None)
         )
-        workdir = None
-        if include_workdir:
-            try:
-                workdir = self.get_cwd(context)
-            except Exception:
-                workdir = None
         return InboundTurnFacts(
             platform=platform,
             user_id=user_id,
             message_id=getattr(context, "message_id", None),
-            session_id=session_id,
-            workdir=workdir,
-            text=text,
             files=getattr(context, "files", None),
             is_dm=payload.get("is_dm") is True,
             is_ordinary_text=getattr(context, "is_original_human_text", None),
@@ -3088,176 +3034,20 @@ class Controller:
                 "is_original_human_attachment",
                 None,
             ),
-            attachment_lease=attachment_lease,
-            attachment_capture_status=attachment_capture_status,
-            attachment_config_generation=attachment_config_generation,
-            memory_enabled=bool(
-                getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
-            ),
         )
 
     def memory_capture_admitted(self, context: MessageContext) -> bool:
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return False
         return self._memory_admission().admits(
-            self._memory_turn_facts(context, include_workdir=False)
-        )
-
-    def reserve_memory_attachment_capture(
-        self,
-        context: MessageContext,
-        session_id: str,
-    ) -> object | None:
-        """Reserve writer capacity and exact-session order before retaining a lease."""
-
-        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
-            return None
-        memory_admission = _load_memory_admission_module()
-        admission = self._memory_admission()
-        facts = self._memory_turn_facts(
-            context,
-            text="",
-            session_id=session_id,
-            include_workdir=False,
-        )
-        if not admission.admits_attachment_turn(facts):
-            return None
-        runtime = getattr(self, "memory_runtime", None)
-        module = getattr(runtime, "module", None)
-        reserve_capacity = getattr(module, "reserve_capture_capacity", None)
-        reserve = getattr(module, "reserve_capture_admission", None)
-        principal_id = admission.principal_for(facts)
-        project_id = admission.project_for(facts)
-        if (
-            not callable(reserve)
-            or not isinstance(principal_id, str)
-            or not isinstance(project_id, str)
-        ):
-            return None
-        if not callable(reserve_capacity):
-            try:
-                token = reserve(
-                    principal_id=principal_id,
-                    project_id=project_id,
-                    session_id=session_id,
-                )
-            except Exception:
-                return None
-            read_generation = getattr(
-                runtime,
-                "attachment_capture_config_generation",
-                None,
-            )
-            try:
-                observed_generation = (
-                    read_generation() if callable(read_generation) else None
-                )
-            except Exception:
-                observed_generation = None
-            return _MemoryAttachmentCaptureReservation(
-                module=module,
-                token=token,
-                config_generation=memory_admission.normalize_attachment_config_generation(
-                    observed_generation
-                ),
-            )
-        try:
-            capacity_token = reserve_capacity()
-        except Exception:
-            return None
-        if isinstance(capacity_token, str):
-            if capacity_token not in {"full", "unavailable", "disabled"}:
-                return None
-            return _MemoryAttachmentCaptureReservation(
-                module=module,
-                token=None,
-                config_generation=None,
-                capacity_outcome=capacity_token,
-            )
-        try:
-            token = reserve(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=session_id,
-            )
-        except Exception:
-            release_capacity = getattr(module, "release_capture_capacity", None)
-            if callable(release_capacity):
-                release_capacity(capacity_token)
-            return None
-        if token is None:
-            release_capacity = getattr(module, "release_capture_capacity", None)
-            if callable(release_capacity):
-                release_capacity(capacity_token)
-            return None
-        read_generation = getattr(
-            runtime,
-            "attachment_capture_config_generation",
-            None,
-        )
-        try:
-            observed_generation = read_generation() if callable(read_generation) else None
-        except Exception:
-            observed_generation = None
-        generation = memory_admission.normalize_attachment_config_generation(
-            observed_generation
-        )
-        return _MemoryAttachmentCaptureReservation(
-            module=module,
-            token=token,
-            config_generation=generation,
-            capacity_token=capacity_token,
-        )
-
-    def reserve_memory_capture_capacity(
-        self,
-        context: MessageContext,
-        text: str,
-        session_id: str,
-    ) -> object | None:
-        """Reserve one writer slot before a text capture task is scheduled."""
-
-        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
-            return None
-        admission = self._memory_admission()
-        facts = self._memory_turn_facts(
-            context,
-            text=text,
-            session_id=session_id,
-            include_workdir=False,
-        )
-        if not admission.admits(facts):
-            return None
-        runtime = getattr(self, "memory_runtime", None)
-        module = getattr(runtime, "module", None)
-        reserve_capacity = getattr(module, "reserve_capture_capacity", None)
-        if not callable(reserve_capacity):
-            return None
-        try:
-            capacity_token = reserve_capacity()
-        except Exception:
-            return None
-        if isinstance(capacity_token, str):
-            if capacity_token not in {"full", "unavailable", "disabled"}:
-                return None
-            return _MemoryAttachmentCaptureReservation(
-                module=module,
-                token=None,
-                config_generation=None,
-                capacity_outcome=capacity_token,
-            )
-        return _MemoryAttachmentCaptureReservation(
-            module=module,
-            token=None,
-            config_generation=None,
-            capacity_token=capacity_token,
+            self._memory_turn_facts(context)
         )
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return None
         return self._memory_admission().principal_for(
-            self._memory_turn_facts(context, include_workdir=False)
+            self._memory_turn_facts(context)
         )
 
     def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
@@ -3475,301 +3265,6 @@ class Controller:
                 deadline_seconds=deadline_seconds,
             )
         return await archive_operation()
-
-    def capture_user_memory(
-        self,
-        context: MessageContext,
-        text: str,
-        session_id: str,
-        *,
-        attachment_lease: object = None,
-        attachment_reservation: object = None,
-        attachment_config_generation: int | None = None,
-        attachment_text_only: bool = False,
-        admission_ready: asyncio.Event | None = None,
-    ) -> Awaitable[None]:
-        """Submit one eligible attributed human turn after session resolution.
-
-        This is deliberately best effort. It is scheduled by ``MessageHandler``
-        and never participates in an agent turn's completion path. Bind the
-        aggregate before task scheduling can yield to a concurrent reset.
-        """
-
-        capture_reservation = attachment_reservation
-        if not isinstance(capture_reservation, _MemoryAttachmentCaptureReservation):
-            prepared = self.reserve_memory_capture_capacity(
-                context,
-                text,
-                session_id,
-            )
-            if prepared is not None:
-                capture_reservation = prepared
-
-        return self._capture_user_memory_bound(
-            context,
-            text,
-            session_id,
-            attachment_lease=attachment_lease,
-            attachment_reservation=capture_reservation,
-            attachment_config_generation=attachment_config_generation,
-            attachment_text_only=attachment_text_only,
-            admission_ready=admission_ready,
-            observed_runtime=getattr(self, "memory_runtime", None),
-        )
-
-    async def _capture_user_memory_bound(
-        self,
-        context: MessageContext,
-        text: str,
-        session_id: str,
-        *,
-        attachment_lease: object = None,
-        attachment_reservation: object = None,
-        attachment_config_generation: int | None = None,
-        attachment_text_only: bool = False,
-        admission_ready: asyncio.Event | None = None,
-        observed_runtime: object,
-    ) -> None:
-        reservation = (
-            attachment_reservation
-            if isinstance(
-                attachment_reservation,
-                _MemoryAttachmentCaptureReservation,
-            )
-            else None
-        )
-        if reservation is not None:
-            attachment_config_generation = reservation.config_generation
-            if reservation.capacity_blocked:
-                reservation.release()
-                return
-        admission = self._memory_admission()
-        facts = self._memory_turn_facts(
-            context,
-            text=text,
-            session_id=session_id,
-            attachment_lease=attachment_lease,
-            attachment_config_generation=attachment_config_generation,
-        )
-        try:
-            if admission.admits_attachment_turn(facts):
-                if reservation is None:
-                    await self._capture_user_memory_decided(
-                        admission,
-                        self._memory_attachment_unavailable(facts),
-                        attachment_lease=None,
-                        observed_runtime=observed_runtime,
-                        capacity_reservation=(
-                            reservation.capacity_token
-                            if reservation is not None
-                            else None
-                        ),
-                    )
-                    return
-                principal_id = admission.principal_for(facts)
-                project_id = admission.project_for(facts)
-                module = getattr(observed_runtime, "module", None)
-                acquire_admission = getattr(module, "capture_admission", None)
-                if (
-                    isinstance(principal_id, str)
-                    and isinstance(project_id, str)
-                    and callable(acquire_admission)
-                    and (reservation is None or reservation.module is module)
-                ):
-                    async with acquire_admission(
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        session_id=session_id,
-                        reservation=(
-                            reservation.token if reservation is not None else None
-                        ),
-                    ) as held_admission:
-                        if admission_ready is not None:
-                            admission_ready.set()
-                        await self._capture_user_memory_decided(
-                            admission,
-                            (
-                                self._memory_attachment_unavailable(facts)
-                                if attachment_text_only
-                                else facts
-                            ),
-                            attachment_lease=(
-                                None if attachment_text_only else attachment_lease
-                            ),
-                            observed_runtime=observed_runtime,
-                            held_admission=held_admission,
-                            capacity_reservation=reservation.capacity_token,
-                        )
-                    return
-            if admission_ready is not None:
-                admission_ready.set()
-            await self._capture_user_memory_decided(
-                admission,
-                facts,
-                attachment_lease=attachment_lease,
-                observed_runtime=observed_runtime,
-                capacity_reservation=(
-                    reservation.capacity_token if reservation is not None else None
-                ),
-            )
-        finally:
-            if reservation is not None:
-                reservation.release()
-            if admission_ready is not None:
-                admission_ready.set()
-
-    @staticmethod
-    def _memory_attachment_unavailable(
-        facts: InboundTurnFacts,
-    ) -> InboundTurnFacts:
-        """Finalize an unavailable attachment set while preserving its caption."""
-
-        return replace(
-            facts,
-            attachment_lease=None,
-            attachment_capture_status="unavailable",
-            attachment_config_generation=None,
-        )
-
-    async def _capture_user_memory_decided(
-        self,
-        admission: CaptureAdmission,
-        facts: InboundTurnFacts,
-        *,
-        attachment_lease: object,
-        observed_runtime: object,
-        held_admission: object = None,
-        capacity_reservation: object = None,
-    ) -> None:
-        from avibe_memory.admission import CaptureAdmission, WORKBENCH_PLATFORM
-
-        memory_admission = _load_memory_admission_module()
-        CaptureAccepted, CaptureRequest, _CaptureSkipped = (
-            _load_memory_capture_types()
-        )
-        del _CaptureSkipped
-        platform = CaptureAdmission.platform_of(facts)
-        if admission.admits_attachment_turn(facts):
-            status = facts.attachment_capture_status
-            attachment_selection = None
-            if status not in {"ready", "not_configured", "unavailable"}:
-                status = "not_configured"
-                if (
-                    platform != WORKBENCH_PLATFORM
-                    and memory_admission.normalize_attachment_config_generation(
-                        facts.attachment_config_generation
-                    )
-                    is not None
-                ):
-                    status = "ready"
-                elif platform == WORKBENCH_PLATFORM:
-                    status = "unavailable"
-                    read_status = getattr(
-                        observed_runtime,
-                        "attachment_capture_status",
-                        None,
-                    )
-                    if callable(read_status):
-                        try:
-                            observed_status = await read_status()
-                        except Exception:
-                            observed_status = "unavailable"
-                        if observed_status in {
-                            "ready",
-                            "not_configured",
-                            "unavailable",
-                        }:
-                            status = observed_status
-            if status == "ready" and platform != WORKBENCH_PLATFORM:
-                try:
-                    attachment_selection = await run_blocking(
-                        memory_admission.select_memory_attachments,
-                        facts.attachment_lease,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "memory_attachment_selection_failed "
-                        "platform=%s count=%d error_type=%s",
-                        platform,
-                        len(facts.files or ()),
-                        type(error).__name__,
-                    )
-                    status = "unavailable"
-            facts = replace(
-                facts,
-                attachment_capture_status=status,
-                attachment_selection=attachment_selection,
-            )
-        request = admission.decide(facts)
-        if not isinstance(request, CaptureRequest):
-            return
-
-        started_at = time.monotonic()
-        try:
-            if observed_runtime is None:
-                return
-            if getattr(observed_runtime, "retired", False):
-                return
-            async with self._memory_replacement_lock():
-                runtime = getattr(self, "memory_runtime", None)
-                if (
-                    runtime is not observed_runtime
-                    or runtime is None
-                    or getattr(runtime, "retired", False)
-                    or not runtime.available
-                ):
-                    return
-                if request.attachments and platform != WORKBENCH_PLATFORM:
-                    read_generation = getattr(
-                        runtime,
-                        "attachment_capture_config_generation",
-                        None,
-                    )
-                    current_generation = (
-                        read_generation() if callable(read_generation) else None
-                    )
-                    if (
-                        isinstance(current_generation, bool)
-                        or current_generation != request.attachment_config_generation
-                    ):
-                        request = replace(
-                            request,
-                            attachments=(),
-                            attachment_config_generation=None,
-                        )
-                        if not request.text.strip():
-                            return
-                capture_options = {}
-                if held_admission is not None:
-                    capture_options["admission"] = held_admission
-                if capacity_reservation is not None:
-                    capture_options["capacity_reservation"] = capacity_reservation
-                if request.attachments and attachment_lease is not None:
-                    capture_options["source_lease"] = attachment_lease
-                result = await runtime.module.capture(
-                    request,
-                    **capture_options,
-                )
-                if platform != WORKBENCH_PLATFORM and isinstance(facts.files, (list, tuple)):
-                    total = len(facts.files)
-                    if total:
-                        captured = (
-                            result.captured_attachment_count
-                            if isinstance(result, CaptureAccepted)
-                            else 0
-                        )
-                        log_attachment_capture(platform, total, captured)
-            logger.info(
-                "Memory capture platform=%s latency_ms=%d",
-                platform,
-                int((time.monotonic() - started_at) * 1000),
-            )
-        except Exception:
-            logger.warning(
-                "Memory capture failed platform=%s latency_ms=%d",
-                platform,
-                int((time.monotonic() - started_at) * 1000),
-            )
 
     async def _log_memory_processing_event(
         self,
@@ -4168,6 +3663,7 @@ class Controller:
             asyncio.set_event_loop(self._loop)
             memory_runtime = getattr(self, "memory_runtime", None)
             if memory_runtime is not None:
+                memory_runtime.start_capture_adapter()
                 self._memory_reconcile_task = self._loop.create_task(
                     memory_runtime.wake(),
                     name="memory-runtime-wake",
