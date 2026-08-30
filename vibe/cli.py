@@ -528,13 +528,6 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
     "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
     "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
-    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
-    "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
-    "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
-    "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",
-    "memory_runtime_preparation_scrubber_failed": "memory.cli.reason.runtimePreparationScrubberFailed",
-    "memory_runtime_preparation_sync_contract_failed": "memory.cli.reason.runtimePreparationSyncContractFailed",
-    "memory_runtime_preparation_failed": "memory.cli.reason.runtimePreparationFailed",
     "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
     "memory_wake_failed": "memory.cli.reason.wakeFailed",
     "memory_runtime_busy": "memory.cli.reason.runtimeBusy",
@@ -557,6 +550,15 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
     "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
     "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
+}
+_DOCTOR_MEMORY_REASON_I18N_KEYS = {
+    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
+    "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
+    "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
+    "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",
+    "memory_runtime_preparation_scrubber_failed": "memory.cli.reason.runtimePreparationScrubberFailed",
+    "memory_runtime_preparation_sync_contract_failed": "memory.cli.reason.runtimePreparationSyncContractFailed",
+    "memory_runtime_preparation_failed": "memory.cli.reason.runtimePreparationFailed",
 }
 
 
@@ -12461,7 +12463,10 @@ def _doctor_display_value(value: object, category: str, language: str) -> str:
 
 def _doctor_memory_reason(reason: object, language: str) -> str:
     reason_code = reason.strip() if isinstance(reason, str) else ""
-    key = _MEMORY_CLI_REASON_I18N_KEYS.get(reason_code)
+    key = _DOCTOR_MEMORY_REASON_I18N_KEYS.get(
+        reason_code,
+        _MEMORY_CLI_REASON_I18N_KEYS.get(reason_code),
+    )
     if key:
         return i18n_t(key, language)
     return reason_code or i18n_t("doctor.value.unknownError", language)
