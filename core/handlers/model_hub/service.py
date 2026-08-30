@@ -5204,17 +5204,91 @@ class ModelHubService:
         request: Mapping[str, Any],
         stream: bool,
         backend: str,
-    ) -> tuple[InvokeHandle, Optional[RawCallOutcome]]:
-        handle = await self._engine_call(
-            self.adapter.invoke(source.id, model_id, request, stream, backend)
-        )
-        if handle.stream is not None:
-            # The body is the gateway's to forward, so the tokens in it are the
-            # gateway's to meter.
-            return handle, None
-        outcome = await self._engine_call(handle.outcome())
-        await self._meter_call(source_id=source.id, model_id=model_id, outcome=outcome)
-        return handle, outcome
+    ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
+        async def meter_available_outcome(
+            handle: InvokeHandle,
+        ) -> RawCallOutcome | None:
+            if handle.stream is not None and not handle.outcome_available:
+                return None
+            outcome = await self._engine_call(handle.outcome())
+            await self._meter_call(
+                source_id=source.id,
+                model_id=model_id,
+                outcome=outcome,
+            )
+            return outcome
+
+        async def invoke_and_meter_bodyless() -> tuple[InvokeHandle, Optional[RawCallOutcome]]:
+            handle = await self._engine_call(
+                self.adapter.invoke(source.id, model_id, request, stream, backend)
+            )
+            if handle.stream is not None:
+                # The body is the gateway's to forward, so the tokens in it are the
+                # gateway's to meter.
+                return handle, None
+            outcome = await meter_available_outcome(handle)
+            assert outcome is not None
+            return handle, outcome
+
+        attempt_task = asyncio.create_task(invoke_and_meter_bodyless())
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            handle, outcome = await asyncio.shield(attempt_task)
+        except asyncio.CancelledError as caught:
+            cancelled = caught
+            try:
+                handle, outcome = await _await_owned_task_before_settling(attempt_task)
+            except BaseException:
+                raise caught
+
+        if cancelled is not None and handle.stream is not None:
+            async def close_and_meter_observed_stream() -> RawCallOutcome | None:
+                await handle.close_stream()
+                return await meter_available_outcome(handle)
+
+            cleanup_task = asyncio.create_task(close_and_meter_observed_stream())
+            try:
+                outcome = await _await_owned_task_before_settling(cleanup_task)
+            except BaseException:
+                raise cancelled
+
+        return handle, outcome, cancelled
+
+    async def _settle_cancelled_attempt(
+        self,
+        *,
+        source: ModelHubSourceConfig,
+        source_model_id: str,
+        requested_model_id: str,
+        backend: BackendName,
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+        settlement_generation: int,
+        attempt_observer: Optional[AttemptObserver],
+    ) -> None:
+        """Persist facts from an upstream call that beat downstream cancellation."""
+
+        if attempt_observer is not None:
+            attempt_observer(
+                source.id,
+                source_model_id,
+                "hub",
+                False,
+                outcome,
+                decision,
+            )
+        if decision.action == "fallback" or (
+            decision.action == "surface"
+            and outcome.stream_started
+            and decision.reason is not None
+        ):
+            await self._settle_fallback_source(
+                source,
+                decision,
+                backend=backend,
+                model_id=requested_model_id,
+                settlement_generation=settlement_generation,
+            )
 
     async def _meter_call(
         self,
@@ -5468,7 +5542,7 @@ class ModelHubService:
                     None,
                     None,
                 )
-            handle, outcome = await self._invoke(
+            handle, outcome, cancelled = await self._invoke(
                 source=source,
                 model_id=target_model,
                 request=exact_request,
@@ -5476,6 +5550,8 @@ class ModelHubService:
                 backend=backend,
             )
             if outcome is None:
+                if cancelled is not None:
+                    raise cancelled
                 self._emit_switch(
                     agent=event_agent,
                     model_id=model_id,
@@ -5495,10 +5571,22 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                 )
             decision = await self._classify_source_outcome(source, outcome)
+            if cancelled is not None:
+                await self._settle_cancelled_attempt(
+                    source=source,
+                    source_model_id=target_model,
+                    requested_model_id=model_id,
+                    backend=cast(BackendName, backend),
+                    outcome=outcome,
+                    decision=decision,
+                    settlement_generation=settlement_generation,
+                    attempt_observer=attempt_observer,
+                )
+                raise cancelled
             if decision.action == "refresh":
                 # The engine refreshes its credential internally; L2 retries the
                 # exact same source once and never falls through on a second 401.
-                handle, outcome = await self._invoke(
+                handle, outcome, cancelled = await self._invoke(
                     source=source,
                     model_id=target_model,
                     request=exact_request,
@@ -5506,6 +5594,8 @@ class ModelHubService:
                     backend=backend,
                 )
                 if outcome is None:
+                    if cancelled is not None:
+                        raise cancelled
                     self._emit_switch(
                         agent=event_agent,
                         model_id=model_id,
@@ -5525,6 +5615,18 @@ class ModelHubService:
                         settlement_generation=settlement_generation,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
+                if cancelled is not None:
+                    await self._settle_cancelled_attempt(
+                        source=source,
+                        source_model_id=target_model,
+                        requested_model_id=model_id,
+                        backend=cast(BackendName, backend),
+                        outcome=outcome,
+                        decision=decision,
+                        settlement_generation=settlement_generation,
+                        attempt_observer=attempt_observer,
+                    )
+                    raise cancelled
             if attempt_observer is not None:
                 attempt_observer(
                     source.id,

@@ -13,7 +13,7 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any, AsyncIterator, BinaryIO, Mapping, TypeVar
+from typing import Any, AsyncIterator, BinaryIO, Mapping, TypeVar, cast
 
 import aiohttp
 import ijson
@@ -179,6 +179,42 @@ class _StreamPrelude:
         if self._file is None:
             return self.prefix(limit)
         return await asyncio.to_thread(self.prefix, limit)
+
+
+class _DeadlineReader:
+    """Keep local response projection inside the request's absolute deadline."""
+
+    def __init__(self, reader: BinaryIO, deadline: float) -> None:
+        self._reader = reader
+        self._deadline = deadline
+
+    def _check_deadline(self) -> None:
+        if time.monotonic() >= self._deadline:
+            raise TimeoutError("engine API response exceeded its request deadline")
+
+    def read(self, size: int = -1) -> bytes:
+        self._check_deadline()
+        payload = self._reader.read(size)
+        self._check_deadline()
+        return payload
+
+    def readinto(self, buffer: bytearray) -> int | None:
+        self._check_deadline()
+        count = self._reader.readinto(buffer)
+        self._check_deadline()
+        return count
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._reader.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._reader.tell()
+
+    def readable(self) -> bool:
+        return self._reader.readable()
+
+    def seekable(self) -> bool:
+        return self._reader.seekable()
 
 
 @dataclass(frozen=True)
@@ -365,7 +401,7 @@ class EngineClient:
                         _read_response_into(response.content, error_body),
                         timeout=self.timeout,
                     )
-                    observed_payload = await asyncio.to_thread(
+                    observed_payload = await _observe_buffered_protocol_response_async(
                         observe_buffered_protocol_response,
                         request_protocol,
                         error_body.reader(),
@@ -419,7 +455,7 @@ class EngineClient:
                     _read_response_into(response.content, buffered_body),
                     timeout=self.timeout,
                 )
-                observation = await asyncio.to_thread(
+                observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
                     buffered_body.reader(),
@@ -579,7 +615,11 @@ class EngineClient:
                     _copy_sync_response(response, response_body, deadline=deadline)
                     response_body.seek(0)
                     try:
-                        return projector(response_body)
+                        return _project_before_deadline(
+                            response_body,
+                            projector,
+                            deadline=deadline,
+                        )
                     except (ijson.JSONError, UnicodeDecodeError, ValueError, OverflowError):
                         raise EngineClientError(
                             "engine API returned an invalid payload",
@@ -590,7 +630,11 @@ class EngineClient:
                 with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
                     _copy_sync_response(exc, response_body, deadline=deadline)
                     response_body.seek(0)
-                    error_type, error_code, error_candidates = _project_raw_error_fields(response_body)
+                    error_type, error_code, error_candidates = _project_before_deadline(
+                        response_body,
+                        _project_raw_error_fields,
+                        deadline=deadline,
+                    )
             except (TimeoutError, socket.timeout, OSError) as read_error:
                 raise EngineClientError(
                     "engine API is unavailable",
@@ -759,6 +803,48 @@ def _project_model_inventory(
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, new_url):
         return None
+
+
+def _project_before_deadline(
+    reader: BinaryIO,
+    projector: Callable[[BinaryIO], _ProjectedJSON],
+    *,
+    deadline: float,
+) -> _ProjectedJSON:
+    guarded = _DeadlineReader(reader, deadline)
+    guarded._check_deadline()
+    projected = projector(cast(BinaryIO, guarded))
+    guarded._check_deadline()
+    return projected
+
+
+async def _observe_buffered_protocol_response_async(
+    projector: Callable[..., ProtocolObservation],
+    protocol: str,
+    reader: BinaryIO,
+    *,
+    machine_error_codes: frozenset[str],
+) -> ProtocolObservation:
+    """Drain the finite local projection before its reader can be closed."""
+
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            projector,
+            protocol,
+            reader,
+            machine_error_codes=machine_error_codes,
+        )
+    )
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancelled:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        worker.result()
+        raise cancelled
 
 
 def _copy_sync_response(

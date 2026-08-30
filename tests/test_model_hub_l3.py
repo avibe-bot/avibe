@@ -3173,6 +3173,60 @@ def test_gateway_cancellation_during_upstream_settlement_preserves_history(
     asyncio.run(exercise())
 
 
+def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_cancelbuf", "Cancelled buffered response")
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
+            source_id=source.id,
+            usage=ProtocolUsageReport.of(
+                input_tokens=321,
+                cached_input_tokens=0,
+                output_tokens=7,
+            ),
+        )
+        service = _service(tmp_path, sources=[source], outcomes=[outcome])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        invoke_started = asyncio.Event()
+        release_invoke = asyncio.Event()
+        invoke = service.adapter.invoke
+
+        async def blocked_invoke(*args, **kwargs):
+            invoke_started.set()
+            await release_invoke.wait()
+            return await invoke(*args, **kwargs)
+
+        service.adapter.invoke = blocked_invoke
+        task = asyncio.create_task(
+            service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request={},
+                stream=False,
+                supply_channel="hub",
+            )
+        )
+        await asyncio.wait_for(invoke_started.wait(), timeout=1)
+        task.cancel()
+        release_invoke.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 321
+        assert metered["output_tokens"] == 7
+        assert service.store.load().sources[0].state.status == "cooldown"
+        assert [event["reason"] for event in service.events.list()] == ["rate_limited"]
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     "blocked_phase",
     [

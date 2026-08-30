@@ -333,6 +333,46 @@ def test_engine_json_response_spooling_uses_one_absolute_deadline(
     assert socket_timeouts == pytest.approx([0.9, 0.4])
 
 
+def test_engine_json_projection_uses_the_request_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self) -> None:
+            self.body = io.BytesIO(b"{}")
+
+        def read(self, size: int = -1) -> bytes:
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return self.body.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    ticks = iter((10.0, 10.1, 10.2, 10.3, 10.4, 11.1))
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: Response()),
+    )
+    client = EngineClient(
+        EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+        timeout=1.0,
+    )
+
+    def projector(reader) -> bool:
+        assert reader.read(1) == b"{"
+        reader.read(1)
+        return True
+
+    with pytest.raises(EngineClientError) as caught:
+        client._request_json_projection("GET", "/fixture", projector)
+
+    assert caught.value.error_type == "TimeoutError"
+
+
 def test_engine_health_projects_only_required_facts_from_large_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4609,6 +4649,78 @@ def test_engine_client_cancellation_closes_pre_handle_resources(
 
         assert session.close_calls == 1
         assert response.close_calls == (1 if phase == "first_byte" else 0)
+
+    asyncio.run(run())
+
+
+def test_buffered_projection_drains_before_its_spool_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        projection_started = threading.Event()
+        release_projection = threading.Event()
+        preludes: list[TrackingPrelude] = []
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=1)
+                preludes.append(self)
+
+        def project(_protocol, reader, **_kwargs):
+            projection_started.set()
+            assert release_projection.wait(timeout=1)
+            assert not reader.closed
+            return client_module.ProtocolObservation(outcome="served")
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return b'{"output":[]}' if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module, "observe_buffered_protocol_response", project)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        )
+
+        task = asyncio.create_task(client.invoke(source, "model-a", {}, stream=False))
+        assert await asyncio.to_thread(projection_started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert preludes and not preludes[0].closed
+        release_projection.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert preludes[0].closed
 
     asyncio.run(run())
 
