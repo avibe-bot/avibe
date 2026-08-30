@@ -712,6 +712,7 @@ async def test_reset_disable_and_cancellation_retain_owner_until_settlement(
     fresh = _Runtime(tmp_path)
     runtime.replacement_runtime = fresh
     controller = _controller(runtime)
+    enabled = controller.config.memory
     _persist(monkeypatch, controller)
     deletion_started = threading.Event()
     allow_deletion_to_finish = threading.Event()
@@ -731,8 +732,7 @@ async def test_reset_disable_and_cancellation_retain_owner_until_settlement(
         "state": "disabled",
         "error": "memory_operation_in_progress",
     }
-    assert controller.memory_runtime is runtime
-    assert controller.config.memory == disabled
+    assert controller.config.memory == enabled
     task.cancel()
     await asyncio.sleep(0.05)
 
@@ -747,12 +747,12 @@ async def test_reset_disable_and_cancellation_retain_owner_until_settlement(
     lease.release()
     assert controller._memory_destructive_tasks == set()
     assert runtime.events == ["reap", "begin_close", "close", "settle", "delete"]
-    assert controller.memory_runtime is None
-    assert controller.memory_module is None
-    assert controller.config.memory == disabled
-    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-    assert runtime.replacement_configs == []
-    assert runtime.root_released is True
+    assert controller.memory_runtime is fresh
+    assert controller.memory_module is fresh.module
+    assert controller.config.memory == enabled
+    assert controller.memory_adapter is fresh.capture_adapter
+    assert runtime.replacement_configs == [enabled]
+    assert runtime.root_released is False
 
 
 @pytest.mark.asyncio

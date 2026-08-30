@@ -18,7 +18,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
 from avibe_memory import CaptureRequest, CaptureSkipped
-from core.memory_adapter import DisabledMemoryAdapter, TurnAccepted
+from core.memory_adapter import DisabledMemoryAdapter
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
@@ -636,11 +636,16 @@ async def test_disabled_cleanup_terminal_status_tracks_ownership(
     )
 
 
+@pytest.mark.parametrize("active_operation", ("preflight", "install"))
 @pytest.mark.asyncio
-async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> None:
+async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
+    active_operation: str,
+) -> None:
     controller = _controller_with_memory()
     enabled = replace(controller.config.memory, enabled=True)
     offers: list[object] = []
+    operation_started = asyncio.Event()
+    operation_release = asyncio.Event()
 
     class _CaptureAdapter:
         def offer(self, event: object) -> None:
@@ -652,6 +657,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> No
             self.available = True
             self.closed = False
             self.capture_adapter = _CaptureAdapter()
+            self.begin_close_calls = 0
 
         def start_capture_adapter(self, **_options: object) -> bool:
             return True
@@ -659,11 +665,20 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> No
         async def reconcile(self, _config) -> dict[str, object]:
             return {"ok": True, "state": "running"}
 
+        async def preflight(self, _config) -> dict[str, object]:
+            operation_started.set()
+            await operation_release.wait()
+            return {"ok": True}
+
+        async def install_artifact(self, **_options: object) -> dict[str, object]:
+            return await self.preflight(enabled)
+
         async def close(self) -> None:
             self.closed = True
 
         def begin_close(self) -> None:
             assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+            self.begin_close_calls += 1
 
     runtime = _Runtime()
     controller._create_memory_runtime = lambda _config: runtime
@@ -676,22 +691,30 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> No
     assert controller.memory_adapter is runtime.capture_adapter
     assert controller.config.memory.enabled is True
 
-    event = TurnAccepted(
-        platform="slack",
-        user_id="user-1",
-        message_id="native-1",
-        session_id="session-1",
-        text="remember this",
-        files=(),
-        is_dm=True,
-        is_ordinary_text=True,
-        is_ordinary_attachment=False,
-        lifecycle_snapshot=0,
-    )
+    event = object()
     controller.memory_adapter.offer(event)
     assert offers == [event]
 
+    operation = asyncio.create_task(
+        controller.preflight_memory(enabled)
+        if active_operation == "preflight"
+        else controller.install_memory_runtime()
+    )
+    await operation_started.wait()
+
     disabled = replace(enabled, enabled=False)
+    assert await controller.reconcile_memory(disabled) == {
+        "ok": False,
+        "state": "disabled",
+        "error": "memory_operation_in_progress",
+    }
+    assert controller.config.memory is enabled
+    assert controller.memory_runtime is runtime
+    assert controller.memory_adapter is runtime.capture_adapter
+    assert runtime.begin_close_calls == 0
+
+    operation_release.set()
+    assert await operation == {"ok": True}
     assert await controller.reconcile_memory(disabled) == {
         "ok": True,
         "state": "disabled",
@@ -701,7 +724,6 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> No
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
     assert controller.config.memory.enabled is False
-    assert controller._memory_disabled_cleanup_unproved is False
 
 
 @pytest.mark.parametrize("overlap", ("preflight", "install"))
@@ -1139,49 +1161,6 @@ async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
     finally:
         wake_release.set()
         await controller._memory_reconcile_task
-
-
-@pytest.mark.asyncio
-async def test_disable_does_not_wait_for_long_runtime_read() -> None:
-    enabled = replace(_disabled_app_config().memory, enabled=True)
-    disabled = replace(enabled, enabled=False)
-    controller = _controller_with_memory(enabled)
-    controller.memory_adapter = None
-    read_started = asyncio.Event()
-    read_release = asyncio.Event()
-
-    class _Runtime(_NoRetainedRootOwnership):
-        def __init__(self) -> None:
-            self.module = object()
-            self.close_calls = 0
-
-        async def status_payload(self) -> dict[str, object]:
-            assert controller._memory_replacement_lock().locked() is False
-            read_started.set()
-            await read_release.wait()
-            return {"status": "ok", "state": "running"}
-
-        def begin_close(self) -> None:
-            return None
-
-        async def close(self) -> None:
-            self.close_calls += 1
-
-    runtime = _Runtime()
-    controller.memory_runtime = runtime
-    controller.memory_module = runtime.module
-    status = asyncio.create_task(controller.memory_status_payload())
-    await read_started.wait()
-    assert await asyncio.wait_for(
-        controller.reconcile_memory(disabled),
-        timeout=0.1,
-    ) == {"ok": True, "state": "disabled"}
-
-    assert runtime.close_calls == 1
-    assert controller.memory_runtime is None
-    assert controller._memory_replacement_lock().locked() is False
-    read_release.set()
-    assert await status == {"status": "ok", "state": "running"}
 
 
 @pytest.mark.asyncio

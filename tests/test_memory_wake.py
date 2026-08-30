@@ -255,6 +255,8 @@ async def test_wake_retries_short_operation_lease_contention(
     )
     attempts = 0
     releases = 0
+    acquired = threading.Event()
+    finish_acquire = threading.Event()
 
     class Lease:
         def __init__(self, _home: Path) -> None:
@@ -265,6 +267,8 @@ async def test_wake_retries_short_operation_lease_contention(
             attempts += 1
             if attempts < 3:
                 raise MemoryOperationBusy("busy")
+            acquired.set()
+            finish_acquire.wait(timeout=5)
 
         def release(self) -> None:
             nonlocal releases
@@ -280,11 +284,22 @@ async def test_wake_retries_short_operation_lease_contention(
         effective_home=tmp_path,
     )
 
-    result = await runtime.wake()
+    wake = asyncio.create_task(runtime.wake())
+    assert await asyncio.to_thread(acquired.wait, 2)
+    runtime.begin_close()
+    finish_acquire.set()
+    result = await wake
 
-    assert result == {"ok": True, "state": "running"}
-    assert attempts == 3
-    assert releases == 1
+    assert result == {
+        "ok": False,
+        "state": "starting",
+        "error": "memory_operation_in_progress",
+    }
+    assert (attempts, releases) == (3, 1)
+    later = Lease(tmp_path)
+    later.acquire()
+    later.release()
+    assert (attempts, releases) == (4, 2)
 
 
 @pytest.mark.parametrize("consumer", ("wake", "install", "controller"))

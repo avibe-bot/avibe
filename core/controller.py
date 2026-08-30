@@ -1012,14 +1012,21 @@ class Controller:
                 "state": "disabled",
                 "error": "memory_operation_in_progress",
             }
-            runtime = await self._detach_memory_runtime(
-                disabled_config=memory_config,
-            )
+            async with self._memory_replacement_lock():
+                runtime = getattr(self, "memory_runtime", None)
             async with self._memory_operation(
                 getattr(runtime, "effective_home", None)
             ) as lease:
                 if lease is None:
                     return busy
+                async with self._memory_replacement_lock():
+                    if getattr(self, "memory_runtime", None) is not runtime:
+                        return busy
+                    self.memory_adapter = DisabledMemoryAdapter()
+                    self.config.memory = memory_config
+                    if runtime is not None:
+                        runtime.begin_close()
+                    self.memory_module = None
                 if runtime is not None and not await self._settle_retained_memory_runtime(
                     runtime
                 ):

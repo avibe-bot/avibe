@@ -2196,15 +2196,14 @@ class MemoryRuntime:
                         await asyncio.sleep(delay_seconds)
                     self._require_lifecycle_work()
                     try:
-                        await self._lifecycle_checkpoint(
-                            run_blocking(
-                                lease.acquire,
-                                on_cancel_result=lambda _result: lease.release(),
-                            )
+                        await run_blocking(
+                            lease.acquire,
+                            on_cancel_result=lambda _result: lease.release(),
                         )
                     except MemoryOperationBusy:
                         continue
                     lease_acquired = True
+                    self._require_lifecycle_work()
                     break
                 if not lease_acquired:
                     self._runtime_error = "memory_operation_in_progress"
