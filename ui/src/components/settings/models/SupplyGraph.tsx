@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
-import type { AgentBackend } from './types';
 import type { SupplyRelation, SupplyRelationKind } from './supplyRelations';
 
 type DrawnRelation = SupplyRelation & {
@@ -25,8 +24,6 @@ export const SupplyGraph: React.FC<{
     if (!container) return undefined;
     const measure = () => {
       const root = container.getBoundingClientRect();
-      const byBackend = new Map<AgentBackend, SupplyRelation[]>();
-      for (const relation of relations) byBackend.set(relation.backend, [...(byBackend.get(relation.backend) ?? []), relation]);
       const wires: DrawnRelation[] = [];
       for (const relation of relations) {
         const source = Array.from(container.querySelectorAll<HTMLElement>('[data-source-id]')).find((element) => element.dataset.sourceId === relation.sourceId);
@@ -34,12 +31,10 @@ export const SupplyGraph: React.FC<{
         if (!source || !backend) continue;
         const sourceBounds = source.getBoundingClientRect();
         const backendBounds = backend.getBoundingClientRect();
-        const siblings = byBackend.get(relation.backend) ?? [];
-        const backendIndex = siblings.findIndex((candidate) => candidate.sourceId === relation.sourceId);
         const startX = sourceBounds.right - root.left;
         const startY = sourceBounds.top - root.top + sourceBounds.height / 2;
         const endX = backendBounds.left - root.left;
-        const endY = backendBounds.top - root.top + backendBounds.height * ((backendIndex + 1) / (siblings.length + 1));
+        const endY = backendBounds.top - root.top + backendBounds.height / 2;
         const railX = startX + (endX - startX) / 2;
         wires.push({ ...relation, startX, startY, endX, endY, path: `M ${startX} ${startY} C ${railX} ${startY}, ${railX} ${endY}, ${endX} ${endY}` });
       }
