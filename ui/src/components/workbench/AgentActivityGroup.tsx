@@ -28,7 +28,6 @@ import { Markdown } from '../ui/markdown';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { copyTextToClipboard } from '../../lib/utils';
 import {
-  activityDurationParts,
   filterActivityRows,
   formatActivityElapsedClock,
   genericChips,
@@ -562,11 +561,8 @@ export const ActivityChip: React.FC<{
   } else if (group.status === 'interrupted') {
     label = t('chat.agentActivity.interrupted', { count: group.steps });
   } else {
-    const parts = activityDurationParts(group.durationMs);
-    const duration = parts
-      ? parts.minutes > 0
-        ? t('chat.agentActivity.durationMin', { minutes: parts.minutes, seconds: parts.seconds })
-        : t('chat.agentActivity.durationSec', { seconds: parts.seconds })
+    const duration = group.durationMs != null && Number.isFinite(group.durationMs) && group.durationMs >= 0
+      ? formatActivityElapsedClock(group.durationMs, t('chat.agentActivity.dayShort'))
       : '';
     label = `${t('chat.agentActivity.label')} · ${stepLabel(t, group.steps)}${duration ? ` · ${duration}` : ''}`;
   }

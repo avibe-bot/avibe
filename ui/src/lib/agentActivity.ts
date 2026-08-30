@@ -228,18 +228,7 @@ export const toolIconKind = (toolName: string): ToolIconKind => {
   return 'wrench';
 };
 
-// Duration as {minutes, seconds} (null when unavailable). The unit text is applied
-// by the component through i18n (AGENTS.md: no hardcoded user-facing units), so the
-// zh chip renders localized units rather than a hardcoded "1m 23s".
-export const activityDurationParts = (
-  ms: number | null | undefined,
-): { minutes: number; seconds: number } | null => {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
-  const totalSeconds = Math.round(ms / 1000);
-  return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
-};
-
-// Precise elapsed clock for the live activity card. Keep the compact MM:SS
+// Shared duration clock for live and completed activity. Keep the compact MM:SS
 // shape below one hour, then expose hours and days instead of letting minutes
 // grow into an increasingly hard-to-read total.
 export const formatActivityElapsedClock = (ms: number, daySuffix: string): string => {
