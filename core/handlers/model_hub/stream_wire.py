@@ -8,9 +8,11 @@ from typing import Callable, Final, Literal, Mapping
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
-# Wire observation keeps only a prefix of each JSON string. This is not a
-# protocol or response limit: the original bytes continue downstream unchanged.
+# Wire observation is a bounded, fail-closed metadata copy. These are not
+# protocol or response limits: the original bytes continue downstream unchanged.
+SSE_OBSERVATION_BYTES: Final = 64 * 1024
 SSE_OBSERVATION_STRING_BYTES: Final = 16 * 1024
+SSE_OBSERVATION_EVENT_BYTES: Final = 256
 UTF8_BOM: Final = b"\xef\xbb\xbf"
 
 
@@ -23,6 +25,10 @@ class SSEFrameTokenizer:
     _after_cr: bool = False
     _stream_prefix: bytearray = field(default_factory=bytearray)
     _stream_started: bool = False
+
+    @property
+    def retained_bytes(self) -> int:
+        return len(self._stream_prefix) + len(self._line) + sum(map(len, self._frame_lines))
 
     def feed(self, chunk: bytes) -> tuple[bytes, ...]:
         if not self._stream_started:
@@ -102,14 +108,18 @@ class _JSONObservationBuffer:
     _string_start: int = 0
     _string_bytes: int = 0
     _string_elided: bool = False
+    _abandoned: bool = False
 
     @property
     def retained_bytes(self) -> int:
         return len(self._payload)
 
     def feed_byte(self, byte: int) -> None:
+        if self._abandoned:
+            return
         if not self._in_string:
             self._payload.append(byte)
+            self._enforce_total_budget()
             if byte == 0x22:
                 self._in_string = True
                 self._escaped = False
@@ -131,6 +141,7 @@ class _JSONObservationBuffer:
         if not self._escaped and byte == 0x22:
             self._payload.append(byte)
             self._in_string = False
+            self._enforce_total_budget()
             return
 
         self._payload.append(byte)
@@ -143,19 +154,30 @@ class _JSONObservationBuffer:
             del self._payload[self._string_start :]
             self._payload.extend(b"__avibe_observation_elided__")
             self._string_elided = True
+        self._enforce_total_budget()
 
     def feed_separator(self) -> None:
         self.feed_byte(0x0A)
 
-    def take(self) -> bytes:
-        payload = bytes(self._payload)
+    def take(self) -> bytes | None:
+        payload = None if self._abandoned else bytes(self._payload)
+        self._reset()
+        return payload
+
+    def _enforce_total_budget(self) -> None:
+        if len(self._payload) <= SSE_OBSERVATION_BYTES:
+            return
+        self._payload.clear()
+        self._abandoned = True
+
+    def _reset(self) -> None:
         self._payload.clear()
         self._in_string = False
         self._escaped = False
         self._string_start = 0
         self._string_bytes = 0
         self._string_elided = False
-        return payload
+        self._abandoned = False
 
 
 @dataclass
@@ -170,16 +192,13 @@ class SSEObservationTokenizer:
     _line_started: bool = False
     _frame_started: bool = False
     _event_value: bytearray = field(default_factory=bytearray)
+    _event_value_too_long: bool = False
     _current_event_name: str | None = None
     _has_data: bool = False
     _data: _JSONObservationBuffer = field(default_factory=_JSONObservationBuffer)
     _after_cr: bool = False
     _stream_prefix: bytearray = field(default_factory=bytearray)
     _stream_started: bool = False
-
-    @property
-    def current_event_name(self) -> str | None:
-        return self._current_event_name
 
     @property
     def retained_bytes(self) -> int:
@@ -245,7 +264,13 @@ class SSEObservationTokenizer:
             if byte == 0x20:
                 return
         if self._line_kind == "event":
-            self._event_value.append(byte)
+            if self._event_value_too_long:
+                return
+            if len(self._event_value) < SSE_OBSERVATION_EVENT_BYTES:
+                self._event_value.append(byte)
+            else:
+                self._event_value.clear()
+                self._event_value_too_long = True
         elif self._line_kind == "data":
             self._data.feed_byte(byte)
 
@@ -268,10 +293,13 @@ class SSEObservationTokenizer:
             elif field_name == b"event":
                 self._line_kind = "event"
         if self._line_kind == "event":
-            try:
-                self._current_event_name = self._event_value.decode("utf-8")
-            except UnicodeDecodeError:
+            if self._event_value_too_long:
                 self._current_event_name = None
+            else:
+                try:
+                    self._current_event_name = self._event_value.decode("utf-8")
+                except UnicodeDecodeError:
+                    self._current_event_name = None
         self._reset_line()
 
     def _start_data_line(self) -> None:
@@ -287,13 +315,13 @@ class SSEObservationTokenizer:
         self._skip_value_space = False
         self._line_started = False
         self._event_value.clear()
+        self._event_value_too_long = False
 
     def _reset_frame(self) -> None:
         self._frame_started = False
         self._current_event_name = None
         self._has_data = False
-        if self._data.retained_bytes:
-            self._data.take()
+        self._data.take()
 
 
 def parse_sse_frame(frame: bytes) -> tuple[str | None, bytes | None]:
@@ -714,20 +742,17 @@ def _selector_matches(
 def is_protocol_model_output(
     protocol: str,
     event_name: str | None,
-    payload: Mapping[str, object] | None,
+    payload: Mapping[str, object],
 ) -> bool:
     """Return the sole table-backed first-model-output boundary fact."""
 
     return any(
         envelope.event_name == event_name
-        and (
-            payload is None
-            or _selector_matches(
-                payload,
-                selector_path=envelope.selector_path,
-                selector_value=envelope.selector_value,
-                require_nonempty=envelope.require_nonempty,
-            )
+        and _selector_matches(
+            payload,
+            selector_path=envelope.selector_path,
+            selector_value=envelope.selector_value,
+            require_nonempty=envelope.require_nonempty,
         )
         for envelope in PROTOCOL_STREAM_TAXONOMY[protocol].model_output_envelopes
     )
@@ -803,11 +828,7 @@ def observe_protocol_response(
     if not isinstance(payload, dict):
         if not streamed:
             return ProtocolObservation(outcome="served")
-        return ProtocolObservation(
-            model_output_started=(
-                event_name is not None and is_protocol_model_output(protocol, event_name, None)
-            )
-        )
+        return ProtocolObservation()
 
     usage = extract_protocol_usage(protocol, payload)
 
@@ -883,13 +904,6 @@ class ProtocolSSEState:
 
     def observe(self, chunk: bytes) -> None:
         frames = self.tokenizer.feed(chunk)
-        current_event_name = self.tokenizer.current_event_name
-        if current_event_name is not None and is_protocol_model_output(
-            self.protocol,
-            current_event_name,
-            None,
-        ):
-            self.model_output_started = True
         for frame in frames:
             self._observe_frame(frame)
 

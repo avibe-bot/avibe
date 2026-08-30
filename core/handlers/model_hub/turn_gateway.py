@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import socket
+import tempfile
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack, suppress
@@ -60,6 +61,9 @@ from .service import (
 
 
 _MAX_REQUEST_BYTES: Final = 16 * 1024 * 1024
+_BUFFERED_RESPONSE_MEMORY_BYTES: Final = 256 * 1024
+_BUFFERED_RESPONSE_OBSERVATION_BYTES: Final = 256 * 1024
+_RESPONSE_CHUNK_BYTES: Final = 64 * 1024
 _SUPPORTED_PATHS: Final = frozenset(
     {
         "messages",
@@ -729,44 +733,70 @@ class ModelHubTurnGateway:
             )
 
         if not stream:
-            payload = bytearray()
-            async for chunk in handle.stream:
-                payload.extend(chunk)
-            execution.completed_at = self._now()
-            # Published before settling, not after: settling can be cancelled by a
-            # downstream disconnect, and facts only this frame's local knew about
-            # would leave the boundary with nothing to meter.
-            observation = observe_protocol_response(
-                protocol,
-                streamed=False,
-                data=bytes(payload),
-            )
-            execution.buffered_usage = observation.usage
-            execution.buffered_outcome = observation.outcome
-            outcome, settlement, rendered = await self._settle_metered_turn(
-                execution,
-                terminalizer,
-                termination_origin="upstream_terminal",
-            )
-            assert outcome is not None
-            assert settlement is not None
-            assert settlement.decision is not None
-            if settlement.decision.action != "return":
-                return self._outcome_response(
-                    outcome,
-                    error_code=settlement.decision.error_code,
-                    status_override=settlement.decision.downstream_status,
-                    rendered=rendered,
+            with tempfile.SpooledTemporaryFile(
+                max_size=_BUFFERED_RESPONSE_MEMORY_BYTES
+            ) as payload:
+                async for chunk in handle.stream:
+                    payload.write(chunk)
+                payload_size = payload.tell()
+                execution.completed_at = self._now()
+                if payload_size <= _BUFFERED_RESPONSE_OBSERVATION_BYTES:
+                    payload.seek(0)
+                    observation = observe_protocol_response(
+                        protocol,
+                        streamed=False,
+                        data=payload.read(),
+                    )
+                    execution.buffered_usage = observation.usage
+                    execution.buffered_outcome = observation.outcome
+                else:
+                    # The adapter handed this boundary a complete 2xx body. A
+                    # private observer declining a large copy must not turn that
+                    # body into an error or make the call disappear from usage.
+                    execution.buffered_outcome = "served"
+                outcome, settlement, rendered = await self._settle_metered_turn(
+                    execution,
+                    terminalizer,
+                    termination_origin="upstream_terminal",
                 )
-            return web.Response(
-                status=200,
-                body=rewrite_buffered_tool_names(
-                    bytes(payload),
-                    execution.response_tool_aliases,
-                ),
-                content_type="application/json",
-                headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
-            )
+                assert outcome is not None
+                assert settlement is not None
+                assert settlement.decision is not None
+                if settlement.decision.action != "return":
+                    return self._outcome_response(
+                        outcome,
+                        error_code=settlement.decision.error_code,
+                        status_override=settlement.decision.downstream_status,
+                        rendered=rendered,
+                    )
+                payload.seek(0)
+                if payload_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
+                    return web.Response(
+                        status=200,
+                        body=rewrite_buffered_tool_names(
+                            payload.read(),
+                            execution.response_tool_aliases,
+                        ),
+                        content_type="application/json",
+                        headers={
+                            "Cache-Control": "no-store",
+                            "X-Content-Type-Options": "nosniff",
+                        },
+                    )
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Content-Length": str(payload_size),
+                        "Content-Type": "application/json",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+                await self._downstream_io(response.prepare(request))
+                while chunk := payload.read(_RESPONSE_CHUNK_BYTES):
+                    await self._downstream_io(response.write(chunk))
+                await self._downstream_io(response.write_eof())
+                return response
 
         response = web.StreamResponse(
             status=200,

@@ -9,6 +9,10 @@ from typing import Any, Mapping
 from .stream_wire import SSEFrameTokenizer, parse_sse_frame
 
 
+_REWRITE_BUFFER_BYTES = 256 * 1024
+_REWRITE_SCAN_BYTES = 16 * 1024
+
+
 _OPENCODE_UPSTREAM_TOOL_ALIASES = {
     # Some Anthropic-compatible relays reserve Claude Code's TodoWrite name
     # case-insensitively and reject OpenCode's otherwise valid definition.
@@ -92,18 +96,37 @@ class StreamingToolNameRewriter:
         self._aliases = aliases
         self._tokenizer = SSEFrameTokenizer()
         self._pending_frames: list[tuple[bytes, dict[str, Any]]] = []
+        self._pending_bytes = 0
+        self._passthrough = False
 
     def feed(self, chunk: bytes) -> bytes:
         if not self._aliases:
             return chunk
+        if self._passthrough:
+            return chunk
         output: list[bytes] = []
-        for frame in self._tokenizer.feed(chunk):
-            output.extend(self._consume_frame(frame))
+        for offset in range(0, len(chunk), _REWRITE_SCAN_BYTES):
+            end = min(offset + _REWRITE_SCAN_BYTES, len(chunk))
+            for frame in self._tokenizer.feed(chunk[offset:end]):
+                if self._passthrough:
+                    output.append(frame + b"\n\n")
+                else:
+                    output.extend(self._consume_frame(frame))
+            if self._passthrough or self._tokenizer.retained_bytes > _REWRITE_BUFFER_BYTES:
+                output.extend(self._flush_pending(rewrite=False))
+                partial = self._tokenizer.drain_partial_frame()
+                if partial:
+                    output.append(partial)
+                output.append(chunk[end:])
+                self._passthrough = True
+                break
         return b"".join(output)
 
     def finish(self) -> bytes:
         if not self._aliases:
             return self._tokenizer.drain_partial_frame()
+        if self._passthrough:
+            return b""
         return b"".join(
             (*self._flush_pending(rewrite=True), self._tokenizer.drain_partial_frame())
         )
@@ -120,6 +143,10 @@ class StreamingToolNameRewriter:
             return [*self._flush_pending(rewrite=True), frame + b"\n\n"]
 
         self._pending_frames.append((frame, decoded))
+        self._pending_bytes += len(frame) + 2
+        if self._pending_bytes > _REWRITE_BUFFER_BYTES:
+            self._passthrough = True
+            return self._flush_pending(rewrite=False)
         if self._has_partial_alias():
             return []
         return self._flush_pending(rewrite=True)
@@ -169,6 +196,7 @@ class StreamingToolNameRewriter:
             for index, (frame, payload) in enumerate(self._pending_frames)
         ]
         self._pending_frames.clear()
+        self._pending_bytes = 0
         return output
 
 

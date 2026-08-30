@@ -10,6 +10,8 @@ import pytest
 
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
+    SSE_OBSERVATION_BYTES,
+    SSE_OBSERVATION_EVENT_BYTES,
     SSE_OBSERVATION_STRING_BYTES,
     SSE_LINE_ENDINGS,
     SSEFrameTokenizer,
@@ -1325,18 +1327,48 @@ def test_large_image_event_is_observed_without_retaining_its_base64_body() -> No
         b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","partial_image_b64":"'
     )
 
-    assert state.model_output_started is True
+    assert state.model_output_started is False
     for _ in range(32):
         state.observe(b"x" * (64 * 1024))
         assert state.tokenizer.retained_bytes < SSE_OBSERVATION_STRING_BYTES + 1024
 
+    state.observe(b'"}\n\n')
+    assert state.model_output_started is True
     state.observe(
-        b'"}\n\nevent: response.completed\ndata: {"type":"response.completed",'
+        b'event: response.completed\ndata: {"type":"response.completed",'
         b'"response":{"usage":{"input_tokens":4,"output_tokens":7}}}\n\n'
     )
 
     assert state.terminal_outcome == "served"
     assert state.usage == ProtocolUsageReport(input_tokens=4, output_tokens=7)
+
+
+def test_observer_abandons_large_non_string_metadata_without_affecting_next_frame() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b"event: response.output_text.delta\ndata: [" + b"0," * SSE_OBSERVATION_BYTES)
+
+    assert state.model_output_started is False
+    assert state.tokenizer.retained_bytes < 1024
+
+    state.observe(
+        b"0]\n\nevent: response.completed\ndata: "
+        b'{"type":"response.completed"}\n\n'
+    )
+
+    assert state.model_output_started is False
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+def test_observer_drops_unrecognized_oversized_event_names() -> None:
+    state = ProtocolSSEState("anthropic")
+    state.observe(b"event: " + b"x" * (SSE_OBSERVATION_EVENT_BYTES * 4))
+
+    assert state.model_output_started is False
+    assert state.tokenizer.retained_bytes <= SSE_OBSERVATION_EVENT_BYTES
+
+    state.observe(b'\ndata: {"type":"content_block_delta"}\n\n')
+
+    assert state.model_output_started is False
 
 
 @pytest.mark.parametrize("split_at", (1, 2, 3))
@@ -1441,8 +1473,10 @@ def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
 
     Cleanup is unobservable from outside — the writers swallow ``OSError`` so a
     full disk cannot break metering — so it cannot be maintained one collection
-    at a time. A module that spells its own temporary file is a second owner of
-    the property, whether or not it remembers the cleanup.
+    at a time. A module that invokes an OS replacement primitive is a second
+    owner of the property, whether or not it remembers the cleanup. Temporary
+    files alone are not evidence of replacement: response spooling has a
+    different owner and lifetime.
 
     Stated as "nobody here re-implements it" rather than "exactly ``state_file``
     implements it": the owner has since moved out of this package entirely, into
@@ -1450,12 +1484,23 @@ def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
     change that satisfied it best.
     """
 
-    second_owners = {
-        module.name
-        for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py"))
+    second_owners: set[str] = set()
+    for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
         if any(
-            marker in module.read_text(encoding="utf-8")
-            for marker in ("tempfile", "os.replace", "os.rename")
-        )
-    }
+            (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+                and node.func.attr in {"rename", "replace"}
+            )
+            or (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "os"
+                and any(alias.name in {"rename", "replace"} for alias in node.names)
+            )
+            for node in ast.walk(tree)
+        ):
+            second_owners.add(module.name)
     assert second_owners == set()

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, BinaryIO, Mapping
 
 import aiohttp
+import ijson
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
@@ -35,6 +36,8 @@ _STREAM_CHUNK_BYTES = 64 * 1024
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
+_BUFFERED_OBSERVATION_BYTES = 256 * 1024
+_ERROR_OBSERVATION_BYTES = 256 * 1024
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
@@ -136,6 +139,16 @@ class _StreamPrelude:
         if self._file is not None:
             self._file.close()
             self._file = None
+
+    def bytes_if_within(self, limit: int) -> bytes | None:
+        """Return a bounded observation copy, never a second large body copy."""
+
+        if self._closed or self._stored_bytes > limit:
+            return None
+        if self._file is None:
+            return bytes(self._memory)
+        self._file.seek(0)
+        return self._file.read()
 
 
 @dataclass(frozen=True)
@@ -311,7 +324,10 @@ class EngineClient:
             if response.status >= 300:
                 try:
                     payload = await asyncio.wait_for(
-                        _read_response(response.content),
+                        _read_response_prefix(
+                            response.content,
+                            limit=_ERROR_OBSERVATION_BYTES,
+                        ),
                         timeout=self.timeout,
                     )
                 except (asyncio.TimeoutError, aiohttp.ClientError):
@@ -357,14 +373,22 @@ class EngineClient:
                 )
             first_received = True
             if not stream:
-                first = await asyncio.wait_for(
-                    _read_response(response.content, initial=first),
+                buffered_body = _StreamPrelude()
+                prelude = buffered_body
+                buffered_body.write(first)
+                await asyncio.wait_for(
+                    _read_response_into(response.content, buffered_body),
                     timeout=self.timeout,
                 )
-                observation = observe_protocol_response(
-                    request_protocol,
-                    streamed=False,
-                    data=first,
+                observed_payload = buffered_body.bytes_if_within(_BUFFERED_OBSERVATION_BYTES)
+                observation = (
+                    observe_protocol_response(
+                        request_protocol,
+                        streamed=False,
+                        data=observed_payload,
+                    )
+                    if observed_payload is not None
+                    else ProtocolObservation(outcome="served")
                 )
                 outcome = _reduce_protocol_observation(
                     observation,
@@ -377,10 +401,13 @@ class EngineClient:
                 response.close()
                 await session.close()
                 ownership_transferred = True
-                return (
-                    buffered_handle(first, outcome)
-                    if outcome.kind == RawOutcomeKind.SUCCESS
-                    else ended(outcome)
+                if outcome.kind != RawOutcomeKind.SUCCESS:
+                    buffered_body.close()
+                    return ended(outcome)
+                return buffered_prelude_handle(
+                    buffered_body,
+                    outcome,
+                    None,
                 )
 
             prelude = _StreamPrelude()
@@ -552,26 +579,50 @@ async def probe_models(
                         f"model discovery returned HTTP {response.status}",
                         status_code=response.status,
                     )
-                payload = await _read_response(response.content)
+                data_models: list[str] = []
+                fallback_models: list[str] = []
+                data_seen = False
+                data_is_array = False
+                fallback_seen = False
+                fallback_is_array = False
+                data_ids: set[str] = set()
+                fallback_ids: set[str] = set()
+                root_is_map = False
+                async for prefix, event, value in ijson.parse_async(response.content):
+                    if prefix == "" and event == "start_map":
+                        root_is_map = True
+                    elif prefix == "" and event == "map_key":
+                        if value == "data":
+                            data_seen = True
+                        elif value == "models":
+                            fallback_seen = True
+                    elif prefix == "data" and event == "start_array":
+                        data_is_array = True
+                    elif prefix == "models" and event == "start_array":
+                        fallback_is_array = True
+                    elif prefix in {"data.item", "data.item.id"} and event == "string":
+                        if value and value not in data_ids:
+                            data_ids.add(value)
+                            data_models.append(value)
+                    elif prefix in {"models.item", "models.item.id"} and event == "string":
+                        if value and value not in fallback_ids:
+                            fallback_ids.add(value)
+                            fallback_models.append(value)
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
         raise EngineClientError("model discovery failed", error_type="network_error") from None
-    try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except ijson.JSONError:
         raise EngineClientError("model discovery returned an invalid payload") from None
-    if not isinstance(decoded, dict):
+    if not root_is_map:
         raise EngineClientError("model discovery returned an invalid payload")
-    items = decoded.get("data", decoded.get("models"))
-    if not isinstance(items, list):
+    if data_seen:
+        if not data_is_array:
+            raise EngineClientError("model discovery returned an invalid payload")
+        return tuple(data_models)
+    if not fallback_seen or not fallback_is_array:
         raise EngineClientError("model discovery returned an invalid payload")
-    model_ids: list[str] = []
-    for item in items:
-        value = item.get("id") if isinstance(item, dict) else item
-        if isinstance(value, str) and value and value not in model_ids:
-            model_ids.append(value)
-    return tuple(model_ids)
+    return tuple(fallback_models)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -579,17 +630,26 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-async def _read_response(
+async def _read_response_prefix(
     content: aiohttp.StreamReader,
     *,
-    initial: bytes = b"",
+    limit: int,
 ) -> bytes:
-    payload = bytearray(initial)
-    while True:
-        chunk = await content.read(_STREAM_CHUNK_BYTES)
+    payload = bytearray()
+    while len(payload) < limit:
+        chunk = await content.read(min(_STREAM_CHUNK_BYTES, limit - len(payload)))
         if not chunk:
-            return bytes(payload)
+            break
         payload.extend(chunk)
+    return bytes(payload)
+
+
+async def _read_response_into(
+    content: aiohttp.StreamReader,
+    target: _StreamPrelude,
+) -> None:
+    while chunk := await content.read(_STREAM_CHUNK_BYTES):
+        target.write(chunk)
 
 
 async def _read_stream_prelude(
@@ -610,6 +670,7 @@ async def _read_stream_prelude(
     """
 
     _received(first, prelude=prelude, wire_state=wire_state)
+    deadline = asyncio.get_running_loop().time() + timeout
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -619,9 +680,12 @@ async def _read_stream_prelude(
         )
         if outcome is not None:
             return outcome
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
         chunk = await asyncio.wait_for(
             response.content.read(_STREAM_CHUNK_BYTES),
-            timeout=timeout,
+            timeout=remaining,
         )
         if not chunk:
             completion = _observed_stream_terminal_outcome(
@@ -843,19 +907,10 @@ def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
     return EngineInvokeHandle(stream=None, outcome=future)
 
 
-def buffered_handle(payload: bytes, outcome: RawCallOutcome) -> EngineInvokeHandle:
-    async def body() -> AsyncIterator[bytes]:
-        yield payload
-
-    future = asyncio.get_running_loop().create_future()
-    future.set_result(outcome)
-    return EngineInvokeHandle(stream=body(), outcome=future)
-
-
 def buffered_prelude_handle(
     prelude: _StreamPrelude,
     outcome: RawCallOutcome,
-    observed: ProtocolSSEState,
+    observed: ProtocolSSEState | None,
 ) -> EngineInvokeHandle:
     async def body() -> AsyncIterator[bytes]:
         try:

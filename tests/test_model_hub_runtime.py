@@ -172,7 +172,7 @@ def test_stream_prelude_replays_large_keepalive_history_before_output() -> None:
 def test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review 4960016618: usage reported before model output survives the failure.
+    """MH-USAGE-005: usage reported before model output survives the failure.
 
     Anthropic bills input tokens on `message_start`, which arrives while the
     prelude is still buffering. A read that then times out never hands a body
@@ -248,6 +248,42 @@ def test_stream_prelude_has_no_total_ceiling_and_cleans_spill() -> None:
         return replayed
 
     assert asyncio.run(run()) == b"x" * (2 * 1024 * 1024)
+
+
+def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                await asyncio.sleep(0.02)
+                return b": keepalive\n\n"
+
+        response = SimpleNamespace(content=Content(), status=200)
+        source = SourceRecord(
+            source_id="src_deadline1",
+            vendor="anthropic",
+            protocol="anthropic",
+            base_url="https://example.test",
+            credential_ref="cred_deadline1",
+            allowed_origins=("codex",),
+            model_ids=("claude-sonnet-4-5",),
+            prefix="deadline",
+        )
+        prelude = client_module._StreamPrelude(memory_limit=64)
+        state = client_module.ProtocolSSEState("anthropic")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await client_module._read_stream_prelude(
+                response=response,
+                first=b": first\n\n",
+                prelude=prelude,
+                wire_state=state,
+                source=source,
+                model_id="claude-sonnet-4-5",
+                timeout=0.01,
+            )
+        prelude.close()
+
+    asyncio.run(run())
 
 
 def test_usage_is_observed_and_replayed_after_prelude_spill() -> None:
@@ -4746,6 +4782,8 @@ def test_model_discovery_accepts_large_valid_inventory(
             reads = 0
 
             async def read(self, _size: int) -> bytes:
+                if _size == 0:
+                    return b""
                 self.reads += 1
                 return payload if self.reads == 1 else b""
 

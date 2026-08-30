@@ -176,3 +176,22 @@ def test_streaming_rewriter_does_not_reject_large_content_frames() -> None:
 
     assert rewriter.feed(frame) == frame
     assert rewriter.finish() == b""
+
+
+def test_streaming_rewriter_fails_open_when_partial_alias_state_exceeds_its_budget() -> None:
+    partial = (
+        b'data: {"choices":[{"index":0,"delta":{"tool_calls":'
+        b'[{"index":0,"function":{"name":"avibe_todo"}}]}}]}\n\n'
+    )
+    content = (
+        b'data: {"choices":[{"index":1,"delta":{"content":"'
+        + b"x" * (512 * 1024)
+        + b'"}}]}\n\n'
+    )
+    terminal = b"data: [DONE]\n\n"
+    rewriter = StreamingToolNameRewriter({"avibe_todo_write": "todowrite"})
+
+    output = rewriter.feed(partial) + rewriter.feed(content) + rewriter.feed(terminal)
+
+    assert output == partial + content + terminal
+    assert rewriter.finish() == b""

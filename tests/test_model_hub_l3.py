@@ -7163,6 +7163,54 @@ def test_gateway_meters_a_buffered_served_turn_from_the_upstream_body(
     asyncio.run(exercise())
 
 
+def test_gateway_spools_and_replays_a_large_buffered_response(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_largebuf01", "Large buffered response")
+        body = b'{"payload":"' + b"x" * (512 * 1024) + b'"}'
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (body[:200_000], body[200_000:400_000], body[400_000:]),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_large_buffered",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+        downstream = FakeStreamResponse()
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=downstream,
+        ):
+            result = await gateway._handle_request(request)
+
+        assert result is downstream
+        assert b"".join(downstream.writes) == body
+        assert downstream.eof_called is True
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
+
+
 def test_gateway_meters_a_streamed_served_turn_from_the_wire(tmp_path: Path) -> None:
     async def exercise() -> None:
         source = _source("src_meterwire01", "Streamed meter")
