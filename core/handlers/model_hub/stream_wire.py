@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
@@ -272,7 +273,8 @@ class SSEObservationTokenizer:
                 self._current_event_name = None
             else:
                 try:
-                    self._current_event_name = self._event_value.decode("utf-8")
+                    decoded = self._event_value.decode("utf-8")
+                    self._current_event_name = decoded or None
                 except UnicodeDecodeError:
                     self._current_event_name = None
         self._reset_line()
@@ -867,8 +869,6 @@ class ProtocolFactProjector:
         self._arrays: set[JSONPath] = set()
         self._nonempty: set[JSONPath] = set()
         self._scalars: dict[JSONPath, object] = {}
-        self._type_candidates: list[str] = []
-        self._code_candidates: list[str] = []
         self._literal = bytearray()
         self._literal_too_long = False
         self._parser = SelectiveJSONParser(
@@ -912,6 +912,8 @@ class ProtocolFactProjector:
             return ProtocolObservation(outcome="served" if not streamed else None)
 
         usage = _usage_from_scalar_paths(self.taxonomy.usage, self._scalars)
+        type_candidates = self._machine_candidates("type")
+        code_candidates = self._machine_candidates("code")
         model_output_started = any(
             envelope.event_name == event_name and self._selector_matches(envelope)
             for envelope in self.taxonomy.model_output_envelopes
@@ -932,8 +934,8 @@ class ProtocolFactProjector:
                 outcome="failed_terminal" if matched_paths else "served",
                 error_envelope_paths=matched_paths,
                 usage=usage,
-                error_type_candidates=(tuple(self._type_candidates) if matched_paths else ()),
-                error_code_candidates=(tuple(self._code_candidates) if matched_paths else ()),
+                error_type_candidates=(type_candidates if matched_paths else ()),
+                error_code_candidates=(code_candidates if matched_paths else ()),
             )
 
         for envelope in self.taxonomy.terminal_envelopes:
@@ -959,12 +961,12 @@ class ProtocolFactProjector:
                 sequence_number=sequence_number,
                 usage=usage,
                 error_type_candidates=(
-                    tuple(self._type_candidates)
+                    type_candidates
                     if envelope.terminal_outcome == "failed_terminal"
                     else ()
                 ),
                 error_code_candidates=(
-                    tuple(self._code_candidates)
+                    code_candidates
                     if envelope.terminal_outcome == "failed_terminal"
                     else ()
                 ),
@@ -976,7 +978,9 @@ class ProtocolFactProjector:
         )
 
     def _visit(self, path: JSONPath, event: JSONEvent, value: object | None) -> None:
-        if event == "start_map":
+        if event == "replace":
+            self._clear_path(path)
+        elif event == "start_map":
             self._maps.add(path)
         elif event == "start_array":
             self._arrays.add(path)
@@ -987,21 +991,30 @@ class ProtocolFactProjector:
             if bool(value):
                 self._nonempty.add(path)
 
-        if event != "scalar" or not isinstance(value, str):
-            return
-        for error_path in _protocol_error_paths(self.taxonomy):
-            if path == (*error_path, "type"):
-                self._append_machine_candidate(self._type_candidates, value)
-            elif path == (*error_path, "code"):
-                self._append_machine_candidate(self._code_candidates, value)
+    def _clear_path(self, path: JSONPath) -> None:
+        def inside(candidate: JSONPath) -> bool:
+            return candidate[: len(path)] == path
 
-    def _append_machine_candidate(self, candidates: list[str], value: str) -> None:
-        if (
-            (not self.machine_error_codes or value in self.machine_error_codes)
-            and value not in candidates
-            and len(candidates) < 8
-        ):
-            candidates.append(value)
+        self._maps = {candidate for candidate in self._maps if not inside(candidate)}
+        self._arrays = {candidate for candidate in self._arrays if not inside(candidate)}
+        self._nonempty = {candidate for candidate in self._nonempty if not inside(candidate)}
+        self._scalars = {
+            candidate: value
+            for candidate, value in self._scalars.items()
+            if not inside(candidate)
+        }
+
+    def _machine_candidates(self, field: Literal["type", "code"]) -> tuple[str, ...]:
+        candidates: list[str] = []
+        for error_path in _protocol_error_paths(self.taxonomy):
+            value = self._scalars.get((*error_path, field))
+            if not isinstance(value, str):
+                continue
+            if self.machine_error_codes and value not in self.machine_error_codes:
+                continue
+            if value not in candidates and len(candidates) < 8:
+                candidates.append(value)
+        return tuple(candidates)
 
     def _selector_matches(
         self,
@@ -1147,6 +1160,11 @@ class ProtocolSSEState:
         frames = self.tokenizer.feed(chunk)
         for frame in frames:
             self._observe_frame(frame)
+
+    async def observe_async(self, chunk: bytes) -> None:
+        """Observe one transport chunk without monopolizing the event loop."""
+
+        await asyncio.to_thread(self.observe, chunk)
 
     def invalidate_partial_frame(self) -> bytes:
         """Make an already-forwarded partial frame non-terminal, then close it."""

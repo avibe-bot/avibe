@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import io
 import json
+import threading
 from dataclasses import replace
 from itertools import product
 from pathlib import Path
@@ -1328,6 +1330,70 @@ def test_buffered_error_array_is_not_an_error_envelope() -> None:
     assert observation.error_envelope_paths == ()
 
 
+def test_duplicate_buffered_member_replaces_earlier_protocol_facts() -> None:
+    observation = observe_buffered_protocol_response(
+        "openai_chat",
+        io.BytesIO(
+            b'{"error":{},"error":[],"usage":{"prompt_tokens":10},'
+            b'"usage":{"prompt_tokens":2}}'
+        ),
+    )
+
+    assert observation.outcome == "served"
+    assert observation.error_envelope_paths == ()
+    assert observation.usage == ProtocolUsageReport(input_tokens=2)
+
+
+def test_sse_data_json_accepts_one_leading_utf8_bom() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(
+        b"event: response.completed\ndata: \xef\xbb\xbf"
+        b'{"type":"response.completed"}\n\n'
+    )
+
+    assert state.terminal_outcome == "served"
+
+
+def test_colonless_empty_event_field_uses_default_message_event() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(b'event\ndata: {"choices":[{"delta":{"content":"hello"}}]}\n\n')
+
+    assert state.model_output_started is True
+
+
+def test_large_selected_string_preserves_its_nonempty_fact() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(
+        b'data: {"choices":[{"delta":{"content":"'
+        + (b"x" * (SSE_OBSERVATION_STRING_BYTES + 1))
+        + b'"}}]}\n\n'
+    )
+
+    assert state.model_output_started is True
+
+
+def test_async_sse_observation_runs_outside_the_event_loop() -> None:
+    state = ProtocolSSEState("openai_responses")
+    caller_thread = threading.get_ident()
+    observer_threads: list[int] = []
+    original_observe = state.observe
+
+    def recording_observe(chunk: bytes) -> None:
+        observer_threads.append(threading.get_ident())
+        original_observe(chunk)
+
+    state.observe = recording_observe
+    asyncio.run(
+        state.observe_async(
+            b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+        )
+    )
+
+    assert observer_threads
+    assert observer_threads[0] != caller_thread
+    assert state.terminal_outcome == "served"
+
+
 @pytest.mark.parametrize(
     ("event_name", "payload", "expected_outcome"),
     (
@@ -1526,7 +1592,7 @@ def test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them() 
     owner = ast.get_source_segment(source, _functions(_tree(CLIENT))["_received"])
     assert owner is not None
     assert "prelude.write(" in owner
-    assert owner.index("wire_state.observe(") < owner.index("prelude.write(")
+    assert owner.index("wire_state.observe_async(") < owner.index("prelude.write(")
 
 
 def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:

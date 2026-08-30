@@ -295,14 +295,13 @@ def test_usage_is_observed_and_replayed_after_prelude_spill() -> None:
     prelude = client_module._StreamPrelude(memory_limit=64)
     state = client_module.ProtocolSSEState("anthropic")
 
-    client_module._received(filler, prelude=prelude, wire_state=state)
-    client_module._received(message_start, prelude=prelude, wire_state=state)
-
     async def replay() -> bytes:
+        await client_module._received(filler, prelude=prelude, wire_state=state)
+        await client_module._received(message_start, prelude=prelude, wire_state=state)
         return b"".join([chunk async for chunk in prelude.chunks()])
 
-    assert prelude.spilled is True
     assert asyncio.run(replay()) == filler + message_start
+    assert prelude.spilled is True
     assert state.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
     prelude.close()
 

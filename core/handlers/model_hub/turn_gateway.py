@@ -815,7 +815,7 @@ class ModelHubTurnGateway:
         tool_name_rewriter = StreamingToolNameRewriter(execution.response_tool_aliases)
         async for chunk in handle.stream:
             output_started_before = wire_state.model_output_started
-            wire_state.observe(chunk)
+            await wire_state.observe_async(chunk)
             if wire_state.model_output_started and not output_started_before:
                 terminalizer.mark_stream_started()
             rewritten = tool_name_rewriter.feed(chunk)

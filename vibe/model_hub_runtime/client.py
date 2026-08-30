@@ -693,7 +693,7 @@ async def _read_stream_prelude(
     raise for the call to be metered.
     """
 
-    _received(first, prelude=prelude, wire_state=wire_state)
+    await _received(first, prelude=prelude, wire_state=wire_state)
     deadline = asyncio.get_running_loop().time() + timeout
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
@@ -721,11 +721,11 @@ async def _read_stream_prelude(
             if completion is not None:
                 return completion
             return _prelude_ended_outcome(source, model_id, response.status)
-        _received(chunk, prelude=prelude, wire_state=wire_state)
+        await _received(chunk, prelude=prelude, wire_state=wire_state)
     return None
 
 
-def _received(
+async def _received(
     chunk: bytes,
     *,
     prelude: _StreamPrelude,
@@ -733,7 +733,7 @@ def _received(
 ) -> None:
     """Observe delivered bytes, then retain their exact replay without truncation."""
 
-    wire_state.observe(chunk)
+    await wire_state.observe_async(chunk)
     prelude.write(chunk)
 
 
@@ -769,7 +769,7 @@ async def _response_stream(
         prelude.close()
         async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
             if chunk:
-                wire_state.observe(chunk)
+                await wire_state.observe_async(chunk)
                 yield chunk
         outcome = _observed_stream_terminal_outcome(
             wire_state,

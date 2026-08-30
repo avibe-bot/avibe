@@ -84,6 +84,31 @@ def test_selective_projection_scans_large_ascii_strings_in_chunks() -> None:
     assert decoder.calls < 10
 
 
+def test_selective_projection_packs_deep_ignored_grammar_state() -> None:
+    parser = SelectiveJSONParser({(), ("wanted",)}, lambda *_args: None)
+    parser.feed(b'{"ignored":' + (b"[" * 100_000))
+
+    assert parser.retained_bytes < 64 * 1024
+    assert parser.finish() is False
+
+
+def test_selective_projection_accepts_one_leading_utf8_bom() -> None:
+    observed: list[object] = []
+
+    valid = project_json_reader(
+        io.BytesIO(b'\xef\xbb\xbf{"wanted":true}'),
+        {(), ("wanted",)},
+        lambda path, event, value: (
+            observed.append(value)
+            if path == ("wanted",) and event == "scalar"
+            else None
+        ),
+    )
+
+    assert valid is True
+    assert observed == [True]
+
+
 def test_path_rewriter_changes_only_selected_string_values() -> None:
     payload = b'{"content":"alias","tool":{"name":"alias"},"other":{"name":"alias"}}'
     rewritten = rewrite_json_strings(

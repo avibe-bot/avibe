@@ -12,11 +12,23 @@ from typing import BinaryIO, Final, Literal
 
 
 JSONPath = tuple[str, ...]
-JSONEvent = Literal["start_map", "start_array", "scalar", "nonempty"]
+JSONEvent = Literal["replace", "start_map", "start_array", "scalar", "nonempty"]
 JSON_STRING_TOKEN_BYTES: Final = 16 * 1024
 JSON_NUMBER_TOKEN_BYTES: Final = 128
 JSON_IO_CHUNK_BYTES: Final = 64 * 1024
 _JSON_STRING_SPECIAL: Final = re.compile(br'["\\\x00-\x1f\x80-\xff]')
+_UTF8_BOM: Final = b"\xef\xbb\xbf"
+
+_SKIP_MAP_KEY_OR_END: Final = 0
+_SKIP_MAP_KEY: Final = 1
+_SKIP_MAP_COLON: Final = 2
+_SKIP_MAP_VALUE: Final = 3
+_SKIP_MAP_COMMA_OR_END: Final = 4
+_SKIP_ARRAY_VALUE_OR_END: Final = 5
+_SKIP_ARRAY_VALUE: Final = 6
+_SKIP_ARRAY_COMMA_OR_END: Final = 7
+_SKIP_STATE_BITS: Final = 3
+_SKIP_STATE_MASK: Final = (1 << _SKIP_STATE_BITS) - 1
 
 
 @dataclass
@@ -48,9 +60,9 @@ class _Container:
 class SelectiveJSONParser:
     """Parse only selected paths while skipping every unrelated value in place.
 
-    Strings and numbers are bounded lexical tokens. Every container retains only
-    its grammar state and selected-path node, so unrelated shape costs O(depth)
-    memory without weakening JSON validation.
+    Strings and numbers are bounded lexical tokens. Selected containers retain
+    path state; an unrelated subtree uses a packed grammar stack, so nesting
+    costs bits rather than Python objects without weakening JSON validation.
     """
 
     def __init__(
@@ -61,8 +73,11 @@ class SelectiveJSONParser:
         self._root = _path_tree(paths)
         self._visitor = visitor
         self._stack: list[_Container] = []
-        self._discard_node = _PathNode()
         self._root_state = "value"
+        self._skip_depth = 0
+        self._skip_states = 0
+        self._root_prefix = bytearray()
+        self._root_started = False
         self._invalid = False
         self._mode: Literal["normal", "string", "number", "literal"] = "normal"
         self._string = bytearray()
@@ -81,6 +96,8 @@ class SelectiveJSONParser:
             len(self._string)
             + len(self._number)
             + len(self._literal)
+            + len(self._root_prefix)
+            + (self._skip_states.bit_length() + 7) // 8
             + sum(len(frame.key or "") for frame in self._stack)
         )
 
@@ -90,6 +107,7 @@ class SelectiveJSONParser:
             not self._invalid
             and self._root_state == "done"
             and not self._stack
+            and self._skip_depth == 0
             and self._mode == "normal"
         )
 
@@ -97,7 +115,7 @@ class SelectiveJSONParser:
     def next_value_path(self) -> JSONPath | None:
         """Return the selected path of the next value, if one is expected."""
 
-        if self._invalid or self._mode != "normal":
+        if self._invalid or self._skip_depth or self._mode != "normal":
             return None
         if not self._stack:
             return () if self._root_state == "value" else None
@@ -113,13 +131,34 @@ class SelectiveJSONParser:
     def feed(self, chunk: bytes) -> None:
         offset = 0
         while offset < len(chunk) and not self._invalid:
+            if not self._root_started:
+                self.feed_byte(chunk[offset])
+                offset += 1
+                continue
             if self._mode == "string":
                 offset = self._feed_string_chunk(chunk, offset)
                 continue
-            self.feed_byte(chunk[offset])
+            self._feed_started_byte(chunk[offset])
             offset += 1
 
     def feed_byte(self, byte: int) -> None:
+        if self._invalid:
+            return
+        if not self._root_started:
+            self._root_prefix.append(byte)
+            prefix = bytes(self._root_prefix)
+            if len(prefix) < len(_UTF8_BOM) and _UTF8_BOM.startswith(prefix):
+                return
+            self._root_started = True
+            self._root_prefix.clear()
+            if prefix.startswith(_UTF8_BOM):
+                prefix = prefix[len(_UTF8_BOM) :]
+            for pending_byte in prefix:
+                self._feed_started_byte(pending_byte)
+            return
+        self._feed_started_byte(byte)
+
+    def _feed_started_byte(self, byte: int) -> None:
         if self._invalid:
             return
         if self._mode == "string":
@@ -218,7 +257,7 @@ class SelectiveJSONParser:
             self._mode = "normal"
             self._string.clear()
             if too_long:
-                self._accept("string", None)
+                self._accept("string_elided", None)
                 return
             try:
                 value = json.loads(b'"' + raw + b'"')
@@ -350,11 +389,14 @@ class SelectiveJSONParser:
         self._accept("scalar", values[raw])
 
     def _accept(self, token: str, value: object | None) -> None:
+        if self._skip_depth:
+            self._accept_skipped(token)
+            return
         if not self._stack:
             if self._root_state != "value":
                 self._invalid = True
                 return
-            self._start_value((), self._root, token, value)
+            self._start_value((), self._root, token, value, replace=True)
             return
 
         frame = self._stack[-1]
@@ -367,7 +409,7 @@ class SelectiveJSONParser:
         if frame.state in {"key_or_end", "key"}:
             if token == "end_map" and frame.state == "key_or_end":
                 self._end_container("map")
-            elif token == "string":
+            elif token in {"string", "string_elided"}:
                 frame.key = value if isinstance(value, str) else None
                 frame.state = "colon"
             else:
@@ -386,7 +428,13 @@ class SelectiveJSONParser:
             if child is None:
                 self._skip_value(token)
             else:
-                self._start_value((*frame.path, key), child, token, value)
+                self._start_value(
+                    (*frame.path, key),
+                    child,
+                    token,
+                    value,
+                    replace=True,
+                )
             return
         if frame.state == "comma_or_end":
             if token == "comma":
@@ -423,7 +471,11 @@ class SelectiveJSONParser:
         node: _PathNode,
         token: str,
         value: object | None,
+        *,
+        replace: bool = False,
     ) -> None:
+        if replace and "*" not in path and (node.selected or node.children):
+            self._visitor(path, "replace", None)
         if token == "start_map":
             if node.selected:
                 self._visitor(path, "start_map", None)
@@ -432,15 +484,90 @@ class SelectiveJSONParser:
             if node.selected:
                 self._visitor(path, "start_array", None)
             self._stack.append(_Container("array", path, node, "value_or_end"))
-        elif token in {"string", "scalar"}:
+        elif token in {"string", "string_elided", "scalar"}:
             if node.selected:
+                if token == "string_elided":
+                    self._visitor(path, "nonempty", True)
                 self._visitor(path, "scalar", value)
             self._complete_value()
         else:
             self._invalid = True
 
     def _skip_value(self, token: str) -> None:
-        self._start_value((), self._discard_node, token, None)
+        if token == "start_map":
+            self._push_skip_state(_SKIP_MAP_KEY_OR_END)
+        elif token == "start_array":
+            self._push_skip_state(_SKIP_ARRAY_VALUE_OR_END)
+        elif token in {"string", "string_elided", "scalar"}:
+            self._complete_value()
+        else:
+            self._invalid = True
+
+    def _accept_skipped(self, token: str) -> None:
+        state = self._skip_states & _SKIP_STATE_MASK
+        if state in {_SKIP_MAP_KEY_OR_END, _SKIP_MAP_KEY}:
+            if token == "end_map" and state == _SKIP_MAP_KEY_OR_END:
+                self._pop_skip_state()
+            elif token in {"string", "string_elided"}:
+                self._set_skip_state(_SKIP_MAP_COLON)
+            else:
+                self._invalid = True
+            return
+        if state == _SKIP_MAP_COLON:
+            if token == "colon":
+                self._set_skip_state(_SKIP_MAP_VALUE)
+            else:
+                self._invalid = True
+            return
+        if state == _SKIP_MAP_VALUE:
+            self._start_skipped_value(token, _SKIP_MAP_COMMA_OR_END)
+            return
+        if state == _SKIP_MAP_COMMA_OR_END:
+            if token == "comma":
+                self._set_skip_state(_SKIP_MAP_KEY)
+            elif token == "end_map":
+                self._pop_skip_state()
+            else:
+                self._invalid = True
+            return
+        if state in {_SKIP_ARRAY_VALUE_OR_END, _SKIP_ARRAY_VALUE}:
+            if token == "end_array" and state == _SKIP_ARRAY_VALUE_OR_END:
+                self._pop_skip_state()
+            else:
+                self._start_skipped_value(token, _SKIP_ARRAY_COMMA_OR_END)
+            return
+        if state == _SKIP_ARRAY_COMMA_OR_END:
+            if token == "comma":
+                self._set_skip_state(_SKIP_ARRAY_VALUE)
+            elif token == "end_array":
+                self._pop_skip_state()
+            else:
+                self._invalid = True
+
+    def _start_skipped_value(self, token: str, completed_state: int) -> None:
+        if token in {"string", "string_elided", "scalar"}:
+            self._set_skip_state(completed_state)
+        elif token == "start_map":
+            self._set_skip_state(completed_state)
+            self._push_skip_state(_SKIP_MAP_KEY_OR_END)
+        elif token == "start_array":
+            self._set_skip_state(completed_state)
+            self._push_skip_state(_SKIP_ARRAY_VALUE_OR_END)
+        else:
+            self._invalid = True
+
+    def _push_skip_state(self, state: int) -> None:
+        self._skip_states = (self._skip_states << _SKIP_STATE_BITS) | state
+        self._skip_depth += 1
+
+    def _set_skip_state(self, state: int) -> None:
+        self._skip_states = (self._skip_states & ~_SKIP_STATE_MASK) | state
+
+    def _pop_skip_state(self) -> None:
+        self._skip_states >>= _SKIP_STATE_BITS
+        self._skip_depth -= 1
+        if self._skip_depth == 0:
+            self._complete_value()
 
     def _mark_nonempty(self, frame: _Container) -> None:
         if not frame.nonempty:
