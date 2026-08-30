@@ -22,7 +22,12 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
 )
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
-from core.handlers.model_hub.json_wire import JSONEvent, JSONPath, project_json_reader
+from core.handlers.model_hub.json_wire import (
+    JSONEvent,
+    JSONPath,
+    JSONScope,
+    project_json_reader,
+)
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
@@ -625,47 +630,74 @@ def _project_model_inventory(
     data_is_array = False
     fallback_seen = False
     fallback_is_array = False
-    data_models: list[str] = []
-    fallback_models: list[str] = []
-    data_ids: set[str] = set()
-    fallback_ids: set[str] = set()
+    data_models: dict[JSONScope, str] = {}
+    fallback_models: dict[JSONScope, str] = {}
+    invalid_data_models: set[JSONScope] = set()
+    invalid_fallback_models: set[JSONScope] = set()
 
-    def visit(path: JSONPath, event: JSONEvent, value: object | None) -> None:
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        scope: JSONScope,
+    ) -> None:
         nonlocal root_is_map, data_seen, data_is_array, fallback_seen, fallback_is_array
         if path == () and event == "start_map":
             root_is_map = True
         elif path == ("data",):
             if event == "replace":
                 data_models.clear()
-                data_ids.clear()
+                invalid_data_models.clear()
             data_seen = True
             if event != "nonempty":
                 data_is_array = event == "start_array"
         elif path == ("models",):
             if event == "replace":
                 fallback_models.clear()
-                fallback_ids.clear()
+                invalid_fallback_models.clear()
             fallback_seen = True
             if event != "nonempty":
                 fallback_is_array = event == "start_array"
         elif path in {("data", "*"), ("data", "*", "id")}:
-            if event == "scalar" and isinstance(value, str) and value and value not in data_ids:
-                data_ids.add(value)
-                data_models.append(value)
+            if event == "replace":
+                data_models.pop(scope, None)
+                invalid_data_models.discard(scope)
+            elif event == "elided_string":
+                invalid_data_models.add(scope)
+            elif event == "scalar" and isinstance(value, str) and value:
+                data_models[scope] = value
         elif path in {("models", "*"), ("models", "*", "id")}:
-            if event == "scalar" and isinstance(value, str) and value and value not in fallback_ids:
-                fallback_ids.add(value)
-                fallback_models.append(value)
+            if event == "replace":
+                fallback_models.pop(scope, None)
+                invalid_fallback_models.discard(scope)
+            elif event == "elided_string":
+                invalid_fallback_models.add(scope)
+            elif event == "scalar" and isinstance(value, str) and value:
+                fallback_models[scope] = value
+
+    def ordered_unique(values: Mapping[JSONScope, str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for scope in sorted(values):
+            value = values[scope]
+            if value not in seen:
+                seen.add(value)
+                result.append(value)
+        return result
 
     if not project_json_reader(reader, paths, visit) or not root_is_map:
+        return None
+    if (data_seen and invalid_data_models) or (
+        not data_seen and fallback_seen and invalid_fallback_models
+    ):
         return None
     return (
         data_seen,
         data_is_array,
-        data_models,
+        ordered_unique(data_models),
         fallback_seen,
         fallback_is_array,
-        fallback_models,
+        ordered_unique(fallback_models),
     )
 
 

@@ -1416,6 +1416,34 @@ def test_model_inventory_duplicate_top_level_members_replace_earlier_values() ->
     )
 
 
+def test_model_inventory_duplicate_item_id_keeps_the_final_member() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":[{"id":"stale","id":"live"},'
+            b'{"id":"other"}]}'
+        )
+    )
+
+    assert projected == (
+        True,
+        True,
+        ["live", "other"],
+        False,
+        False,
+        [],
+    )
+
+
+def test_model_inventory_rejects_an_elided_model_identifier() -> None:
+    oversized = b"x" * (16 * 1024 + 1)
+
+    projected = client_module._project_model_inventory(
+        io.BytesIO(b'{"data":[{"id":"valid"},{"id":"' + oversized + b'"}]}')
+    )
+
+    assert projected is None
+
+
 def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self, store: EngineStateStore) -> None:

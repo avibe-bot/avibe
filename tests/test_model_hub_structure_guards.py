@@ -18,6 +18,7 @@ from core.handlers.model_hub.stream_wire import (
     SSE_OBSERVATION_STRING_BYTES,
     SSE_LINE_ENDINGS,
     SSEFrameTokenizer,
+    ProtocolFactProjector,
     ProtocolObservation,
     ProtocolTerminalEnvelope,
     ProtocolSSEState,
@@ -1344,6 +1345,39 @@ def test_duplicate_buffered_member_replaces_earlier_protocol_facts() -> None:
     assert observation.usage == ProtocolUsageReport(input_tokens=2)
 
 
+def test_duplicate_chat_choice_member_replaces_only_its_choice() -> None:
+    def observe(payload: bytes) -> bool:
+        state = ProtocolSSEState("openai_chat")
+        state.observe(b"data: " + payload + b"\n\n")
+        return state.model_output_started
+
+    replaced_only = observe(
+        b'{"choices":[{"delta":{"content":"hello","content":null}}]}'
+    )
+    sibling_survives = observe(
+        b'{"choices":[{"delta":{"content":"hello"}},'
+        b'{"delta":{"content":"stale","content":null}}]}'
+    )
+
+    assert replaced_only is False
+    assert sibling_survives is True
+
+
+def test_chat_projection_facts_do_not_grow_with_choice_count() -> None:
+    projector = ProtocolFactProjector("openai_chat")
+    projector.feed(
+        b'{"choices":['
+        + b",".join(
+            b'{"delta":{"content":"hello"}}' for _index in range(10_000)
+        )
+        + b"]}"
+    )
+
+    assert projector.finish(streamed=True).model_output_started is True
+    assert projector._nonempty == {(), ("choices", "*", "delta", "content")}
+    assert projector._scoped_nonempty == set()
+
+
 def test_buffered_machine_codes_are_scoped_to_the_matched_error_envelope() -> None:
     observation = observe_buffered_protocol_response(
         "openai_responses",
@@ -1420,6 +1454,36 @@ def test_async_sse_observation_runs_outside_the_event_loop() -> None:
     assert observer_threads
     assert observer_threads[0] != caller_thread
     assert state.terminal_outcome == "served"
+
+
+def test_cancelled_sse_observation_drains_its_worker_before_settlement() -> None:
+    async def run() -> None:
+        state = ProtocolSSEState("openai_responses")
+        entered = threading.Event()
+        release = threading.Event()
+        original_observe = state.observe
+
+        def blocked_observe(chunk: bytes) -> None:
+            entered.set()
+            assert release.wait(1)
+            original_observe(chunk)
+
+        state.observe = blocked_observe
+        observer = asyncio.create_task(
+            state.observe_async(
+                b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        observer.cancel()
+        await asyncio.sleep(0)
+        assert not observer.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        assert state.terminal_outcome == "served"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

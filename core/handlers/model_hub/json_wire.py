@@ -12,7 +12,17 @@ from typing import BinaryIO, Final, Literal
 
 
 JSONPath = tuple[str, ...]
-JSONEvent = Literal["replace", "start_map", "start_array", "scalar", "nonempty"]
+JSONScope = tuple[int, ...]
+JSONEvent = Literal[
+    "replace",
+    "start_map",
+    "start_array",
+    "scalar",
+    "nonempty",
+    "elided_string",
+    "scope_end",
+]
+JSONVisitor = Callable[[JSONPath, JSONEvent, object | None, JSONScope], None]
 JSON_STRING_TOKEN_BYTES: Final = 16 * 1024
 JSON_NUMBER_TOKEN_BYTES: Final = 128
 JSON_IO_CHUNK_BYTES: Final = 64 * 1024
@@ -55,8 +65,11 @@ class _Container:
     path: JSONPath
     node: _PathNode
     state: str
+    scope: JSONScope
     key: str | None = None
     nonempty: bool = False
+    next_index: int = 0
+    seen_children: set[str] = field(default_factory=set)
 
 
 class SelectiveJSONParser:
@@ -70,7 +83,7 @@ class SelectiveJSONParser:
     def __init__(
         self,
         paths: Iterable[JSONPath],
-        visitor: Callable[[JSONPath, JSONEvent, object | None], None],
+        visitor: JSONVisitor,
     ) -> None:
         self._root = _path_tree(paths)
         self._visitor = visitor
@@ -101,6 +114,10 @@ class SelectiveJSONParser:
             + len(self._root_prefix)
             + len(self._skip_state_chunks) * _SKIP_CHUNK_BYTES
             + sum(len(frame.key or "") for frame in self._stack)
+            + sum(
+                sum(len(key) for key in frame.seen_children)
+                for frame in self._stack
+            )
         )
 
     @property
@@ -398,7 +415,7 @@ class SelectiveJSONParser:
             if self._root_state != "value":
                 self._invalid = True
                 return
-            self._start_value((), self._root, token, value, replace=True)
+            self._start_value((), self._root, token, value, scope=())
             return
 
         frame = self._stack[-1]
@@ -430,12 +447,15 @@ class SelectiveJSONParser:
             if child is None:
                 self._skip_value(token)
             else:
+                duplicate = key in frame.seen_children
+                frame.seen_children.add(key)
                 self._start_value(
                     (*frame.path, key),
                     child,
                     token,
                     value,
-                    replace=True,
+                    scope=frame.scope,
+                    replace=duplicate,
                 )
             return
         if frame.state == "comma_or_end":
@@ -457,7 +477,13 @@ class SelectiveJSONParser:
             if child is None:
                 self._skip_value(token)
             else:
-                self._start_value((*frame.path, "*"), child, token, value)
+                self._start_value(
+                    (*frame.path, "*"),
+                    child,
+                    token,
+                    value,
+                    scope=(*frame.scope, frame.next_index),
+                )
             return
         if frame.state == "comma_or_end":
             if token == "comma":
@@ -474,23 +500,24 @@ class SelectiveJSONParser:
         token: str,
         value: object | None,
         *,
+        scope: JSONScope,
         replace: bool = False,
     ) -> None:
-        if replace and "*" not in path and (node.selected or node.children):
-            self._visitor(path, "replace", None)
+        if replace and (node.selected or node.children):
+            self._visitor(path, "replace", None, scope)
         if token == "start_map":
             if node.selected:
-                self._visitor(path, "start_map", None)
-            self._stack.append(_Container("map", path, node, "key_or_end"))
+                self._visitor(path, "start_map", None, scope)
+            self._stack.append(_Container("map", path, node, "key_or_end", scope))
         elif token == "start_array":
             if node.selected:
-                self._visitor(path, "start_array", None)
-            self._stack.append(_Container("array", path, node, "value_or_end"))
+                self._visitor(path, "start_array", None, scope)
+            self._stack.append(_Container("array", path, node, "value_or_end", scope))
         elif token in {"string", "string_elided", "scalar"}:
             if node.selected:
                 if token == "string_elided":
-                    self._visitor(path, "nonempty", True)
-                self._visitor(path, "scalar", value)
+                    self._visitor(path, "elided_string", None, scope)
+                self._visitor(path, "scalar", value, scope)
             self._complete_value()
         else:
             self._invalid = True
@@ -594,7 +621,7 @@ class SelectiveJSONParser:
         if not frame.nonempty:
             frame.nonempty = True
             if frame.node.selected:
-                self._visitor(frame.path, "nonempty", True)
+                self._visitor(frame.path, "nonempty", True, frame.scope)
 
     def _end_container(self, expected: Literal["map", "array"]) -> None:
         if not self._stack or self._stack[-1].kind != expected:
@@ -608,13 +635,23 @@ class SelectiveJSONParser:
             self._root_state = "done"
             return
         parent = self._stack[-1]
+        if parent.kind == "array":
+            child = parent.node.children.get("*")
+            if child is not None and (child.selected or child.children):
+                self._visitor(
+                    (*parent.path, "*"),
+                    "scope_end",
+                    None,
+                    (*parent.scope, parent.next_index),
+                )
+            parent.next_index += 1
         parent.state = "comma_or_end"
 
 
 def project_json_reader(
     reader: BinaryIO,
     paths: Iterable[JSONPath],
-    visitor: Callable[[JSONPath, JSONEvent, object | None], None],
+    visitor: JSONVisitor,
 ) -> bool:
     parser = SelectiveJSONParser(paths, visitor)
     while chunk := reader.read(JSON_IO_CHUNK_BYTES):

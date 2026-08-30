@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
 
-from .json_wire import JSONEvent, JSONPath, SelectiveJSONParser
+from .json_wire import JSONEvent, JSONPath, JSONScope, SelectiveJSONParser
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
@@ -868,6 +868,7 @@ class ProtocolFactProjector:
         self._maps: set[JSONPath] = set()
         self._arrays: set[JSONPath] = set()
         self._nonempty: set[JSONPath] = set()
+        self._scoped_nonempty: set[tuple[JSONPath, JSONScope]] = set()
         self._scalars: dict[JSONPath, object] = {}
         self._literal = bytearray()
         self._literal_too_long = False
@@ -989,23 +990,73 @@ class ProtocolFactProjector:
             usage=usage,
         )
 
-    def _visit(self, path: JSONPath, event: JSONEvent, value: object | None) -> None:
+    def _visit(
+        self,
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        scope: JSONScope,
+    ) -> None:
         if event == "replace":
-            self._clear_path(path)
-        elif event == "start_map":
+            self._clear_path(path, scope)
+        elif event == "start_map" and not scope:
             self._maps.add(path)
-        elif event == "start_array":
+        elif event == "start_array" and not scope:
             self._arrays.add(path)
-        elif event == "nonempty":
-            self._nonempty.add(path)
-        elif event == "scalar":
-            self._scalars[path] = value
-            if bool(value):
+        elif event in {"nonempty", "elided_string"}:
+            if scope:
+                self._scoped_nonempty.add((path, scope))
+            else:
                 self._nonempty.add(path)
+        elif event == "scalar":
+            if scope:
+                if bool(value):
+                    self._scoped_nonempty.add((path, scope))
+            else:
+                self._scalars[path] = value
+                if bool(value):
+                    self._nonempty.add(path)
+        elif event == "scope_end":
+            self._collapse_scope(scope)
 
-    def _clear_path(self, path: JSONPath) -> None:
+    def _collapse_scope(self, scope: JSONScope) -> None:
+        """Fold a completed array member into its parent without retaining its index."""
+
+        if not scope:
+            return
+        completed = {
+            path
+            for path, candidate_scope in self._scoped_nonempty
+            if candidate_scope == scope
+        }
+        self._scoped_nonempty = {
+            candidate
+            for candidate in self._scoped_nonempty
+            if candidate[1] != scope
+        }
+        parent_scope = scope[:-1]
+        if parent_scope:
+            self._scoped_nonempty.update(
+                (path, parent_scope) for path in completed
+            )
+        else:
+            self._nonempty.update(completed)
+
+    def _clear_path(self, path: JSONPath, scope: JSONScope) -> None:
         def inside(candidate: JSONPath) -> bool:
             return candidate[: len(path)] == path
+
+        def inside_scope(candidate: tuple[JSONPath, JSONScope]) -> bool:
+            candidate_path, candidate_scope = candidate
+            return inside(candidate_path) and candidate_scope[: len(scope)] == scope
+
+        self._scoped_nonempty = {
+            candidate
+            for candidate in self._scoped_nonempty
+            if not inside_scope(candidate)
+        }
+        if scope:
+            return
 
         self._maps = {candidate for candidate in self._maps if not inside(candidate)}
         self._arrays = {candidate for candidate in self._arrays if not inside(candidate)}
@@ -1180,7 +1231,17 @@ class ProtocolSSEState:
     async def observe_async(self, chunk: bytes) -> None:
         """Observe one transport chunk without monopolizing the event loop."""
 
-        await asyncio.to_thread(self.observe, chunk)
+        worker = asyncio.create_task(asyncio.to_thread(self.observe, chunk))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+            worker.result()
+            raise cancelled
 
     def invalidate_partial_frame(self) -> bytes:
         """Make an already-forwarded partial frame non-terminal, then close it."""
