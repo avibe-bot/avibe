@@ -11,7 +11,11 @@ from avibe_memory.capture_adapter import EnabledMemoryAdapter
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from avibe_memory.everos import ProviderHealthSnapshot
 from avibe_memory.processing_record import RuntimeHealthProjection, SourceObservation
-from avibe_memory.runtime import MemoryConfig, MemoryRuntime
+from avibe_memory.runtime import (
+    MemoryConfig,
+    MemoryRuntime,
+    MemoryRuntimeRootBusyError,
+)
 from avibe_memory.store import MemoryStore
 
 
@@ -60,10 +64,76 @@ async def test_session_lifecycle_offers_without_waiting_for_capture(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
+async def test_runtime_close_releases_provider_root_for_one_replacement(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime(tmp_path)
+    with pytest.raises(MemoryRuntimeRootBusyError):
+        _runtime(tmp_path)
+
     await runtime.close()
-    assert runtime.closed
+
+    replacement = _runtime(tmp_path)
+    await replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_timeouts_still_attempt_everos_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    release = asyncio.Event()
+    phases: list[str] = []
+
+    async def stalled_capture() -> None:
+        phases.append("capture")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    async def stalled_local_cleanup() -> None:
+        phases.append("local")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    async def stop_provider() -> None:
+        phases.append("provider")
+
+    monkeypatch.setattr(runtime, "_cancel_capture_tasks", stalled_capture)
+    monkeypatch.setattr(runtime, "_close_local_runtime", stalled_local_cleanup)
+    monkeypatch.setattr(runtime._supervisor, "close", stop_provider)
+    monkeypatch.setattr(runtime_module, "MEMORY_CAPTURE_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_module, "MEMORY_LOCAL_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    await runtime.close()
+
+    assert phases == ["capture", "local", "provider"]
+    replacement = _runtime(tmp_path)
+    await replacement.close()
+    release.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_failed_provider_stop_prevents_second_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+
+    async def fail_stop() -> None:
+        raise RuntimeError("stop failed")
+
+    monkeypatch.setattr(runtime._supervisor, "close", fail_stop)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await runtime.close()
+    with pytest.raises(MemoryRuntimeRootBusyError):
+        _runtime(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -293,7 +363,6 @@ async def test_runtime_close_cancels_pending_automatic_wake(
 
     assert wake.cancelled()
     assert runtime._wake_task is None
-    assert runtime.closed
 
 
 @pytest.mark.asyncio

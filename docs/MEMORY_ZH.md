@@ -150,7 +150,7 @@ Call Log，记录可以不完整或丢失。包含 `memory.diagnostics.log_provi
 提供方 I/O 的情况下丢弃。
 
 生命周期 offer 和 barrier 都不会阻塞。`/new`、归档、运行时替换和关机不会等待捕获
-投递；仍在准备中或属于旧 authority generation 的捕获可能丢失或失效。替换和关机
+投递；运行时 authority 被撤销后仍在准备的捕获可能丢失或失效。替换和关机
 会主动丢弃进程内易失工作。
 
 add/flush 最多尝试三次，只有明确证明在提供方执行前失败时才重试。可能已经提交的

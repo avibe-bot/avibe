@@ -173,6 +173,7 @@ class MemoryModule:
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
         provider_root_owner: ProviderRoot | None = None,
+        runtime_active: Callable[[], bool] | None = None,
         processing_event: Callable[..., Awaitable[bool]] | None = None,
         ambiguous_stop_reap: Callable[[], Awaitable[bool] | bool] | None = None,
         writer: BestEffortMemoryWriter | None = None,
@@ -190,6 +191,7 @@ class MemoryModule:
         )
         self._provider_root = provider_root or (self._effective_home / "memory" / "everos-root")
         self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
+        self._runtime_active = runtime_active or (lambda: True)
         self.provider_root = provider_root_owner or ProviderRoot(
             self._provider_root,
             effective_home=self._effective_home,
@@ -225,6 +227,7 @@ class MemoryModule:
             store=store,
             provider=provider,
             enabled=self._is_enabled,
+            runtime_active=self._runtime_active,
             processing_event=processing_event,
             attachment_store=self._attachment_store,
             ambiguous_stop_reap=ambiguous_stop_reap,
@@ -248,7 +251,7 @@ class MemoryModule:
         """Permanently close this module to stale callers before root deletion."""
 
         self._retired = True
-        self._writer.pause_intake()
+        self._writer.retire()
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[None]:
@@ -357,11 +360,11 @@ class MemoryModule:
     ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
-        if self._retired:
+        if self._retired or not self._owns_runtime():
             return CaptureSkipped(reason="memory_operation_in_progress")
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
-        if self._retired:
+        if self._retired or not self._owns_runtime():
             return CaptureSkipped(reason="memory_operation_in_progress")
 
         reservation = capacity_reservation
@@ -529,11 +532,11 @@ class MemoryModule:
         capacity_reservation: WriterReservation,
     ) -> CaptureReceipt:
         async with self._root_lifecycle_lock():
-            if self._retired:
+            if self._retired or not self._owns_runtime():
                 return CaptureSkipped(reason="memory_operation_in_progress")
             if not self._is_enabled():
                 return CaptureSkipped(reason="memory_disabled")
-            if self._retired:
+            if self._retired or not self._owns_runtime():
                 return CaptureSkipped(reason="memory_operation_in_progress")
             if not isinstance(request, CaptureRequest):
                 return await self._skipped_with_missed("memory_invalid_input")
@@ -561,6 +564,12 @@ class MemoryModule:
                 source_lease=source_lease,
                 capacity_reservation=capacity_reservation,
             )
+
+    def _owns_runtime(self) -> bool:
+        try:
+            return bool(self._runtime_active())
+        except Exception:
+            return False
 
     def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
         if not isinstance(request, CaptureRequest):

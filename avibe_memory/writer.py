@@ -118,6 +118,7 @@ class BestEffortMemoryWriter:
         store: MemoryStore,
         provider: MemoryProviderPort,
         enabled: Callable[[], bool],
+        runtime_active: Callable[[], bool] | None = None,
         attachment_store: AttachmentPinStore | None = None,
         ambiguous_stop_reap: AmbiguousStop | None = None,
         now: Callable[[], datetime] | None = None,
@@ -127,6 +128,7 @@ class BestEffortMemoryWriter:
         self._store = store
         self._provider = provider
         self._enabled = enabled
+        self._runtime_active = runtime_active or (lambda: True)
         self._attachment_store = attachment_store
         self._ambiguous_stop_reap = ambiguous_stop_reap
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -147,6 +149,7 @@ class BestEffortMemoryWriter:
         self._closed = False
         self._unavailable = False
         self._attachments_disabled = False
+        self._retired = False
         self.dropped = 0
 
     @property
@@ -179,6 +182,18 @@ class BestEffortMemoryWriter:
     def pause_intake(self) -> None:
         self._intake_paused = True
 
+    def retire(self) -> None:
+        """Permanently revoke this writer before its runtime is detached."""
+
+        self._retired = True
+        self._intake_paused = True
+
+    def _owns_runtime(self) -> bool:
+        try:
+            return not self._retired and bool(self._runtime_active())
+        except Exception:
+            return False
+
     def resume_intake(self) -> None:
         # ``_closed`` independently fences a settling cleanup. Clearing the
         # pause records recovery intent without reopening that old work early.
@@ -209,6 +224,8 @@ class BestEffortMemoryWriter:
     ) -> WriterReservation | Literal["full", "disabled", "unavailable"]:
         """Claim capacity before deferred capture work performs I/O."""
 
+        if not self._owns_runtime():
+            return "disabled"
         if self._unavailable:
             return "unavailable"
         if self._closed or self._intake_paused or not self._enabled():
@@ -230,6 +247,9 @@ class BestEffortMemoryWriter:
             or not reservation.active
             or reservation.digest is not None
         ):
+            return "disabled"
+        if not self._owns_runtime():
+            reservation.abandon()
             return "disabled"
         if self._unavailable:
             reservation.abandon()
@@ -263,6 +283,8 @@ class BestEffortMemoryWriter:
             or reservation.digest is None
             or admission.outcome != "accepted"
         ):
+            return "disabled"
+        if not self._owns_runtime():
             return "disabled"
         if self._unavailable:
             return "unavailable"
@@ -305,6 +327,7 @@ class BestEffortMemoryWriter:
             or self._closed
             or self._intake_paused
             or self._unavailable
+            or not self._owns_runtime()
             or not self._enabled()
         ):
             return "disabled"
@@ -323,7 +346,7 @@ class BestEffortMemoryWriter:
         return "queued"
 
     async def quiesce(self, *, timeout_seconds: float = 30.0) -> bool:
-        """Join current generation admissions for authority-changing transitions."""
+        """Join current admissions for authority-changing transitions."""
 
         self.pause_intake()
         loop = asyncio.get_running_loop()
@@ -464,6 +487,9 @@ class BestEffortMemoryWriter:
                 self._queued_items = max(0, self._queued_items - 1)
 
     async def _deliver(self, item: _CaptureItem) -> None:
+        if not self._owns_runtime():
+            await self._cleanup_item(item)
+            return
         capture = item.capture
         attachments = capture.attachments
         if item.bundle is not None and self._attachment_store is not None:
@@ -488,6 +514,9 @@ class BestEffortMemoryWriter:
         )
         attempt = 0
         while attempt < MAX_ATTEMPTS:
+            if not self._owns_runtime():
+                await self._cleanup_item(item)
+                return
             attempt += 1
             self._active_provider_calls += 1
             try:
@@ -524,6 +553,10 @@ class BestEffortMemoryWriter:
             finally:
                 self._active_provider_calls = max(0, self._active_provider_calls - 1)
 
+            if not self._owns_runtime():
+                await self._cleanup_item(item)
+                return
+
             if (
                 isinstance(result, AddAck)
                 and result.status in {"accumulated", "extracted"}
@@ -552,6 +585,9 @@ class BestEffortMemoryWriter:
             return
 
     async def _success(self, item: _CaptureItem, *, extracted: bool) -> None:
+        if not self._owns_runtime():
+            await self._cleanup_item(item)
+            return
         try:
             await run_blocking(self._store.mark_capture_success)
         except Exception:
@@ -576,6 +612,9 @@ class BestEffortMemoryWriter:
         await self._cleanup_item(item)
 
     async def _terminal_failure(self, item: _CaptureItem, error: str) -> None:
+        if not self._owns_runtime():
+            await self._cleanup_item(item)
+            return
         try:
             await run_blocking(self._store.set_last_error, error)
         except Exception:
@@ -626,6 +665,9 @@ class BestEffortMemoryWriter:
                 continue
             result: FlushResult | None = None
             for attempt in range(1, MAX_ATTEMPTS + 1):
+                if not self._owns_runtime():
+                    self._pending.pop(key, None)
+                    return
                 self._active_provider_calls += 1
                 try:
                     result = await self._provider.flush(ref)
@@ -706,6 +748,8 @@ class BestEffortMemoryWriter:
             return
 
     async def _ambiguous_outcome(self, _error: str, *, recover: bool = True) -> None:
+        if not self._owns_runtime():
+            return
         self._unavailable = True
         self._intake_paused = True
         self._pending.clear()

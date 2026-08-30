@@ -372,7 +372,11 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
         def __init__(self) -> None:
             self.closed = False
 
+        def begin_close(self) -> None:
+            memory_adapter.quiesce_memory_capture_tasks()
+
         async def close(self) -> None:
+            await memory_adapter.cancel_memory_capture_tasks()
             assert stopped["capture"] is True
             self.closed = True
             stopped["runtime"] = True
@@ -394,7 +398,8 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller.runtime_work_supervisor = _Supervisor("supervisor")
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
-    controller.memory_adapter = _MemoryAdapter()
+    memory_adapter = _MemoryAdapter()
+    controller.memory_adapter = memory_adapter
     memory_runtime = _MemoryRuntime()
     controller.memory_runtime = memory_runtime
 
@@ -870,6 +875,9 @@ def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
     controller._join_memory_destructive_transactions = join_destructive_transactions
 
     class _MemoryRuntime:
+        def begin_close(self) -> None:
+            assert reconcile_task.cancelled()
+
         async def close(self) -> None:
             assert reconcile_task.cancelled()
             assert cleanup_order == ["destructive-transactions"]

@@ -179,6 +179,36 @@ async def test_worker_delivers_captures_in_offer_order(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_revoked_runtime_drops_detached_provider_completion(
+    tmp_path: Path,
+) -> None:
+    active = True
+    provider = FakeMemoryProvider()
+    provider_entered = asyncio.Event()
+    provider_release = asyncio.Event()
+    successes: list[str] = []
+
+    async def delayed_add(capture):  # noqa: ANN001, ANN202
+        provider_entered.set()
+        await provider_release.wait()
+        return AddAck(request_id="old-runtime", status="accumulated")
+
+    provider.add = delayed_add
+    writer = _writer(tmp_path, provider, runtime_active=lambda: active)
+    writer._store.mark_capture_success = lambda: successes.append("published")
+    _reserve_and_offer(writer, 0)
+    await provider_entered.wait()
+
+    active = False
+    provider_release.set()
+    await writer.wait_idle_for_tests()
+
+    assert successes == []
+    assert writer._pending == {}
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
 async def test_extracted_add_clears_existing_volatile_session_state(tmp_path: Path) -> None:
     provider = FakeMemoryProvider(
         add_results=deque([AddAck(request_id="add-extracted", status="extracted")])

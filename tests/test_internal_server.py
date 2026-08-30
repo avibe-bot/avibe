@@ -372,22 +372,13 @@ def _build_controller_double(handler=None):
     controller._memory_disabled_cleanup_task = None
     controller._memory_disabled_cleanup_unproved = False
     controller._memory_replacement_gate = None
-    controller._memory_runtime_lease_condition = None
-    controller._memory_runtime_lease_count = 0
-    controller._memory_runtime_leases_blocked = False
-    controller._memory_runtime_temporary = False
-    controller._memory_runtime_generation = 0
     controller.default_memory_project_id.return_value = "default"
     for method_name in (
         "_memory_replacement_lock",
-        "_memory_runtime_condition",
-        "_drain_memory_runtime_leases_locked",
-        "_mutate_memory_runtime",
         "_await_disabled_memory_cleanup",
-        "_attach_memory_runtime_locked",
-        "_clear_memory_runtime_locked",
-        "_close_memory_runtime_locked",
-        "_borrow_memory_runtime",
+        "_attach_memory_runtime",
+        "_detach_memory_runtime",
+        "_memory_runtime_for_operation",
         "_disabled_memory_source_payload",
         "_disabled_memory_status_payload",
         "_disabled_memory_status_payload_locked",
@@ -2000,8 +1991,8 @@ def test_native_processing_record_routes_authorize_the_selected_project() -> Non
     assert runtime.list_memory_projects.call_count == 3
 
 
-def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement() -> None:
-    """The production CLI route cannot repopulate the fresh reset aggregate."""
+def test_memory_remember_route_does_not_hold_pointer_lock_during_capture() -> None:
+    """Long capture work runs after the Controller pointer snapshot."""
 
     from core.controller import Controller
     from avibe_memory import CaptureAccepted
@@ -2010,21 +2001,23 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
     class Module:
         def __init__(self) -> None:
             self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
 
         async def capture(self, _request):  # noqa: ANN001, ANN202
+            assert controller._memory_replacement_lock().locked() is False
             self.calls += 1
+            self.started.set()
+            await self.release.wait()
             return CaptureAccepted()
 
-    old_module = Module()
-    fresh_module = Module()
-    old_runtime = SimpleNamespace(retired=False, available=True, module=old_module)
-    fresh_runtime = SimpleNamespace(retired=False, available=True, module=fresh_module)
+    module = Module()
+    runtime = SimpleNamespace(retired=False, available=True, module=module)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(
         memory=SimpleNamespace(enabled=True),
     )
-    controller.memory_runtime = old_runtime
-    controller._memory_runtime_generation = 1
+    controller.memory_runtime = runtime
     controller.memory_scope_for_cli_session = lambda _session_id: (
         "u-" + "1" * 32,
         "p-" + "2" * 32,
@@ -2032,8 +2025,6 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
     app = internal_server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
-        gate = controller._memory_replacement_lock()
-        await gate.acquire()
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
@@ -2046,25 +2037,18 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
                     headers={CALLER_SESSION_HEADER: "session-1"},
                 )
             )
-            for _ in range(20):
-                await asyncio.sleep(0)
-                if getattr(gate, "_waiters", None):
-                    break
-            assert getattr(gate, "_waiters", None)
-            controller.memory_runtime = fresh_runtime
-            controller._memory_runtime_generation += 1
-            gate.release()
+            await module.started.wait()
+            async with asyncio.timeout(0.1):
+                async with controller._memory_replacement_lock():
+                    assert controller.memory_runtime is runtime
+            module.release.set()
             return await request
 
     response = asyncio.run(_exercise())
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "skipped",
-        "reason": "memory_operation_in_progress",
-    }
-    assert old_module.calls == 0
-    assert fresh_module.calls == 0
+    assert response.json() == {"status": "accepted"}
+    assert module.calls == 1
 
 
 # ---------------------------------------------------------------------

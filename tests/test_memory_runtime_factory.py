@@ -302,7 +302,6 @@ async def test_factory_settles_runtime_tasks_and_sidecar_before_scope_exit(
     assert scheduler_task not in asyncio.all_tasks()
     assert runtime.module._writer._worker_task is None
     assert runtime.module._writer._scheduler_task is None
-    assert runtime.closed is True
 
 
 async def test_factory_continues_teardown_after_a_close_failure(tmp_path: Path) -> None:

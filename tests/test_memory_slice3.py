@@ -900,11 +900,13 @@ def _reconcile_controller(current: MemoryConfig) -> Controller:
 def test_a_failed_memory_reconciliation_does_not_adopt_the_candidate_config() -> None:
     controller = _reconcile_controller(_memory_config())
 
-    result = asyncio.run(controller.reconcile_memory(_memory_config(enabled=False)))
+    result = asyncio.run(
+        controller.reconcile_memory(_memory_config(llm_model="replacement"))
+    )
 
     assert result["ok"] is False
     assert controller.memory_runtime.calls == 1
-    assert controller.config.memory.enabled is True
+    assert controller.config.memory.processing.llm.model == "chat"
 
 
 def test_controller_adopts_an_independent_settled_memory_snapshot() -> None:
