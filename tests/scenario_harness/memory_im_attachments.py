@@ -222,8 +222,10 @@ class MemoryIMAttachmentScenarioHarness:
             batch.lease.adopt()
         finally:
             batch.lease.release()
-        await self.adapter.wait_idle_for_tests()
-        await self.adapter.cancel_memory_capture_tasks()
+        try:
+            await self.adapter.wait_idle_for_tests()
+        finally:
+            await self.adapter.cancel_memory_capture_tasks()
 
     @property
     def memory_bundle_entries(self) -> tuple[Path, ...]:
