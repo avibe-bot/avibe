@@ -552,7 +552,44 @@ async def test_reconfigure_rejects_a_stale_memory_snapshot(
         "error": "memory_operation_in_progress",
         "result": "unchanged",
     }
+    assert runtime.events == ["reap", "retire", "close"]
+
+
+@pytest.mark.asyncio
+async def test_reset_lost_runtime_writes_no_fence_and_leaves_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(tmp_path)
+    replacement = _Runtime(tmp_path)
+    controller = _controller(runtime)
+    replacement_adapter = object()
+
+    async def lose_expected_runtime() -> None:
+        runtime.events.append("reap")
+        controller.memory_runtime = replacement
+        controller.memory_module = replacement.module
+        controller.memory_adapter = replacement_adapter
+
+    runtime.prepare_data_reset = lose_expected_runtime
+    monkeypatch.setattr(
+        "core.controller.atomic_update_memory",
+        lambda _transform: pytest.fail("lost ownership must not persist a fence"),
+    )
+
+    result = await controller.delete_memory_data(confirm_loss=True)
+
+    assert result == {
+        "ok": False,
+        "operation": "delete_data",
+        "error": "memory_operation_in_progress",
+        "result": "unchanged",
+    }
     assert runtime.events == ["reap"]
+    assert replacement.events == []
+    assert controller.memory_runtime is replacement
+    assert controller.memory_module is replacement.module
+    assert controller.memory_adapter is replacement_adapter
 
 
 @pytest.mark.asyncio

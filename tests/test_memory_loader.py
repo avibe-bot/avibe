@@ -9,6 +9,7 @@ from core.memory_loader import load_memory_runtime, probe_memory_runtime_entrypo
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
+    MemoryRuntimeBusyError,
 )
 
 
@@ -172,6 +173,27 @@ def test_loader_maps_constructor_failure_to_unavailable(monkeypatch: pytest.Monk
 
     with pytest.raises(MemoryPluginUnavailableError):
         load_memory_runtime(_config())
+
+
+def test_loader_preserves_runtime_root_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.memory_loader
+
+    busy = MemoryRuntimeBusyError("provider root busy")
+    monkeypatch.setattr(
+        core.memory_loader.importlib,
+        "import_module",
+        Mock(
+            return_value=SimpleNamespace(
+                MEMORY_RUNTIME_PROTOCOL_VERSION=1,
+                create_memory_runtime=Mock(side_effect=busy),
+            )
+        ),
+    )
+
+    with pytest.raises(MemoryRuntimeBusyError) as raised:
+        load_memory_runtime(_config())
+
+    assert raised.value is busy
 
 
 def test_loader_constructs_fixed_protocol_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

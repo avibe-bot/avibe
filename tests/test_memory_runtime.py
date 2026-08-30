@@ -137,6 +137,75 @@ async def test_failed_provider_stop_prevents_second_runtime(
 
 
 @pytest.mark.asyncio
+async def test_revoked_reconcile_stops_before_provider_root_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    probe_started = asyncio.Event()
+    probe_release = asyncio.Event()
+    side_effects: list[str] = []
+
+    async def ownership_reconciled() -> bool:
+        return True
+
+    async def delayed_probe(_python: Path, _config: MemoryConfig) -> bool:
+        probe_started.set()
+        await probe_release.wait()
+        return True
+
+    async def unexpected_async(name: str, *_args, **_kwargs):
+        side_effects.append(name)
+        pytest.fail(f"revoked reconciliation reached {name}")
+
+    def unexpected_sync(name: str, *_args, **_kwargs):
+        side_effects.append(name)
+        pytest.fail(f"revoked reconciliation reached {name}")
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(runtime, "_reconcile_released_ownership", ownership_reconciled)
+    monkeypatch.setattr(runtime, "_probe_processing", delayed_probe)
+    monkeypatch.setattr(runtime._artifact_manager, "resolve_python", lambda: Path("python"))
+    monkeypatch.setattr(
+        runtime._supervisor,
+        "stop",
+        lambda: unexpected_async("provider stop"),
+    )
+    monkeypatch.setattr(
+        runtime._supervisor,
+        "wake",
+        lambda *_args, **_kwargs: unexpected_async("provider wake"),
+    )
+    monkeypatch.setattr(
+        runtime._store,
+        "ensure_meta",
+        lambda: unexpected_sync("store metadata"),
+    )
+    monkeypatch.setattr(
+        runtime._provider_root_owner,
+        "ensure",
+        lambda *_args: unexpected_sync("provider root ensure"),
+    )
+    monkeypatch.setattr(runtime, "_cancel_capture_tasks", no_op)
+    monkeypatch.setattr(runtime, "_close_local_runtime", no_op)
+    monkeypatch.setattr(runtime._supervisor, "close", no_op)
+
+    reconcile = asyncio.create_task(runtime.reconcile(MemoryConfig(enabled=True)))
+    await probe_started.wait()
+    runtime.begin_close()
+    await runtime.close()
+    probe_release.set()
+
+    assert await reconcile == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+    }
+    assert side_effects == []
+
+
+@pytest.mark.asyncio
 async def test_environmental_store_failure_defers_durable_repair_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

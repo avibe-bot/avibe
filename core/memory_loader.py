@@ -9,6 +9,7 @@ from typing import Any
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
+    MemoryRuntimeBusyError,
 )
 
 
@@ -72,6 +73,8 @@ def load_memory_runtime(
     factory = _resolve_memory_runtime_factory()
     try:
         runtime = factory(config, **runtime_kwargs)
+    except MemoryRuntimeBusyError:
+        raise
     except Exception as exc:
         raise MemoryPluginUnavailableError(
             "Memory implementation could not be constructed"

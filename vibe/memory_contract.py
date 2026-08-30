@@ -220,6 +220,10 @@ class MemoryStoreUnavailableError(RuntimeError):
     """The optional Memory store cannot currently serve a host request."""
 
 
+class MemoryRuntimeBusyError(RuntimeError):
+    """The provider root already belongs to another live Memory runtime."""
+
+
 class MemoryPluginUnavailableError(RuntimeError):
     """The optional Memory implementation is absent or cannot be constructed."""
 

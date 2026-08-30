@@ -22,6 +22,7 @@ from core.memory_adapter import DisabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
+    MemoryRuntimeBusyError,
     MemoryStoreUnavailableError,
 )
 
@@ -793,6 +794,77 @@ async def test_disabled_preflight_uses_one_unpublished_runtime() -> None:
     assert controller.memory_runtime is None
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+
+@pytest.mark.parametrize("overlap", ("preflight", "install"))
+@pytest.mark.asyncio
+async def test_overlapping_unpublished_operations_return_busy(
+    overlap: str,
+) -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    controller._memory_plugin_error = None
+    candidate = replace(controller.config.memory, enabled=True)
+    preflight_started = asyncio.Event()
+    preflight_release = asyncio.Event()
+    construction_attempts = 0
+
+    class _Runtime:
+        module = object()
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def preflight(self, config) -> dict[str, object]:
+            assert config is candidate
+            preflight_started.set()
+            await preflight_release.wait()
+            return {"ok": True}
+
+        def begin_close(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+    runtime = _Runtime()
+
+    def create_runtime(_config, **_kwargs):
+        nonlocal construction_attempts
+        construction_attempts += 1
+        if construction_attempts == 1:
+            return runtime
+        raise MemoryRuntimeBusyError("provider root busy")
+
+    controller._create_memory_runtime = create_runtime
+    first = asyncio.create_task(controller.preflight_memory(candidate))
+    await preflight_started.wait()
+
+    if overlap == "preflight":
+        busy = await controller.preflight_memory(candidate)
+        assert busy == {"ok": False, "error": "memory_operation_in_progress"}
+    else:
+        busy = await controller.install_memory_runtime()
+        assert busy == {
+            "ok": False,
+            "reason": "memory_operation_in_progress",
+            "download_error": None,
+        }
+
+    assert construction_attempts == 2
+    assert controller.memory_runtime is None
+    assert controller.memory_module is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+    assert controller._memory_plugin_error is None
+
+    preflight_release.set()
+    assert await first == {"ok": True}
+    assert runtime.closed is True
 
 
 @pytest.mark.parametrize("operation", ("preflight", "install"))

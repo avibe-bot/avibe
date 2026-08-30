@@ -67,6 +67,7 @@ from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
+    MemoryRuntimeBusyError,
     MemoryStoreUnavailableError,
 )
 from vibe.runtime import mark_service_instance_started
@@ -834,6 +835,8 @@ class Controller:
             return await runtime.preflight(memory_config)
         try:
             runtime = self._create_memory_runtime(memory_config)
+        except MemoryRuntimeBusyError:
+            return {"ok": False, "error": "memory_operation_in_progress"}
         except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
             self._memory_plugin_error = exc
             raise
@@ -857,6 +860,12 @@ class Controller:
                 self.config.memory,
                 allow_disabled=True,
             )
+        except MemoryRuntimeBusyError:
+            return {
+                "ok": False,
+                "reason": "memory_operation_in_progress",
+                "download_error": None,
+            }
         except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
             self._memory_plugin_error = exc
             raise
@@ -887,6 +896,8 @@ class Controller:
         if created:
             try:
                 runtime = self._create_memory_runtime(memory_config)
+            except MemoryRuntimeBusyError:
+                return {"ok": False, "error": "memory_operation_in_progress"}
             except (
                 MemoryPluginUnavailableError,
                 MemoryPluginIncompatibleError,
@@ -1624,6 +1635,22 @@ class Controller:
                     reason="operation_lock_failed",
                 )
 
+            async def close_reset_runtime() -> dict[str, Any] | None:
+                runtime.begin_close()
+                try:
+                    await runtime.close()
+                except BaseException:
+                    logger.exception("Memory data reset could not close the owned runtime")
+                    runtime.mark_needs_repair(f"memory_{operation}_failed")
+                    failure = unchanged_memory_data_result(
+                        runtime.effective_home,
+                        operation=operation,
+                        reason="runtime_termination_unproved",
+                    )
+                    failure["state"] = "needs_repair"
+                    return failure
+                return None
+
             try:
                 if getattr(runtime, "_artifact_installing", False):
                     return {
@@ -1644,6 +1671,16 @@ class Controller:
                         reason="sidecar_termination_unproved",
                     )
 
+                if attached:
+                    detached = await self._detach_memory_runtime(runtime)
+                    if detached is not runtime:
+                        return {
+                            "ok": False,
+                            "operation": operation,
+                            "error": "memory_operation_in_progress",
+                            "result": "unchanged",
+                        }
+
                 target = replace(
                     deepcopy(target_config or self.config.memory),
                     legacy_needs_repair=False,
@@ -1663,6 +1700,8 @@ class Controller:
                         )
                     ).memory
                 except MemoryConfigStaleWrite:
+                    if failure := await close_reset_runtime():
+                        return failure
                     return {
                         "ok": False,
                         "operation": operation,
@@ -1673,6 +1712,8 @@ class Controller:
                     logger.exception(
                         "Memory data reset could not persist its repair fence"
                     )
+                    if failure := await close_reset_runtime():
+                        return failure
                     return unchanged_memory_data_result(
                         runtime.effective_home,
                         operation=operation,
@@ -1687,28 +1728,7 @@ class Controller:
                         return target
                     return replace(current, legacy_needs_repair=False)
 
-                if attached:
-                    detached = await self._detach_memory_runtime(runtime)
-                    if detached is not runtime:
-                        return {
-                            "ok": False,
-                            "operation": operation,
-                            "error": "memory_operation_in_progress",
-                            "result": "unchanged",
-                        }
-                else:
-                    runtime.begin_close()
-                try:
-                    await runtime.close()
-                except BaseException:
-                    logger.exception("Memory data reset could not close the owned runtime")
-                    runtime.mark_needs_repair(f"memory_{operation}_failed")
-                    failure = unchanged_memory_data_result(
-                        runtime.effective_home,
-                        operation=operation,
-                        reason="runtime_termination_unproved",
-                    )
-                    failure["state"] = "needs_repair"
+                if failure := await close_reset_runtime():
                     return failure
                 try:
                     await runtime.settle_after_data_loss()
