@@ -39,10 +39,11 @@ PRINCIPAL = "u-" + "1" * 32
 
 def _writer(tmp_path: Path, provider: FakeMemoryProvider, **kwargs: object) -> BestEffortMemoryWriter:
     store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite", effective_home=tmp_path)
+    enabled = kwargs.pop("enabled", lambda: True)
     return BestEffortMemoryWriter(
         store=store,
         provider=provider,
-        enabled=lambda: True,
+        enabled=enabled,
         **kwargs,
     )
 
@@ -176,6 +177,36 @@ async def test_worker_delivers_captures_in_offer_order(tmp_path: Path) -> None:
         "message-1",
         "message-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_revoked_runtime_drops_detached_provider_completion(
+    tmp_path: Path,
+) -> None:
+    active = True
+    provider = FakeMemoryProvider()
+    provider_entered = asyncio.Event()
+    provider_release = asyncio.Event()
+    successes: list[str] = []
+
+    async def delayed_add(capture):  # noqa: ANN001, ANN202
+        provider_entered.set()
+        await provider_release.wait()
+        return AddAck(request_id="old-runtime", status="accumulated")
+
+    provider.add = delayed_add
+    writer = _writer(tmp_path, provider, enabled=lambda: active)
+    writer._store.mark_capture_success = lambda: successes.append("published")
+    _reserve_and_offer(writer, 0)
+    await provider_entered.wait()
+
+    active = False
+    provider_release.set()
+    await writer.wait_idle_for_tests()
+
+    assert successes == []
+    assert writer._pending == {}
+    assert writer._permits == MAX_WRITER_PERMITS
 
 
 @pytest.mark.asyncio

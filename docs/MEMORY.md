@@ -288,7 +288,7 @@ capture data.
 
 Lifecycle offers and barriers are non-blocking. `/new`, archive, runtime
 replacement, and shutdown never wait for capture delivery. Work still preparing
-or belonging to a stale authority generation may be missed or invalidated.
+after its runtime authority is revoked may be missed or invalidated.
 Shutdown and replacement intentionally drop volatile work.
 
 The writer gives add and flush operations at most three attempts, and retries

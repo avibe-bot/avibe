@@ -323,7 +323,7 @@ class BestEffortMemoryWriter:
         return "queued"
 
     async def quiesce(self, *, timeout_seconds: float = 30.0) -> bool:
-        """Join current generation admissions for authority-changing transitions."""
+        """Join current admissions for authority-changing transitions."""
 
         self.pause_intake()
         loop = asyncio.get_running_loop()
@@ -464,6 +464,9 @@ class BestEffortMemoryWriter:
                 self._queued_items = max(0, self._queued_items - 1)
 
     async def _deliver(self, item: _CaptureItem) -> None:
+        if not self._enabled():
+            await self._cleanup_item(item)
+            return
         capture = item.capture
         attachments = capture.attachments
         if item.bundle is not None and self._attachment_store is not None:
@@ -488,6 +491,9 @@ class BestEffortMemoryWriter:
         )
         attempt = 0
         while attempt < MAX_ATTEMPTS:
+            if not self._enabled():
+                await self._cleanup_item(item)
+                return
             attempt += 1
             self._active_provider_calls += 1
             try:
@@ -552,6 +558,9 @@ class BestEffortMemoryWriter:
             return
 
     async def _success(self, item: _CaptureItem, *, extracted: bool) -> None:
+        if not self._enabled():
+            await self._cleanup_item(item)
+            return
         try:
             await run_blocking(self._store.mark_capture_success)
         except Exception:
@@ -576,6 +585,9 @@ class BestEffortMemoryWriter:
         await self._cleanup_item(item)
 
     async def _terminal_failure(self, item: _CaptureItem, error: str) -> None:
+        if not self._enabled():
+            await self._cleanup_item(item)
+            return
         try:
             await run_blocking(self._store.set_last_error, error)
         except Exception:
@@ -626,6 +638,9 @@ class BestEffortMemoryWriter:
                 continue
             result: FlushResult | None = None
             for attempt in range(1, MAX_ATTEMPTS + 1):
+                if not self._enabled():
+                    self._pending.pop(key, None)
+                    return
                 self._active_provider_calls += 1
                 try:
                     result = await self._provider.flush(ref)
@@ -706,6 +721,8 @@ class BestEffortMemoryWriter:
             return
 
     async def _ambiguous_outcome(self, _error: str, *, recover: bool = True) -> None:
+        if not self._enabled():
+            return
         self._unavailable = True
         self._intake_paused = True
         self._pending.clear()

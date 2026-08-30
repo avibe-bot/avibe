@@ -103,7 +103,7 @@ def test_captured_processed_episodes_list_through_cli_with_exact_page_boundary(
     asyncio.run(_capture_and_process())
     runtime = object.__new__(MemoryRuntime)
     runtime._module = module
-    runtime._retired = False
+    runtime._closing = False
     monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "ses-memory-list-scenario")
 
     def list_sync(*, project, page, limit, caller_session_id):
@@ -193,7 +193,7 @@ def test_settings_can_browse_agent_episodes_without_crossing_owner_scopes(
         await module.wait_writer_idle_for_tests()
         runtime = object.__new__(MemoryRuntime)
         runtime._module = module
-        runtime._retired = False
+        runtime._closing = False
         return (
             await runtime.list_episodes_payload(
                 PRINCIPAL,

@@ -73,7 +73,6 @@ class _Runtime:
     def __init__(self, module) -> None:
         self.module = module
         self.available = True
-        self.retired = False
         self.attachment_status = "ready"
         self.attachment_generation: int | None = 1
         self.barrier_offers = 0
@@ -83,10 +82,6 @@ class _Runtime:
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
         return f"u-{suffix * 32}"
-
-    def project_for_workdir(self, workdir: str) -> str:
-        assert workdir == "/tmp/project"
-        return PROJECT
 
     async def attachment_capture_status(self) -> str:
         return self.attachment_status
@@ -900,11 +895,13 @@ def _reconcile_controller(current: MemoryConfig) -> Controller:
 def test_a_failed_memory_reconciliation_does_not_adopt_the_candidate_config() -> None:
     controller = _reconcile_controller(_memory_config())
 
-    result = asyncio.run(controller.reconcile_memory(_memory_config(enabled=False)))
+    result = asyncio.run(
+        controller.reconcile_memory(_memory_config(llm_model="replacement"))
+    )
 
     assert result["ok"] is False
     assert controller.memory_runtime.calls == 1
-    assert controller.config.memory.enabled is True
+    assert controller.config.memory.processing.llm.model == "chat"
 
 
 def test_controller_adopts_an_independent_settled_memory_snapshot() -> None:

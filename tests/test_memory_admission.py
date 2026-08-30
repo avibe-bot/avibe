@@ -50,12 +50,6 @@ class _Principals:
         self.keys.append(user_key)
         return PRINCIPAL
 
-    def project_for_workdir(self, workdir: str) -> str:
-        if self.raises:
-            raise RuntimeError("memory store unavailable")
-        return PROJECT
-
-
 class _Bindings:
     def __init__(self, *, enabled: bool = True, raises: bool = False) -> None:
         self.enabled = enabled

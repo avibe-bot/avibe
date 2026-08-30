@@ -329,9 +329,6 @@ async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
         def principal_for_user_key(self, _user_key: str) -> str:
             return "u-11111111111111111111111111111111"
 
-        def project_for_workdir(self, _workdir: str) -> str:
-            raise AssertionError("capture must use the default project")
-
     module = Module()
     adapter = EnabledMemoryAdapter(
         module=module,

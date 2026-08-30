@@ -263,6 +263,7 @@ class EverOSPort:
         multimodal_model: str | None = None,
         multimodal_api_key: str | None = None,
         processing_health_check: Callable[[], Awaitable[bool]] | None = None,
+        runtime_active: Callable[[], bool] | None = None,
         sidecar_timeout_seconds: float = _SIDECAR_TIMEOUT_SECONDS,
         add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
         flush_timeout_seconds: float = _FLUSH_TIMEOUT_SECONDS,
@@ -287,6 +288,7 @@ class EverOSPort:
         self._multimodal_model = _optional_string(multimodal_model)
         self._multimodal_api_key = _optional_string(multimodal_api_key)
         self._processing_health_check = processing_health_check
+        self._runtime_active = runtime_active or (lambda: True)
         self._sidecar_timeout_seconds = _positive_timeout(sidecar_timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
         self._add_timeout_seconds = _positive_timeout(add_timeout_seconds, _ADD_TIMEOUT_SECONDS)
         self._flush_timeout_seconds = _positive_timeout(flush_timeout_seconds, _FLUSH_TIMEOUT_SECONDS)
@@ -430,6 +432,13 @@ class EverOSPort:
         timeout_seconds: float | None = None,
     ) -> tuple[int, bytes | None]:
         """Return the HTTP verdict even when its bounded body is unusable."""
+
+        try:
+            runtime_active = bool(self._runtime_active())
+        except Exception:
+            runtime_active = False
+        if not runtime_active:
+            raise MemoryProviderSystemFailure("memory_operation_in_progress")
 
         started = time.monotonic()
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))

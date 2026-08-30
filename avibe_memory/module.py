@@ -173,6 +173,7 @@ class MemoryModule:
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
         provider_root_owner: ProviderRoot | None = None,
+        runtime_active: Callable[[], bool] | None = None,
         processing_event: Callable[..., Awaitable[bool]] | None = None,
         ambiguous_stop_reap: Callable[[], Awaitable[bool] | bool] | None = None,
         writer: BestEffortMemoryWriter | None = None,
@@ -190,6 +191,7 @@ class MemoryModule:
         )
         self._provider_root = provider_root or (self._effective_home / "memory" / "everos-root")
         self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
+        self._runtime_active = runtime_active or (lambda: True)
         self.provider_root = provider_root_owner or ProviderRoot(
             self._provider_root,
             effective_home=self._effective_home,
@@ -202,7 +204,6 @@ class MemoryModule:
             tuple[str, str, str], _CaptureReservation
         ] = {}
         self._invalid_capture_admission_lock = asyncio.Lock()
-        self._retired = False
         attachments_available = False
         self._attachment_store: AttachmentPinStore | None = None
         try:
@@ -237,18 +238,6 @@ class MemoryModule:
         """Whether new attachment captures can enter the volatile writer."""
 
         return self._writer.attachments_enabled
-
-    @property
-    def retired(self) -> bool:
-        """Whether this captured module has been permanently tombstoned."""
-
-        return self._retired
-
-    def retire(self) -> None:
-        """Permanently close this module to stale callers before root deletion."""
-
-        self._retired = True
-        self._writer.pause_intake()
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[None]:
@@ -357,12 +346,10 @@ class MemoryModule:
     ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
-        if self._retired:
+        if not self._owns_runtime():
             return CaptureSkipped(reason="memory_operation_in_progress")
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
-        if self._retired:
-            return CaptureSkipped(reason="memory_operation_in_progress")
 
         reservation = capacity_reservation
         if reservation is None:
@@ -529,12 +516,10 @@ class MemoryModule:
         capacity_reservation: WriterReservation,
     ) -> CaptureReceipt:
         async with self._root_lifecycle_lock():
-            if self._retired:
+            if not self._owns_runtime():
                 return CaptureSkipped(reason="memory_operation_in_progress")
             if not self._is_enabled():
                 return CaptureSkipped(reason="memory_disabled")
-            if self._retired:
-                return CaptureSkipped(reason="memory_operation_in_progress")
             if not isinstance(request, CaptureRequest):
                 return await self._skipped_with_missed("memory_invalid_input")
 
@@ -561,6 +546,12 @@ class MemoryModule:
                 source_lease=source_lease,
                 capacity_reservation=capacity_reservation,
             )
+
+    def _owns_runtime(self) -> bool:
+        try:
+            return bool(self._runtime_active())
+        except Exception:
+            return False
 
     def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
         if not isinstance(request, CaptureRequest):
@@ -837,7 +828,7 @@ class MemoryModule:
         if len(query_bytes) > MAX_QUERY_BYTES:
             return OperationFailed(error="memory_input_too_large")
 
-        if self._retired:
+        if not self._owns_runtime():
             return OperationFailed(error="memory_operation_in_progress")
 
         agentic_started = (
@@ -1093,7 +1084,7 @@ class MemoryModule:
             return OperationFailed(error="memory_access_denied")
         if not is_new_stored_memory_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
-        if self._retired:
+        if not self._owns_runtime():
             return OperationFailed(error="memory_operation_in_progress")
 
         async with self._lifecycle_lock:
@@ -1182,7 +1173,7 @@ class MemoryModule:
 
             return result
 
-        if self._retired:
+        if not self._owns_runtime():
             yield unavailable("memory_operation_in_progress")
             return
         remaining = deadline - monotonic()
@@ -1198,7 +1189,7 @@ class MemoryModule:
             yield unavailable("memory_provider_timeout")
             return
         try:
-            if self._retired:
+            if not self._owns_runtime():
                 yield unavailable("memory_operation_in_progress")
                 return
             try:
@@ -1241,7 +1232,7 @@ class MemoryModule:
             or origin not in ("user", "agent")
         ):
             return OperationFailed(error="memory_invalid_input")
-        if self._retired:
+        if not self._owns_runtime():
             return OperationFailed(error="memory_operation_in_progress")
         return None
 
@@ -1572,7 +1563,7 @@ class MemoryModule:
         return _utf8_bytes("\0".join((value.name, value.uri, value.ext))) is not None
 
     def _is_enabled(self) -> bool:
-        if self._retired:
+        if not self._owns_runtime():
             return False
         try:
             value = self._enabled_source() if callable(self._enabled_source) else self._enabled_source

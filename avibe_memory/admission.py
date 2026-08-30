@@ -40,8 +40,6 @@ class PrincipalDirectory(Protocol):
 
     def principal_for_user_key(self, user_key: str) -> str: ...
 
-    def project_for_workdir(self, workdir: str) -> str: ...
-
 
 class UserBindingDirectory(Protocol):
     """Answers whether an IM user is bound to this install and still enabled."""
