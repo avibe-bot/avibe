@@ -1,17 +1,17 @@
 {
-  "source": "Owner ruling 2026-08-12: the SSE parser owns stream=true only",
+  "source": "OpenAI Responses image events may carry Base64 strings with no documented event-size ceiling; response size is not a protocol validity rule",
   "cases": [
     {
-      "name": "buffered_json_above_stream_line_limit",
+      "name": "large_buffered_json",
       "stream": false,
-      "payload": "valid_json_above_stream_line_limit",
+      "payload": "valid_large_json",
       "expected_outcome": "success"
     },
     {
-      "name": "sse_frame_above_stream_line_limit",
+      "name": "large_image_sse_frame",
       "stream": true,
-      "payload": "sse_frame_above_stream_line_limit",
-      "expected_outcome": "protocol_error"
+      "payload": "response.image_generation_call.partial_image",
+      "expected_outcome": "success"
     }
   ]
 }

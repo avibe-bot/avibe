@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .stream_wire import SSE_MAX_FRAME_BYTES, SSEFrameTokenizer, parse_sse_frame
+from .stream_wire import SSEFrameTokenizer, parse_sse_frame
 
 
 _OPENCODE_UPSTREAM_TOOL_ALIASES = {
@@ -92,7 +92,6 @@ class StreamingToolNameRewriter:
         self._aliases = aliases
         self._tokenizer = SSEFrameTokenizer()
         self._pending_frames: list[tuple[bytes, dict[str, Any]]] = []
-        self._pending_size = 0
 
     def feed(self, chunk: bytes) -> bytes:
         if not self._aliases:
@@ -120,17 +119,10 @@ class StreamingToolNameRewriter:
         if not isinstance(decoded, dict):
             return [*self._flush_pending(rewrite=True), frame + b"\n\n"]
 
-        output: list[bytes] = []
-        if len(frame) > SSE_MAX_FRAME_BYTES:
-            return [*self._flush_pending(rewrite=False), frame + b"\n\n"]
-        if self._pending_size + len(frame) > SSE_MAX_FRAME_BYTES:
-            output.extend(self._flush_pending(rewrite=False))
         self._pending_frames.append((frame, decoded))
-        self._pending_size += len(frame)
         if self._has_partial_alias():
-            return output
-        output.extend(self._flush_pending(rewrite=True))
-        return output
+            return []
+        return self._flush_pending(rewrite=True)
 
     def _has_partial_alias(self) -> bool:
         for assembled, _locations in self._assembled_stream_names().values():
@@ -177,7 +169,6 @@ class StreamingToolNameRewriter:
             for index, (frame, payload) in enumerate(self._pending_frames)
         ]
         self._pending_frames.clear()
-        self._pending_size = 0
         return output
 
 

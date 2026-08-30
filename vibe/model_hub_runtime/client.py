@@ -26,18 +26,15 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
     ProtocolSSEState,
     ProtocolUsageReport,
-    SSE_MAX_FRAME_BYTES,
-    SSE_MAX_PRELUDE_BYTES,
-    SSEFrameLimitError,
     observe_protocol_response,
 )
 from vibe.model_hub_runtime.state import SourceRecord
 
 
-_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 64 * 1024
-_MODEL_PROBE_BYTES = 4 * 1024 * 1024
-_PRELUDE_MEMORY_BYTES = SSE_MAX_FRAME_BYTES
+# This threshold only selects memory or a temporary file; it never rejects or
+# truncates upstream response bytes.
+_PRELUDE_MEMORY_BYTES = 256 * 1024
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
@@ -76,10 +73,6 @@ class EngineClientError(RuntimeError):
         self.error_candidates = error_candidates
 
 
-class _ResponseTooLargeError(RuntimeError):
-    pass
-
-
 class _StreamPrelude:
     """Per-invocation byte owner that spills pre-output data out of memory."""
 
@@ -87,10 +80,8 @@ class _StreamPrelude:
         self,
         *,
         memory_limit: int | None = None,
-        total_limit: int | None = None,
     ) -> None:
         self._memory_limit = _PRELUDE_MEMORY_BYTES if memory_limit is None else memory_limit
-        self._total_limit = SSE_MAX_PRELUDE_BYTES if total_limit is None else total_limit
         self._memory = bytearray()
         self._file: BinaryIO | None = None
         self._stored_bytes = 0
@@ -112,22 +103,19 @@ class _StreamPrelude:
     def closed(self) -> bool:
         return self._closed
 
-    def write(self, data: bytes) -> bool:
+    def write(self, data: bytes) -> None:
         if self._closed:
             raise RuntimeError("stream prelude is closed")
-        if self._stored_bytes + len(data) > self._total_limit:
-            return False
         if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
             self._memory.extend(data)
             self._stored_bytes += len(data)
-            return True
+            return
         if self._file is None:
             self._file = tempfile.TemporaryFile()
             self._file.write(self._memory)
             self._memory.clear()
         self._file.write(data)
         self._stored_bytes += len(data)
-        return True
 
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._closed:
@@ -323,10 +311,10 @@ class EngineClient:
             if response.status >= 300:
                 try:
                     payload = await asyncio.wait_for(
-                        _read_limited(response.content, _MAX_RESPONSE_BYTES),
+                        _read_response(response.content),
                         timeout=self.timeout,
                     )
-                except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
+                except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                 observed_payload = observe_protocol_response(
                     request_protocol,
@@ -369,30 +357,10 @@ class EngineClient:
                 )
             first_received = True
             if not stream:
-                try:
-                    first = await asyncio.wait_for(
-                        _read_limited(
-                            response.content,
-                            _MAX_RESPONSE_BYTES,
-                            initial=first,
-                        ),
-                        timeout=self.timeout,
-                    )
-                except _ResponseTooLargeError:
-                    response.close()
-                    await session.close()
-                    return ended(
-                        _protocol_error_outcome(
-                            ProtocolObservation(
-                                outcome="protocol_error",
-                                message="upstream response exceeded the local limit",
-                            ),
-                            source,
-                            model_id,
-                            response.status,
-                            False,
-                        )
-                    )
+                first = await asyncio.wait_for(
+                    _read_response(response.content, initial=first),
+                    timeout=self.timeout,
+                )
                 observation = observe_protocol_response(
                     request_protocol,
                     streamed=False,
@@ -477,19 +445,6 @@ class EngineClient:
                     stream_started=model_output_started if stream else False,
                 )
             )
-        except SSEFrameLimitError as exc:
-            if response is not None:
-                response.close()
-            await session.close()
-            return ended(
-                _protocol_error_outcome(
-                    ProtocolObservation(outcome="protocol_error", message=str(exc)),
-                    source,
-                    model_id,
-                    response.status if response is not None else None,
-                    model_output_started if stream else False,
-                )
-            )
         except aiohttp.ClientError:
             if response is not None:
                 response.close()
@@ -535,9 +490,9 @@ class EngineClient:
                 _NoRedirectHandler(),
             )
             with opener.open(request, timeout=timeout or self.timeout) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
+                raw = response.read()
         except urllib.error.HTTPError as exc:
-            raw = exc.read(_MAX_RESPONSE_BYTES)
+            raw = exc.read()
             error_type, error_code, error_candidates = _raw_error_fields(raw)
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
@@ -548,8 +503,6 @@ class EngineClient:
             ) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
             raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
-        if len(raw) > _MAX_RESPONSE_BYTES:
-            raise EngineClientError("engine API response is too large", error_type="response_too_large")
         try:
             decoded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -599,9 +552,7 @@ async def probe_models(
                         f"model discovery returned HTTP {response.status}",
                         status_code=response.status,
                     )
-                payload = await _read_limited(response.content, _MODEL_PROBE_BYTES)
-    except _ResponseTooLargeError:
-        raise EngineClientError("model discovery response is too large") from None
+                payload = await _read_response(response.content)
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
@@ -628,22 +579,17 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-async def _read_limited(
+async def _read_response(
     content: aiohttp.StreamReader,
-    limit: int,
     *,
     initial: bytes = b"",
 ) -> bytes:
     payload = bytearray(initial)
-    if len(payload) > limit:
-        raise _ResponseTooLargeError
     while True:
-        chunk = await content.read(min(_STREAM_CHUNK_BYTES, limit + 1 - len(payload)))
+        chunk = await content.read(_STREAM_CHUNK_BYTES)
         if not chunk:
             return bytes(payload)
         payload.extend(chunk)
-        if len(payload) > limit:
-            raise _ResponseTooLargeError
 
 
 async def _read_stream_prelude(
@@ -663,8 +609,7 @@ async def _read_stream_prelude(
     raise for the call to be metered.
     """
 
-    if not _received(first, prelude=prelude, wire_state=wire_state):
-        return _prelude_ended_outcome(source, model_id, response.status)
+    _received(first, prelude=prelude, wire_state=wire_state)
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -688,8 +633,7 @@ async def _read_stream_prelude(
             if completion is not None:
                 return completion
             return _prelude_ended_outcome(source, model_id, response.status)
-        if not _received(chunk, prelude=prelude, wire_state=wire_state):
-            return _prelude_ended_outcome(source, model_id, response.status)
+        _received(chunk, prelude=prelude, wire_state=wire_state)
     return None
 
 
@@ -698,25 +642,11 @@ def _received(
     *,
     prelude: _StreamPrelude,
     wire_state: ProtocolSSEState,
-) -> bool:
-    """Take receipt of bytes the wire delivered: read them, then keep a copy.
-
-    Two different questions get asked about the same bytes, and only the second
-    one can fail: what they say, and whether there is room to store a replay of
-    them. Asking the storage question first lets a full prelude erase the report
-    that arrived in the chunk that filled it — tokens the vendor billed, delivered
-    on the socket, dropped because we had nowhere to put a copy. Whether we can
-    hold a copy is not a question about what happened.
-
-    Every earlier round of this class was the reading half: a fact was observed
-    and some ending could not reach it. This is the writing half, and it has no
-    reader-side remedy at all — bytes nobody observed leave nothing behind to fall
-    back to. So this is the sole caller of ``prelude.write``, and an arrival site
-    added later cannot reorder the two questions by forgetting which comes first.
-    """
+) -> None:
+    """Observe delivered bytes, then retain their exact replay without truncation."""
 
     wire_state.observe(chunk)
-    return prelude.write(chunk)
+    prelude.write(chunk)
 
 
 def _prelude_ended_outcome(
@@ -768,14 +698,6 @@ async def _response_stream(
                 message="upstream stream ended before a protocol terminal event",
                 stream_started=wire_state.model_output_started,
             )
-    except SSEFrameLimitError as exc:
-        outcome = _protocol_error_outcome(
-            ProtocolObservation(outcome="protocol_error", message=str(exc)),
-            source,
-            model_id,
-            response.status,
-            wire_state.model_output_started,
-        )
     except asyncio.TimeoutError:
         outcome = _observed_stream_terminal_outcome(
             wire_state,

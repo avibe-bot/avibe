@@ -34,11 +34,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import (
-    SSE_MAX_FRAME_BYTES,
-    SSE_MAX_LINE_BYTES,
-    ProtocolUsageReport,
-)
+from core.handlers.model_hub.stream_wire import ProtocolUsageReport
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
@@ -129,9 +125,9 @@ def test_released_install_claim_is_read_without_rewrite_and_resumed_as_current_s
     }
 
 
-def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
-    keepalive = b": " + b"k" * (SSE_MAX_LINE_BYTES - 4) + b"\n\n"
-    first = keepalive * (SSE_MAX_FRAME_BYTES // len(keepalive) + 1)
+def test_stream_prelude_replays_large_keepalive_history_before_output() -> None:
+    keepalive = b": " + b"k" * (64 * 1024) + b"\n\n"
+    first = keepalive * 5
     output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
 
     class Content:
@@ -238,147 +234,41 @@ def test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
     asyncio.run(run())
 
 
-def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def run() -> None:
-        budget = 512 * 1024
-        keepalive = b": " + b"k" * (32 * 1024 - 4) + b"\n\n"
-        preludes: list[TrackingPrelude] = []
+def test_stream_prelude_has_no_total_ceiling_and_cleans_spill() -> None:
+    async def run() -> bytes:
+        prelude = client_module._StreamPrelude(memory_limit=64)
+        payload = b"x" * (2 * 1024 * 1024)
+        prelude.write(payload)
 
-        class TrackingPrelude(client_module._StreamPrelude):
-            def __init__(self) -> None:
-                super().__init__(memory_limit=64, total_limit=budget)
-                self.physical_close_calls = 0
-                self.spill_observed = False
-                preludes.append(self)
+        assert prelude.spilled is True
+        assert prelude.stored_bytes == len(payload)
+        replayed = b"".join([chunk async for chunk in prelude.chunks()])
+        prelude.close()
+        assert prelude.closed is True
+        return replayed
 
-            def write(self, data: bytes) -> bool:
-                stored = super().write(data)
-                self.spill_observed = self.spill_observed or self.spilled
-                return stored
-
-            def close(self) -> None:
-                if not self.closed:
-                    self.physical_close_calls += 1
-                super().close()
-
-        class Content:
-            async def read(self, _size: int) -> bytes:
-                return keepalive
-
-        class Response:
-            status = 200
-            headers = {"Content-Type": "text/event-stream"}
-            content = Content()
-
-            def close(self) -> None:
-                return None
-
-        class Session:
-            async def post(self, *_args, **_kwargs):
-                return Response()
-
-            async def close(self) -> None:
-                return None
-
-        source = SourceRecord(
-            source_id="src_budget001",
-            vendor="custom",
-            protocol="openai_responses",
-            base_url="https://budget.example.test/v1",
-            credential_ref="cred_budget001",
-            allowed_origins=("codex",),
-            model_ids=("model-a",),
-            prefix="budget",
-        )
-        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
-        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
-        client = EngineClient(
-            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
-        )
-
-        handle = await client.invoke(source, "model-a", {}, stream=True)
-        outcome = await handle.outcome()
-
-        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
-        assert outcome.stream_started is False
-        assert preludes[0].spill_observed is True
-        assert preludes[0].stored_bytes <= budget
-        assert preludes[0].closed is True
-        assert preludes[0].physical_close_calls == 1
-
-    asyncio.run(run())
+    assert asyncio.run(run()) == b"x" * (2 * 1024 * 1024)
 
 
-def test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MH-USAGE-005, review 4965677908: the vendor billed the frame that broke the buffer.
+def test_usage_is_observed_and_replayed_after_prelude_spill() -> None:
+    message_start = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+        b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+    )
+    filler = b": " + b"k" * 4090 + b"\n\n"
+    prelude = client_module._StreamPrelude(memory_limit=64)
+    state = client_module.ProtocolSSEState("anthropic")
 
-    Every earlier round of this class was a reader that could not reach an
-    observed fact. This one is the producer: the socket delivered a complete
-    usage report, and the only reason it would go unrecorded is that the prelude
-    had no room left to keep a replay of the bytes carrying it. Whether we can
-    store a copy is not a question about what the upstream said.
-    """
+    client_module._received(filler, prelude=prelude, wire_state=state)
+    client_module._received(message_start, prelude=prelude, wire_state=state)
 
-    async def run() -> None:
-        message_start = (
-            b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
-            b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
-        )
-        filler = b": " + b"k" * 4090 + b"\n\n"
-        budget = len(filler) + len(message_start) - 1
-        reads = iter([filler, message_start])
+    async def replay() -> bytes:
+        return b"".join([chunk async for chunk in prelude.chunks()])
 
-        class TrackingPrelude(client_module._StreamPrelude):
-            def __init__(self) -> None:
-                super().__init__(memory_limit=budget, total_limit=budget)
-
-        class Content:
-            async def read(self, _size: int) -> bytes:
-                return next(reads)
-
-        class Response:
-            status = 200
-            headers = {"Content-Type": "text/event-stream"}
-            content = Content()
-
-            def close(self) -> None:
-                return None
-
-        class Session:
-            async def post(self, *_args, **_kwargs):
-                return Response()
-
-            async def close(self) -> None:
-                return None
-
-        source = SourceRecord(
-            source_id="src_overflowbill",
-            vendor="anthropic",
-            protocol="anthropic",
-            base_url="https://overflow.example.test",
-            credential_ref="cred_overflowbill",
-            allowed_origins=("codex",),
-            model_ids=("claude-sonnet-4-5",),
-            prefix="overflow",
-        )
-        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
-        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
-        client = EngineClient(
-            EngineConnection("http://127.0.0.1:15222", "management", "gateway")
-        )
-
-        handle = await client.invoke(source, "claude-sonnet-4-5", {}, stream=True)
-        outcome = await handle.outcome()
-
-        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
-        assert outcome.stream_started is False
-        assert outcome.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
-
-    asyncio.run(run())
+    assert prelude.spilled is True
+    assert asyncio.run(replay()) == filler + message_start
+    assert state.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
+    prelude.close()
 
 
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
@@ -1635,7 +1525,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload['model'].endswith('/oversized-non-stream'):
-            body = b'{{"payload":"too-large"}}'
+            body = b'{{"payload":"' + b'x' * (17 * 1024 * 1024) + b'"}}'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
@@ -4738,14 +4628,12 @@ def test_engine_client_times_out_before_completion(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "response_limit"),
-    [("invalid-json", 1024), ("oversized-non-stream", 8)],
+    "model_id",
+    ["invalid-json", "oversized-non-stream"],
 )
-def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
+def test_engine_client_non_stream_response_size_does_not_change_protocol_outcome(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     model_id: str,
-    response_limit: int,
 ) -> None:
     async def run() -> None:
         supervisor, store = _fixture_supervisor(tmp_path / model_id)
@@ -4757,7 +4645,6 @@ def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
         source = store.get_source("src_fixture123")
         assert source is not None
         connection = supervisor.ensure_running()
-        monkeypatch.setattr(client_module, "_MAX_RESPONSE_BYTES", response_limit)
 
         handle = await EngineClient(connection).invoke(
             source,
@@ -4766,30 +4653,34 @@ def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
             stream=False,
         )
 
-        assert (handle.stream is not None) is (model_id == "invalid-json")
-        if handle.stream is not None:
-            assert b"".join([chunk async for chunk in handle.stream])
+        assert handle.stream is not None
+        assert b"".join([chunk async for chunk in handle.stream])
         outcome = await handle.outcome()
-        assert outcome.kind is (
-            RawOutcomeKind.SUCCESS if model_id == "invalid-json" else RawOutcomeKind.PROTOCOL_ERROR
-        )
+        assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.http_status == 200
-        assert outcome.stream_started is (model_id == "invalid-json")
+        assert outcome.stream_started is True
         supervisor.stop()
 
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("case", STREAM_TRANSPORT_BOUNDARIES, ids=lambda case: case["name"])
-def test_engine_client_applies_sse_limits_only_to_streams(
+def test_engine_client_preserves_large_valid_responses(
     monkeypatch: pytest.MonkeyPatch,
     case: dict[str, object],
 ) -> None:
     async def run() -> None:
+        large_value = b"x" * (2 * 1024 * 1024)
         payload = (
-            b'{"payload":"' + b"x" * (SSE_MAX_LINE_BYTES + 1) + b'"}'
+            b'{"output":[{"content":"' + large_value + b'"}]}'
             if not case["stream"]
-            else b"data: " + b"x" * (SSE_MAX_LINE_BYTES + 1)
+            else (
+                b"event: response.image_generation_call.partial_image\n"
+                b'data: {"type":"response.image_generation_call.partial_image",'
+                b'"partial_image_b64":"'
+                + large_value
+                + b'"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n'
+            )
         )
 
         class Content:
@@ -4822,7 +4713,7 @@ def test_engine_client_applies_sse_limits_only_to_streams(
         source = SourceRecord(
             source_id="src_fixture123",
             vendor="custom",
-            protocol="openai_chat",
+            protocol="openai_responses",
             base_url="https://api.example.test/v1",
             credential_ref="cred_fixture123",
             allowed_origins=(),
@@ -4833,15 +4724,59 @@ def test_engine_client_applies_sse_limits_only_to_streams(
             source, "model-a", {}, stream=bool(case["stream"])
         )
 
-        if case["stream"]:
-            assert handle.stream is None
-            chunks = []
-        else:
-            assert handle.stream is not None
-            chunks = [chunk async for chunk in handle.stream]
+        assert handle.stream is not None
+        chunks = [chunk async for chunk in handle.stream]
         outcome = await handle.outcome()
         assert outcome.kind.value == case["expected_outcome"]
-        assert chunks == ([payload] if outcome.kind is RawOutcomeKind.SUCCESS else [])
+        assert b"".join(chunks) == payload
+
+    asyncio.run(run())
+
+
+def test_model_discovery_accepts_large_valid_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        payload = json.dumps(
+            {"data": [{"id": "model-a", "metadata": "x" * (5 * 1024 * 1024)}]},
+            separators=(",", ":"),
+        ).encode()
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+
+        assert await client_module.probe_models(
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            secret="secret",
+        ) == ("model-a",)
 
     asyncio.run(run())
 

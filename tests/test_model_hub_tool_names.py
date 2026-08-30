@@ -160,3 +160,19 @@ def test_streaming_rewriter_drains_unterminated_wire_bytes_without_loss() -> Non
 
     assert rewriter.feed(partial) == b""
     assert rewriter.finish() == partial
+
+
+def test_streaming_rewriter_does_not_reject_large_content_frames() -> None:
+    payload = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": "x" * (2 * 1024 * 1024)},
+            }
+        ]
+    }
+    frame = b"data: " + json.dumps(payload, separators=(",", ":")).encode() + b"\n\n"
+    rewriter = StreamingToolNameRewriter({"avibe_todo_write": "todowrite"})
+
+    assert rewriter.feed(frame) == frame
+    assert rewriter.finish() == b""

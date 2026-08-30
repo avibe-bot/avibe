@@ -612,11 +612,19 @@ The complete observation surface is limited to these facts:
    event lifecycle.
 3. EOF without a recognized terminal is the existing network family and is
    non-punitive to durable Source health.
-4. `stream_started` flips only when content, refusal, or tool-call model output crosses
-   the caller boundary. Role metadata, transport frames, and error frames do not flip it.
+4. `stream_started` flips only when content, refusal, tool-call, or image-generation
+   model output crosses the caller boundary. Role metadata, transport frames, and error
+   frames do not flip it.
 5. The observer performs only the framing normalization required to see those facts:
-   stripping an initial UTF-8 BOM and splitting bounded SSE lines and events across CRLF,
-   LF, or CR boundaries.
+   stripping an initial UTF-8 BOM and splitting SSE lines and events across CRLF, LF, or
+   CR boundaries. It may elide large model-authored string values from its private
+   metadata copy, but the original bytes continue downstream unchanged.
+
+Response size is not a protocol-validity rule. Model Hub applies no local byte ceiling to
+successful upstream response bodies, SSE lines or frames, pre-output replay, or model
+inventory responses. Request admission limits remain separate request-side policy. Memory
+thresholds may spill retained replay bytes to a temporary file, but must never truncate,
+reject, reclassify, or trigger fallback for an otherwise valid response.
 
 Everything else is forwarded and ignored for settlement. Model Hub does not judge
 `sequence_number` presence or order; completeness of the event vocabulary; lifecycle

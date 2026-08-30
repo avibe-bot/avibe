@@ -10,16 +10,15 @@ import pytest
 
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
-    SSE_MAX_FRAME_BYTES,
-    SSE_MAX_LINE_BYTES,
+    SSE_OBSERVATION_STRING_BYTES,
     SSE_LINE_ENDINGS,
-    SSEFrameLimitError,
     SSEFrameTokenizer,
     ProtocolObservation,
     ProtocolTerminalEnvelope,
     ProtocolSSEState,
     ProtocolModelOutputEnvelope,
     ProtocolStreamTaxonomy,
+    ProtocolUsageReport,
     observe_protocol_response,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
@@ -181,6 +180,13 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
         "response.function_call_arguments.delta",
         ("type",),
         "response.function_call_arguments.delta",
+        False,
+    ),
+    (
+        "openai_responses",
+        "response.image_generation_call.partial_image",
+        ("type",),
+        "response.image_generation_call.partial_image",
         False,
     ),
     ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
@@ -1305,15 +1311,32 @@ def test_responses_terminal_trust_roots_ignore_unofficial_error_locations(
     assert "permission_error" not in candidates
 
 
-def test_sse_tokenizer_bounds_lines_and_frames() -> None:
-    with pytest.raises(SSEFrameLimitError, match="line"):
-        SSEFrameTokenizer().feed(b"x" * (SSE_MAX_LINE_BYTES + 1))
+def test_exact_sse_tokenizer_accepts_large_protocol_frames() -> None:
     tokenizer = SSEFrameTokenizer()
-    line = b"x" * SSE_MAX_LINE_BYTES + b"\n"
-    for _ in range(SSE_MAX_FRAME_BYTES // SSE_MAX_LINE_BYTES):
-        tokenizer.feed(line)
-    with pytest.raises(SSEFrameLimitError, match="frame"):
-        tokenizer.feed(b"x")
+    data = b"x" * (2 * 1024 * 1024)
+
+    assert tokenizer.feed(b"data: " + data + b"\n\n") == (b"data: " + data,)
+
+
+def test_large_image_event_is_observed_without_retaining_its_base64_body() -> None:
+    state = ProtocolSSEState("openai_responses")
+    event_type = b"response.image_generation_call.partial_image"
+    state.observe(
+        b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","partial_image_b64":"'
+    )
+
+    assert state.model_output_started is True
+    for _ in range(32):
+        state.observe(b"x" * (64 * 1024))
+        assert state.tokenizer.retained_bytes < SSE_OBSERVATION_STRING_BYTES + 1024
+
+    state.observe(
+        b'"}\n\nevent: response.completed\ndata: {"type":"response.completed",'
+        b'"response":{"usage":{"input_tokens":4,"output_tokens":7}}}\n\n'
+    )
+
+    assert state.terminal_outcome == "served"
+    assert state.usage == ProtocolUsageReport(input_tokens=4, output_tokens=7)
 
 
 @pytest.mark.parametrize("split_at", (1, 2, 3))

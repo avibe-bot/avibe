@@ -8,27 +8,19 @@ from typing import Callable, Final, Literal, Mapping
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
-# One line may fill the runtime's 64 KiB transport read; one logical event may
-# span four such reads. Both retained buffers remain bounded under hostile input.
-SSE_MAX_LINE_BYTES: Final = 64 * 1024
-SSE_MAX_FRAME_BYTES: Final = 256 * 1024
-# The pre-output owner shares the buffered-response ceiling; valid preludes are smaller.
-SSE_MAX_PRELUDE_BYTES: Final = 16 * 1024 * 1024
+# Wire observation keeps only a prefix of each JSON string. This is not a
+# protocol or response limit: the original bytes continue downstream unchanged.
+SSE_OBSERVATION_STRING_BYTES: Final = 16 * 1024
 UTF8_BOM: Final = b"\xef\xbb\xbf"
-
-
-class SSEFrameLimitError(ValueError):
-    """Raised when retained SSE parser state crosses a configured bound."""
 
 
 @dataclass
 class SSEFrameTokenizer:
-    """Incrementally split SSE frames across CRLF, LF, and CR line endings."""
+    """Incrementally split exact SSE frames for response mutation."""
 
     _line: bytearray = field(default_factory=bytearray)
     _frame_lines: list[bytes] = field(default_factory=list)
     _after_cr: bool = False
-    _frame_size: int = 0
     _stream_prefix: bytearray = field(default_factory=bytearray)
     _stream_started: bool = False
 
@@ -54,11 +46,6 @@ class SSEFrameTokenizer:
                 self._finish_line(frames)
             else:
                 self._line.append(byte)
-                if len(self._line) > SSE_MAX_LINE_BYTES:
-                    raise SSEFrameLimitError("SSE line exceeds the configured limit")
-                self._frame_size += 1
-                if self._frame_size > SSE_MAX_FRAME_BYTES:
-                    raise SSEFrameLimitError("SSE frame exceeds the configured limit")
         return tuple(frames)
 
     def discard_partial_frame(self) -> bool | None:
@@ -69,7 +56,6 @@ class SSEFrameTokenizer:
         line_open = bool(self._line)
         self._line.clear()
         self._frame_lines.clear()
-        self._frame_size = 0
         self._after_cr = False
         self._stream_prefix.clear()
         return line_open
@@ -83,7 +69,6 @@ class SSEFrameTokenizer:
             pending = b"\n".join((*self._frame_lines, bytes(self._line)))
         self._line.clear()
         self._frame_lines.clear()
-        self._frame_size = 0
         self._after_cr = False
         self._stream_prefix.clear()
         return pending
@@ -97,7 +82,218 @@ class SSEFrameTokenizer:
         if self._frame_lines:
             frames.append(b"\n".join(self._frame_lines))
             self._frame_lines.clear()
-            self._frame_size = 0
+
+
+@dataclass(frozen=True)
+class SSEObservedFrame:
+    """The protocol metadata retained from one SSE frame."""
+
+    event_name: str | None
+    data: bytes | None
+
+
+@dataclass
+class _JSONObservationBuffer:
+    """Keep JSON structure while eliding large string bodies from observation."""
+
+    _payload: bytearray = field(default_factory=bytearray)
+    _in_string: bool = False
+    _escaped: bool = False
+    _string_start: int = 0
+    _string_bytes: int = 0
+    _string_elided: bool = False
+
+    @property
+    def retained_bytes(self) -> int:
+        return len(self._payload)
+
+    def feed_byte(self, byte: int) -> None:
+        if not self._in_string:
+            self._payload.append(byte)
+            if byte == 0x22:
+                self._in_string = True
+                self._escaped = False
+                self._string_start = len(self._payload)
+                self._string_bytes = 0
+                self._string_elided = False
+            return
+
+        if self._string_elided:
+            if self._escaped:
+                self._escaped = False
+            elif byte == 0x5C:
+                self._escaped = True
+            elif byte == 0x22:
+                self._payload.append(byte)
+                self._in_string = False
+            return
+
+        if not self._escaped and byte == 0x22:
+            self._payload.append(byte)
+            self._in_string = False
+            return
+
+        self._payload.append(byte)
+        self._string_bytes += 1
+        if self._escaped:
+            self._escaped = False
+        elif byte == 0x5C:
+            self._escaped = True
+        if self._string_bytes > SSE_OBSERVATION_STRING_BYTES:
+            del self._payload[self._string_start :]
+            self._payload.extend(b"__avibe_observation_elided__")
+            self._string_elided = True
+
+    def feed_separator(self) -> None:
+        self.feed_byte(0x0A)
+
+    def take(self) -> bytes:
+        payload = bytes(self._payload)
+        self._payload.clear()
+        self._in_string = False
+        self._escaped = False
+        self._string_start = 0
+        self._string_bytes = 0
+        self._string_elided = False
+        return payload
+
+
+@dataclass
+class SSEObservationTokenizer:
+    """Observe SSE metadata without retaining model-authored string bodies."""
+
+    _field: bytearray = field(default_factory=bytearray)
+    _field_too_long: bool = False
+    _line_kind: str | None = None
+    _value_started: bool = False
+    _skip_value_space: bool = False
+    _line_started: bool = False
+    _frame_started: bool = False
+    _event_value: bytearray = field(default_factory=bytearray)
+    _current_event_name: str | None = None
+    _has_data: bool = False
+    _data: _JSONObservationBuffer = field(default_factory=_JSONObservationBuffer)
+    _after_cr: bool = False
+    _stream_prefix: bytearray = field(default_factory=bytearray)
+    _stream_started: bool = False
+
+    @property
+    def current_event_name(self) -> str | None:
+        return self._current_event_name
+
+    @property
+    def retained_bytes(self) -> int:
+        return len(self._field) + len(self._event_value) + self._data.retained_bytes
+
+    def feed(self, chunk: bytes) -> tuple[SSEObservedFrame, ...]:
+        if not self._stream_started:
+            self._stream_prefix.extend(chunk)
+            prefix = bytes(self._stream_prefix)
+            if len(prefix) < len(UTF8_BOM) and UTF8_BOM.startswith(prefix):
+                return ()
+            self._stream_started = True
+            self._stream_prefix.clear()
+            chunk = prefix[len(UTF8_BOM) :] if prefix.startswith(UTF8_BOM) else prefix
+
+        frames: list[SSEObservedFrame] = []
+        for byte in chunk:
+            if self._after_cr:
+                self._after_cr = False
+                if byte == 0x0A:
+                    continue
+            if byte == 0x0D:
+                self._finish_line(frames)
+                self._after_cr = True
+            elif byte == 0x0A:
+                self._finish_line(frames)
+            else:
+                self._consume_byte(byte)
+        return tuple(frames)
+
+    def discard_partial_frame(self) -> bool | None:
+        if not self._frame_started and not self._line_started:
+            return None
+        line_open = self._line_started
+        self._reset_line()
+        self._reset_frame()
+        self._after_cr = False
+        self._stream_prefix.clear()
+        return line_open
+
+    def _consume_byte(self, byte: int) -> None:
+        self._line_started = True
+        self._frame_started = True
+        if not self._value_started:
+            if byte == 0x3A:
+                self._value_started = True
+                field_name = bytes(self._field) if not self._field_too_long else b""
+                self._line_kind = (
+                    "event" if field_name == b"event" else "data" if field_name == b"data" else None
+                )
+                self._skip_value_space = True
+                if self._line_kind == "data":
+                    self._start_data_line()
+                return
+            if len(self._field) < len(b"event"):
+                self._field.append(byte)
+            else:
+                self._field_too_long = True
+            return
+
+        if self._skip_value_space:
+            self._skip_value_space = False
+            if byte == 0x20:
+                return
+        if self._line_kind == "event":
+            self._event_value.append(byte)
+        elif self._line_kind == "data":
+            self._data.feed_byte(byte)
+
+    def _finish_line(self, frames: list[SSEObservedFrame]) -> None:
+        if not self._line_started:
+            if self._frame_started:
+                frames.append(
+                    SSEObservedFrame(
+                        event_name=self._current_event_name,
+                        data=self._data.take() if self._has_data else None,
+                    )
+                )
+                self._reset_frame()
+            return
+
+        if not self._value_started and not self._field_too_long:
+            field_name = bytes(self._field)
+            if field_name == b"data":
+                self._start_data_line()
+            elif field_name == b"event":
+                self._line_kind = "event"
+        if self._line_kind == "event":
+            try:
+                self._current_event_name = self._event_value.decode("utf-8")
+            except UnicodeDecodeError:
+                self._current_event_name = None
+        self._reset_line()
+
+    def _start_data_line(self) -> None:
+        if self._has_data:
+            self._data.feed_separator()
+        self._has_data = True
+
+    def _reset_line(self) -> None:
+        self._field.clear()
+        self._field_too_long = False
+        self._line_kind = None
+        self._value_started = False
+        self._skip_value_space = False
+        self._line_started = False
+        self._event_value.clear()
+
+    def _reset_frame(self) -> None:
+        self._frame_started = False
+        self._current_event_name = None
+        self._has_data = False
+        if self._data.retained_bytes:
+            self._data.take()
 
 
 def parse_sse_frame(frame: bytes) -> tuple[str | None, bytes | None]:
@@ -399,6 +595,12 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 ("type",),
                 "response.function_call_arguments.delta",
             ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/image-generation-call/partial-image
+                "response.image_generation_call.partial_image",
+                ("type",),
+                "response.image_generation_call.partial_image",
+            ),
         ),
         success_literal=None,
         sequence_number_path=("sequence_number",),
@@ -512,17 +714,20 @@ def _selector_matches(
 def is_protocol_model_output(
     protocol: str,
     event_name: str | None,
-    payload: Mapping[str, object],
+    payload: Mapping[str, object] | None,
 ) -> bool:
     """Return the sole table-backed first-model-output boundary fact."""
 
     return any(
         envelope.event_name == event_name
-        and _selector_matches(
-            payload,
-            selector_path=envelope.selector_path,
-            selector_value=envelope.selector_value,
-            require_nonempty=envelope.require_nonempty,
+        and (
+            payload is None
+            or _selector_matches(
+                payload,
+                selector_path=envelope.selector_path,
+                selector_value=envelope.selector_value,
+                require_nonempty=envelope.require_nonempty,
+            )
         )
         for envelope in PROTOCOL_STREAM_TAXONOMY[protocol].model_output_envelopes
     )
@@ -596,7 +801,13 @@ def observe_protocol_response(
         return ProtocolObservation(outcome="served")
     payload = _try_parse_payload(data)
     if not isinstance(payload, dict):
-        return ProtocolObservation(outcome="served" if not streamed else None)
+        if not streamed:
+            return ProtocolObservation(outcome="served")
+        return ProtocolObservation(
+            model_output_started=(
+                event_name is not None and is_protocol_model_output(protocol, event_name, None)
+            )
+        )
 
     usage = extract_protocol_usage(protocol, payload)
 
@@ -662,7 +873,7 @@ class ProtocolSSEState:
     """Observe settlement facts without validating the upstream protocol stream."""
 
     protocol: str
-    tokenizer: SSEFrameTokenizer = field(default_factory=SSEFrameTokenizer)
+    tokenizer: SSEObservationTokenizer = field(default_factory=SSEObservationTokenizer)
     terminal_outcome: StreamTerminalOutcome | None = None
     error_payload: bytes | None = None
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
@@ -671,7 +882,15 @@ class ProtocolSSEState:
     usage: ProtocolUsageReport | None = None
 
     def observe(self, chunk: bytes) -> None:
-        for frame in self.tokenizer.feed(chunk):
+        frames = self.tokenizer.feed(chunk)
+        current_event_name = self.tokenizer.current_event_name
+        if current_event_name is not None and is_protocol_model_output(
+            self.protocol,
+            current_event_name,
+            None,
+        ):
+            self.model_output_started = True
+        for frame in frames:
             self._observe_frame(frame)
 
     def invalidate_partial_frame(self) -> bytes:
@@ -703,15 +922,14 @@ class ProtocolSSEState:
 
         return self.terminal_outcome == "served" or self.model_output_started
 
-    def _observe_frame(self, frame: bytes) -> None:
+    def _observe_frame(self, frame: SSEObservedFrame) -> None:
         if self.terminal_outcome is not None:
             return
-        event_name, data = parse_sse_frame(frame)
         observation = observe_protocol_response(
             self.protocol,
             streamed=True,
-            event_name=event_name,
-            data=data,
+            event_name=frame.event_name,
+            data=frame.data,
             previous_sequence_number=self.last_sequence_number,
         )
         if observation.model_output_started:

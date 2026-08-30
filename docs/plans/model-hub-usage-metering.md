@@ -692,6 +692,13 @@ then reaches `ended()`, which has attached the wire's report to the outcome sinc
 ordering; `test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered`
 drives it, with the overflowing chunk carrying a complete `message_start`.
 
+**Later correction (2026-08-30).** The 16 MiB refusal was itself an invalid protocol
+rule: official response schemas do not impose that byte ceiling, and image-generation
+SSE events can legitimately carry much larger Base64 strings. The prelude now spills to
+a temporary file without a total response ceiling, while the wire observer keeps only a
+small metadata projection and never changes the forwarded bytes. Observation-before-copy
+remains the owner ordering, but copy can no longer refuse a valid response for its size.
+
 **Class D: five copies of one durability property.** The review flagged
 `usage.py:_write` for leaving its temporary file behind when the replacement raised. The
 members were enumerable immediately: `revocations.py`, `events.py`, `usage.py`,
