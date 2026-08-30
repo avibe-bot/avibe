@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -15,7 +16,7 @@ import zipfile
 
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
-from packaging.utils import canonicalize_name
+from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 import pytest
 import yaml
@@ -154,6 +155,35 @@ def _parent_site_packages() -> list[Path]:
     ]
     assert paths
     return paths
+
+
+def _provision_build_requirement_wheelhouse(pyprojects: tuple[dict[str, Any], ...], directory: Path) -> None:
+    requirements = sorted(
+        {
+            value
+            for pyproject in pyprojects
+            for value in pyproject["build-system"]["requires"]
+        }
+    )
+    parsed = [Requirement(value) for value in requirements]
+    directory.mkdir()
+    _run(
+        Path(sys.executable),
+        "-m",
+        "pip",
+        "download",
+        "--disable-pip-version-check",
+        "--only-binary=:all:",
+        "--dest",
+        str(directory),
+        *requirements,
+        cwd=directory.parent,
+    )
+
+    wheels = list(directory.glob("*.whl"))
+    assert wheels
+    downloaded_names = {canonicalize_name(parse_wheel_filename(wheel.name)[0]) for wheel in wheels}
+    assert {canonicalize_name(requirement.name) for requirement in parsed} <= downloaded_names
 
 
 def _run(python: Path, *args: str, cwd: Path) -> None:
@@ -512,13 +542,18 @@ def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> 
     memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
     core_sdist = _sdist_path(core_wheel, "avibe_os")
     memory_sdist = _sdist_path(memory_wheel, "avibe_memory")
+    core_pyproject = _sdist_pyproject(core_wheel, "avibe_os")
+    memory_pyproject = _sdist_pyproject(memory_wheel, "avibe_memory")
     core_version = Version(_sdist_metadata(core_wheel, "avibe_os")["Version"])
     decoy_version = Version("3.0.99rc2")
     assert decoy_version > core_version
 
-    links = tmp_path / "links"
-    links.mkdir()
-    _write_minimal_wheel(links, "avibe-memory", str(decoy_version))
+    package_links = tmp_path / "package-links"
+    package_links.mkdir()
+    shutil.copy2(memory_sdist, package_links / memory_sdist.name)
+    _write_minimal_wheel(package_links, "avibe-memory", str(decoy_version))
+    build_links = tmp_path / "build-links"
+    _provision_build_requirement_wheelhouse((core_pyproject, memory_pyproject), build_links)
 
     environment = tmp_path / "sdist-resolver"
     subprocess.run(
@@ -534,24 +569,28 @@ def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> 
         capture_output=True,
         text=True,
     ).stdout.strip()
-    Path(child_site_packages, "avibe-test-build-environment.pth").write_text(
+    Path(child_site_packages, "avibe-test-runtime-dependencies.pth").write_text(
         "".join(f"{path}\n" for path in _parent_site_packages()),
         encoding="utf-8",
     )
 
-    _run(
-        python,
+    install_command = [
         "-m",
         "pip",
         "install",
         "--disable-pip-version-check",
-        "--no-build-isolation",
         "--no-index",
         "--find-links",
-        str(memory_sdist.parent),
+        str(package_links),
         "--find-links",
-        str(links),
+        str(build_links),
         f"avibe-os[memory] @ {core_sdist.as_uri()}",
+    ]
+    assert "--no-build-isolation" not in install_command
+    assert install_command.count("--find-links") == 2
+    _run(
+        python,
+        *install_command,
         cwd=tmp_path,
     )
     _run(
