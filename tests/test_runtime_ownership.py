@@ -606,7 +606,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("snapshot", "expected", "dead_expected"),
+    ("snapshot", "expected", "drained_expected", "dead_expected"),
     (
         (
             RuntimeTargetOwnershipSnapshot(
@@ -618,6 +618,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 sessionless_fallback_run_ids=(),
                 disposition=SessionRuntimeDisposition.UNKNOWN,
             ),
+            True,
             True,
             True,
         ),
@@ -633,6 +634,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
             ),
             True,
             True,
+            True,
         ),
         (
             RuntimeTargetOwnershipSnapshot(
@@ -645,6 +647,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 disposition=SessionRuntimeDisposition.ACTIVE,
                 reasons=("run:run-a:active",),
             ),
+            True,
             True,
             False,
         ),
@@ -670,6 +673,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
             ),
             False,
             False,
+            False,
         ),
         (
             RuntimeTargetOwnershipSnapshot(
@@ -693,15 +697,18 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
             ),
             True,
             False,
+            False,
         ),
     ),
 )
 def test_transport_replacement_gate_tracks_only_durable_native_effect_owners(
     snapshot: RuntimeTargetOwnershipSnapshot,
     expected: bool,
+    drained_expected: bool,
     dead_expected: bool,
 ) -> None:
     assert snapshot.blocks_transport_replacement is expected
+    assert snapshot.blocks_transport_replacement_after_turn_drain is drained_expected
     assert snapshot.blocks_dead_transport_replacement is dead_expected
 
 

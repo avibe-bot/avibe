@@ -292,6 +292,9 @@ def test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner(
         def set_runtime_activation_retire(self, callback) -> None:
             self.retire_activation = callback
 
+        def runtime_has_active_turns(self) -> bool:
+            return False
+
     server = _Server()
     opencode = object.__new__(OpenCodeAgent)
     opencode.controller = SimpleNamespace(runtime_activation=registry)
@@ -299,6 +302,8 @@ def test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner(
         SimpleNamespace(
             blocks_reclamation=True,
             blocks_transport_replacement=False,
+            blocks_transport_replacement_after_turn_drain=False,
+            has_active_turn_evidence=False,
         ),
     )
 
@@ -318,6 +323,9 @@ def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
         def set_runtime_activation_retire(self, callback) -> None:
             self.retire_activation = callback
 
+        def runtime_has_active_turns(self) -> bool:
+            return True
+
     server = _Server()
     opencode = object.__new__(OpenCodeAgent)
     opencode.controller = SimpleNamespace(runtime_activation=registry)
@@ -325,6 +333,8 @@ def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
         SimpleNamespace(
             blocks_reclamation=True,
             blocks_transport_replacement=True,
+            blocks_transport_replacement_after_turn_drain=False,
+            has_active_turn_evidence=True,
         ),
     )
 
@@ -333,6 +343,39 @@ def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
     assert identity is not None
     assert not server.retire_activation(False)
     assert registry.is_current(identity)
+
+
+def test_mh_runtime_007_opencode_overlay_restart_ignores_drained_durable_active_turn() -> None:
+    """MH-RUNTIME-007: a stale durable Turn cannot outvote the server drain."""
+
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+        def runtime_has_active_turns(self) -> bool:
+            return False
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode.runtime_ownership_snapshots = lambda: (
+        SimpleNamespace(
+            blocks_reclamation=True,
+            blocks_transport_replacement=True,
+            blocks_transport_replacement_after_turn_drain=False,
+            has_active_turn_evidence=True,
+        ),
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert server.retire_activation(False)
+    assert not registry.is_current(identity)
 
 
 def test_session_binding_lookup_failure_is_not_resource_absence() -> None:

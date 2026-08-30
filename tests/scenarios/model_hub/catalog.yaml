@@ -166,7 +166,7 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics
   - id: MH-RUNTIME-007
-    name: An OpenCode overlay change retires a pre-native owner without replacing an active native Turn
+    name: An OpenCode overlay change retires drained durable owners without replacing an active native Turn
     status: covered
     kind: concurrency
     layer: unit

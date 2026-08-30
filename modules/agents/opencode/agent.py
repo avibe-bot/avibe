@@ -738,10 +738,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if force:
                 return True
             snapshots = self.runtime_ownership_snapshots()
+            live_native_turn = server.runtime_has_active_turns()
             return bool(
                 snapshots is not None
                 and all(
-                    not snapshot.blocks_transport_replacement
+                    not snapshot.blocks_transport_replacement_after_turn_drain
+                    and not (
+                        live_native_turn
+                        and snapshot.has_active_turn_evidence
+                    )
                     for snapshot in snapshots
                 )
             )
