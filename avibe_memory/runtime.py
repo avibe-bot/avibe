@@ -85,6 +85,8 @@ from vibe.memory_project_ids import (
 )
 from avibe_memory.store import MemoryStore, is_principal_id
 from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+from core.memory_adapter import DisabledMemoryAdapter, MemoryCaptureAdapter
+from avibe_memory.capture_adapter import EnabledMemoryAdapter
 from avibe_memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
@@ -298,6 +300,9 @@ def create_memory_runtime(
     processing_event: ProcessingEvent | None = None,
     insight_reader: MemoryInsightReader | None = None,
     on_config_settled: Callable[[MemoryConfig], None] | None = None,
+    is_enabled_user: Callable[[str, str], bool] | None = None,
+    lifecycle_snapshot_matches: Callable[[str, object], bool] | None = None,
+    acquire_lifecycle_admission: Callable[[str], Awaitable[object]] | None = None,
 ) -> MemoryRuntime:
     """Construct Memory without allowing store failures to stop Avibe.
 
@@ -313,6 +318,9 @@ def create_memory_runtime(
         processing_event=processing_event,
         insight_reader=insight_reader,
         on_config_settled=on_config_settled,
+        is_enabled_user=is_enabled_user,
+        lifecycle_snapshot_matches=lifecycle_snapshot_matches,
+        acquire_lifecycle_admission=acquire_lifecycle_admission,
     )
 
 
@@ -330,6 +338,9 @@ class MemoryRuntime:
         processing_event: ProcessingEvent | None = None,
         insight_reader: MemoryInsightReader | None = None,
         on_config_settled: Callable[[MemoryConfig], None] | None = None,
+        is_enabled_user: Callable[[str, str], bool] | None = None,
+        lifecycle_snapshot_matches: Callable[[str, object], bool] | None = None,
+        acquire_lifecycle_admission: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._config = config
         self._wake_config = deepcopy(config)
@@ -347,6 +358,12 @@ class MemoryRuntime:
         )
         self._processing_event = processing_event
         self._on_config_settled = on_config_settled
+        self._is_enabled_user = is_enabled_user
+        self._lifecycle_snapshot_matches = lifecycle_snapshot_matches
+        self._acquire_lifecycle_admission = acquire_lifecycle_admission
+        self._capture_adapter: MemoryCaptureAdapter = DisabledMemoryAdapter()
+        self._capture_task_factory: Callable[..., asyncio.Task[Any]] | None = None
+        self._compose_capture_adapter(None)
         # The controller-side port only talks to the private UDS. Credentials
         # enter an EverOSPort only inside the owned child probe/sidecar.
         self._provider = EverOSPort(self._socket_path)
@@ -419,6 +436,14 @@ class MemoryRuntime:
             return False
         self._store = opened
         self._module = module
+        self._compose_capture_adapter(module)
+        factory_loop = getattr(self._capture_task_factory, "__self__", None)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if factory_loop is running_loop and running_loop is not None:
+            self.start_capture_adapter()
         if self._legacy_clear_state_exists(opened):
             self._needs_repair_reason = "memory_legacy_recovery_required"
         if self._needs_repair_reason is not None:
@@ -574,6 +599,9 @@ class MemoryRuntime:
             processing_event=self._processing_event,
             insight_reader=self._insight_reader_override,
             on_config_settled=self._on_config_settled,
+            is_enabled_user=self._is_enabled_user,
+            lifecycle_snapshot_matches=self._lifecycle_snapshot_matches,
+            acquire_lifecycle_admission=self._acquire_lifecycle_admission,
         )
 
     def retire(self) -> None:
@@ -625,6 +653,50 @@ class MemoryRuntime:
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
         return self._module if self._module is not None else _UNAVAILABLE_MODULE
+
+    @property
+    def capture_adapter(self) -> MemoryCaptureAdapter:
+        return self._capture_adapter
+
+    def start_capture_adapter(
+        self,
+        *,
+        task_factory: Callable[..., asyncio.Task[Any]] | None = None,
+    ) -> bool:
+        if task_factory is not None:
+            if (
+                self._capture_task_factory is not None
+                and self._capture_task_factory != task_factory
+            ):
+                raise RuntimeError("Memory capture scheduler is already bound")
+            self._capture_task_factory = task_factory
+        start = getattr(self._capture_adapter, "start", None)
+        return bool(
+            callable(start)
+            and start(task_factory=self._capture_task_factory)
+        )
+
+    def _compose_capture_adapter(self, module: MemoryModule | None) -> None:
+        if isinstance(self._capture_adapter, EnabledMemoryAdapter):
+            if module is not None:
+                self._capture_adapter.bind_module(module)
+            return
+        if (
+            not callable(self._is_enabled_user)
+            or not callable(self._lifecycle_snapshot_matches)
+            or not callable(self._acquire_lifecycle_admission)
+        ):
+            return
+
+        self._capture_adapter = EnabledMemoryAdapter(
+            module=module,
+            principals=self,
+            is_enabled_user=self._is_enabled_user,
+            lifecycle_snapshot_matches=self._lifecycle_snapshot_matches,
+            acquire_lifecycle_admission=self._acquire_lifecycle_admission,
+            attachment_capture_status=self.attachment_capture_status,
+            attachment_config_generation=self.attachment_capture_config_generation,
+        )
 
     def _unavailable(self) -> MemoryStoreUnavailableError:
         """Build the error the read surfaces raise, chained to the real cause."""
@@ -778,6 +850,7 @@ class MemoryRuntime:
                     "state": "needs_repair" if self.needs_repair else "degraded",
                     "error": self._runtime_error or "memory_store_unavailable",
                 }
+            self.start_capture_adapter()
         async with self._reconcile_lock:
             self._activation_loop = asyncio.get_running_loop()
             if self._artifact_installing:
@@ -2018,6 +2091,7 @@ class MemoryRuntime:
                     "state": "needs_repair" if self.needs_repair else "degraded",
                     "error": self._runtime_error or "memory_store_unavailable",
                 }
+            self.start_capture_adapter()
             if self.needs_repair:
                 return {
                     "ok": False,
@@ -2276,6 +2350,14 @@ class MemoryRuntime:
         self._supervisor.begin_close()
         self._activation_loop = None
         self._advance_lifecycle_revision()
+
+        adapter = self._capture_adapter
+        quiesce = getattr(adapter, "quiesce_memory_capture_tasks", None)
+        if callable(quiesce):
+            quiesce()
+        cancel_capture = getattr(adapter, "cancel_memory_capture_tasks", None)
+        if callable(cancel_capture):
+            await cancel_capture()
 
         cancellation: asyncio.CancelledError | None = None
         wake = self._wake_task

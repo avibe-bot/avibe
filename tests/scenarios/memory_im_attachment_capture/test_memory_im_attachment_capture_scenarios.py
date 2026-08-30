@@ -51,7 +51,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
     harness = MemoryIMAttachmentScenarioHarness(tmp_path)
     asyncio.run(
         harness.capture(
-            text="Remember this screenshot",
+            text="记住这张截图",
             payloads={"screenshot.png": ("image/png", PNG_BYTES)},
         )
     )
@@ -61,6 +61,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
         {"name": "screenshot.png", "max_bytes": None}
     ]
     assert len(harness.provider.captures) == 1
+    assert harness.provider.captures[0].text == "记住这张截图"
     assert harness.provider.flushes == []
     assert harness.provider.observed_payloads == [PNG_BYTES]
     assert harness.provider.provider_invocations == ["multimodal_llm"]
@@ -549,7 +550,6 @@ def test_enabled_platform_attachment_fact_reaches_memory_admission(
         files=[file],
         is_dm=True,
         is_ordinary_attachment=_platform_attachment_fact(platform, file),
-        memory_enabled=True,
     )
 
     assert facts.is_ordinary_attachment is True

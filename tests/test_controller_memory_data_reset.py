@@ -38,6 +38,7 @@ class _Runtime:
         self.closed = False
         self.retired = False
         self.module = object()
+        self.capture_adapter = DisabledMemoryAdapter()
         self._artifact_installing = False
         self._close_proved = close_proved
         self._wake_result = wake_result or {"ok": True, "state": "running"}
@@ -48,6 +49,9 @@ class _Runtime:
 
     async def prepare_data_reset(self) -> None:
         self.events.append("reap")
+
+    def start_capture_adapter(self, **_options: object) -> bool:
+        return True
 
     def replacement(self, config: MemoryConfig) -> _Runtime:
         self.replacement_configs.append(config)

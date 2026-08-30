@@ -18,6 +18,7 @@ from avibe_memory.admission import (
     InboundTurnFacts,
 )
 from avibe_memory.attachments import workbench_capture_attachments
+from avibe_memory.im_attachments import select_memory_attachments
 from avibe_memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
@@ -83,7 +84,6 @@ def _facts(**overrides) -> InboundTurnFacts:
         "text": "ordinary text",
         "is_dm": True,
         "is_ordinary_text": True,
-        "memory_enabled": True,
     }
     return InboundTurnFacts(**{**defaults, **overrides})
 
@@ -216,7 +216,6 @@ def test_user_turns_capture_into_default_without_a_workdir() -> None:
 @pytest.mark.parametrize(
     "facts,reason",
     [
-        (_facts(memory_enabled=False), "memory_disabled"),
         (_facts(is_dm=False), "memory_access_denied"),
         (_facts(message_id=None), "memory_invalid_input"),
         (_facts(message_id=""), "memory_invalid_input"),
@@ -245,15 +244,6 @@ def test_a_non_bool_is_dm_never_admits_a_public_channel_turn(malformed: object) 
     assert admission.decide(facts) == CaptureSkipped(reason="memory_access_denied")
 
 
-@pytest.mark.parametrize("malformed", ["false", "true", "0", "1", 0, 1, None, "", []])
-def test_a_non_bool_memory_enabled_never_enables_capture(malformed: object) -> None:
-    """A mis-typed enablement flag must read as disabled, not as consent."""
-
-    assert _admission().decide(_facts(memory_enabled=malformed)) == CaptureSkipped(
-        reason="memory_disabled"
-    )
-
-
 @pytest.mark.parametrize("malformed", ["true", "1", 1, "ordinary"])
 def test_a_non_bool_is_ordinary_text_is_not_a_classification(malformed: object) -> None:
     """Only the surface's literal `True` counts as "this is ordinary human text"."""
@@ -266,7 +256,7 @@ def test_a_non_bool_is_ordinary_text_is_not_a_classification(malformed: object) 
 def test_a_literal_true_still_admits_after_strict_normalization() -> None:
     """The strict reading must not reject the well-behaved surfaces."""
 
-    assert isinstance(_admission().decide(_facts(is_dm=True, memory_enabled=True)), CaptureRequest)
+    assert isinstance(_admission().decide(_facts(is_dm=True)), CaptureRequest)
 
 
 def test_bound_slack_attachment_turn_selects_only_the_materialized_lease(
@@ -285,6 +275,7 @@ def test_bound_slack_attachment_turn_selects_only_the_materialized_lease(
                 attachment_lease=batch.lease,
                 attachment_capture_status="ready",
                 attachment_config_generation=1,
+                attachment_selection=select_memory_attachments(batch.lease),
             )
         )
     finally:
@@ -358,21 +349,22 @@ def test_im_attachment_only_turn_with_every_upload_filtered_is_not_captured() ->
     ],
 )
 def test_denied_attachment_turn_never_reads_the_lease(
-    monkeypatch: pytest.MonkeyPatch,
     overrides: dict[str, object],
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-002."""
 
-    monkeypatch.setattr(
-        "avibe_memory.admission.select_memory_attachments",
-        lambda _lease: pytest.fail("denied turn reached Memory attachment selection"),
-    )
+    class ForbiddenSelection:
+        @property
+        def attachments(self):
+            pytest.fail("denied turn reached Memory attachment selection")
+
     facts = _facts(
         **{
             "files": [object()],
             "is_ordinary_text": False,
             "is_ordinary_attachment": True,
             "attachment_capture_status": "ready",
+            "attachment_selection": ForbiddenSelection(),
             **overrides,
         }
     )
@@ -400,17 +392,7 @@ def test_not_configured_attachment_turn_keeps_safe_caption() -> None:
     assert request.attachments == ()
 
 
-def test_mixed_attachment_rejections_keep_caption(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "avibe_memory.admission.select_memory_attachments",
-        lambda _lease: SimpleNamespace(
-            attachments=(),
-            skipped=("file_too_large", "unsupported_type"),
-        ),
-    )
-
+def test_mixed_attachment_rejections_keep_caption() -> None:
     request = _admission().decide(
         _facts(
             text="safe caption",
@@ -420,61 +402,15 @@ def test_mixed_attachment_rejections_keep_caption(
             attachment_lease=object(),
             attachment_capture_status="ready",
             attachment_config_generation=1,
+            attachment_selection=SimpleNamespace(
+                attachments=(),
+                skipped=("file_too_large", "unsupported_type"),
+            ),
         )
     )
 
     assert isinstance(request, CaptureRequest)
     assert request.attachments == ()
-
-
-def test_unexpected_attachment_selection_failure_keeps_text(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Scenario: MEMORY-IM-ATTACH-004."""
-
-    monkeypatch.setattr(
-        "avibe_memory.admission.select_memory_attachments",
-        lambda _lease: (_ for _ in ()).throw(
-            RuntimeError("secret attachment name must not be logged")
-        ),
-    )
-    caplog.set_level("INFO", logger="avibe_memory.admission")
-
-    request = _admission().decide(
-        _facts(
-            text="keep this caption",
-            files=[object()],
-            is_ordinary_text=False,
-            is_ordinary_attachment=True,
-            attachment_lease=object(),
-            attachment_capture_status="ready",
-            attachment_config_generation=9,
-        )
-    )
-
-    assert isinstance(request, CaptureRequest)
-    assert request.text == "keep this caption"
-    assert request.attachments == ()
-    warnings = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_selection_failed")
-    ]
-    assert len(warnings) == 1
-    assert "error_type=RuntimeError" in warnings[0].getMessage()
-    assert "secret attachment name" not in caplog.text
-
-
-def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:
-    principals = _Principals(raises=True)
-    bindings = _Bindings(raises=True)
-
-    decision = _admission(principals=principals, bindings=bindings).decide(
-        _facts(memory_enabled=False)
-    )
-
-    assert decision == CaptureSkipped(reason="memory_disabled")
 
 
 def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path) -> None:

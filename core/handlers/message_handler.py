@@ -15,7 +15,7 @@ from core.audio_asr import (
 )
 from core.backend_failure import emit_backend_failure
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
-from core.memory_adapter import TurnAccepted
+from core.memory_adapter import TurnAccepted, snapshot_memory_files
 from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
@@ -34,6 +34,37 @@ from .base import BaseHandler
 logger = logging.getLogger(__name__)
 
 SUBAGENT_REACTION_EMOJI = "🤖"
+
+
+def memory_turn_event(
+    context: MessageContext,
+    text: str,
+    session_id: str,
+    lifecycle_snapshot: object,
+    attachment_lease: object = None,
+) -> TurnAccepted:
+    """Close one live message context into immutable host-owned facts."""
+
+    payload = (
+        context.platform_specific
+        if isinstance(context.platform_specific, dict)
+        else {}
+    )
+    platform = context.platform or payload.get("platform")
+    user_id = payload.get("author_id") if platform == "avibe" else context.user_id
+    return TurnAccepted(
+        platform=platform,
+        user_id=user_id,
+        message_id=context.message_id,
+        session_id=session_id,
+        text=text,
+        files=snapshot_memory_files(context.files),
+        is_dm=payload.get("is_dm") is True,
+        is_ordinary_text=context.is_original_human_text,
+        is_ordinary_attachment=context.is_original_human_attachment,
+        lifecycle_snapshot=lifecycle_snapshot,
+        attachment_lease=attachment_lease,
+    )
 
 
 def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Optional[str] = None) -> Optional[str]:
@@ -298,7 +329,7 @@ class MessageHandler(BaseHandler):
             # descriptor-backed lease.
             if is_human and not context.files:
                 self.controller.memory_adapter.offer(
-                    TurnAccepted(
+                    memory_turn_event(
                         context,
                         control_message,
                         capture_session_id,
@@ -695,7 +726,7 @@ class MessageHandler(BaseHandler):
                 except Exception:
                     if is_human:
                         self.controller.memory_adapter.offer(
-                            TurnAccepted(
+                            memory_turn_event(
                                 context,
                                 control_message,
                                 capture_session_id,
@@ -721,7 +752,7 @@ class MessageHandler(BaseHandler):
 
             if is_human and context.files:
                 self.controller.memory_adapter.offer(
-                    TurnAccepted(
+                    memory_turn_event(
                         context,
                         control_message,
                         capture_session_id,

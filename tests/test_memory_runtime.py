@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import avibe_memory.runtime as runtime_module
+from avibe_memory.capture_adapter import EnabledMemoryAdapter
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from avibe_memory.everos import ProviderHealthSnapshot
 from avibe_memory.processing_record import RuntimeHealthProjection, SourceObservation
@@ -94,6 +95,46 @@ async def test_environmental_store_failure_defers_durable_repair_fence(
 
     assert result["state"] == "needs_repair"
     assert runtime.needs_repair is True
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_store_recovery_keeps_facade_identity_and_starts_bound_scheduler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_type = runtime_module.MemoryStore
+
+    def unavailable_store(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    async def acquire(_session_id: str) -> object:
+        return type("Admission", (), {"release": lambda self: None})()
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", unavailable_store)
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+        is_enabled_user=lambda _platform, _user_id: True,
+        lifecycle_snapshot_matches=lambda _session_id, _snapshot: True,
+        acquire_lifecycle_admission=acquire,
+    )
+    facade = runtime.capture_adapter
+    assert isinstance(facade, EnabledMemoryAdapter)
+    assert runtime.available is False
+    assert runtime.start_capture_adapter(
+        task_factory=asyncio.get_running_loop().create_task
+    ) is False
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", store_type)
+    assert runtime._open_store() is True
+
+    assert runtime.capture_adapter is facade
+    assert runtime.available is True
+    assert facade._worker_task is not None
+    assert not facade._worker_task.done()
+    with pytest.raises(RuntimeError, match="scheduler is already bound"):
+        runtime.start_capture_adapter(task_factory=lambda _pending, **_kwargs: None)
     await runtime.close()
 
 
