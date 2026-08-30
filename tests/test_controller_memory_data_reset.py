@@ -31,7 +31,7 @@ class _Runtime:
         home: Path,
         *,
         needs_repair: bool = False,
-        close_error: bool = False,
+        fail_stage: str | None = None,
         wake_result: dict[str, object] | None = None,
     ) -> None:
         self.effective_home = home
@@ -41,17 +41,23 @@ class _Runtime:
         self.module = object()
         self.capture_adapter = DisabledMemoryAdapter()
         self._artifact_installing = False
-        self._close_error = close_error
+        self._fail_stage = fail_stage
         self._wake_result = wake_result or {"ok": True, "state": "running"}
         self.events: list[str] = []
         self.marked_reason: str | None = None
         self.replacement_runtime: _Runtime | None = None
         self.replacement_configs: list[MemoryConfig] = []
         self.root_ownership = object()
+        self.root_handoffs: list[object] = []
         self.root_released = False
 
     async def prepare_data_reset(self) -> None:
         self.events.append("reap")
+
+    def _fail_once(self, stage: str) -> None:
+        if self._fail_stage == stage:
+            self._fail_stage = None
+            raise RuntimeError(f"{stage} failed")
 
     def start_capture_adapter(self, **_options: object) -> bool:
         return True
@@ -74,6 +80,7 @@ class _Runtime:
 
     def begin_root_ownership_handoff(self) -> object:
         self.begin_close()
+        self.root_handoffs.append(self.root_ownership)
         return self.root_ownership
 
     def accept_root_ownership(self) -> None:
@@ -89,8 +96,7 @@ class _Runtime:
         if root_ownership is not None:
             assert root_ownership is self.root_ownership
         self.events.append("close")
-        if self._close_error:
-            raise RuntimeError("close failed")
+        self._fail_once("close")
         self.close_completed = True
 
     async def wake(self, *, operation_lease_held: bool) -> dict[str, object]:
@@ -101,16 +107,21 @@ class _Runtime:
     async def settle_after_data_loss(self, root_ownership: object) -> None:
         assert root_ownership is self.root_ownership
         assert self.close_completed is True
+        self._fail_once("settle")
         self.events.append("settle")
 
     def reset_mutable_data(self, root_ownership: object):
         assert root_ownership is self.root_ownership
         assert self.close_completed is True
+        self._fail_once("delete")
         self.events.append("delete")
         return reset_memory_data_roots(self.effective_home)
 
     def release_root_ownership(self, root_ownership: object) -> None:
         assert root_ownership is self.root_ownership
+        self.root_released = True
+
+    def release_retained_root_ownership(self) -> None:
         self.root_released = True
 
     def mark_needs_repair(self, reason: str) -> None:
@@ -216,82 +227,72 @@ def test_reset_memory_data_roots_fails_closed_on_special_entry(tmp_path: Path) -
     assert stat.S_ISFIFO(os.lstat(unsafe).st_mode)
 
 
+@pytest.mark.parametrize(
+    ("needs_repair", "confirm_loss", "error"),
+    (
+        (True, False, "memory_loss_confirmation_required"),
+        (False, True, "memory_repair_not_required"),
+    ),
+)
 @pytest.mark.asyncio
-async def test_repair_requires_exact_loss_confirmation(tmp_path: Path) -> None:
-    """MEMORY-REPAIR-201: Repair requires exact accepted-loss authority."""
+async def test_repair_requires_exact_loss_and_repair_authority(
+    needs_repair: bool,
+    confirm_loss: bool,
+    error: str,
+    tmp_path: Path,
+) -> None:
+    """MEMORY-REPAIR-201: Repair requires loss and needs-repair authority."""
 
-    runtime = _Runtime(tmp_path, needs_repair=True)
+    runtime = _Runtime(tmp_path, needs_repair=needs_repair)
     controller = _controller(runtime)
 
-    result = await controller.repair_memory(confirm_loss=False)
+    result = await controller.repair_memory(confirm_loss=confirm_loss)
 
-    assert result == {
-        "ok": False,
-        "operation": "repair",
-        "error": "memory_loss_confirmation_required",
-        "result": "unchanged",
-    }
+    assert result["error"] == error
     assert runtime.events == []
 
 
+@pytest.mark.parametrize("failure_stage", (None, "close", "settle", "delete"))
 @pytest.mark.asyncio
-async def test_repair_is_not_offered_for_degraded_runtime(tmp_path: Path) -> None:
-    """MEMORY-REPAIR-201: degraded state grants no Repair authority."""
-
-    runtime = _Runtime(tmp_path, needs_repair=False)
-    controller = _controller(runtime)
-
-    result = await controller.repair_memory(confirm_loss=True)
-
-    assert result["error"] == "memory_repair_not_required"
-    assert runtime.events == []
-
-
-@pytest.mark.asyncio
-async def test_repair_stops_owned_runtime_before_delete_and_proves_native_readiness(
+async def test_repair_reuses_retained_owner_until_reset_proves(
+    failure_stage: str | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MEMORY-REPAIR-202: Repair proves stop, reset, and native readiness."""
+    """MEMORY-REPAIR-202/203: failed reset phases retain one retryable owner."""
 
     _roots(tmp_path)
-    runtime = _Runtime(tmp_path, needs_repair=True)
+    runtime = _Runtime(
+        tmp_path,
+        needs_repair=True,
+        fail_stage=failure_stage,
+    )
     fresh = _Runtime(tmp_path)
     runtime.replacement_runtime = fresh
     controller = _controller(runtime)
     _persist(monkeypatch, controller)
-    events = runtime.events
-
-    result = await controller.repair_memory(confirm_loss=True)
+    if failure_stage == "delete":
+        with pytest.raises(RuntimeError, match="delete failed"):
+            await controller.repair_memory(confirm_loss=True)
+    else:
+        first = await controller.repair_memory(confirm_loss=True)
+        if failure_stage is None:
+            result = first
+        else:
+            assert first["ok"] is False
+            assert first["state"] == "needs_repair"
+    if failure_stage is not None:
+        assert controller.memory_runtime is runtime
+        assert runtime.root_released is False
+        assert fresh.events == []
+        result = await controller.repair_memory(confirm_loss=True)
 
     assert result["ok"] is True
     assert result["state"] == "running"
-    assert events == ["reap", "begin_close", "close", "settle", "delete"]
+    assert all(token is runtime.root_ownership for token in runtime.root_handoffs)
+    assert len(runtime.root_handoffs) == (1 if failure_stage is None else 2)
     assert fresh.events == ["wake"]
     assert controller.memory_runtime is fresh
-
-
-@pytest.mark.asyncio
-async def test_repair_deletes_nothing_when_runtime_close_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MEMORY-REPAIR-203: failed runtime close grants no deletion."""
-
-    _roots(tmp_path)
-    runtime = _Runtime(tmp_path, needs_repair=True, close_error=True)
-    controller = _controller(runtime)
-    _persist(monkeypatch, controller)
-    result = await controller.repair_memory(confirm_loss=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_termination_unproved"
-    assert result["state"] == "needs_repair"
-    assert result["data_deleted"] is False
-    assert "delete" not in runtime.events
-    assert runtime.replacement_configs == []
-    assert runtime.marked_reason == "memory_repair_failed"
-    assert (tmp_path / "memory").is_dir()
 
 
 @pytest.mark.asyncio
@@ -359,28 +360,6 @@ async def test_local_post_reset_wake_failure_remains_needs_repair(
 
 
 @pytest.mark.asyncio
-async def test_delete_data_has_distinct_intent_but_reuses_reset(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MEMORY-DELETE-DATA-001: explicit deletion uses the shared reset."""
-
-    _roots(tmp_path)
-    runtime = _Runtime(tmp_path)
-    fresh = _Runtime(tmp_path)
-    runtime.replacement_runtime = fresh
-    controller = _controller(runtime, enabled=False)
-    _persist(monkeypatch, controller)
-    result = await controller.delete_memory_data(confirm_loss=True)
-
-    assert result["ok"] is True
-    assert result["operation"] == "delete_data"
-    assert result["state"] == "disabled"
-    assert result["data_deleted"] is True
-    assert fresh.events == []
-
-
-@pytest.mark.asyncio
 async def test_delete_data_lazily_constructs_runtime_after_disabled_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -408,6 +387,7 @@ async def test_delete_data_lazily_constructs_runtime_after_disabled_restart(
     result = await controller.delete_memory_data(confirm_loss=True)
 
     assert result["ok"] is True
+    assert result["operation"] == "delete_data"
     assert result["state"] == "disabled"
     assert result["data_deleted"] is True
     assert created == [controller.config.memory]

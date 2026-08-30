@@ -666,6 +666,7 @@ class MemoryRuntime:
             ):
                 raise MemoryRuntimeBusyError("Memory provider root ownership changed")
             _RUNTIME_ROOTS[self._root_key] = self
+            ownership.owner._reset_root_ownership = None
         self._pending_root_ownership = None
 
     def release_root_ownership(self, root_ownership: object) -> None:
@@ -674,6 +675,12 @@ class MemoryRuntime:
             if _RUNTIME_ROOTS.get(self._root_key) is not self:
                 raise MemoryRuntimeBusyError("Memory provider root ownership changed")
             _RUNTIME_ROOTS.pop(self._root_key, None)
+            self._reset_root_ownership = None
+
+    def release_retained_root_ownership(self) -> None:
+        ownership = self._reset_root_ownership
+        if ownership is not None:
+            self.release_root_ownership(ownership)
 
     def begin_close(self) -> None:
         if self._closing:

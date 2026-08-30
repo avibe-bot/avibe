@@ -83,7 +83,10 @@ async def test_reset_handoff_holds_root_until_exact_successor_accepts(
 
     await replacement.close()
     final = _runtime(tmp_path)
-    await final.close()
+    final_ownership = final.begin_root_ownership_handoff()
+    await final.close(root_ownership=final_ownership)
+    final.release_retained_root_ownership()
+    await _runtime(tmp_path).close()
 
 
 @pytest.mark.asyncio

@@ -830,6 +830,7 @@ class Controller:
                 return False
         try:
             await runtime.close()
+            runtime.release_retained_root_ownership()
         except Exception:
             return False
         return await self._clear_memory_runtime(runtime)
@@ -840,6 +841,7 @@ class Controller:
         memory_config: MemoryConfig,
         *,
         allow_disabled: bool = False,
+        settle_closing: bool = True,
     ) -> AsyncIterator[tuple["MemoryRuntime" | None, bool]]:
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
@@ -853,7 +855,7 @@ class Controller:
                 if getattr(self, "memory_runtime", None) is not runtime:
                     yield None, False
                     return
-            if runtime is not None and bool(getattr(runtime, "closing", False)):
+            if settle_closing and runtime is not None and bool(getattr(runtime, "closing", False)):
                 if not await self._settle_retained_memory_runtime(runtime):
                     yield None, False
                     return
@@ -1587,6 +1589,7 @@ class Controller:
         async with self._memory_mutation_runtime(
             self.config.memory,
             allow_disabled=True,
+            settle_closing=False,
         ) as runtime_context:
             runtime, created = runtime_context
             if runtime is None:

@@ -29,6 +29,11 @@ from vibe.memory_contract import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class _NoRetainedRootOwnership:
+    def release_retained_root_ownership(self) -> None:
+        return None
+
+
 def _disabled_app_config():
     return to_app_config(
         V2Config.from_payload(
@@ -641,7 +646,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> No
         def offer(self, event: object) -> None:
             offers.append(event)
 
-    class _Runtime:
+    class _Runtime(_NoRetainedRootOwnership):
         def __init__(self) -> None:
             self.module = object()
             self.available = True
@@ -781,7 +786,7 @@ async def test_cached_plugin_failure_only_retries_for_explicit_recovery(
     assert raised.value is failure
     events: list[str] = []
 
-    class _Runtime:
+    class _Runtime(_NoRetainedRootOwnership):
         def __init__(self, label: str, *, fail_close: bool = False) -> None:
             self.label = label
             self.module = object()
@@ -959,6 +964,7 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
             self.module = object()
             self.fail_close = True
             self.close_calls = 0
+            self.root_released = False
 
         def begin_close(self) -> None:
             assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
@@ -967,6 +973,9 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
             self.close_calls += 1
             if self.fail_close:
                 raise RuntimeError("close failed")
+
+        def release_retained_root_ownership(self) -> None:
+            self.root_released = True
 
     runtime = _Runtime()
     controller.memory_runtime = runtime
@@ -989,6 +998,7 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
         "state": "disabled",
     }
     assert runtime.close_calls == 2
+    assert runtime.root_released is True
     assert controller.memory_runtime is None
 
 
@@ -1140,7 +1150,7 @@ async def test_disable_does_not_wait_for_long_runtime_read() -> None:
     read_started = asyncio.Event()
     read_release = asyncio.Event()
 
-    class _Runtime:
+    class _Runtime(_NoRetainedRootOwnership):
         def __init__(self) -> None:
             self.module = object()
             self.close_calls = 0
@@ -1223,7 +1233,7 @@ async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> Non
     reconcile_started = asyncio.Event()
     reconcile_release = asyncio.Event()
 
-    class _Runtime:
+    class _Runtime(_NoRetainedRootOwnership):
         module = object()
         capture_adapter = object()
 
