@@ -7384,6 +7384,69 @@ def test_a_buffered_response_cancelled_while_settling_is_still_metered(
     asyncio.run(exercise())
 
 
+def test_a_buffered_projection_is_drained_before_cancellation_settlement(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_meterproj1", "Cancelled projection")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (b'{"usage":{"input_tokens":901,"output_tokens":22}}',),
+                )
+            ],
+        )
+        projection_started = threading.Event()
+        release_projection = threading.Event()
+        from core.handlers.model_hub.stream_wire import (
+            observe_buffered_protocol_response as observe,
+        )
+
+        def blocked_projection(protocol, reader):
+            projection_started.set()
+            assert release_projection.wait(2)
+            return observe(protocol, reader)
+
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_projection_cancel",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.observe_buffered_protocol_response",
+            side_effect=blocked_projection,
+        ):
+            turn = asyncio.create_task(gateway._handle_request(request))
+            assert await asyncio.to_thread(projection_started.wait, 1)
+            turn.cancel()
+            await asyncio.sleep(0)
+            assert not turn.done()
+            release_projection.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(turn, timeout=2)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 901
+        assert metered["output_tokens"] == 22
+
+    asyncio.run(exercise())
+
+
 def test_a_cancelled_buffered_turn_is_counted_even_when_it_reported_no_tokens(
     tmp_path: Path,
 ) -> None:

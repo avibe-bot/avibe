@@ -250,6 +250,129 @@ def test_stream_prelude_has_no_total_ceiling_and_cleans_spill() -> None:
     assert asyncio.run(run()) == b"x" * (2 * 1024 * 1024)
 
 
+def test_engine_json_responses_are_read_in_bounded_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = io.BytesIO(body)
+
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return self.body.read(min(size, 31))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    payload = {
+        "state": "ok",
+        "large_integer": 123456789012345678901234567890,
+        "ratio": 1.25,
+        "metadata": "x" * (2 * 1024 * 1024),
+    }
+    response = Response(json.dumps(payload).encode())
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: response),
+    )
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+
+    assert client.management_request("GET", "/fixture") == payload
+    assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
+
+
+def test_engine_health_projects_only_required_facts_from_large_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = io.BytesIO(body)
+
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return self.body.read(min(size, 37))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def open_response(request, **_kwargs):
+        if request.full_url.endswith("/v1/models"):
+            return Response(
+                json.dumps(
+                    {
+                        "object": "list",
+                        "data": [{"id": "model", "metadata": "x" * (2 * 1024 * 1024)}],
+                    }
+                ).encode()
+            )
+        return Response(json.dumps({"sources": ["x" * (2 * 1024 * 1024)]}).encode())
+
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=open_response),
+    )
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+
+    assert client.health() is True
+    assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
+
+
+def test_engine_error_projection_does_not_materialize_unrelated_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class ErrorBody(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return super().read(min(size, 41))
+
+    body = ErrorBody(
+        json.dumps(
+            {
+                "error": {"type": "permission_error", "code": "permission_error"},
+                "metadata": "x" * (2 * 1024 * 1024),
+            }
+        ).encode()
+    )
+    error = client_module.urllib.error.HTTPError(
+        "http://127.0.0.1:15220/v0/management/fixture",
+        403,
+        "Forbidden",
+        {},
+        body,
+    )
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(error)),
+    )
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+
+    with pytest.raises(EngineClientError) as caught:
+        client.management_request("GET", "/fixture")
+
+    assert caught.value.status_code == 403
+    assert caught.value.error_type == "permission_error"
+    assert caught.value.error_code == "permission_error"
+    assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
+
+
 def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
     async def run() -> None:
         class Content:

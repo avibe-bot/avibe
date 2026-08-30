@@ -11,9 +11,11 @@ import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, AsyncIterator, BinaryIO, Mapping
+from decimal import Decimal
+from typing import Any, AsyncIterator, BinaryIO, Mapping, TypeVar
 
 import aiohttp
+import ijson
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
@@ -50,6 +52,7 @@ _OFFICIAL_BASE_URLS = {
 }
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
+_ProjectedJSON = TypeVar("_ProjectedJSON")
 
 
 def upstream_api_url(root: str, path: str) -> str:
@@ -237,16 +240,23 @@ class EngineClient:
 
     def health(self) -> bool:
         try:
-            models = self._request_json(
+            models_ok = self._request_json_projection(
                 "GET",
                 "/v1/models",
+                _project_models_health,
                 headers={"Authorization": f"Bearer {self.connection.gateway_token}"},
                 timeout=min(self.timeout, 1.0),
             )
-            config = self.management_request("GET", "/config", timeout=min(self.timeout, 1.0))
+            config_ok = self._request_json_projection(
+                "GET",
+                "/v0/management/config",
+                _project_root_map,
+                headers={"X-Management-Key": self.connection.management_key},
+                timeout=min(self.timeout, 1.0),
+            )
         except EngineClientError:
             return False
-        return models.get("object") == "list" and isinstance(config, dict)
+        return models_ok and config_ok
 
     def management_request(
         self,
@@ -518,6 +528,27 @@ class EngineClient:
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        return self._request_json_projection(
+            method,
+            path,
+            _load_json_object,
+            query=query,
+            payload=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+
+    def _request_json_projection(
+        self,
+        method: str,
+        path: str,
+        projector: Callable[[BinaryIO], _ProjectedJSON],
+        *,
+        query: Mapping[str, str] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> _ProjectedJSON:
         url = self._url(path, query=query)
         data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
         request_headers = dict(headers or {})
@@ -530,10 +561,21 @@ class EngineClient:
                 _NoRedirectHandler(),
             )
             with opener.open(request, timeout=timeout or self.timeout) as response:
-                raw = response.read()
+                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
+                    _copy_sync_response(response, response_body)
+                    response_body.seek(0)
+                    try:
+                        return projector(response_body)
+                    except (ijson.JSONError, UnicodeDecodeError, ValueError, OverflowError):
+                        raise EngineClientError(
+                            "engine API returned an invalid payload",
+                            error_type="invalid_json",
+                        ) from None
         except urllib.error.HTTPError as exc:
-            raw = exc.read()
-            error_type, error_code, error_candidates = _raw_error_fields(raw)
+            with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
+                _copy_sync_response(exc, response_body)
+                response_body.seek(0)
+                error_type, error_code, error_candidates = _project_raw_error_fields(response_body)
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
                 status_code=exc.code,
@@ -543,13 +585,6 @@ class EngineClient:
             ) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
             raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
-        try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json") from None
-        if not isinstance(decoded, dict):
-            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json")
-        return decoded
 
     def _url(self, path: str, *, query: Mapping[str, str] | None = None) -> str:
         url = f"{self.connection.base_url.rstrip('/')}{path}"
@@ -704,6 +739,133 @@ def _project_model_inventory(
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, new_url):
         return None
+
+
+def _copy_sync_response(source: BinaryIO, target: BinaryIO) -> None:
+    while chunk := source.read(_STREAM_CHUNK_BYTES):
+        target.write(chunk)
+
+
+def _load_json_object(reader: BinaryIO) -> dict[str, Any]:
+    if reader.read(3) != b"\xef\xbb\xbf":
+        reader.seek(0)
+    items = ijson.items(reader, "")
+    try:
+        decoded = next(items)
+    except StopIteration:
+        raise ValueError("empty JSON document") from None
+    try:
+        next(items)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError("multiple JSON documents")
+    if not isinstance(decoded, dict):
+        raise ValueError("root JSON value is not an object")
+    containers: list[dict[str, Any] | list[Any]] = [decoded]
+    while containers:
+        container = containers.pop()
+        entries = container.items() if isinstance(container, dict) else enumerate(container)
+        for key, value in entries:
+            if isinstance(value, Decimal):
+                container[key] = float(value)
+            elif isinstance(value, (dict, list)):
+                containers.append(value)
+    return decoded
+
+
+def _project_models_health(reader: BinaryIO) -> bool:
+    root_is_map = False
+    object_value: object | None = None
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        nonlocal root_is_map, object_value
+        if path == () and event == "start_map":
+            root_is_map = True
+        elif path == ("object",):
+            if event == "replace":
+                object_value = None
+            elif event == "scalar":
+                object_value = value
+
+    if not project_json_reader(reader, {(), ("object",)}, visit):
+        raise ValueError("invalid models health response")
+    return root_is_map and object_value == "list"
+
+
+def _project_root_map(reader: BinaryIO) -> bool:
+    root_is_map = False
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        _value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        nonlocal root_is_map
+        if path == () and event in {"start_map", "start_array", "scalar"}:
+            root_is_map = event == "start_map"
+
+    if not project_json_reader(reader, {()}, visit):
+        raise ValueError("invalid JSON response")
+    return root_is_map
+
+
+def _project_raw_error_fields(
+    reader: BinaryIO,
+    envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    selected_paths = {
+        path
+        for envelope_path in envelope_paths
+        for path in (envelope_path, (*envelope_path, "type"), (*envelope_path, "code"))
+    }
+    maps: set[ErrorEnvelopePath] = set()
+    values: dict[JSONPath, object] = {}
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        for envelope_path in envelope_paths:
+            if path == envelope_path:
+                if event == "replace":
+                    maps.discard(envelope_path)
+                    values.pop((*envelope_path, "type"), None)
+                    values.pop((*envelope_path, "code"), None)
+                elif event == "start_map":
+                    maps.add(envelope_path)
+                elif event == "start_array":
+                    maps.discard(envelope_path)
+            elif path in {(*envelope_path, "type"), (*envelope_path, "code")}:
+                if event == "replace":
+                    values.pop(path, None)
+                elif event == "scalar":
+                    values[path] = value
+
+    if not project_json_reader(reader, selected_paths, visit):
+        return None, None, ()
+    types = [
+        code
+        for path in envelope_paths
+        if path in maps
+        if (code := _safe_error_code(values.get((*path, "type")))) is not None
+    ]
+    codes = [
+        code
+        for path in envelope_paths
+        if path in maps
+        if (code := _safe_error_code(values.get((*path, "code")))) is not None
+    ]
+    candidates = tuple(dict.fromkeys((*types, *codes)))
+    return types[0] if types else None, codes[0] if codes else None, candidates
 
 
 async def _read_response_into(
@@ -1050,31 +1212,7 @@ def _raw_error_fields(
     payload: bytes,
     envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
-    try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None, None, ()
-    if not isinstance(decoded, dict):
-        return None, None, ()
-    types: list[str] = []
-    codes: list[str] = []
-    for path in envelope_paths:
-        envelope: object = decoded
-        for component in path:
-            if not isinstance(envelope, Mapping) or component not in envelope:
-                envelope = None
-                break
-            envelope = envelope[component]
-        if not isinstance(envelope, Mapping):
-            continue
-        error_type = _safe_error_code(envelope["type"]) if "type" in envelope else None
-        error_code = _safe_error_code(envelope["code"]) if "code" in envelope else None
-        if error_type is not None:
-            types.append(error_type)
-        if error_code is not None:
-            codes.append(error_code)
-    candidates = tuple(dict.fromkeys((*types, *codes)))
-    return (types[0] if types else None, codes[0] if codes else None, candidates)
+    return _project_raw_error_fields(io.BytesIO(payload), envelope_paths)
 
 
 def _safe_error_code(value: object) -> str | None:

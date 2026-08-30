@@ -38,6 +38,7 @@ from .provenance import (
 )
 from .request import ModelHubRequest
 from .stream_wire import (
+    ProtocolObservation,
     ProtocolSSEState,
     ProtocolUsageReport,
     StreamTerminalOutcome,
@@ -113,6 +114,7 @@ class _TurnExecution:
     # wire tracker to read them from.
     buffered_usage: ProtocolUsageReport | None = None
     buffered_outcome: StreamTerminalOutcome | None = None
+    buffered_projection_task: asyncio.Task[ProtocolObservation] | None = None
     # When the upstream body ended, published here for the same reason the two
     # facts above are: it is the instant the call belongs to, and everything after
     # it is bookkeeping whose duration is not the call's. A settlement that hangs
@@ -470,6 +472,16 @@ class ModelHubTurnGateway:
                 # Only the request is canceled. Owned teardown and settlement
                 # are shielded and drained before this boundary re-raises.
                 drain_deadline = asyncio.get_running_loop().time() + self._transport_timeout
+                projection_task = execution.buffered_projection_task
+                if projection_task is not None:
+                    while not projection_task.done():
+                        with suppress(asyncio.CancelledError):
+                            await asyncio.shield(projection_task)
+                    with suppress(BaseException):
+                        observation = projection_task.result()
+                        execution.buffered_usage = observation.usage
+                        execution.buffered_outcome = observation.outcome
+                    execution.buffered_projection_task = None
                 if not request_task.done():
                     request_task.cancel()
                 while not request_task.done() and asyncio.get_running_loop().time() < drain_deadline:
@@ -739,13 +751,14 @@ class ModelHubTurnGateway:
                     payload.write(chunk)
                 execution.completed_at = self._now()
                 payload.seek(0)
-                observation = await asyncio.to_thread(
-                    observe_buffered_protocol_response,
-                    protocol,
-                    payload,
+                projection_task = asyncio.create_task(
+                    asyncio.to_thread(observe_buffered_protocol_response, protocol, payload)
                 )
+                execution.buffered_projection_task = projection_task
+                observation = await asyncio.shield(projection_task)
                 execution.buffered_usage = observation.usage
                 execution.buffered_outcome = observation.outcome
+                execution.buffered_projection_task = None
                 outcome, settlement, rendered = await self._settle_metered_turn(
                     execution,
                     terminalizer,

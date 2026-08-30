@@ -1088,11 +1088,16 @@ def test_machine_error_field_access_has_one_extractor() -> None:
 
 
 def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
-    extractor = _functions(_tree(CLIENT))["_raw_error_fields"]
-    source = ast.get_source_segment(CLIENT.read_text(encoding="utf-8"), extractor)
-    assert source is not None
-    assert "envelope_paths" in source
-    assert "for path in envelope_paths" in source
+    functions = _functions(_tree(CLIENT))
+    extractor = functions["_raw_error_fields"]
+    projector = functions["_project_raw_error_fields"]
+    client_source = CLIENT.read_text(encoding="utf-8")
+    extractor_source = ast.get_source_segment(client_source, extractor)
+    projector_source = ast.get_source_segment(client_source, projector)
+    assert extractor_source is not None
+    assert projector_source is not None
+    assert "_project_raw_error_fields" in extractor_source
+    assert "for envelope_path in envelope_paths" in projector_source
     assert not any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not extractor
         for node in ast.walk(extractor)
