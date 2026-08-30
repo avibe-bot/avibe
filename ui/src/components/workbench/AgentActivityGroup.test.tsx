@@ -9,7 +9,7 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-import { ActivityCard } from './AgentActivityGroup';
+import { ActivityCard, ActivityChip } from './AgentActivityGroup';
 
 afterEach(() => {
   cleanup();
@@ -62,5 +62,34 @@ describe('ActivityCard display shortcut', () => {
 
     fireEvent.click(close);
     expect(onDisableActivity).toHaveBeenCalledOnce();
+  });
+});
+
+describe('ActivityChip completed duration', () => {
+  it.each([
+    ['collapsed', false],
+    ['expanded', true],
+  ])('uses the long-duration clock while %s', (_state, expanded) => {
+    render(
+      <ActivityChip
+        group={{
+          id: 'completed-turn',
+          anchorMessageId: 'reply',
+          anchorPosition: 'before',
+          open: false,
+          status: 'done',
+          steps: 4,
+          durationMs: (24 + 14) * 3_600_000 + 33 * 60_000 + 11_000,
+          rows: [],
+        }}
+        expanded={expanded}
+        loading={false}
+        onToggle={vi.fn()}
+        showToolCalls
+        onToggleTools={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/1d 14:33:11/)).toBeTruthy();
   });
 });

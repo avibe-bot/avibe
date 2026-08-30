@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   activityGroupsForForeground,
-  activityDurationParts,
   activityRowFromMessage,
   filterActivityRows,
   formatActivityElapsedClock,
@@ -218,19 +217,6 @@ describe('filterActivityRows (B: eye toggle filters tool rows only)', () => {
   it('never hides assistant rows even with tools off', () => {
     const narrationOnly = rows.filter((r) => r.kind === 'assistant');
     expect(filterActivityRows(narrationOnly, false)).toEqual({ visible: narrationOnly, hiddenTools: 0 });
-  });
-});
-
-describe('activityDurationParts', () => {
-  it('splits into whole-second minutes/seconds (units applied via i18n)', () => {
-    expect(activityDurationParts(45000)).toEqual({ minutes: 0, seconds: 45 });
-    expect(activityDurationParts(83000)).toEqual({ minutes: 1, seconds: 23 });
-    expect(activityDurationParts(600000)).toEqual({ minutes: 10, seconds: 0 });
-  });
-
-  it('returns null for null/negative', () => {
-    expect(activityDurationParts(null)).toBeNull();
-    expect(activityDurationParts(-5)).toBeNull();
   });
 });
 
