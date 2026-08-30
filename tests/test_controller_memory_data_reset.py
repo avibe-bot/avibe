@@ -21,7 +21,7 @@ from config.v2_config import (
 from core.controller import Controller
 from avibe_memory.data_reset import reset_memory_data_roots
 from core.memory_adapter import DisabledMemoryAdapter
-from vibe.memory_contract import MemoryPluginUnavailableError, MemoryRuntimeBusyError
+from vibe.memory_contract import MemoryPluginUnavailableError
 
 
 class _Runtime:
@@ -46,6 +46,8 @@ class _Runtime:
         self.marked_reason: str | None = None
         self.replacement_runtime: _Runtime | None = None
         self.replacement_configs: list[MemoryConfig] = []
+        self.root_ownership = object()
+        self.root_released = False
 
     async def prepare_data_reset(self) -> None:
         self.events.append("reap")
@@ -53,7 +55,8 @@ class _Runtime:
     def start_capture_adapter(self, **_options: object) -> bool:
         return True
 
-    def replacement(self, config: MemoryConfig) -> _Runtime:
+    def replacement(self, config: MemoryConfig, root_ownership: object) -> _Runtime:
+        assert root_ownership is self.root_ownership
         self.replacement_configs.append(config)
         if self.replacement_runtime is not None:
             return self.replacement_runtime
@@ -68,7 +71,22 @@ class _Runtime:
         self.closing = True
         self.events.append("begin_close")
 
-    async def close(self) -> None:
+    def begin_root_ownership_handoff(self) -> object:
+        self.begin_close()
+        return self.root_ownership
+
+    def accept_root_ownership(self) -> None:
+        return None
+
+    async def close(
+        self,
+        *,
+        root_ownership: object | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        del timeout_seconds
+        if root_ownership is not None:
+            assert root_ownership is self.root_ownership
         self.events.append("close")
         if self._close_error:
             raise RuntimeError("close failed")
@@ -79,24 +97,30 @@ class _Runtime:
         self.events.append("wake")
         return self._wake_result
 
-    async def settle_after_data_loss(self) -> None:
+    async def settle_after_data_loss(self, root_ownership: object) -> None:
+        assert root_ownership is self.root_ownership
         assert self.close_completed is True
         self.events.append("settle")
 
-    def reset_mutable_data(self):
+    def reset_mutable_data(self, root_ownership: object):
+        assert root_ownership is self.root_ownership
         assert self.close_completed is True
         self.events.append("delete")
         return reset_memory_data_roots(self.effective_home)
+
+    def release_root_ownership(self, root_ownership: object) -> None:
+        assert root_ownership is self.root_ownership
+        self.root_released = True
 
     def mark_needs_repair(self, reason: str) -> None:
         self.marked_reason = reason
         self.needs_repair = True
 
 
-def _controller(runtime: _Runtime, *, enabled: bool = True) -> Controller:
+def _controller(runtime: _Runtime | None, *, enabled: bool = True) -> Controller:
     controller = Controller.__new__(Controller)
     controller.memory_runtime = runtime
-    controller.memory_module = runtime.module
+    controller.memory_module = runtime.module if runtime is not None else None
     controller.config = SimpleNamespace(memory=MemoryConfig(enabled=enabled))
     return controller
 
@@ -568,25 +592,49 @@ async def test_reconfigure_fence_failure_restores_exact_enabled_runtime(
 
 
 @pytest.mark.asyncio
-async def test_disabled_reset_root_contention_returns_busy() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(memory=MemoryConfig(enabled=False))
-    controller.memory_runtime = None
-    controller.memory_module = None
+async def test_unpublished_reset_blocks_concurrent_enable_before_construction(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(None, enabled=False)
     controller.memory_adapter = DisabledMemoryAdapter()
-    controller._memory_disabled_cleanup_task = None
+    controller._memory_plugin_error = None
+    runtime = _Runtime(tmp_path)
+    reset_started = asyncio.Event()
+    reset_release = asyncio.Event()
+    lease = threading.Lock()
+    construction_calls: list[object] = []
 
-    def busy(*_args, **_kwargs):
-        raise MemoryRuntimeBusyError("provider root busy")
+    async def try_lease(_effective_home=None):
+        if not lease.acquire(blocking=False):
+            return None
+        return SimpleNamespace(release=lease.release)
 
-    controller._create_memory_runtime = busy
+    async def prepare_data_reset() -> None:
+        reset_started.set()
+        await reset_release.wait()
 
-    assert await controller.delete_memory_data(confirm_loss=True) == {
+    runtime.prepare_data_reset = prepare_data_reset
+    controller._try_memory_operation_lease = try_lease
+    controller._create_memory_runtime = lambda config, **_kwargs: (
+        construction_calls.append(config) or runtime
+    )
+    reset = asyncio.create_task(
+        controller._reset_memory_data_transaction(operation="delete_data")
+    )
+    await reset_started.wait()
+
+    assert await controller.reconcile_memory(MemoryConfig(enabled=True)) == {
         "ok": False,
-        "operation": "delete_data",
         "error": "memory_operation_in_progress",
-        "result": "unchanged",
     }
+    assert construction_calls == [controller.config.memory]
+    assert controller.memory_runtime is None
+
+    reset.cancel()
+    reset_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reset
+    assert runtime.close_completed is True
 
 
 @pytest.mark.asyncio
@@ -698,7 +746,7 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
         def release(self) -> None:
             lease_events.append("release")
 
-    def blocking_reset():
+    def blocking_reset(_root_ownership: object):
         runtime.events.append("delete")
         deletion_started.set()
         allow_deletion_to_finish.wait(timeout=5)

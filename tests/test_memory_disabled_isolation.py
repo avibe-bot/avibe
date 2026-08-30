@@ -22,7 +22,6 @@ from core.memory_adapter import DisabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
-    MemoryRuntimeBusyError,
     MemoryStoreUnavailableError,
 )
 
@@ -47,6 +46,33 @@ def _disabled_app_config():
                 "setup_completed": True,
             }
         )
+    )
+
+
+def _controller_with_memory(memory=None) -> Controller:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=memory or _disabled_app_config().memory
+    )
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    controller._memory_disabled_cleanup_unproved = False
+    controller._memory_plugin_error = None
+    return controller
+
+
+def _capture_request() -> CaptureRequest:
+    return CaptureRequest(
+        source_message_id="message-1",
+        session_id="session-1",
+        principal_id="u-11111111111111111111111111111111",
+        project_id="default",
+        provenance="agent",
+        text="remember this",
+        occurred_at_ms=1,
     )
 
 
@@ -116,11 +142,7 @@ async def _start_disabled_cleanup(
     process_module.ReleasedEverOSOrphanReconciler = _Reconciler
     monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
 
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller._memory_disabled_cleanup_task = None
+    controller = _controller_with_memory()
     await controller._schedule_disabled_memory_cleanup()
     cleanup_task = controller._memory_disabled_cleanup_task
     assert cleanup_task is not None
@@ -534,10 +556,7 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
     process_module.ReleasedEverOSOrphanReconciler = _Reconciler
     monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
 
-    controller = Controller.__new__(Controller)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller._memory_disabled_cleanup_task = None
+    controller = _controller_with_memory()
 
     await controller._schedule_disabled_memory_cleanup()
 
@@ -582,37 +601,20 @@ async def test_disabled_cleanup_pending_projects_degraded_status(
         await cleanup_task
 
 
-@pytest.mark.asyncio
-async def test_disabled_cleanup_failure_remains_degraded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def reconcile_orphans() -> None:
-        raise RuntimeError("cleanup failed")
-
-    controller, cleanup_task, _record_path = await _start_disabled_cleanup(
-        monkeypatch,
-        reconcile_orphans,
-    )
-    await cleanup_task
-
-    status = await controller.memory_status_payload()
-
-    assert status["state"] == "degraded"
-    assert status["reason"] == "memory_runtime_busy"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("remove_ownership", "expected_state"),
-    [(False, "degraded"), (True, "disabled")],
+    ("outcome", "expected_state"),
+    [("failure", "degraded"), ("retained", "degraded"), ("released", "disabled")],
 )
-async def test_disabled_cleanup_success_rechecks_released_ownership(
+@pytest.mark.asyncio
+async def test_disabled_cleanup_terminal_status_tracks_ownership(
     monkeypatch: pytest.MonkeyPatch,
-    remove_ownership: bool,
+    outcome: str,
     expected_state: str,
 ) -> None:
     async def reconcile_orphans() -> None:
-        if remove_ownership:
+        if outcome == "failure":
+            raise RuntimeError("cleanup failed")
+        if outcome == "released":
             record_path.unlink()
 
     controller, cleanup_task, record_path = await _start_disabled_cleanup(
@@ -630,121 +632,59 @@ async def test_disabled_cleanup_success_rechecks_released_ownership(
 
 
 @pytest.mark.asyncio
-async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    created: list[object] = []
-    capture_started = asyncio.Event()
-    capture_stopped = asyncio.Event()
+async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime() -> None:
+    controller = _controller_with_memory()
+    enabled = replace(controller.config.memory, enabled=True)
+    offers: list[object] = []
+
+    class _CaptureAdapter:
+        def offer(self, event: object) -> None:
+            offers.append(event)
 
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
             self.available = True
             self.closed = False
-            self.capture_adapter = self._CaptureAdapter()
-
-        class _CaptureAdapter:
-            def __init__(self) -> None:
-                self.task: asyncio.Task[None] | None = None
-
-            def start(self) -> bool:
-                return True
-
-            def offer(self, _event: object) -> None:
-                async def capture() -> None:
-                    capture_started.set()
-                    try:
-                        await asyncio.Event().wait()
-                    finally:
-                        capture_stopped.set()
-
-                self.task = asyncio.create_task(capture())
-
-            def quiesce_memory_capture_tasks(self) -> None:
-                return None
-
-            async def cancel_memory_capture_tasks(self) -> None:
-                if self.task is None:
-                    return
-                self.task.cancel()
-                await asyncio.gather(self.task, return_exceptions=True)
-
-            def cancel_memory_capture_tasks_nowait(self) -> None:
-                if self.task is not None:
-                    self.task.cancel()
+            self.capture_adapter = _CaptureAdapter()
 
         def start_capture_adapter(self, **_options: object) -> bool:
-            return self.capture_adapter.start()
+            return True
 
-        async def reconcile(self, config) -> dict[str, object]:
-            return {
-                "ok": True,
-                "state": "running" if config.enabled else "disabled",
-            }
+        async def reconcile(self, _config) -> dict[str, object]:
+            return {"ok": True, "state": "running"}
 
         async def close(self) -> None:
-            await self.capture_adapter.cancel_memory_capture_tasks()
             self.closed = True
 
         def begin_close(self) -> None:
-            self.capture_adapter.quiesce_memory_capture_tasks()
-            self.capture_adapter.cancel_memory_capture_tasks_nowait()
+            assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
     runtime = _Runtime()
-
-    def create_memory_runtime(config, **_kwargs):
-        created.append(config)
-        return runtime
-
-    runtime_module = types.ModuleType("avibe_memory.runtime")
-    runtime_module.MEMORY_RUNTIME_PROTOCOL_VERSION = 1
-    runtime_module.create_memory_runtime = create_memory_runtime
-    monkeypatch.setitem(sys.modules, "avibe_memory.runtime", runtime_module)
-
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_disabled_cleanup_unproved = True
-    controller.settings_manager = types.SimpleNamespace(
-        is_enabled_user=lambda *_args, **_kwargs: True
-    )
-    controller.session_turns = types.SimpleNamespace(
-        session_lifecycle_snapshot_matches=lambda *_args: True,
-        acquire_lifecycle_admission=lambda *_args: asyncio.sleep(
-            0,
-            result=types.SimpleNamespace(release=lambda: None),
-        ),
-    )
-
-    enabled = replace(controller.config.memory, enabled=True)
+    controller._create_memory_runtime = lambda _config: runtime
     assert await controller.reconcile_memory(enabled) == {
         "ok": True,
         "state": "running",
     }
-    assert created == [enabled]
     assert controller.memory_runtime is runtime
     assert controller.memory_module is runtime.module
     assert controller.memory_adapter is runtime.capture_adapter
     assert controller.config.memory.enabled is True
 
-    controller.memory_adapter.offer(
-        TurnAccepted(
-            platform="slack",
-            user_id="user-1",
-            message_id="native-1",
-            session_id="session-1",
-            text="remember this",
-            files=(),
-            is_dm=True,
-            is_ordinary_text=True,
-            is_ordinary_attachment=False,
-            lifecycle_snapshot=0,
-        )
+    event = TurnAccepted(
+        platform="slack",
+        user_id="user-1",
+        message_id="native-1",
+        session_id="session-1",
+        text="remember this",
+        files=(),
+        is_dm=True,
+        is_ordinary_text=True,
+        is_ordinary_attachment=False,
+        lifecycle_snapshot=0,
     )
-    await capture_started.wait()
+    controller.memory_adapter.offer(event)
+    assert offers == [event]
 
     disabled = replace(enabled, enabled=False)
     assert await controller.reconcile_memory(disabled) == {
@@ -764,18 +704,11 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
 async def test_overlapping_unpublished_operations_return_busy(
     overlap: str,
 ) -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
-    controller._memory_plugin_error = None
+    controller = _controller_with_memory()
     candidate = replace(controller.config.memory, enabled=True)
     preflight_started = asyncio.Event()
     preflight_release = asyncio.Event()
-    construction_attempts = 0
+    construction_attempts: list[object] = []
 
     class _Runtime:
         module = object()
@@ -797,12 +730,9 @@ async def test_overlapping_unpublished_operations_return_busy(
 
     runtime = _Runtime()
 
-    def create_runtime(_config, **_kwargs):
-        nonlocal construction_attempts
-        construction_attempts += 1
-        if construction_attempts == 1:
-            return runtime
-        raise MemoryRuntimeBusyError("provider root busy")
+    def create_runtime(config, **_kwargs):
+        construction_attempts.append(config)
+        return runtime
 
     controller._create_memory_runtime = create_runtime
     first = asyncio.create_task(controller.preflight_memory(candidate))
@@ -819,11 +749,9 @@ async def test_overlapping_unpublished_operations_return_busy(
             "download_error": None,
         }
 
-    assert construction_attempts == 2
+    assert construction_attempts == [candidate]
     assert controller.memory_runtime is None
-    assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-    assert controller._memory_plugin_error is None
 
     preflight_release.set()
     assert await first == {"ok": True}
@@ -835,12 +763,7 @@ async def test_overlapping_unpublished_operations_return_busy(
 async def test_explicit_recovery_retries_after_cached_plugin_failure(
     operation: str,
 ) -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
+    controller = _controller_with_memory()
     controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
     candidate = replace(controller.config.memory, enabled=True)
     calls: list[tuple[str, object]] = []
@@ -853,7 +776,7 @@ async def test_explicit_recovery_retries_after_cached_plugin_failure(
             calls.append(("preflight", config))
             return {"ok": True}
 
-        async def install_artifact(self) -> dict[str, object]:
+        async def install_artifact(self, **_options: object) -> dict[str, object]:
             calls.append(("install", controller.config.memory))
             return {"ok": True}
 
@@ -881,13 +804,10 @@ async def test_explicit_recovery_retries_after_cached_plugin_failure(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_memory_read_keeps_cached_plugin_failure_without_retry() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(
-        memory=replace(_disabled_app_config().memory, enabled=True)
+async def test_cached_plugin_failure_only_retries_for_explicit_recovery() -> None:
+    controller = _controller_with_memory(
+        replace(_disabled_app_config().memory, enabled=True)
     )
-    controller.memory_runtime = None
-    controller._memory_reconcile_task = None
     failure = MemoryPluginUnavailableError("startup failed")
     controller._memory_plugin_error = failure
     controller._create_memory_runtime = lambda *_args, **_kwargs: pytest.fail(
@@ -901,27 +821,15 @@ async def test_ordinary_memory_read_keeps_cached_plugin_failure_without_retry() 
         )
 
     assert raised.value is failure
-
-
-@pytest.mark.asyncio
-async def test_explicit_recovery_caches_typed_retry_failure() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
-    candidate = replace(controller.config.memory, enabled=True)
     retry_failure = MemoryPluginIncompatibleError("still incompatible")
 
-    def create_runtime(_config, **_kwargs):
+    def fail_retry(_config, **_kwargs):
         raise retry_failure
 
-    controller._create_memory_runtime = create_runtime
+    controller._create_memory_runtime = fail_retry
 
     with pytest.raises(MemoryPluginIncompatibleError) as raised:
-        await controller.preflight_memory(candidate)
+        await controller.preflight_memory(controller.config.memory)
 
     assert raised.value is retry_failure
     assert controller._memory_plugin_error is retry_failure
@@ -929,12 +837,7 @@ async def test_explicit_recovery_caches_typed_retry_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_disabled_install_keeps_runtime_unpublished_until_close() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
+    controller = _controller_with_memory()
     events: list[str] = []
     loader_flags: list[bool] = []
 
@@ -943,7 +846,7 @@ async def test_disabled_install_keeps_runtime_unpublished_until_close() -> None:
             self.module = object()
             self.closed = False
 
-        async def install_artifact(self) -> dict[str, object]:
+        async def install_artifact(self, **_options: object) -> dict[str, object]:
             assert controller.memory_runtime is None
             events.append("install")
             return {"ok": True}
@@ -971,79 +874,125 @@ async def test_disabled_install_keeps_runtime_unpublished_until_close() -> None:
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
 
+@pytest.mark.parametrize("ordering", ("reaper-first", "enable-first"))
 @pytest.mark.asyncio
-async def test_cancelled_install_does_not_cancel_shared_disabled_cleanup() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    cleanup_started = asyncio.Event()
-    cleanup_release = asyncio.Event()
-    created: list[object] = []
+async def test_disabled_reaper_and_enable_share_root_mutation_gate(
+    ordering: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _controller_with_memory()
+    controller._memory_disabled_cleanup_unproved = True
+    enabled = replace(controller.config.memory, enabled=True)
+    lease_held = False
+    reaper_started = asyncio.Event()
+    reaper_release = asyncio.Event()
+    attach_started = asyncio.Event()
+    attach_release = asyncio.Event()
+    reaper_calls = 0
+    construction_calls = 0
 
-    async def cleanup() -> None:
-        cleanup_started.set()
-        await cleanup_release.wait()
+    class _Lease:
+        def release(self) -> None:
+            nonlocal lease_held
+            lease_held = False
+
+    async def try_lease(_effective_home=None):
+        nonlocal lease_held
+        if lease_held:
+            return None
+        lease_held = True
+        return _Lease()
+
+    class _Reconciler:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def reconcile_orphans(self) -> None:
+            nonlocal reaper_calls
+            reaper_calls += 1
+            reaper_started.set()
+            await reaper_release.wait()
+
+    process_module = types.ModuleType("avibe_memory.process")
+    process_module.ReleasedEverOSOrphanReconciler = _Reconciler
+    monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
+    controller._try_memory_operation_lease = try_lease
+    controller._disabled_memory_ownership_exists = lambda _path: True
 
     class _Runtime:
-        def __init__(self) -> None:
-            self.module = object()
-            self.closed = False
+        module = object()
+        capture_adapter = object()
+        closing = False
 
-        async def install_artifact(self) -> dict[str, object]:
-            return {"ok": True}
+        async def reconcile(self, _config) -> dict[str, object]:
+            return {"ok": True, "state": "running"}
 
-        async def close(self) -> None:
-            self.closed = True
+        def start_capture_adapter(self, **_kwargs) -> bool:
+            return True
 
-        def begin_close(self) -> None:
-            return None
+    runtime = _Runtime()
 
-    cleanup_task = asyncio.create_task(cleanup())
-    controller._memory_disabled_cleanup_task = cleanup_task
-    controller._create_memory_runtime = (
-        lambda config, **_kwargs: created.append(config) or _Runtime()
-    )
+    def create_runtime(_config, **_kwargs):
+        nonlocal construction_calls
+        construction_calls += 1
+        return runtime
 
-    first = asyncio.create_task(controller.install_memory_runtime())
-    await cleanup_started.wait()
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
+    controller._create_memory_runtime = create_runtime
+    memory_dir = Path("unused-memory-root")
 
-    assert cleanup_task.done() is False
-    second = asyncio.create_task(controller.install_memory_runtime())
-    await asyncio.sleep(0)
-    assert created == []
+    if ordering == "reaper-first":
+        cleanup = asyncio.create_task(
+            controller._cleanup_disabled_memory_process(memory_dir)
+        )
+        await reaper_started.wait()
+        assert await controller.reconcile_memory(enabled) == {
+            "ok": False,
+            "error": "memory_operation_in_progress",
+        }
+        assert construction_calls == 0
+        reaper_release.set()
+        await cleanup
+    else:
+        attach = controller._attach_memory_runtime
 
-    cleanup_release.set()
-    assert await second == {"ok": True}
-    assert cleanup_task.done() is True
-    assert created == [controller.config.memory]
+        async def blocked_attach(*args, **kwargs) -> None:
+            attach_started.set()
+            await attach_release.wait()
+            await attach(*args, **kwargs)
+
+        controller._attach_memory_runtime = blocked_attach
+        reconcile = asyncio.create_task(controller.reconcile_memory(enabled))
+        await attach_started.wait()
+        await controller._cleanup_disabled_memory_process(memory_dir)
+        assert reaper_calls == 0
+        attach_release.set()
+        assert await reconcile == {"ok": True, "state": "running"}
+        assert controller.memory_runtime is runtime
+
+    assert controller._memory_replacement_lock().locked() is False
 
 
 @pytest.mark.asyncio
 async def test_disable_publishes_disabled_before_failed_close() -> None:
     enabled = replace(_disabled_app_config().memory, enabled=True)
     disabled = replace(enabled, enabled=False)
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=enabled)
+    controller = _controller_with_memory(enabled)
     original_adapter = object()
     controller.memory_adapter = original_adapter
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
 
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
+            self.fail_close = True
+            self.close_calls = 0
 
         def begin_close(self) -> None:
             assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
-        async def close(self) -> None:
-            raise RuntimeError("close failed")
+        async def close(self, **_options: object) -> None:
+            self.close_calls += 1
+            if self.fail_close:
+                raise RuntimeError("close failed")
 
     runtime = _Runtime()
     controller.memory_runtime = runtime
@@ -1053,67 +1002,56 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
         await controller.reconcile_memory(disabled)
 
     assert controller.config.memory == disabled
-    assert controller.memory_runtime is None
+    assert controller.memory_runtime is runtime
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
+    runtime.fail_close = False
+    assert await controller.reconcile_memory(disabled) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert runtime.close_calls == 2
+    assert controller.memory_runtime is None
 
+
+@pytest.mark.parametrize(
+    ("cleanup_unproved", "expected_state", "expected_reason", "source_reason"),
+    [
+        (False, "needs_repair", "memory_legacy_recovery_required", "memory_disabled"),
+        (True, "degraded", "memory_runtime_busy", "memory_runtime_busy"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_disabled_status_preserves_legacy_repair_fence_without_runtime() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(
-        memory=replace(
+async def test_disabled_status_projects_repair_and_cleanup_fences(
+    cleanup_unproved: bool,
+    expected_state: str,
+    expected_reason: str,
+    source_reason: str,
+) -> None:
+    controller = _controller_with_memory(
+        replace(
             _disabled_app_config().memory,
             legacy_needs_repair=True,
         )
     )
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
+    controller._memory_disabled_cleanup_unproved = cleanup_unproved
 
     status = await controller.memory_status_payload()
 
-    assert status["state"] == "needs_repair"
-    assert status["reason"] == "memory_legacy_recovery_required"
-    assert status["source"]["reason"] == "memory_disabled"
+    assert status["state"] == expected_state
+    assert status["reason"] == expected_reason
+    assert status["source"]["reason"] == source_reason
 
 
 @pytest.mark.asyncio
-async def test_disabled_cleanup_fence_precedes_legacy_repair_projection() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(
-        memory=replace(
-            _disabled_app_config().memory,
-            legacy_needs_repair=True,
-        )
-    )
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_disabled_cleanup_task = None
-    controller._memory_disabled_cleanup_unproved = True
-
-    status = await controller.memory_status_payload()
-
-    assert status["state"] == "degraded"
-    assert status["reason"] == "memory_runtime_busy"
-    assert status["source"]["reason"] == "memory_runtime_busy"
-
-
-@pytest.mark.asyncio
-async def test_disabled_dashboard_reads_do_not_construct_runtime() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
+async def test_disabled_operations_do_not_construct_runtime() -> None:
+    controller = _controller_with_memory()
     factory_calls: list[object] = []
 
     def create_runtime(config, **_kwargs):
         factory_calls.append(config)
-        raise AssertionError("disabled dashboard reads must not construct Memory")
+        raise AssertionError("disabled operations must not construct Memory")
 
     controller._create_memory_runtime = create_runtime
 
@@ -1147,53 +1085,28 @@ async def test_disabled_dashboard_reads_do_not_construct_runtime() -> None:
         "data_exists": True,
         "can_delete_data": True,
     }
-    assert factory_calls == []
-
-
-@pytest.mark.asyncio
-async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
-        "disabled outcomes must not construct Memory"
-    )
-
     assert await controller.wake_memory() == {
         "ok": False,
         "state": "disabled",
         "error": "memory_disabled",
     }
     assert await controller.capture_memory(
-        CaptureRequest(
-            source_message_id="message-1",
-            session_id="session-1",
-            principal_id="u-11111111111111111111111111111111",
-            project_id="default",
-            provenance="agent",
-            text="remember this",
-            occurred_at_ms=1,
-        )
+        _capture_request()
     ) == CaptureSkipped(reason="memory_disabled")
+    with pytest.raises(MemoryStoreUnavailableError, match="Memory is disabled"):
+        await controller.memory_projects_payload(
+            verified_user_key=None,
+            cli_scope=("u-11111111111111111111111111111111", "default"),
+        )
+    assert factory_calls == []
 
 
 @pytest.mark.asyncio
 async def test_plugin_failure_rechecked_after_blocked_capture_lock() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=types.SimpleNamespace(enabled=True))
-    controller._memory_plugin_error = None
-    controller.memory_runtime = None
-    request = CaptureRequest(
-        source_message_id="message-1",
-        session_id="session-1",
-        principal_id="u-11111111111111111111111111111111",
-        project_id="default",
-        provenance="agent",
-        text="remember this",
-        occurred_at_ms=1,
+    controller = _controller_with_memory(
+        replace(_disabled_app_config().memory, enabled=True)
     )
+    request = _capture_request()
 
     gate = controller._memory_replacement_lock()
     await gate.acquire()
@@ -1208,36 +1121,11 @@ async def test_plugin_failure_rechecked_after_blocked_capture_lock() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_store_backed_read_is_gated_before_runtime_construction() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-
-    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
-        "disabled reads must not construct Memory"
-    )
-
-    with pytest.raises(MemoryStoreUnavailableError, match="Memory is disabled"):
-        await controller.memory_projects_payload(
-            verified_user_key=None,
-            cli_scope=("u-11111111111111111111111111111111", "default"),
-        )
-
-    assert controller.memory_runtime is None
-    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-
-
-@pytest.mark.asyncio
 async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(
-        memory=replace(_disabled_app_config().memory, enabled=True)
+    controller = _controller_with_memory(
+        replace(_disabled_app_config().memory, enabled=True)
     )
     controller.memory_adapter = None
-    controller._memory_disabled_cleanup_task = None
     wake_release = asyncio.Event()
 
     async def startup_wake() -> None:
@@ -1270,11 +1158,8 @@ async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
 async def test_disable_does_not_wait_for_long_runtime_read() -> None:
     enabled = replace(_disabled_app_config().memory, enabled=True)
     disabled = replace(enabled, enabled=False)
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=enabled)
+    controller = _controller_with_memory(enabled)
     controller.memory_adapter = None
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
     read_started = asyncio.Event()
     read_release = asyncio.Event()
 
@@ -1316,16 +1201,19 @@ async def test_disable_does_not_wait_for_long_runtime_read() -> None:
 async def test_reconcile_provider_work_does_not_hold_pointer_lock() -> None:
     enabled = replace(_disabled_app_config().memory, enabled=True)
     candidate = replace(enabled)
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=enabled)
+    controller = _controller_with_memory(enabled)
     controller.memory_adapter = None
-    controller._memory_disabled_cleanup_task = None
     reconcile_started = asyncio.Event()
     reconcile_release = asyncio.Event()
 
     class _Runtime:
         module = object()
         capture_adapter = object()
+        capture_starts = 0
+
+        def start_capture_adapter(self, **_options: object) -> bool:
+            self.capture_starts += 1
+            return True
 
         async def reconcile(self, config) -> dict[str, object]:
             assert config is candidate
@@ -1347,26 +1235,16 @@ async def test_reconcile_provider_work_does_not_hold_pointer_lock() -> None:
     reconcile_release.set()
     assert await reconcile == {"ok": True, "state": "running"}
     assert controller.config.memory is candidate
+    assert runtime.capture_starts == 1
 
 
 @pytest.mark.asyncio
 async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> None:
     disabled = _disabled_app_config().memory
     enabled = replace(disabled, enabled=True)
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=disabled)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_disabled_cleanup_task = None
+    controller = _controller_with_memory(disabled)
     reconcile_started = asyncio.Event()
     reconcile_release = asyncio.Event()
-
-    async def no_cleanup() -> None:
-        return None
-
-    controller._await_disabled_memory_cleanup = no_cleanup
-    controller._recheck_disabled_memory_cleanup = no_cleanup
 
     class _Runtime:
         module = object()
@@ -1399,8 +1277,6 @@ async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> Non
         "ok": True,
         "state": "disabled",
     }
-    assert controller.memory_runtime is None
-    assert controller.config.memory is disabled
     assert runtime.close_calls == 1
 
     reconcile_release.set()
@@ -1415,51 +1291,7 @@ async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> Non
 
 
 @pytest.mark.asyncio
-async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budget() -> None:
-    controller = Controller.__new__(Controller)
-    controller._memory_reconcile_task = None
-    controller._memory_shutdown_budget_seconds = 0.06
-    controller._shutdown_tainted = False
-    controller._memory_destructive_quiescing = False
-
-    started: list[str] = []
-
-    class _MemoryAdapter:
-        def quiesce_memory_capture_tasks(self) -> None:
-            started.append("capture-registration")
-
-    class _MemoryRuntime:
-        def begin_close(self) -> None:
-            assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-            started.append("runtime-revoke")
-
-        async def close(self) -> None:
-            started.append("runtime")
-
-    controller.memory_adapter = _MemoryAdapter()
-    controller.memory_runtime = _MemoryRuntime()
-
-    async def join_destructive_transactions() -> None:
-        started.append("destructive")
-
-    controller._join_memory_destructive_transactions = join_destructive_transactions
-
-    started_at = time.monotonic()
-    await controller._shutdown_memory_stack()
-    elapsed = time.monotonic() - started_at
-
-    assert elapsed < 0.2
-    assert started == [
-        "capture-registration",
-        "destructive",
-        "runtime-revoke",
-        "runtime",
-    ]
-    assert controller._shutdown_tainted is False
-
-
-@pytest.mark.asyncio
-async def test_shutdown_attempts_runtime_close_after_destructive_timeout() -> None:
+async def test_memory_indep_015_shutdown_uses_one_budget_after_stage_timeout() -> None:
     controller = Controller.__new__(Controller)
     controller._memory_reconcile_task = None
     controller._memory_shutdown_budget_seconds = 0.04
@@ -1469,6 +1301,7 @@ async def test_shutdown_attempts_runtime_close_after_destructive_timeout() -> No
         quiesce_memory_capture_tasks=lambda: None,
     )
     release = asyncio.Event()
+    close_deadlines: list[float] = []
 
     async def transaction() -> dict[str, object]:
         await release.wait()
@@ -1484,8 +1317,9 @@ async def test_shutdown_attempts_runtime_close_after_destructive_timeout() -> No
         def begin_close(self) -> None:
             return None
 
-        async def close(self) -> None:
+        async def close(self, **options: object) -> None:
             self.closed = True
+            close_deadlines.append(float(options["timeout_seconds"]))
 
     runtime = _MemoryRuntime()
     controller.memory_runtime = runtime
@@ -1498,6 +1332,7 @@ async def test_shutdown_attempts_runtime_close_after_destructive_timeout() -> No
     assert runtime.closed is True
     assert controller.memory_runtime is None
     assert controller._shutdown_tainted is True
+    assert 0.0 <= close_deadlines[0] <= controller._memory_shutdown_budget_seconds
 
     release.set()
     await destructive

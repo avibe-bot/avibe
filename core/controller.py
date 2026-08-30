@@ -766,18 +766,74 @@ class Controller:
             return False
         return runtime.start_capture_adapter(task_factory=loop.create_task)
 
+    async def _try_memory_operation_lease(
+        self,
+        effective_home: Path | None = None,
+    ) -> MemoryOperationLease | None:
+        lease = MemoryOperationLease(effective_home)
+        try:
+            await run_blocking(lease.acquire)
+        except MemoryOperationBusy:
+            return None
+        return lease
+
+    @asynccontextmanager
+    async def _memory_operation(self, effective_home: Path | None = None):
+        lease = await self._try_memory_operation_lease(effective_home)
+        try:
+            yield lease
+        finally:
+            if lease is not None:
+                await run_blocking(lease.release)
+
+    def _retry_memory_runtime(
+        self,
+        memory_config: MemoryConfig,
+        *,
+        allow_disabled: bool = False,
+    ) -> "MemoryRuntime":
+        try:
+            runtime = self._create_memory_runtime(
+                memory_config,
+                **({"allow_disabled": True} if allow_disabled else {}),
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            self._memory_plugin_error = exc
+            raise
+        self._memory_plugin_error = None
+        return runtime
+
+    async def _close_unpublished_memory_runtime(
+        self,
+        runtime: "MemoryRuntime",
+    ) -> None:
+        runtime.begin_close()
+        try:
+            await runtime.close()
+        except BaseException:
+            async with self._memory_replacement_lock():
+                if getattr(self, "memory_runtime", None) is None:
+                    self.memory_adapter = DisabledMemoryAdapter()
+                    self.memory_runtime = runtime
+                    self.memory_module = None
+            raise
+
     async def _attach_memory_runtime(
         self,
         runtime: "MemoryRuntime",
         *,
         capture_enabled: bool,
+        previous: "MemoryRuntime" | None = None,
     ) -> None:
-        """Publish one fully constructed runtime with a short pointer swap."""
-
         async with self._memory_replacement_lock():
             current = getattr(self, "memory_runtime", None)
-            if current not in (None, runtime):
+            if (
+                previous is None and current is not None and current is not runtime
+            ) or previous is not None and current is not previous:
                 raise RuntimeError("A different Memory runtime is already owned")
+            accept_ownership = getattr(runtime, "accept_root_ownership", None)
+            if callable(accept_ownership):
+                accept_ownership()
             self.memory_runtime = runtime
             self.memory_module = runtime.module
             self._memory_plugin_error = None
@@ -795,8 +851,6 @@ class Controller:
         *,
         disabled_config: MemoryConfig | None = None,
     ) -> "MemoryRuntime" | None:
-        """Publish Disabled first, revoke the old runtime, then drop pointers."""
-
         async with self._memory_replacement_lock():
             current = getattr(self, "memory_runtime", None)
             if runtime is not None and current is not runtime:
@@ -806,35 +860,48 @@ class Controller:
                 self.config.memory = disabled_config
             if current is not None:
                 current.begin_close()
-            self.memory_runtime = None
             self.memory_module = None
             return current
+
+    async def _clear_memory_runtime(self, runtime: "MemoryRuntime") -> bool:
+        async with self._memory_replacement_lock():
+            if getattr(self, "memory_runtime", None) is not runtime:
+                return False
+            self.memory_runtime = None
+            self.memory_module = None
+            return True
+
+    async def _retire_memory_runtime_for_reset(
+        self,
+        runtime: "MemoryRuntime",
+        *,
+        allow_unpublished: bool,
+    ) -> object | None:
+        async with self._memory_replacement_lock():
+            current = getattr(self, "memory_runtime", None)
+            if current is not runtime and not (allow_unpublished and current is None):
+                return None
+            self.memory_adapter = DisabledMemoryAdapter()
+            ownership = runtime.begin_root_ownership_handoff()
+            self.memory_runtime = runtime
+            self.memory_module = None
+            return ownership
 
     async def _activate_memory_replacement(
         self,
         previous: "MemoryRuntime",
         config: MemoryConfig,
+        root_ownership: object,
     ) -> tuple["MemoryRuntime", dict[str, Any]]:
-        """Attach one successor after the previous runtime proved closed."""
-
-        fresh = previous.replacement(config)
-        try:
-            await self._attach_memory_runtime(fresh, capture_enabled=True)
-        except BaseException:
-            fresh.begin_close()
-            try:
-                await fresh.close()
-            except Exception:
-                logger.warning(
-                    "Unattached Memory replacement did not close cleanly",
-                    exc_info=True,
-                )
-            raise
+        fresh = previous.replacement(config, root_ownership)
+        await self._attach_memory_runtime(
+            fresh,
+            capture_enabled=True,
+            previous=previous,
+        )
         return fresh, await fresh.wake(operation_lease_held=True)
 
     async def _memory_runtime_for_operation(self) -> "MemoryRuntime":
-        """Snapshot the enabled runtime without retaining a host lifecycle lease."""
-
         await self._await_disabled_memory_cleanup()
         async with self._memory_replacement_lock():
             if not self.config.memory.enabled:
@@ -850,58 +917,70 @@ class Controller:
     async def preflight_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Preflight a candidate without activating capture on a disabled host."""
 
-        await self._await_disabled_memory_cleanup()
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
-        if runtime is not None:
-            return await runtime.preflight(memory_config)
-        try:
-            runtime = self._create_memory_runtime(memory_config)
-        except MemoryRuntimeBusyError:
-            return {"ok": False, "error": "memory_operation_in_progress"}
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-            self._memory_plugin_error = exc
-            raise
-        self._memory_plugin_error = None
-        try:
-            return await runtime.preflight(memory_config)
-        finally:
-            runtime.begin_close()
-            await runtime.close()
+        created = runtime is None
+        async with self._memory_operation(
+            getattr(runtime, "effective_home", None)
+        ) as lease:
+            if lease is None:
+                return {"ok": False, "error": "memory_operation_in_progress"}
+            async with self._memory_replacement_lock():
+                if getattr(self, "memory_runtime", None) is not runtime:
+                    return {"ok": False, "error": "memory_operation_in_progress"}
+            if created:
+                try:
+                    runtime = self._retry_memory_runtime(memory_config)
+                except MemoryRuntimeBusyError:
+                    return {"ok": False, "error": "memory_operation_in_progress"}
+            try:
+                return await runtime.preflight(memory_config)
+            except MemoryRuntimeBusyError:
+                return {"ok": False, "error": "memory_operation_in_progress"}
+            finally:
+                if created:
+                    await self._close_unpublished_memory_runtime(runtime)
 
     async def install_memory_runtime(self) -> dict[str, Any]:
         """Install the managed artifact through Controller runtime ownership."""
 
-        await self._await_disabled_memory_cleanup()
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
         if runtime is not None:
             return await runtime.install_artifact()
-        try:
-            runtime = self._create_memory_runtime(
-                self.config.memory,
-                allow_disabled=True,
-            )
-        except MemoryRuntimeBusyError:
-            return {
-                "ok": False,
-                "reason": "memory_operation_in_progress",
-                "download_error": None,
-            }
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-            self._memory_plugin_error = exc
-            raise
-        self._memory_plugin_error = None
-        try:
-            return await runtime.install_artifact()
-        finally:
-            runtime.begin_close()
-            await runtime.close()
+        async with self._memory_operation() as lease:
+            if lease is None:
+                return {
+                    "ok": False,
+                    "reason": "memory_operation_in_progress",
+                    "download_error": None,
+                }
+            async with self._memory_replacement_lock():
+                if getattr(self, "memory_runtime", None) is not None:
+                    return {
+                        "ok": False,
+                        "reason": "memory_operation_in_progress",
+                        "download_error": None,
+                    }
+            try:
+                runtime = self._retry_memory_runtime(
+                    self.config.memory,
+                    allow_disabled=True,
+                )
+            except MemoryRuntimeBusyError:
+                return {
+                    "ok": False,
+                    "reason": "memory_operation_in_progress",
+                    "download_error": None,
+                }
+            try:
+                return await runtime.install_artifact(operation_lease_held=True)
+            finally:
+                await self._close_unpublished_memory_runtime(runtime)
 
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without destructive fallback."""
 
-        await self._await_disabled_memory_cleanup()
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
         if not memory_config.enabled:
@@ -911,40 +990,43 @@ class Controller:
             )
             if runtime is not None:
                 await runtime.close()
+                await self._clear_memory_runtime(runtime)
             await self._recheck_disabled_memory_cleanup()
             return {"ok": True, "state": "disabled"}
 
         created = runtime is None
         if created:
-            try:
-                runtime = self._create_memory_runtime(memory_config)
-            except MemoryRuntimeBusyError:
-                return {"ok": False, "error": "memory_operation_in_progress"}
-            except (
-                MemoryPluginUnavailableError,
-                MemoryPluginIncompatibleError,
-            ) as exc:
-                self._memory_plugin_error = exc
-                raise
-            try:
-                await self._attach_memory_runtime(runtime, capture_enabled=False)
-            except BaseException:
-                runtime.begin_close()
-                await runtime.close()
-                raise
+            async with self._memory_operation() as lease:
+                if lease is None:
+                    return {"ok": False, "error": "memory_operation_in_progress"}
+                async with self._memory_replacement_lock():
+                    if getattr(self, "memory_runtime", None) is not None:
+                        return {"ok": False, "error": "memory_operation_in_progress"}
+                try:
+                    runtime = self._retry_memory_runtime(memory_config)
+                except MemoryRuntimeBusyError:
+                    return {"ok": False, "error": "memory_operation_in_progress"}
+                try:
+                    await self._attach_memory_runtime(runtime, capture_enabled=False)
+                except BaseException:
+                    await self._close_unpublished_memory_runtime(runtime)
+                    raise
         try:
             result = await runtime.reconcile(memory_config)
             async with self._memory_replacement_lock():
                 still_owned = getattr(self, "memory_runtime", None) is runtime
                 current_enabled = bool(self.config.memory.enabled)
-                if still_owned:
+                publishable = (
+                    still_owned
+                    and not bool(getattr(runtime, "closing", False))
+                )
+                if publishable:
                     self.memory_module = runtime.module
                     if result.get("ok") is True:
                         self.config.memory = memory_config
-                        if created:
-                            self._start_memory_capture_adapter(runtime)
+                        self._start_memory_capture_adapter(runtime)
                         self.memory_adapter = runtime.capture_adapter
-            if result.get("ok") is True and not still_owned:
+            if result.get("ok") is True and not publishable:
                 return {
                     "ok": False,
                     "state": "degraded" if current_enabled else "disabled",
@@ -956,6 +1038,7 @@ class Controller:
                 detached = await self._detach_memory_runtime(runtime)
                 if detached is runtime:
                     await runtime.close()
+                    await self._clear_memory_runtime(runtime)
             raise
 
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
@@ -1477,33 +1560,41 @@ class Controller:
     async def _memory_runtime_for_data_reset(
         self,
     ) -> AsyncIterator[tuple["MemoryRuntime" | None, bool]]:
-        """Provide the current runtime or an unpublished disabled-mode runtime."""
-
-        await self._await_disabled_memory_cleanup()
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
-        attached = runtime is not None
         if runtime is None:
-            try:
-                runtime = self._create_memory_runtime(
-                    self.config.memory,
-                    allow_disabled=True,
-                )
-            except MemoryRuntimeBusyError:
+            async with self._memory_operation() as lease:
+                if lease is None:
+                    yield None, False
+                    return
+                async with self._memory_replacement_lock():
+                    if getattr(self, "memory_runtime", None) is not None:
+                        yield None, False
+                        return
+                try:
+                    runtime = self._retry_memory_runtime(
+                        self.config.memory,
+                        allow_disabled=True,
+                    )
+                except MemoryRuntimeBusyError:
+                    yield None, False
+                    return
+                try:
+                    yield runtime, False
+                finally:
+                    if not bool(getattr(runtime, "closing", False)):
+                        await self._close_unpublished_memory_runtime(runtime)
+            return
+        async with self._memory_operation(runtime.effective_home) as lease:
+            if lease is None:
                 yield None, False
                 return
-        try:
-            yield runtime, attached
-        finally:
-            if not attached:
-                runtime.begin_close()
-                try:
-                    await runtime.close()
-                except Exception:
-                    logger.warning(
-                        "Unpublished Memory reset runtime did not close cleanly",
-                        exc_info=True,
-                    )
+            async with self._memory_replacement_lock():
+                ownership_changed = getattr(self, "memory_runtime", None) is not runtime
+            if ownership_changed:
+                yield None, False
+                return
+            yield runtime, True
 
     async def _cancel_memory_reconcile_task(self) -> None:
         task = getattr(self, "_memory_reconcile_task", None)
@@ -1581,7 +1672,7 @@ class Controller:
         deadline = loop.time() + budget
         for index, (label, operation) in enumerate(stages):
             remaining = max(0.0, deadline - loop.time())
-            stage_budget = remaining / (len(stages) - index)
+            stage_budget = remaining / (len(stages) - index + 1)
             task = asyncio.create_task(operation(), name=f"memory-shutdown-{index}")
             done, _pending = await asyncio.wait({task}, timeout=stage_budget)
             if task not in done:
@@ -1610,17 +1701,18 @@ class Controller:
                 logger.error("Memory %s failed during shutdown", label, exc_info=True)
 
         try:
-            await self._close_memory_runtime_for_shutdown()
+            await self._close_memory_runtime_for_shutdown(
+                timeout_seconds=max(0.0, deadline - loop.time())
+            )
         except Exception:
             self._shutdown_tainted = True
             logger.error("Memory runtime close failed during shutdown", exc_info=True)
 
-    async def _close_memory_runtime_for_shutdown(self) -> None:
-        """Detach the current runtime, then run its bounded close boundary."""
-
+    async def _close_memory_runtime_for_shutdown(self, *, timeout_seconds: float) -> None:
         runtime = await self._detach_memory_runtime()
         if runtime is not None:
-            await runtime.close()
+            await runtime.close(timeout_seconds=timeout_seconds)
+            await self._clear_memory_runtime(runtime)
 
     async def _reset_memory_data_transaction(
         self,
@@ -1631,9 +1723,7 @@ class Controller:
     ) -> dict[str, Any]:
         async with self._memory_runtime_for_data_reset() as runtime_context:
             runtime, attached = runtime_context
-            from avibe_memory.data_reset import (
-                unchanged_memory_data_result,
-            )
+            from avibe_memory.data_reset import unchanged_memory_data_result
 
             if runtime is None:
                 return {
@@ -1651,28 +1741,46 @@ class Controller:
                     "result": "unchanged",
                 }
 
-            lease = MemoryOperationLease(runtime.effective_home)
-            try:
-                await run_blocking(lease.acquire)
-            except MemoryOperationBusy:
+            if getattr(runtime, "_artifact_installing", False):
                 return {
                     "ok": False,
                     "operation": operation,
                     "error": "memory_operation_in_progress",
                     "result": "unchanged",
                 }
-            except Exception:
-                logger.exception("Memory data reset could not acquire operation lease")
-                return unchanged_memory_data_result(
-                    runtime.effective_home,
-                    operation=operation,
-                    reason="operation_lock_failed",
-                )
+            if not bool(getattr(runtime, "closing", False)):
+                try:
+                    await runtime.prepare_data_reset()
+                except Exception:
+                    logger.exception(
+                        "Memory data reset could not prove recorded sidecar ownership ended"
+                    )
+                    return unchanged_memory_data_result(
+                        runtime.effective_home,
+                        operation=operation,
+                        reason="sidecar_termination_unproved",
+                    )
+
+            root_ownership = await self._retire_memory_runtime_for_reset(
+                runtime,
+                allow_unpublished=not attached,
+            )
+            if root_ownership is None:
+                return {
+                    "ok": False,
+                    "operation": operation,
+                    "error": "memory_operation_in_progress",
+                    "result": "unchanged",
+                }
+
+            target = replace(
+                deepcopy(target_config or self.config.memory),
+                legacy_needs_repair=False,
+            )
 
             async def close_reset_runtime() -> dict[str, Any] | None:
-                runtime.begin_close()
                 try:
-                    await runtime.close()
+                    await runtime.close(root_ownership=root_ownership)
                 except BaseException:
                     logger.exception("Memory data reset could not close the owned runtime")
                     runtime.mark_needs_repair(f"memory_{operation}_failed")
@@ -1685,6 +1793,21 @@ class Controller:
                     return failure
                 return None
 
+            async def release_disabled() -> None:
+                runtime.release_root_ownership(root_ownership)
+                await self._clear_memory_runtime(runtime)
+
+            async def publish(config: MemoryConfig):
+                self.config.memory = config
+                if config.enabled:
+                    return await self._activate_memory_replacement(
+                        runtime,
+                        config,
+                        root_ownership,
+                    )
+                await release_disabled()
+                return None, {"ok": True, "state": "disabled"}
+
             async def restore_after_fence_failure(
                 failure: dict[str, Any],
             ) -> dict[str, Any]:
@@ -1696,15 +1819,8 @@ class Controller:
                     )
                     failure.update(state="degraded", result="runtime_restore_failed")
                     return failure
-                self.config.memory = live_config
-                if not live_config.enabled:
-                    failure["state"] = "disabled"
-                    return failure
                 try:
-                    _fresh, activation = await self._activate_memory_replacement(
-                        runtime,
-                        live_config,
-                    )
+                    _fresh, activation = await publish(live_config)
                 except MemoryRuntimeBusyError:
                     failure.update(
                         state="degraded",
@@ -1726,203 +1842,146 @@ class Controller:
                     )
                 return failure
 
+            def persist_reset_fence(current: MemoryConfig) -> MemoryConfig:
+                if operation == "reconfigure":
+                    if expected_config is None or current != expected_config:
+                        raise MemoryConfigStaleWrite("memory candidate changed")
+                return replace(current, legacy_needs_repair=True)
+
             try:
-                if getattr(runtime, "_artifact_installing", False):
-                    return {
-                        "ok": False,
-                        "operation": operation,
-                        "error": "memory_operation_in_progress",
-                        "result": "unchanged",
-                    }
-                try:
-                    await runtime.prepare_data_reset()
-                except Exception:
-                    logger.exception(
-                        "Memory data reset could not prove recorded sidecar ownership ended"
+                fenced_config = (
+                    await run_blocking(
+                        atomic_update_memory,
+                        persist_reset_fence,
                     )
-                    return unchanged_memory_data_result(
-                        runtime.effective_home,
-                        operation=operation,
-                        reason="sidecar_termination_unproved",
-                    )
-
-                if attached:
-                    detached = await self._detach_memory_runtime(runtime)
-                    if detached is not runtime:
-                        return {
-                            "ok": False,
-                            "operation": operation,
-                            "error": "memory_operation_in_progress",
-                            "result": "unchanged",
-                        }
-
-                target = replace(
-                    deepcopy(target_config or self.config.memory),
-                    legacy_needs_repair=False,
-                )
-
-                def persist_reset_fence(current: MemoryConfig) -> MemoryConfig:
-                    if operation == "reconfigure":
-                        if expected_config is None or current != expected_config:
-                            raise MemoryConfigStaleWrite("memory candidate changed")
-                    return replace(current, legacy_needs_repair=True)
-
-                try:
-                    fenced_config = (
-                        await run_blocking(
-                            atomic_update_memory,
-                            persist_reset_fence,
-                        )
-                    ).memory
-                except MemoryConfigStaleWrite:
-                    if failure := await close_reset_runtime():
-                        return failure
-                    return await restore_after_fence_failure({
-                        "ok": False,
-                        "operation": operation,
-                        "error": "memory_operation_in_progress",
-                        "result": "unchanged",
-                    })
-                except Exception:
+                ).memory
+            except Exception as exc:
+                stale = isinstance(exc, MemoryConfigStaleWrite)
+                if not stale:
                     logger.exception(
                         "Memory data reset could not persist its repair fence"
                     )
-                    if failure := await close_reset_runtime():
-                        return failure
-                    return await restore_after_fence_failure(
-                        unchanged_memory_data_result(
-                            runtime.effective_home,
-                            operation=operation,
-                            reason="config_persist_failed",
-                        )
-                    )
-                self.config.memory = fenced_config
-
-                def persist_confirmed_config(current: MemoryConfig) -> MemoryConfig:
-                    if operation == "reconfigure":
-                        if current != fenced_config:
-                            raise MemoryConfigStaleWrite("memory candidate changed")
-                        return target
-                    return replace(current, legacy_needs_repair=False)
-
                 if failure := await close_reset_runtime():
                     return failure
-                try:
-                    await runtime.settle_after_data_loss()
-                except Exception:
-                    logger.exception(
-                        "Memory data reset could not preserve and rotate stable identity"
-                    )
-                    runtime.mark_needs_repair(f"memory_{operation}_failed")
+                if stale:
+                    failure = {
+                        "ok": False,
+                        "operation": operation,
+                        "error": "memory_operation_in_progress",
+                        "result": "unchanged",
+                    }
+                else:
                     failure = unchanged_memory_data_result(
                         runtime.effective_home,
                         operation=operation,
-                        reason="identity_settlement_failed",
+                        reason="config_persist_failed",
                     )
-                    failure["state"] = "needs_repair"
-                    return failure
+                return await restore_after_fence_failure(failure)
+            self.config.memory = fenced_config
 
-                deletion = await run_blocking(
-                    runtime.reset_mutable_data,
+            def persist_confirmed_config(current: MemoryConfig) -> MemoryConfig:
+                if operation == "reconfigure":
+                    if current != fenced_config:
+                        raise MemoryConfigStaleWrite("memory candidate changed")
+                    return target
+                return replace(current, legacy_needs_repair=False)
+
+            if failure := await close_reset_runtime():
+                return failure
+            try:
+                await runtime.settle_after_data_loss(root_ownership)
+            except Exception:
+                logger.exception(
+                    "Memory data reset could not preserve and rotate stable identity"
                 )
-                deletion_payload = deletion.payload()
-                if deletion.data_remaining:
-                    if fenced_config.enabled:
-                        failed = runtime.replacement(fenced_config)
-                        await self._attach_memory_runtime(
-                            failed,
-                            capture_enabled=True,
-                        )
-                    return {
-                        "ok": False,
-                        "operation": operation,
-                        "state": "needs_repair",
-                        "error": f"memory_{operation}_failed",
-                        "result": "partial",
-                        **deletion_payload,
-                    }
+                runtime.mark_needs_repair(f"memory_{operation}_failed")
+                failure = unchanged_memory_data_result(
+                    runtime.effective_home,
+                    operation=operation,
+                    reason="identity_settlement_failed",
+                )
+                failure["state"] = "needs_repair"
+                return failure
 
+            deletion = await run_blocking(
+                runtime.reset_mutable_data,
+                root_ownership,
+            )
+            deletion_payload = deletion.payload()
+            if deletion.data_remaining:
+                await publish(fenced_config)
+                return {
+                    "ok": False,
+                    "operation": operation,
+                    "state": "needs_repair",
+                    "error": f"memory_{operation}_failed",
+                    "result": "partial",
+                    **deletion_payload,
+                }
+
+            try:
+                persisted = await run_blocking(
+                    atomic_update_memory,
+                    persist_confirmed_config,
+                )
+            except Exception as exc:
+                stale = isinstance(exc, MemoryConfigStaleWrite)
+                if not stale:
+                    logger.exception(
+                        "Memory data reset deleted data but could not persist configuration"
+                    )
                 try:
-                    persisted = await run_blocking(
-                        atomic_update_memory,
-                        persist_confirmed_config,
+                    live_config = (await run_blocking(V2Config.load)).memory
+                except Exception:
+                    logger.exception(
+                        "Memory data reset could not reload configuration after deletion"
                     )
-                except Exception as exc:
-                    stale = isinstance(exc, MemoryConfigStaleWrite)
-                    if not stale:
-                        logger.exception(
-                            "Memory data reset deleted data but could not persist configuration"
-                        )
-                    try:
-                        live_config = (await run_blocking(V2Config.load)).memory
-                    except Exception:
-                        logger.exception(
-                            "Memory data reset could not reload configuration after deletion"
-                        )
-                        live_config = deepcopy(expected_config or self.config.memory)
-                    self.config.memory = live_config
-                    fallback_state = "disabled"
-                    if live_config.enabled:
-                        _fallback, fallback_activation = (
-                            await self._activate_memory_replacement(
-                                runtime,
-                                live_config,
-                            )
-                        )
-                        fallback_state = str(
-                            fallback_activation.get("state") or "degraded"
-                        )
-                    return {
-                        "ok": False,
-                        "operation": operation,
-                        "state": fallback_state,
-                        "error": (
-                            "memory_operation_in_progress"
-                            if stale
-                            else f"memory_{operation}_failed"
-                        ),
-                        "result": "deleted_config_not_applied",
-                        **deletion_payload,
-                    }
+                    live_config = deepcopy(expected_config or self.config.memory)
+                _fresh, fallback = await publish(live_config)
+                return {
+                    "ok": False,
+                    "operation": operation,
+                    "state": str(fallback.get("state") or "degraded"),
+                    "error": (
+                        "memory_operation_in_progress"
+                        if stale
+                        else f"memory_{operation}_failed"
+                    ),
+                    "result": "deleted_config_not_applied",
+                    **deletion_payload,
+                }
 
-                target = persisted.memory
-                self.config.memory = target
-
-                if not target.enabled:
-                    return {
-                        "ok": True,
-                        "operation": operation,
-                        "state": "disabled",
-                        "result": "completed",
-                        **deletion_payload,
-                    }
-                fresh, activation = await self._activate_memory_replacement(
-                    runtime,
-                    target,
-                )
-                if activation.get("ok") is not True:
-                    state = activation.get("state")
-                    if state == "needs_repair" and not fresh.needs_repair:
-                        fresh.mark_needs_repair(
-                            str(activation.get("error") or f"memory_{operation}_failed")
-                        )
-                    return {
-                        "ok": False,
-                        "operation": operation,
-                        "state": "needs_repair" if fresh.needs_repair else "degraded",
-                        "error": activation.get("error", f"memory_{operation}_failed"),
-                        "result": "deleted_readiness_failed",
-                        **deletion_payload,
-                    }
+            target = persisted.memory
+            fresh, activation = await publish(target)
+            if fresh is None:
                 return {
                     "ok": True,
                     "operation": operation,
-                    "state": "running",
+                    "state": "disabled",
                     "result": "completed",
                     **deletion_payload,
                 }
-            finally:
-                await run_blocking(lease.release)
+            if activation.get("ok") is not True:
+                state = activation.get("state")
+                if state == "needs_repair" and not fresh.needs_repair:
+                    fresh.mark_needs_repair(
+                        str(activation.get("error") or f"memory_{operation}_failed")
+                    )
+                return {
+                    "ok": False,
+                    "operation": operation,
+                    "state": "needs_repair" if fresh.needs_repair else "degraded",
+                    "error": activation.get("error", f"memory_{operation}_failed"),
+                    "result": "deleted_readiness_failed",
+                    **deletion_payload,
+                }
+            return {
+                "ok": True,
+                "operation": operation,
+                "state": "running",
+                "result": "completed",
+                **deletion_payload,
+            }
 
     def _memory_replacement_lock(self) -> asyncio.Lock:
         """Lazily provide the gate for lightweight Controller test doubles."""
@@ -2362,8 +2421,6 @@ class Controller:
             return False
 
     async def _recheck_disabled_memory_cleanup(self) -> None:
-        """Clear a stale cleanup fence after checking ownership off-lock."""
-
         if not getattr(self, "_memory_disabled_cleanup_unproved", False):
             return
         memory_dir = paths.get_vibe_remote_dir() / "memory"
@@ -2400,49 +2457,52 @@ class Controller:
             )
 
     async def _cleanup_disabled_memory_process(self, memory_dir: Path) -> None:
-        """Lazily load the proven-ownership reaper after service readiness."""
-
-        ownership_exists = await asyncio.to_thread(
-            self._disabled_memory_ownership_exists,
-            memory_dir,
-        )
-        async with self._memory_replacement_lock():
-            if not isinstance(
-                getattr(self, "memory_adapter", None),
-                DisabledMemoryAdapter,
-            ) or getattr(self, "memory_runtime", None) is not None:
+        async with self._memory_operation() as lease:
+            if lease is None:
+                async with self._memory_replacement_lock():
+                    self._memory_disabled_cleanup_unproved = True
                 return
-            if not ownership_exists:
-                self._memory_disabled_cleanup_unproved = False
-                return
-            self._memory_disabled_cleanup_unproved = True
-
-        try:
-            from avibe_memory.process import ReleasedEverOSOrphanReconciler
-
-            reconciler = ReleasedEverOSOrphanReconciler(
-                provider_root=memory_dir / "everos-root",
-                effective_home=paths.get_vibe_remote_dir(),
-            )
-            await reconciler.reconcile_orphans()
-        except asyncio.CancelledError:
-            async with self._memory_replacement_lock():
-                self._memory_disabled_cleanup_unproved = True
-            raise
-        except Exception:
-            async with self._memory_replacement_lock():
-                self._memory_disabled_cleanup_unproved = True
-            logger.warning(
-                "Disabled Memory could not clean up an older owned EverOS process",
-                exc_info=True,
-            )
-        else:
             ownership_exists = await asyncio.to_thread(
                 self._disabled_memory_ownership_exists,
                 memory_dir,
             )
             async with self._memory_replacement_lock():
-                self._memory_disabled_cleanup_unproved = ownership_exists
+                if not isinstance(
+                    getattr(self, "memory_adapter", None),
+                    DisabledMemoryAdapter,
+                ) or getattr(self, "memory_runtime", None) is not None:
+                    return
+                if not ownership_exists:
+                    self._memory_disabled_cleanup_unproved = False
+                    return
+                self._memory_disabled_cleanup_unproved = True
+
+            try:
+                from avibe_memory.process import ReleasedEverOSOrphanReconciler
+
+                reconciler = ReleasedEverOSOrphanReconciler(
+                    provider_root=memory_dir / "everos-root",
+                    effective_home=paths.get_vibe_remote_dir(),
+                )
+                await reconciler.reconcile_orphans()
+            except asyncio.CancelledError:
+                async with self._memory_replacement_lock():
+                    self._memory_disabled_cleanup_unproved = True
+                raise
+            except Exception:
+                async with self._memory_replacement_lock():
+                    self._memory_disabled_cleanup_unproved = True
+                logger.warning(
+                    "Disabled Memory could not clean up an older owned EverOS process",
+                    exc_info=True,
+                )
+            else:
+                ownership_exists = await asyncio.to_thread(
+                    self._disabled_memory_ownership_exists,
+                    memory_dir,
+                )
+                async with self._memory_replacement_lock():
+                    self._memory_disabled_cleanup_unproved = ownership_exists
 
     def _run_im_runtime(self) -> None:
         try:

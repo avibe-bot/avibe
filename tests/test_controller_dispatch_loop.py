@@ -375,7 +375,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
         def begin_close(self) -> None:
             memory_adapter.quiesce_memory_capture_tasks()
 
-        async def close(self) -> None:
+        async def close(self, **_kwargs: object) -> None:
             await memory_adapter.cancel_memory_capture_tasks()
             assert stopped["capture"] is True
             self.closed = True
@@ -878,7 +878,7 @@ def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
         def begin_close(self) -> None:
             assert reconcile_task.cancelled()
 
-        async def close(self) -> None:
+        async def close(self, **_kwargs: object) -> None:
             assert reconcile_task.cancelled()
             assert cleanup_order == ["destructive-transactions"]
             cleanup_order.append("runtime")

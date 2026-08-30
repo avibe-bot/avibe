@@ -530,10 +530,6 @@ class BestEffortMemoryWriter:
             finally:
                 self._active_provider_calls = max(0, self._active_provider_calls - 1)
 
-            if not self._enabled():
-                await self._cleanup_item(item)
-                return
-
             if (
                 isinstance(result, AddAck)
                 and result.status in {"accumulated", "extracted"}

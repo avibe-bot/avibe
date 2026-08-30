@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -61,17 +62,28 @@ async def test_session_lifecycle_offers_without_waiting_for_capture(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_releases_provider_root_for_one_replacement(
+async def test_reset_handoff_holds_root_until_exact_successor_accepts(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
     with pytest.raises(MemoryRuntimeBusyError):
         _runtime(tmp_path)
+    ownership = runtime.begin_root_ownership_handoff()
 
-    await runtime.close()
+    await runtime.close(root_ownership=ownership)
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
 
-    replacement = _runtime(tmp_path)
+    replacement = runtime.replacement(MemoryConfig(enabled=True), ownership)
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
+    replacement.accept_root_ownership()
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
+
     await replacement.close()
+    final = _runtime(tmp_path)
+    await final.close()
 
 
 @pytest.mark.asyncio
@@ -83,37 +95,71 @@ async def test_runtime_close_timeouts_still_attempt_everos_stop(
     release = asyncio.Event()
     phases: list[str] = []
 
-    async def stalled_capture() -> None:
-        phases.append("capture")
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await release.wait()
+    def stalled(label: str):
+        async def wait() -> None:
+            phases.append(label)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
 
-    async def stalled_local_cleanup() -> None:
-        phases.append("local")
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await release.wait()
+        return wait
 
     async def stop_provider() -> None:
         phases.append("provider")
 
-    monkeypatch.setattr(runtime, "_cancel_capture_tasks", stalled_capture)
-    monkeypatch.setattr(runtime, "_close_local_runtime", stalled_local_cleanup)
+    monkeypatch.setattr(runtime, "_cancel_capture_tasks", stalled("capture"))
+    monkeypatch.setattr(runtime, "_close_local_runtime", stalled("local"))
     monkeypatch.setattr(runtime._supervisor, "close", stop_provider)
-    monkeypatch.setattr(runtime_module, "MEMORY_CAPTURE_CLOSE_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(runtime_module, "MEMORY_LOCAL_CLOSE_TIMEOUT_SECONDS", 0.01)
 
     with pytest.raises(RuntimeError, match="local cleanup"):
-        await runtime.close()
+        await runtime.close(timeout_seconds=0.03)
 
     assert phases == ["capture", "local", "provider"]
     with pytest.raises(MemoryRuntimeBusyError):
         _runtime(tmp_path)
     release.set()
     await asyncio.sleep(0)
+    await runtime.close(timeout_seconds=1.0)
+
+    replacement = _runtime(tmp_path)
+    await replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_artifact_install_keeps_root_until_close_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    install_started = threading.Event()
+    install_release = threading.Event()
+
+    def blocked_ensure(*, force: bool) -> dict[str, object]:
+        assert force is True
+        install_started.set()
+        assert install_release.wait(timeout=2.0)
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime._artifact_manager, "ensure", blocked_ensure)
+    install = asyncio.create_task(runtime.install_artifact())
+    assert await asyncio.to_thread(install_started.wait, 1.0)
+
+    runtime.begin_close()
+    with pytest.raises(RuntimeError, match="local cleanup"):
+        await runtime.close(timeout_seconds=0.03)
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
+
+    install_release.set()
+    assert await install == {
+        "ok": False,
+        "reason": "memory_operation_in_progress",
+        "download_error": None,
+    }
+    await runtime.close(timeout_seconds=1.0)
+    replacement = _runtime(tmp_path)
+    await replacement.close()
 
 
 @pytest.mark.parametrize("operation", ("reconcile", "wake"))
@@ -126,12 +172,8 @@ async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
     runtime = _runtime(tmp_path)
     stop_started = asyncio.Event()
     stop_release = asyncio.Event()
-    side_effects: list[str] = []
 
-    async def ownership_reconciled() -> bool:
-        return True
-
-    async def processing_ready(_python: Path, _config: MemoryConfig) -> bool:
+    async def truthy(*_args) -> bool:
         return True
 
     async def delayed_stop() -> None:
@@ -139,18 +181,16 @@ async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
         await stop_release.wait()
 
     async def unexpected_async(name: str, *_args, **_kwargs):
-        side_effects.append(name)
         pytest.fail(f"revoked reconciliation reached {name}")
 
     def unexpected_sync(name: str, *_args, **_kwargs):
-        side_effects.append(name)
         pytest.fail(f"revoked reconciliation reached {name}")
 
     async def no_op() -> None:
         return None
 
-    monkeypatch.setattr(runtime, "_reconcile_released_ownership", ownership_reconciled)
-    monkeypatch.setattr(runtime, "_probe_processing", processing_ready)
+    monkeypatch.setattr(runtime, "_reconcile_released_ownership", truthy)
+    monkeypatch.setattr(runtime, "_probe_processing", truthy)
     monkeypatch.setattr(runtime, "artifact_admitted", lambda: True)
     monkeypatch.setattr(runtime._artifact_manager, "resolve_python", lambda: Path("python"))
     monkeypatch.setattr(runtime._supervisor, "stop", delayed_stop)
@@ -169,7 +209,6 @@ async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
         "ensure",
         lambda *_args: unexpected_sync("provider root ensure"),
     )
-    monkeypatch.setattr(runtime, "_cancel_capture_tasks", no_op)
     monkeypatch.setattr(runtime, "_close_local_runtime", no_op)
     monkeypatch.setattr(runtime._supervisor, "close", no_op)
 
@@ -186,7 +225,6 @@ async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
     if operation == "wake":
         expected["state"] = "starting"
     assert await lifecycle == expected
-    assert side_effects == []
     await runtime.close()
 
 
@@ -500,6 +538,13 @@ async def test_disabled_attachment_intake_is_unavailable_in_status(
         ),
         effective_home=tmp_path,
     )
+    first_epoch = runtime.attachment_capture_config_generation()
+    assert isinstance(first_epoch, int)
+    runtime._replace_provider(runtime._provider)
+    second_epoch = runtime.attachment_capture_config_generation()
+    assert isinstance(second_epoch, int)
+    assert second_epoch > first_epoch
+
     runtime.module._writer.disable_attachment_intake()
 
     assert (await runtime.status_payload())["attachment_capture"] == {
