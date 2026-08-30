@@ -674,7 +674,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
                 if self.task is not None:
                     self.task.cancel()
 
-        def start_capture_adapter(self) -> bool:
+        def start_capture_adapter(self, **_options: object) -> bool:
             return self.capture_adapter.start()
 
         async def reconcile(self, config) -> dict[str, object]:

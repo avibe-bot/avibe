@@ -573,7 +573,9 @@ class Controller:
             allow_disabled=allow_disabled,
             processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
-            is_enabled_user=self.settings_manager.is_enabled_user,
+            is_enabled_user=_SettingsUserBindings(
+                getattr(self, "platform_settings_managers", None)
+            ).is_enabled_user,
             lifecycle_snapshot_matches=(
                 self.session_turns.session_lifecycle_snapshot_matches
             ),
@@ -806,6 +808,19 @@ class Controller:
                 self._memory_runtime_leases_blocked = False
                 condition.notify_all()
 
+    def _start_memory_capture_adapter(self, runtime: "MemoryRuntime") -> bool:
+        """Bind every capture task to the Controller-owned event loop."""
+
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return False
+        if loop.is_closed():
+            return False
+        return runtime.start_capture_adapter(task_factory=loop.create_task)
+
     def _attach_memory_runtime_locked(
         self,
         runtime: "MemoryRuntime",
@@ -833,7 +848,7 @@ class Controller:
         self._memory_plugin_error = None
         if capture_enabled:
             self.memory_adapter = runtime.capture_adapter
-            runtime.start_capture_adapter()
+            self._start_memory_capture_adapter(runtime)
         else:
             self.memory_adapter = DisabledMemoryAdapter()
 
@@ -1050,7 +1065,7 @@ class Controller:
                     self._recheck_disabled_memory_cleanup_locked()
                 else:
                     self.memory_adapter = runtime.capture_adapter
-                    runtime.start_capture_adapter()
+                    self._start_memory_capture_adapter(runtime)
             return result
 
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
@@ -3663,7 +3678,7 @@ class Controller:
             asyncio.set_event_loop(self._loop)
             memory_runtime = getattr(self, "memory_runtime", None)
             if memory_runtime is not None:
-                memory_runtime.start_capture_adapter()
+                self._start_memory_capture_adapter(memory_runtime)
                 self._memory_reconcile_task = self._loop.create_task(
                     memory_runtime.wake(),
                     name="memory-runtime-wake",

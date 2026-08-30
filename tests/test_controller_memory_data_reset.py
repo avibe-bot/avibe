@@ -50,7 +50,7 @@ class _Runtime:
     async def prepare_data_reset(self) -> None:
         self.events.append("reap")
 
-    def start_capture_adapter(self) -> bool:
+    def start_capture_adapter(self, **_options: object) -> bool:
         return True
 
     def replacement(self, config: MemoryConfig) -> _Runtime:

@@ -5,6 +5,7 @@ import gc
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import select, update
 
+from avibe_memory.capture_adapter import EnabledMemoryAdapter
+from core.handlers.message_handler import memory_turn_event
+from core.memory_adapter import SessionArchived, SessionReset
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
@@ -273,6 +277,134 @@ async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> Non
         )
     finally:
         admission.release()
+
+
+@pytest.mark.anyio
+async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-001."""
+
+    manager, _other, _engine, _engine_b, starts = managers
+    capture_started = asyncio.Event()
+
+    class Module:
+        def __init__(self) -> None:
+            self.capacities: list[SimpleNamespace] = []
+            self.reservations: list[SimpleNamespace] = []
+            self.barriers: list[str] = []
+
+        def reserve_capture_capacity(self) -> object:
+            capacity = SimpleNamespace(active=True)
+            self.capacities.append(capacity)
+            return capacity
+
+        def release_capture_capacity(self, capacity: object) -> None:
+            capacity.active = False
+
+        def reserve_capture_admission(self, **_scope: object) -> object:
+            reservation = SimpleNamespace(active=True)
+            self.reservations.append(reservation)
+            return reservation
+
+        def cancel_capture_reservation(self, reservation: object) -> None:
+            reservation.active = False
+
+        @asynccontextmanager
+        async def capture_admission(self, **_options: object):
+            yield object()
+
+        async def capture(self, _request: object, **_options: object) -> object:
+            capture_started.set()
+            await asyncio.Event().wait()
+
+        def offer_barrier(self, session_id: str) -> object:
+            self.barriers.append(session_id)
+            return "queued"
+
+        async def wait_writer_idle_for_tests(self, **_options: object) -> None:
+            return None
+
+    class Principals:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            return "u-11111111111111111111111111111111"
+
+        def project_for_workdir(self, _workdir: str) -> str:
+            raise AssertionError("capture must use the default project")
+
+    module = Module()
+    adapter = EnabledMemoryAdapter(
+        module=module,
+        principals=Principals(),
+        is_enabled_user=lambda _platform, _user_id: True,
+        lifecycle_snapshot_matches=manager.session_lifecycle_snapshot_matches,
+        acquire_lifecycle_admission=manager.acquire_lifecycle_admission,
+        attachment_capture_status=lambda: asyncio.sleep(0, result="unavailable"),
+        attachment_config_generation=lambda: None,
+    )
+    manager.controller.memory_adapter = adapter
+    assert adapter.start(task_factory=asyncio.create_task)
+    context = _context()
+    context.message_id = "native-memory-turn"
+    context.is_original_human_text = True
+    context.platform_specific["author_id"] = "authenticated-author"
+    adapter.offer(
+        memory_turn_event(
+            context,
+            "记住这一轮",
+            "ses_fsm",
+            manager.snapshot_session_lifecycle("ses_fsm"),
+        )
+    )
+    await asyncio.wait_for(capture_started.wait(), timeout=1.0)
+
+    delivered = await asyncio.wait_for(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="next turn",
+            ),
+            context=_context(),
+        ),
+        timeout=1.0,
+    )
+    assert delivered.turn_id
+    assert starts[-1] == (delivered.turn_id, "next turn")
+
+    async def reset_session() -> str:
+        return "reset"
+
+    async def archive_session() -> str:
+        return "archived"
+
+    assert await asyncio.wait_for(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            reset_session,
+            deadline_seconds=0.05,
+        ),
+        timeout=1.0,
+    ) == "reset"
+    adapter.offer(SessionReset("ses_fsm"))
+    assert await asyncio.wait_for(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            archive_session,
+            deadline_seconds=0.05,
+        ),
+        timeout=1.0,
+    ) == "archived"
+    adapter.offer(SessionArchived("ses_fsm"))
+
+    await adapter.wait_idle_for_tests(timeout_seconds=1.0)
+    assert module.barriers == ["ses_fsm", "ses_fsm"]
+    assert module.capacities and all(not item.active for item in module.capacities)
+    assert module.reservations and all(
+        not item.active for item in module.reservations
+    )
+    assert adapter.capture_tasks == set()
+    await adapter.cancel_memory_capture_tasks()
 
 
 @pytest.mark.anyio

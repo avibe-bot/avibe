@@ -300,7 +300,7 @@ def create_memory_runtime(
     processing_event: ProcessingEvent | None = None,
     insight_reader: MemoryInsightReader | None = None,
     on_config_settled: Callable[[MemoryConfig], None] | None = None,
-    is_enabled_user: Callable[..., bool] | None = None,
+    is_enabled_user: Callable[[str, str], bool] | None = None,
     lifecycle_snapshot_matches: Callable[[str, object], bool] | None = None,
     acquire_lifecycle_admission: Callable[[str], Awaitable[object]] | None = None,
 ) -> MemoryRuntime:
@@ -338,7 +338,7 @@ class MemoryRuntime:
         processing_event: ProcessingEvent | None = None,
         insight_reader: MemoryInsightReader | None = None,
         on_config_settled: Callable[[MemoryConfig], None] | None = None,
-        is_enabled_user: Callable[..., bool] | None = None,
+        is_enabled_user: Callable[[str, str], bool] | None = None,
         lifecycle_snapshot_matches: Callable[[str, object], bool] | None = None,
         acquire_lifecycle_admission: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
@@ -362,6 +362,8 @@ class MemoryRuntime:
         self._lifecycle_snapshot_matches = lifecycle_snapshot_matches
         self._acquire_lifecycle_admission = acquire_lifecycle_admission
         self._capture_adapter: MemoryCaptureAdapter = DisabledMemoryAdapter()
+        self._capture_task_factory: Callable[..., asyncio.Task[Any]] | None = None
+        self._compose_capture_adapter(None)
         # The controller-side port only talks to the private UDS. Credentials
         # enter an EverOSPort only inside the owned child probe/sidecar.
         self._provider = EverOSPort(self._socket_path)
@@ -435,6 +437,13 @@ class MemoryRuntime:
         self._store = opened
         self._module = module
         self._compose_capture_adapter(module)
+        factory_loop = getattr(self._capture_task_factory, "__self__", None)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if factory_loop is running_loop and running_loop is not None:
+            self.start_capture_adapter()
         if self._legacy_clear_state_exists(opened):
             self._needs_repair_reason = "memory_legacy_recovery_required"
         if self._needs_repair_reason is not None:
@@ -649,30 +658,40 @@ class MemoryRuntime:
     def capture_adapter(self) -> MemoryCaptureAdapter:
         return self._capture_adapter
 
-    def start_capture_adapter(self) -> bool:
+    def start_capture_adapter(
+        self,
+        *,
+        task_factory: Callable[..., asyncio.Task[Any]] | None = None,
+    ) -> bool:
+        if task_factory is not None:
+            if (
+                self._capture_task_factory is not None
+                and self._capture_task_factory != task_factory
+            ):
+                raise RuntimeError("Memory capture scheduler is already bound")
+            self._capture_task_factory = task_factory
         start = getattr(self._capture_adapter, "start", None)
-        return bool(callable(start) and start())
+        return bool(
+            callable(start)
+            and start(task_factory=self._capture_task_factory)
+        )
 
-    def _compose_capture_adapter(self, module: MemoryModule) -> None:
-        if not all(
-            callable(item)
-            for item in (
-                self._is_enabled_user,
-                self._lifecycle_snapshot_matches,
-                self._acquire_lifecycle_admission,
-            )
+    def _compose_capture_adapter(self, module: MemoryModule | None) -> None:
+        if isinstance(self._capture_adapter, EnabledMemoryAdapter):
+            if module is not None:
+                self._capture_adapter.bind_module(module)
+            return
+        if (
+            not callable(self._is_enabled_user)
+            or not callable(self._lifecycle_snapshot_matches)
+            or not callable(self._acquire_lifecycle_admission)
         ):
             return
-
-        class Bindings:
-            def is_enabled_user(inner_self, platform: str, user_id: str) -> bool:
-                del inner_self
-                return bool(self._is_enabled_user(user_id, platform=platform))
 
         self._capture_adapter = EnabledMemoryAdapter(
             module=module,
             principals=self,
-            bindings=Bindings(),
+            is_enabled_user=self._is_enabled_user,
             lifecycle_snapshot_matches=self._lifecycle_snapshot_matches,
             acquire_lifecycle_admission=self._acquire_lifecycle_admission,
             attachment_capture_status=self.attachment_capture_status,
@@ -831,6 +850,7 @@ class MemoryRuntime:
                     "state": "needs_repair" if self.needs_repair else "degraded",
                     "error": self._runtime_error or "memory_store_unavailable",
                 }
+            self.start_capture_adapter()
         async with self._reconcile_lock:
             self._activation_loop = asyncio.get_running_loop()
             if self._artifact_installing:
@@ -2071,6 +2091,7 @@ class MemoryRuntime:
                     "state": "needs_repair" if self.needs_repair else "degraded",
                     "error": self._runtime_error or "memory_store_unavailable",
                 }
+            self.start_capture_adapter()
             if self.needs_repair:
                 return {
                     "ok": False,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 from dataclasses import dataclass, field
@@ -141,7 +142,7 @@ class MemoryIMAttachmentScenarioHarness:
         return EnabledMemoryAdapter(
             module=self.module,
             principals=self.runtime,
-            bindings=_Bindings(bound=self.bound),
+            is_enabled_user=_Bindings(bound=self.bound).is_enabled_user,
             lifecycle_snapshot_matches=lambda _session_id, snapshot: snapshot == 1,
             acquire_lifecycle_admission=lambda _session_id: _completed(
                 _LifecycleAdmission()
@@ -209,7 +210,7 @@ class MemoryIMAttachmentScenarioHarness:
         ).materialize(context, self.downloader)
         try:
             self.adapter = self._new_adapter()
-            assert self.adapter.start()
+            assert self.adapter.start(task_factory=asyncio.create_task)
             self.adapter.offer(
                 memory_turn_event(
                     context,

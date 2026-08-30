@@ -12,7 +12,6 @@ from avibe_memory.admission import (
     CaptureAdmission,
     InboundTurnFacts,
     PrincipalDirectory,
-    UserBindingDirectory,
     normalize_attachment_config_generation,
 )
 from avibe_memory.im_attachments import select_memory_attachments
@@ -64,6 +63,14 @@ class CaptureModule(Protocol):
     async def wait_writer_idle_for_tests(self, *, timeout_seconds: float = 5.0) -> None: ...
 
 
+class _UserBindings:
+    def __init__(self, is_enabled_user: Callable[[str, str], bool]) -> None:
+        self._is_enabled_user = is_enabled_user
+
+    def is_enabled_user(self, platform: str, user_id: str) -> bool:
+        return self._is_enabled_user(platform, user_id)
+
+
 @dataclass(slots=True)
 class _QueuedTurn:
     event: TurnAccepted
@@ -84,31 +91,52 @@ class _QueuedTurn:
             pass
 
 
+@dataclass(slots=True)
+class _CaptureOwnership:
+    item: _QueuedTurn
+    reservation: object
+    settled: asyncio.Event
+    active: bool = True
+
+    def release(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        try:
+            self.item.module.cancel_capture_reservation(self.reservation)
+        except BaseException:
+            pass
+        self.item.release()
+        self.settled.set()
+
+
 class EnabledMemoryAdapter:
     """Own capture admission, preparation, scheduling, and cleanup."""
 
     def __init__(
         self,
         *,
-        module: CaptureModule,
+        module: CaptureModule | None,
         principals: PrincipalDirectory,
-        bindings: UserBindingDirectory,
+        is_enabled_user: Callable[[str, str], bool],
         lifecycle_snapshot_matches: Callable[[str, object], bool],
         acquire_lifecycle_admission: Callable[[str], Awaitable[object]],
         attachment_capture_status: Callable[[], Awaitable[str]],
         attachment_config_generation: Callable[[], int | None],
         attachment_selector: Callable[[object], object] = select_memory_attachments,
-        task_factory: Callable[..., asyncio.Task[Any]] = asyncio.create_task,
         max_pending_events: int = MAX_PENDING_CAPTURE_EVENTS,
     ) -> None:
         self._module = module
-        self._admission = CaptureAdmission(principals=principals, bindings=bindings)
+        self._admission = CaptureAdmission(
+            principals=principals,
+            bindings=_UserBindings(is_enabled_user),
+        )
         self._lifecycle_snapshot_matches = lifecycle_snapshot_matches
         self._acquire_lifecycle_admission = acquire_lifecycle_admission
         self._attachment_capture_status = attachment_capture_status
         self._attachment_config_generation = attachment_config_generation
         self._attachment_selector = attachment_selector
-        self._task_factory = task_factory
+        self._task_factory: Callable[..., asyncio.Task[Any]] | None = None
         self._queue: asyncio.Queue[MemoryEvent | _QueuedTurn] = asyncio.Queue(
             maxsize=max_pending_events
         )
@@ -117,19 +145,37 @@ class EnabledMemoryAdapter:
         self._capture_tasks_by_session: dict[str, set[asyncio.Task[None]]] = {}
         self._registration_open = False
 
+    def bind_module(self, module: CaptureModule) -> None:
+        """Bind the recovered store once without changing facade identity."""
+
+        if self._module is not None and self._module is not module:
+            raise RuntimeError("Memory capture facade is already bound")
+        self._module = module
+
     @property
     def capture_tasks(self) -> set[asyncio.Task[None]]:
         return set(self._capture_tasks)
 
-    def start(self) -> bool:
+    def start(
+        self,
+        *,
+        task_factory: Callable[..., asyncio.Task[Any]] | None = None,
+    ) -> bool:
         """Schedule the sole preparation worker before the host can offer work."""
 
+        if task_factory is not None:
+            if self._task_factory is not None and self._task_factory != task_factory:
+                raise RuntimeError("Memory capture scheduler is already bound")
+            self._task_factory = task_factory
+        factory = self._task_factory
+        if self._module is None or factory is None:
+            return False
         if self._worker_task is not None and not self._worker_task.done():
             return True
         self._registration_open = True
         pending = self._run()
         try:
-            self._worker_task = self._task_factory(
+            self._worker_task = factory(
                 pending,
                 name="memory-capture-dispatcher",
             )
@@ -145,8 +191,10 @@ class EnabledMemoryAdapter:
         queued: MemoryEvent | _QueuedTurn | None = None
         try:
             worker = self._worker_task
+            module = self._module
             if (
                 not self._registration_open
+                or module is None
                 or worker is None
                 or worker.done()
             ):
@@ -154,7 +202,7 @@ class EnabledMemoryAdapter:
             if isinstance(event, TurnAccepted):
                 if not _valid_turn(event):
                     return
-                capacity = self._module.reserve_capture_capacity()
+                capacity = module.reserve_capture_capacity()
                 if isinstance(capacity, str):
                     return
                 lease = None
@@ -163,7 +211,7 @@ class EnabledMemoryAdapter:
                         lease = event.attachment_lease.retain()
                     except BaseException:
                         lease = None
-                queued = _QueuedTurn(event, self._module, capacity, lease)
+                queued = _QueuedTurn(event, module, capacity, lease)
             elif isinstance(event, (SessionReset, SessionArchived)):
                 if not isinstance(event.session_id, str) or not event.session_id:
                     return
@@ -187,7 +235,9 @@ class EnabledMemoryAdapter:
                         await self._prepare_and_schedule(item)
                         current = None
                     else:
-                        self._module.offer_barrier(item.session_id)
+                        module = self._module
+                        if module is not None:
+                            module.offer_barrier(item.session_id)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -206,17 +256,45 @@ class EnabledMemoryAdapter:
         if not self._matches(event):
             item.release()
             return
+        facts = InboundTurnFacts(
+            platform=event.platform,
+            user_id=event.user_id,
+            message_id=event.message_id,
+            session_id=event.session_id,
+            text=event.text,
+            files=list(event.files),
+            is_dm=event.is_dm,
+            is_ordinary_text=event.is_ordinary_text,
+            is_ordinary_attachment=event.is_ordinary_attachment,
+            attachment_lease=item.lease,
+            attachment_capture_status="unavailable",
+            attachment_config_generation=None,
+            attachment_selection=None,
+        )
+        if event.platform != "avibe" and event.files:
+            authorized = await run_blocking(
+                self._admission.admits_attachment_turn,
+                facts,
+            )
+            if not authorized:
+                item.release()
+                return
         attachment_status: object = "unavailable"
         generation: object = None
         attachment_selection: object = None
         if event.platform != "avibe" and event.files and item.lease is not None:
             try:
-                attachment_status = await self._attachment_capture_status()
-                generation = self._attachment_config_generation()
+                generation = normalize_attachment_config_generation(
+                    self._attachment_config_generation()
+                )
             except Exception:
-                attachment_status = "unavailable"
                 generation = None
-            if attachment_status == "ready" and generation is not None:
+            if generation is not None:
+                try:
+                    attachment_status = await self._attachment_capture_status()
+                except Exception:
+                    attachment_status = "unavailable"
+            if attachment_status == "ready":
                 try:
                     attachment_selection = await run_blocking(
                         self._attachment_selector,
@@ -232,17 +310,8 @@ class EnabledMemoryAdapter:
                     )
                     attachment_status = "unavailable"
                     generation = None
-        facts = InboundTurnFacts(
-            platform=event.platform,
-            user_id=event.user_id,
-            message_id=event.message_id,
-            session_id=event.session_id,
-            text=event.text,
-            files=list(event.files),
-            is_dm=event.is_dm,
-            is_ordinary_text=event.is_ordinary_text,
-            is_ordinary_attachment=event.is_ordinary_attachment,
-            attachment_lease=item.lease,
+        facts = replace(
+            facts,
             attachment_capture_status=attachment_status,
             attachment_config_generation=generation,
             attachment_selection=attachment_selection,
@@ -256,7 +325,7 @@ class EnabledMemoryAdapter:
             item.release()
             return
         try:
-            reservation = self._module.reserve_capture_admission(
+            reservation = item.module.reserve_capture_admission(
                 principal_id=request.principal_id,
                 project_id=request.project_id,
                 session_id=request.session_id,
@@ -265,20 +334,23 @@ class EnabledMemoryAdapter:
             item.release()
             return
         settled = asyncio.Event()
-        pending = self._run_capture(item, request, reservation, settled)
+        ownership = _CaptureOwnership(item, reservation, settled)
+        pending = self._run_capture(item, request, ownership)
         task: asyncio.Task[Any] | None = None
         try:
-            task = self._task_factory(pending, name="memory-capture")
+            factory = self._task_factory
+            if factory is None:
+                raise RuntimeError("Memory capture scheduler is not bound")
+            task = factory(pending, name="memory-capture")
             item.task_owned = True
-            self._track_capture_task(task, request.session_id)
+            self._track_capture_task(task, request.session_id, ownership)
         except BaseException:
             if task is None:
                 pending.close()
             else:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            self._module.cancel_capture_reservation(reservation)
-            item.release()
+            ownership.release()
             return
         await settled.wait()
 
@@ -288,9 +360,12 @@ class EnabledMemoryAdapter:
     ) -> CaptureRequest | None:
         if not request.attachments:
             return request
-        observed = normalize_attachment_config_generation(
-            self._attachment_config_generation()
-        )
+        try:
+            observed = normalize_attachment_config_generation(
+                self._attachment_config_generation()
+            )
+        except Exception:
+            observed = None
         if observed == request.attachment_config_generation:
             return request
         if not request.text.strip():
@@ -305,8 +380,7 @@ class EnabledMemoryAdapter:
         self,
         item: _QueuedTurn,
         request: CaptureRequest,
-        reservation: object,
-        settled: asyncio.Event,
+        ownership: _CaptureOwnership,
     ) -> None:
         lifecycle_admission = None
         try:
@@ -315,15 +389,15 @@ class EnabledMemoryAdapter:
             )
             if not self._registration_open or not self._matches(item.event):
                 return
-            async with self._module.capture_admission(
+            async with item.module.capture_admission(
                 principal_id=request.principal_id,
                 project_id=request.project_id,
                 session_id=request.session_id,
-                reservation=reservation,
+                reservation=ownership.reservation,
             ) as admission:
                 if not self._registration_open or not self._matches(item.event):
                     return
-                result = await self._module.capture(
+                result = await item.module.capture(
                     request,
                     source_lease=item.lease,
                     admission=admission,
@@ -341,10 +415,8 @@ class EnabledMemoryAdapter:
                         captured,
                     )
         finally:
-            self._module.cancel_capture_reservation(reservation)
             _release(lifecycle_admission)
-            item.release()
-            settled.set()
+            ownership.release()
 
     def _matches(self, event: TurnAccepted) -> bool:
         try:
@@ -359,6 +431,7 @@ class EnabledMemoryAdapter:
         self,
         task: asyncio.Task[None],
         session_id: str,
+        ownership: _CaptureOwnership,
     ) -> None:
         if not self._registration_open:
             task.cancel()
@@ -372,6 +445,7 @@ class EnabledMemoryAdapter:
                 pass
             except Exception:
                 logger.warning("Memory capture task failed", exc_info=True)
+            ownership.release()
             self._capture_tasks.discard(completed)
             bucket = self._capture_tasks_by_session.get(session_id)
             if bucket is not None:
@@ -420,9 +494,11 @@ class EnabledMemoryAdapter:
             await self._queue.join()
             while self._capture_tasks:
                 await asyncio.sleep(0)
-            await self._module.wait_writer_idle_for_tests(
-                timeout_seconds=timeout_seconds
-            )
+            module = self._module
+            if module is not None:
+                await module.wait_writer_idle_for_tests(
+                    timeout_seconds=timeout_seconds
+                )
 
         await asyncio.wait_for(wait(), timeout=timeout_seconds)
 

@@ -59,6 +59,7 @@ class _Module:
     def __init__(self) -> None:
         self.capacity_outcome: object = None
         self.capacities: list[_Capacity] = []
+        self.reservations: list[object] = []
         self.captures: list[object] = []
         self.barriers: list[str] = []
         self.capture_error: BaseException | None = None
@@ -78,7 +79,9 @@ class _Module:
             reservation.active = False
 
     def reserve_capture_admission(self, **_scope: object) -> object:
-        return SimpleNamespace(active=True)
+        reservation = SimpleNamespace(active=True)
+        self.reservations.append(reservation)
+        return reservation
 
     def cancel_capture_reservation(self, reservation: object) -> None:
         reservation.active = False
@@ -120,15 +123,16 @@ class _Principals:
 
 
 class _Bindings:
-    def __init__(self, forbidden: bool = False) -> None:
+    def __init__(self, forbidden: bool = False, enabled: bool = True) -> None:
         self.forbidden = forbidden
+        self.enabled = enabled
         self.calls = 0
 
     def is_enabled_user(self, _platform: str, _user_id: str) -> bool:
         self.calls += 1
         if self.forbidden:
             raise AssertionError("offer reached settings/binding lookup")
-        return True
+        return self.enabled
 
 
 class _Lifecycle:
@@ -194,24 +198,57 @@ def _adapter(
     adapter = EnabledMemoryAdapter(
         module=module,
         principals=principals or _Principals(),
-        bindings=bindings or _Bindings(),
+        is_enabled_user=(bindings or _Bindings()).is_enabled_user,
         lifecycle_snapshot_matches=lifecycle.snapshot_matches,
         acquire_lifecycle_admission=lifecycle.acquire,
         attachment_capture_status=(
             status_reader or (lambda: asyncio.sleep(0, result="ready"))
         ),
         attachment_config_generation=generation_reader or (lambda: 7),
-        task_factory=task_factory,
         max_pending_events=max_pending_events,
         **options,
     )
-    assert adapter.start()
+    assert adapter.start(task_factory=task_factory)
     return adapter, lifecycle
 
 
 async def _settle(adapter: EnabledMemoryAdapter) -> None:
     await adapter.wait_idle_for_tests()
     await asyncio.sleep(0)
+
+
+def test_non_running_controller_loop_can_schedule_dispatcher() -> None:
+    from core.controller import Controller
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        assert loop.is_running() is False
+        module = _Module()
+        lifecycle = _Lifecycle()
+        adapter = EnabledMemoryAdapter(
+            module=module,
+            principals=_Principals(),
+            is_enabled_user=_Bindings().is_enabled_user,
+            lifecycle_snapshot_matches=lifecycle.snapshot_matches,
+            acquire_lifecycle_admission=lifecycle.acquire,
+            attachment_capture_status=lambda: asyncio.sleep(0, result="ready"),
+            attachment_config_generation=lambda: 7,
+        )
+
+        class Runtime:
+            def start_capture_adapter(self, *, task_factory) -> bool:
+                return adapter.start(task_factory=task_factory)
+
+        controller = Controller.__new__(Controller)
+        controller._loop = loop
+        assert controller._start_memory_capture_adapter(Runtime())
+        assert adapter._worker_task is not None
+        assert adapter._worker_task.get_loop() is loop
+        loop.run_until_complete(adapter.cancel_memory_capture_tasks())
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 def test_disabled_adapter_has_zero_side_effects() -> None:
@@ -350,6 +387,70 @@ async def test_success_releases_one_retained_lease_and_forwards_capture() -> Non
 
 
 @pytest.mark.asyncio
+async def test_denied_attachment_is_rejected_before_any_preparation() -> None:
+    module = _Module()
+    bindings = _Bindings(enabled=False)
+    generation = Mock(side_effect=AssertionError("generation read before authorization"))
+    status = Mock(side_effect=AssertionError("status read before authorization"))
+    selector = Mock(side_effect=AssertionError("selection ran before authorization"))
+    adapter, _ = _adapter(
+        module,
+        bindings=bindings,
+        generation_reader=generation,
+        status_reader=status,
+        selector=selector,
+    )
+    lease = _Lease()
+
+    adapter.offer(
+        _event(
+            text="private caption",
+            files=(MemoryFile("private.pdf", "application/pdf"),),
+            lease=lease,
+        )
+    )
+    await _settle(adapter)
+
+    assert bindings.calls == 1
+    generation.assert_not_called()
+    status.assert_not_called()
+    selector.assert_not_called()
+    assert module.captures == []
+    assert lease.retained == lease.released == 1
+    await adapter.cancel_memory_capture_tasks()
+
+
+@pytest.mark.asyncio
+async def test_missing_generation_skips_provider_probe_and_degrades_caption() -> None:
+    module = _Module()
+    status = Mock(side_effect=AssertionError("provider probed without opt-in"))
+    selector = Mock(side_effect=AssertionError("selection ran without opt-in"))
+    adapter, _ = _adapter(
+        module,
+        generation_reader=lambda: None,
+        status_reader=status,
+        selector=selector,
+    )
+    lease = _Lease()
+
+    adapter.offer(
+        _event(
+            text="caption survives",
+            files=(MemoryFile("receipt.pdf", "application/pdf"),),
+            lease=lease,
+        )
+    )
+    await _settle(adapter)
+
+    status.assert_not_called()
+    selector.assert_not_called()
+    assert len(module.captures) == 1
+    assert module.captures[0].attachments == ()
+    assert lease.retained == lease.released == 1
+    await adapter.cancel_memory_capture_tasks()
+
+
+@pytest.mark.asyncio
 async def test_queue_full_releases_rejected_and_shutdown_releases_queued_lease() -> None:
     module = _Module()
     adapter, _ = _adapter(module, max_pending_events=1)
@@ -396,6 +497,73 @@ async def test_capture_registration_failure_joins_task_before_releasing_lease() 
 
     assert lease.retained == lease.released == 1
     await adapter.cancel_memory_capture_tasks()
+
+
+@pytest.mark.asyncio
+async def test_pre_first_step_cancellation_releases_all_ownership() -> None:
+    module = _Module()
+    adapter, _ = _adapter(module)
+    original_track = adapter._track_capture_task
+
+    def track_then_cancel(task, session_id, ownership):
+        original_track(task, session_id, ownership)
+        task.cancel()
+
+    adapter._track_capture_task = track_then_cancel
+    lease = _Lease()
+    adapter.offer(_event(lease=lease))
+    await _settle(adapter)
+
+    assert module.captures == []
+    assert lease.retained == lease.released == 1
+    assert module.capacities and all(not item.active for item in module.capacities)
+    assert module.reservations and all(
+        not item.active for item in module.reservations
+    )
+    assert adapter.capture_tasks == set()
+    await adapter.cancel_memory_capture_tasks()
+
+
+def test_controller_passes_only_fresh_binding_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core.controller as controller_module
+    from config.v2_config import MemoryConfig
+    from core.controller import Controller
+
+    calls: list[str] = []
+    passed: dict[str, object] = {}
+
+    class Store:
+        def maybe_reload(self) -> None:
+            calls.append("reload")
+
+        def get_user(self, user_id: str, *, platform: str):
+            calls.append(f"lookup:{platform}:{user_id}")
+            return SimpleNamespace(enabled=False)
+
+    def load_runtime(_config, **kwargs):
+        passed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(controller_module, "load_memory_runtime", load_runtime)
+    controller = Controller.__new__(Controller)
+    controller.platform_settings_managers = {
+        "slack": SimpleNamespace(get_store=lambda: Store())
+    }
+    controller.session_turns = SimpleNamespace(
+        session_lifecycle_snapshot_matches=lambda *_args: True,
+        acquire_lifecycle_admission=lambda *_args: None,
+    )
+    controller._log_memory_processing_event = lambda *_args: None
+    controller._adopt_settled_memory_config = lambda _config: None
+
+    assert controller._create_memory_runtime(MemoryConfig(enabled=True)) is not None
+    assert "platform_settings_managers" not in passed
+    is_enabled_user = passed["is_enabled_user"]
+    assert callable(is_enabled_user)
+    assert is_enabled_user("slack", "user-1") is False
+    assert calls == ["reload", "lookup:slack:user-1"]
 
 
 @pytest.mark.asyncio

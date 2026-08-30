@@ -37,7 +37,7 @@ scenarios:
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/test_memory_adapter.py::test_session_and_shutdown_cancellation_release_active_leases
+    test: tests/test_session_delivery_fsm.py::test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops
   - id: MEMORY-INDEP-002
     name: A capture admitted before /new or archive is discarded after the transition
     status: covered
