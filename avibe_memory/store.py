@@ -230,10 +230,6 @@ class MemoryStore:
         with self._transaction() as conn:
             return derive_principal_id(self._ensure_meta(conn).scope_key, user_key)
 
-    def project_for_workdir(self, workdir: str) -> str:
-        with self._transaction() as conn:
-            return derive_project_id(self._ensure_meta(conn).scope_key, workdir)
-
     def source_message_digest(self, source_message_id: str) -> str:
         if not isinstance(source_message_id, str) or not source_message_id or "\x00" in source_message_id:
             raise ValueError("invalid Memory source message")

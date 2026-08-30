@@ -1067,7 +1067,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(
-        list_memory_projects=Mock(return_value=("default", "notes")),
+        list_memory_projects=AsyncMock(return_value=("default", "notes")),
         list_episodes_payload=AsyncMock(
             return_value={"status": "ok", "items": [], "page": 2}
         ),
@@ -1094,7 +1094,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "items": [], "page": 2}
     controller.memory_scope_for_cli_session.assert_called_once_with("ses-memory-list")
-    runtime.list_memory_projects.assert_called_once_with(
+    runtime.list_memory_projects.assert_awaited_once_with(
         "u-11111111111111111111111111111111"
     )
     runtime.list_episodes_payload.assert_awaited_once_with(
@@ -1110,7 +1110,7 @@ def test_memory_list_reports_unavailable_store_before_named_project_validation()
 
     runtime = SimpleNamespace(
         available=False,
-        list_memory_projects=Mock(return_value=("default",)),
+        list_memory_projects=AsyncMock(return_value=("default",)),
         list_episodes_payload=AsyncMock(),
     )
     controller = _build_controller_double()
@@ -1137,7 +1137,7 @@ def test_memory_list_reports_unavailable_store_before_named_project_validation()
         "status": "failed",
         "error": "memory_store_unavailable",
     }
-    runtime.list_memory_projects.assert_not_called()
+    runtime.list_memory_projects.assert_not_awaited()
     runtime.list_episodes_payload.assert_not_awaited()
 
 
@@ -1183,7 +1183,7 @@ def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
 
     secret = "test-memory-ui-secret"
     runtime = SimpleNamespace(
-        principal_for_user_key=Mock(
+        resolve_principal_for_user_key=AsyncMock(
             return_value="u-22222222222222222222222222222222"
         ),
         list_all_episodes_payload=AsyncMock(
@@ -1227,7 +1227,7 @@ def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
 
     assert response.status_code == 200
     assert response.json()["next_cursor"] == "next-token"
-    runtime.principal_for_user_key.assert_called_once_with(user_key)
+    runtime.resolve_principal_for_user_key.assert_awaited_once_with(user_key)
     runtime.list_all_episodes_payload.assert_awaited_once_with(
         "u-22222222222222222222222222222222",
         cursor="cursor-token",
@@ -1278,7 +1278,7 @@ def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -
 
     secret = "test-memory-ui-secret"
     runtime = SimpleNamespace(
-        principal_for_user_key=Mock(
+        resolve_principal_for_user_key=AsyncMock(
             return_value="u-22222222222222222222222222222222"
         ),
         list_all_episodes_payload=AsyncMock(
@@ -1324,7 +1324,7 @@ def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary()
 
     secret = "test-memory-ui-secret"
     runtime = SimpleNamespace(
-        principal_for_user_key=Mock(
+        resolve_principal_for_user_key=AsyncMock(
             return_value="u-22222222222222222222222222222222"
         ),
         list_all_episodes_payload=AsyncMock(),
@@ -1374,7 +1374,7 @@ def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound(monkeypatc
     secret = "test-memory-ui-secret"
     cursor = "a" * MEMORY_LIST_CURSOR_MAX_BYTES
     runtime = SimpleNamespace(
-        principal_for_user_key=Mock(
+        resolve_principal_for_user_key=AsyncMock(
             return_value="u-22222222222222222222222222222222"
         ),
         list_all_episodes_payload=AsyncMock(
@@ -1929,8 +1929,8 @@ def test_native_processing_record_routes_authorize_the_selected_project() -> Non
 
     principal_id = "u-11111111111111111111111111111111"
     runtime = SimpleNamespace(
-        principal_for_user_key=Mock(return_value=principal_id),
-        list_memory_projects=Mock(return_value=("default", "notes")),
+        resolve_principal_for_user_key=AsyncMock(return_value=principal_id),
+        list_memory_projects=AsyncMock(return_value=("default", "notes")),
         processing_record_entries_payload=AsyncMock(
             return_value={"status": "ok", "entries": [], "next_cursor": None}
         ),
@@ -1988,7 +1988,7 @@ def test_native_processing_record_routes_authorize_the_selected_project() -> Non
     runtime.processing_record_entry_payload.assert_awaited_once_with(
         principal_id, "notes", "mc_1"
     )
-    assert runtime.list_memory_projects.call_count == 3
+    assert runtime.list_memory_projects.await_count == 3
 
 
 def test_memory_remember_route_does_not_hold_pointer_lock_during_capture() -> None:

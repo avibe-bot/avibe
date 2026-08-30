@@ -118,10 +118,6 @@ class _Principals:
             raise AssertionError("offer reached SQLite/store principal derivation")
         return PRINCIPAL
 
-    def project_for_workdir(self, _workdir: str) -> str:
-        raise AssertionError("capture must not derive a project from workdir")
-
-
 class _Bindings:
     def __init__(self, forbidden: bool = False, enabled: bool = True) -> None:
         self.forbidden = forbidden

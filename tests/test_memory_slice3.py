@@ -83,10 +83,6 @@ class _Runtime:
         suffix = "1" if user_key.endswith("user-1") else "2"
         return f"u-{suffix * 32}"
 
-    def project_for_workdir(self, workdir: str) -> str:
-        assert workdir == "/tmp/project"
-        return PROJECT
-
     async def attachment_capture_status(self) -> str:
         return self.attachment_status
 

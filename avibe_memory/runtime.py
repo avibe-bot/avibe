@@ -794,9 +794,20 @@ class MemoryRuntime:
         )
 
     async def _processing_record_operator(self, user_key: str) -> str:
-        if not self.available:
+        return await self.resolve_principal_for_user_key(user_key)
+
+    async def _run_local_observation(
+        self,
+        operation: Callable[[], _LifecycleResult],
+    ) -> _LifecycleResult:
+        module = self._module
+        if module is None:
             raise self._unavailable()
-        return await run_blocking(self._store.principal_for_user_key, user_key)
+        async with module.lifecycle():
+            if self._module is not module:
+                raise self._unavailable()
+            self._require_lifecycle_work()
+            return await run_blocking(operation)
 
     def _processing_runtime_snapshot(self) -> _ProcessingRuntimeSnapshot:
         module = self._module
@@ -1241,7 +1252,7 @@ class MemoryRuntime:
         reader = self._insight_reader
         if reader is None:
             raise self._unavailable()
-        observation = await run_blocking(reader.source_observation)
+        observation = await self._run_local_observation(reader.source_observation)
         after = self._processing_runtime_snapshot()
         current_reason = after.local_observation_reason(maintenance_reason)
         if not after.same_lifecycle(before) or current_reason is not None:
@@ -1262,16 +1273,21 @@ class MemoryRuntime:
         observation: MaintenanceObservation,
     ) -> MaintenanceResult:
         del operator_ref
+        reason = self._processing_runtime_snapshot().local_observation_reason(
+            observation.block_reason
+        )
         data_exists = True
-        if self.available:
+        if reason is None:
             try:
-                data_exists = await asyncio.to_thread(self._provider_data_exists_strict)
+                data_exists = await self._run_local_observation(
+                    self._provider_data_exists_strict
+                )
             except Exception:
-                data_exists = True
+                reason = "busy"
         return MaintenanceResult(
             data_exists=data_exists,
-            can_delete_data=observation.can_delete_data,
-            error=observation.block_reason,
+            can_delete_data=observation.can_delete_data and reason is None,
+            error=reason,
         )
 
     async def processing_record_payload(
@@ -1396,10 +1412,10 @@ class MemoryRuntime:
             raise self._unavailable()
         return self._store.principal_for_user_key(user_key)
 
-    def project_for_workdir(self, workdir: str) -> str:
-        if not self.available:
-            raise self._unavailable()
-        return self._store.project_for_workdir(workdir)
+    async def resolve_principal_for_user_key(self, user_key: str) -> str:
+        return await self._run_local_observation(
+            lambda: self._store.principal_for_user_key(user_key)
+        )
 
     def offer_barrier(self, raw_session_id: str) -> str:
         """Offer a non-blocking provider barrier for lifecycle transitions."""
@@ -1468,7 +1484,7 @@ class MemoryRuntime:
         ):
             return {"status": "failed", "error": "memory_invalid_input"}
         try:
-            projects = await run_blocking(self.list_memory_projects, principal_id)
+            projects = await self.list_memory_projects(principal_id)
         except Exception:
             return {"status": "failed", "error": "memory_store_unavailable"}
         if not projects:
@@ -1902,10 +1918,10 @@ class MemoryRuntime:
             },
         )
 
-    def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
-        if not self.available:
-            return (DEFAULT_MEMORY_PROJECT_ID,)
-        return self._store.list_memory_projects(principal_id)
+    async def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
+        return await self._run_local_observation(
+            lambda: self._store.list_memory_projects(principal_id)
+        )
 
     async def search_payload(
         self,
@@ -1952,7 +1968,7 @@ class MemoryRuntime:
         if policy.mode == "agentic" or policy.include_current_session:
             return OperationFailed(error="memory_invalid_input")
         deadline = time.monotonic() + 20.0
-        projects = await run_blocking(self.list_memory_projects, principal_id)
+        projects = await self.list_memory_projects(principal_id)
         if not projects:
             projects = (DEFAULT_MEMORY_PROJECT_ID,)
         collected: list[MemoryItem] = []
@@ -2067,8 +2083,7 @@ class MemoryRuntime:
         self,
         operation: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
-        async with self.module.lifecycle():
-            return await run_blocking(operation)
+        return await self._run_local_observation(operation)
 
     async def install_artifact(
         self,

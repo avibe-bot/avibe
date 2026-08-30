@@ -1239,7 +1239,7 @@ class Controller:
             verified_user_key=verified_user_key
         )
 
-    def _memory_scope_for_runtime(
+    async def _memory_scope_for_runtime(
         self,
         runtime: "MemoryRuntime",
         *,
@@ -1251,7 +1251,7 @@ class Controller:
         try:
             if verified_user_key is not None:
                 scope = (
-                    runtime.principal_for_user_key(verified_user_key),
+                    await runtime.resolve_principal_for_user_key(verified_user_key),
                     self.default_memory_project_id(),
                 )
             else:
@@ -1281,10 +1281,7 @@ class Controller:
         if project_id is None or project_id == default_project_id:
             return scope
         try:
-            catalog = await run_blocking(
-                runtime.list_memory_projects,
-                principal_id,
-            )
+            catalog = await runtime.list_memory_projects(principal_id)
         except Exception as exc:
             raise MemoryStoreUnavailableError(
                 "Memory store is unavailable"
@@ -1300,7 +1297,7 @@ class Controller:
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
         runtime = await self._memory_runtime_for_operation()
-        scope = self._memory_scope_for_runtime(
+        scope = await self._memory_scope_for_runtime(
             runtime,
             verified_user_key=verified_user_key,
             cli_scope=cli_scope,
@@ -1317,7 +1314,7 @@ class Controller:
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
         runtime = await self._memory_runtime_for_operation()
-        scope = self._memory_scope_for_runtime(
+        scope = await self._memory_scope_for_runtime(
             runtime,
             verified_user_key=verified_user_key,
             cli_scope=cli_scope,
@@ -1338,7 +1335,7 @@ class Controller:
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
         runtime = await self._memory_runtime_for_operation()
-        scope = self._memory_scope_for_runtime(
+        scope = await self._memory_scope_for_runtime(
             runtime,
             verified_user_key=verified_user_key,
             cli_scope=cli_scope,
@@ -1358,16 +1355,13 @@ class Controller:
         )
 
         runtime = await self._memory_runtime_for_operation()
-        principal_id, _project_id = self._memory_scope_for_runtime(
+        principal_id, _project_id = await self._memory_scope_for_runtime(
             runtime,
             verified_user_key=verified_user_key,
             cli_scope=cli_scope,
         )
         try:
-            catalogued = await run_blocking(
-                runtime.list_memory_projects,
-                principal_id,
-            )
+            catalogued = await runtime.list_memory_projects(principal_id)
         except Exception as exc:
             raise MemoryStoreUnavailableError(
                 "Memory store is unavailable"
@@ -1395,7 +1389,7 @@ class Controller:
         from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
 
         runtime = await self._memory_runtime_for_operation()
-        scope = self._memory_scope_for_runtime(
+        scope = await self._memory_scope_for_runtime(
             runtime,
             verified_user_key=verified_user_key,
             cli_scope=cli_scope,
@@ -1427,7 +1421,7 @@ class Controller:
         )
 
         runtime = await self._memory_runtime_for_operation()
-        principal_id, default_project_id = self._memory_scope_for_runtime(
+        principal_id, default_project_id = await self._memory_scope_for_runtime(
             runtime,
             verified_user_key=verified_user_key,
             cli_scope=cli_scope,
