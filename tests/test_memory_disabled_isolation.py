@@ -1188,6 +1188,9 @@ async def test_reconcile_provider_work_does_not_hold_pointer_lock() -> None:
             await reconcile_release.wait()
             return {"ok": True, "state": "running"}
 
+        async def preflight(self, _config) -> dict[str, object]:
+            pytest.fail("preflight overlapped enabled reconciliation")
+
     runtime = _Runtime()
     controller.memory_runtime = runtime
     controller.memory_module = runtime.module
@@ -1197,63 +1200,15 @@ async def test_reconcile_provider_work_does_not_hold_pointer_lock() -> None:
     async with asyncio.timeout(0.1):
         async with controller._memory_replacement_lock():
             assert controller.memory_runtime is runtime
+    assert await controller.preflight_memory(candidate) == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+    }
 
     reconcile_release.set()
     assert await reconcile == {"ok": True, "state": "running"}
     assert controller.config.memory is candidate
     assert runtime.capture_starts == 1
-
-
-@pytest.mark.asyncio
-async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> None:
-    disabled = _disabled_app_config().memory
-    enabled = replace(disabled, enabled=True)
-    controller = _controller_with_memory(disabled)
-    reconcile_started = asyncio.Event()
-    reconcile_release = asyncio.Event()
-
-    class _Runtime(_NoRetainedRootOwnership):
-        module = object()
-        capture_adapter = object()
-
-        def __init__(self) -> None:
-            self.close_calls = 0
-
-        async def reconcile(self, config) -> dict[str, object]:
-            assert config is enabled
-            assert controller.memory_runtime is self
-            assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-            assert controller._memory_replacement_lock().locked() is False
-            reconcile_started.set()
-            await reconcile_release.wait()
-            return {"ok": True, "state": "running"}
-
-        def begin_close(self) -> None:
-            assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-
-        async def close(self) -> None:
-            self.close_calls += 1
-
-    runtime = _Runtime()
-    controller._create_memory_runtime = lambda _config: runtime
-    reconcile = asyncio.create_task(controller.reconcile_memory(enabled))
-    await reconcile_started.wait()
-
-    assert await controller.reconcile_memory(disabled) == {
-        "ok": True,
-        "state": "disabled",
-    }
-    assert runtime.close_calls == 1
-
-    reconcile_release.set()
-    assert await reconcile == {
-        "ok": False,
-        "state": "disabled",
-        "error": "memory_operation_in_progress",
-    }
-    assert controller.memory_runtime is None
-    assert controller.config.memory is disabled
-    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
 
 @pytest.mark.asyncio

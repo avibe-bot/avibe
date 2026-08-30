@@ -2547,7 +2547,12 @@ class MemoryRuntime:
                 name="memory-runtime-close",
             )
             self._close_task = task
-        await asyncio.shield(task)
+            await asyncio.shield(task)
+            return
+        await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=max(0.0, timeout_seconds),
+        )
 
     async def _close_once(self, timeout_seconds: float) -> None:
         loop = asyncio.get_running_loop()

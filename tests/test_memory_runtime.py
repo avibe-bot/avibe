@@ -223,7 +223,7 @@ async def test_runtime_close_timeouts_still_attempt_everos_stop(
 
 
 @pytest.mark.asyncio
-async def test_blocked_artifact_install_keeps_root_until_close_retry(
+async def test_blocked_artifact_install_keeps_root_across_cached_close_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -241,9 +241,12 @@ async def test_blocked_artifact_install_keeps_root_until_close_retry(
     install = asyncio.create_task(runtime.install_artifact())
     assert await asyncio.to_thread(install_started.wait, 1.0)
 
-    runtime.begin_close()
-    with pytest.raises(RuntimeError, match="local cleanup"):
+    close = asyncio.create_task(runtime.close(timeout_seconds=1.0))
+    while "local cleanup" not in runtime._close_phase_tasks:
+        await asyncio.sleep(0)
+    with pytest.raises(TimeoutError):
         await runtime.close(timeout_seconds=0.03)
+    assert close.done() is False
     with pytest.raises(MemoryRuntimeBusyError):
         _runtime(tmp_path)
 
@@ -253,7 +256,7 @@ async def test_blocked_artifact_install_keeps_root_until_close_retry(
         "reason": "memory_operation_in_progress",
         "download_error": None,
     }
-    await runtime.close(timeout_seconds=1.0)
+    await close
     replacement = _runtime(tmp_path)
     await replacement.close()
 

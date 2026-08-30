@@ -1044,35 +1044,35 @@ class Controller:
                 except BaseException:
                     await self._close_unpublished_memory_runtime(runtime)
                     raise
-        try:
-            result = await runtime.reconcile(memory_config)
-            async with self._memory_replacement_lock():
-                still_owned = getattr(self, "memory_runtime", None) is runtime
-                current_enabled = bool(self.config.memory.enabled)
-                publishable = (
-                    still_owned
-                    and not bool(getattr(runtime, "closing", False))
-                )
-                if publishable:
-                    self.memory_module = runtime.module
-                    if result.get("ok") is True:
-                        self.config.memory = memory_config
-                        self._start_memory_capture_adapter(runtime)
-                        self.memory_adapter = runtime.capture_adapter
-            if result.get("ok") is True and not publishable:
-                return {
-                    "ok": False,
-                    "state": "degraded" if current_enabled else "disabled",
-                    "error": "memory_operation_in_progress",
-                }
-            return result
-        except BaseException:
-            if created:
-                detached = await self._detach_memory_runtime(runtime)
-                if detached is runtime:
-                    await runtime.close()
-                    await self._clear_memory_runtime(runtime)
-            raise
+            try:
+                result = await runtime.reconcile(memory_config)
+                async with self._memory_replacement_lock():
+                    still_owned = getattr(self, "memory_runtime", None) is runtime
+                    current_enabled = bool(self.config.memory.enabled)
+                    publishable = (
+                        still_owned
+                        and not bool(getattr(runtime, "closing", False))
+                    )
+                    if publishable:
+                        self.memory_module = runtime.module
+                        if result.get("ok") is True:
+                            self.config.memory = memory_config
+                            self._start_memory_capture_adapter(runtime)
+                            self.memory_adapter = runtime.capture_adapter
+                if result.get("ok") is True and not publishable:
+                    return {
+                        "ok": False,
+                        "state": "degraded" if current_enabled else "disabled",
+                        "error": "memory_operation_in_progress",
+                    }
+                return result
+            except BaseException:
+                if created:
+                    detached = await self._detach_memory_runtime(runtime)
+                    if detached is runtime:
+                        await runtime.close()
+                        await self._clear_memory_runtime(runtime)
+                raise
 
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
         """Snapshot the current module before offering one volatile capture."""
