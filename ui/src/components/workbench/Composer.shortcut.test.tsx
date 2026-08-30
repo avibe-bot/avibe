@@ -189,6 +189,7 @@ describe('Composer voice shortcut', () => {
 
     fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    await screen.findByRole('button', { name: en.chat.compose.stopRecording });
     expect(document.activeElement).toBe(outside);
 
     fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
@@ -206,6 +207,7 @@ describe('Composer voice shortcut', () => {
 
     fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    await screen.findByRole('button', { name: en.chat.compose.stopRecording });
     view.rerender(composerView('gated-shortcut-session', { shortcutStartEnabled: false }));
 
     fireEvent.keyDown(foreground, { code: 'KeyZ', altKey: true });

@@ -1072,7 +1072,7 @@ sections. §1.8 states the direct-only body condition.
 | Run pill | Engine liveness | `runtime-dependency.schema.json` → `status.health` `[contract]` | see the mapping below | see the mapping below |
 | Tabs ×3 | Section switch | — | yes | 来源与网关 / 用量 / 日志; the active one gets the mint underline |
 | Upstream module | Source inventory + info icon | `GET /api/models/sources` `[spec]` | info icon and rows: yes | Tooltip: `upstream.info`; open 06 for that source |
-| Dispatch rail | That upstream feeds gateway | derived, decorative | no | — |
+| Wire corridor | Routing space between Sources and Agents; it draws no independent axis | derived, decorative | no | — |
 | Gateway module | One group per backend, each with model rows + info icon | per-backend supply + chains `[spec]` | info icon, rows, collapse, 「调整优先级」, mode switch | Tooltip: `gateway.info`; open 02 / expand / open 03 for **that backend** / open 10's confirm |
 | Legend | Colour → meaning | static; kept in bijection with the inks the page draws | no | — |
 
@@ -1745,7 +1745,7 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `uf3re` detail | account label, or `host/path · masked key` — **and every field it can draw is nullable, so the line is specified by omission, exactly as §0.9 and §1.6 rule the same hole** `[contract]`. `account_label`, `base_url` and `masked_credential` are each `["string","null"]` in `source.schema.json`, so a segment with no value is dropped, never rendered empty and never left behind a dangling `·`; `base_url: null` is the vendor's official endpoint (§0.9's `{{host}}`) and is not synthesized into a hostname (§1.6). When nothing is left the whole line is omitted rather than filled — a subscription that reports no account label is the common case, and the card still identifies itself from four required fields (icon and pill by `kind`, name by `display_name`, state by `state`). Repeating the kind pill or the card's own name here would be the only alternative, and it would say nothing the card has not already said | source | no | — |
 | `YcOFo` status | which Hub-mode backends have this source configured into a route — `adopted_by` (§1.0) | the complete server-derived Source projection, never a computation over chains (D-28) | no | — |
 | `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | 添加订阅 opens frame 13; its selected vendor opens 04. 添加 API Key opens 05 |
-| `f8w6Xp` + `pnYa0` rail | dispatch happens between the columns | decorative | no | — |
+| `f8w6Xp` + `pnYa0` wire corridor | the relations cross between the columns without an independent axis | decorative | no | — |
 | `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line. For an open menu the count is the explicit selected count, never the number of models available from Sources | per-backend mode + supply health | head: buttons only | OpenCode's **Manage models** opens its model-menu dialog; other actions are registered below |
 | `ehGRK` / `bGsC7` 「调整优先级」 | — | — | yes | Open 03 **for that backend** |
 | OpenCode 「管理模型」 `[derived]` | — | `menu.checked` plus the server-owned eligible Source inventory | yes | Open the OpenCode model-menu dialog; the same action remains available in the empty row area |
@@ -1753,7 +1753,7 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `z02Ep` / `gbrq2` 「切到直连」 | — | backend on the gateway | yes | That backend leaves the gateway immediately — **no confirm** (D-30) |
 | `Exx0a` model row | model id (mono 12), a chain chip, current-source text; `legend.unavailable` occupies that text slot when the page-grain row has no runnable hop | `AgentSupply.model_supply[].has_runnable_hop`; per-model AgentChain and its `current` member | yes | Open 02 for `(backend, model)` |
 | `ZM1pm` collapse row | `还有 N 个型号` | count of hidden rows | yes | Expand in place |
-| `FZUYI` wire layer | one path per supply relation + endpoint dots | derived supply set | no | — |
+| `FZUYI` wire layer | one path per supply relation + endpoint dots; no central axis | derived supply set | Source and Agent cards highlight their connected paths on hover or focus | — |
 | `ftWgW` legend info icon | the legend's note — **the string is measured from the frame, not specified here** (§0.2) | static | hover, focus **and** activation — the same three §1.0's title icon carries | Tooltip, the note standing as the icon's accessible description |
 
 **The 当前 lines are a third read, and the page does not wait on it** `[contract]`. Every
@@ -1944,7 +1944,7 @@ Other limits `[derived]`:
 | Many sources (> 6) | The upstream module grows with every source; the enclosing settings route pane scrolls, so the head, groups and footer remain in one reading flow. |
 | Many backends (> 3) | The gateway module grows with every backend; the enclosing settings route pane scrolls and no nested gateway scrollbar appears. |
 | Zero supply relations | The wire layer renders nothing — no placeholder path. |
-| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. The SVG follows the natural-height `cols` track and remains clipped before the legend and following page sections. |
+| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. Every path leaves its Source at the shared right-edge midpoint, and every relation targeting the same Agent lands at that Agent card's shared left-edge midpoint while remaining a distinct curve. One neutral marker represents each shared Source or Agent anchor, so relation ordering cannot hide or recolor either endpoint. Paths rest at low opacity; hovering or focusing a Source or Agent restores full opacity only for its connected paths. The corridor draws no independent central axis. The SVG follows the natural-height `cols` track and remains clipped before the legend and following page sections. |
 
 ---
 
