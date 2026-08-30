@@ -208,11 +208,14 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         except OSError:
             binary = None
             invalid = True
-        if (
-            pointer is not None
+        admission_rejected = (
+            not invalid
+            and pointer is not None
+            and binary is not None
             and pointer.get("admission_revision") == ARTIFACT_ADMISSION_REVISION
             and pointer.get("admission_ok") is not True
-        ):
+        )
+        if admission_rejected:
             binary = None
             invalid = True
         invalid = invalid or (pointer is not None and binary is None)
@@ -251,11 +254,14 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                     matches_manifest = False
         installed_version = pointer.get("runtime_version") if binary is not None else None
         persisted_reason = latest_failure.get("reason") if latest_failure is not None else None
-        failure_reason = (
-            "memory_runtime_install_failed"
-            if invalid
-            else persisted_reason or (self._install_reason if binary is None else None)
-        )
+        if admission_rejected and persisted_reason is not None:
+            failure_reason = persisted_reason
+        elif invalid:
+            failure_reason = "memory_runtime_install_failed"
+        else:
+            failure_reason = persisted_reason or (
+                self._install_reason if binary is None else None
+            )
         return {
             "id": self.spec.runtime_id,
             "provider": "manifest",
@@ -777,9 +783,11 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             admitted_pointer["admission_ok"] = admission_ok
             self._restore_current_pointer(admitted_pointer)
             if not admission_ok:
-                self._install_reason = str(
+                admission_reason = str(
                     preparation.get("reason") or _PREPARATION_FAILURE_REASON
                 )
+                self._install_reason = admission_reason
+                self._write_latest_install_failure(admission_reason)
                 return None
         except Exception:  # noqa: BLE001
             self._install_reason = "memory_runtime_install_failed"

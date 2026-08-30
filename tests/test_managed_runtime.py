@@ -998,6 +998,56 @@ def test_memory_preparation_timeout_reclaims_staging_and_persists_latest_failure
     assert restarted.status()["reason"] is None
 
 
+def test_memory_legacy_pointer_admission_failure_survives_fresh_manager_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    runtime_dir = tmp_path / "memory-runtime"
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        "memory",
+        manifest_path,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+    assert isinstance(manager, MemoryArtifactManager)
+    assert manager.ensure()["ok"] is True
+    pointer = manager._active_pointer()
+    assert pointer is not None
+    pointer.pop("admission_revision")
+    pointer.pop("admission_ok")
+    manager._restore_current_pointer(pointer)
+    monkeypatch.setattr(
+        manager,
+        "_prepare_binary",
+        lambda _binary, **_kwargs: {
+            "ok": False,
+            "reason": COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON,
+        },
+    )
+
+    assert manager.resolve_python() is None
+
+    restarted = _subclass_runtime_manager(
+        tmp_path,
+        "memory",
+        manifest_path,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+    restarted_status = restarted.status()
+    assert restarted_status["installed"] is False
+    assert restarted_status["status"] == "error"
+    assert restarted_status["reason"] == COLD_ARTIFACT_ADMISSION_TIMEOUT_REASON
+
+    (Path(pointer["install_dir"]) / pointer["bin_path"]).unlink()
+    corrupted_status = restarted.status()
+    assert corrupted_status["installed"] is False
+    assert corrupted_status["reason"] == "memory_runtime_install_failed"
+
+
 def test_memory_scrubber_timeout_keeps_its_preparation_stage_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
