@@ -8,6 +8,19 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: memory_runtime_install
+    name: Memory Runtime artifact installation
+    status: active
+    catalog: tests/scenarios/memory_runtime_install/catalog.yaml
+    observations: tests/scenarios/memory_runtime_install/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
+    unit_or_contract_tests:
+      - tests/test_memory_artifact_contract.py
+      - tests/test_managed_runtime.py
+      - tests/test_memory_runtime_release.py
+      - tests/test_ui_server_install.py
+      - ui/src/components/settings/SettingsDependenciesPage.test.tsx
   - id: memory_delete_data
     name: Explicit confirmed deletion of confined Memory data
     status: active

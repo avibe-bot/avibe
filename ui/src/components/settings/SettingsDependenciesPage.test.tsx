@@ -103,4 +103,39 @@ describe('SettingsDependenciesPage Memory runtime', () => {
       'listDependencies',
     ]);
   });
+
+  it('renders a persisted preparation reason on initial page load', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        installed: false,
+        status: 'error',
+        version: null,
+        reason: 'memory_runtime_preparation_import_timeout',
+      })],
+    });
+
+    renderPage();
+
+    const failure = await screen.findByRole('alert');
+    expect(failure.textContent).toBe('errors.memory_runtime_preparation_import_timeout');
+    expect(screen.getByText('settings.dependencies.statusError')).toBeTruthy();
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'memory_runtime_preparation_failed',
+    'memory_runtime_preparation_import_timeout',
+    'memory_runtime_preparation_import_failed',
+    'memory_runtime_preparation_scrubber_timeout',
+    'memory_runtime_preparation_scrubber_failed',
+    'memory_runtime_preparation_sync_contract_failed',
+  ])('localizes the bounded preparation reason %s', async (reason) => {
+    api.installDependency.mockResolvedValue({ ok: false, reason });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.repair' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(`errors.${reason}`, 'error'));
+  });
 });
