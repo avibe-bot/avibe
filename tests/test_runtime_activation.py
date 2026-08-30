@@ -272,7 +272,7 @@ def test_opencode_binding_resolver_returns_pre_prompt_shared_generation() -> Non
             workdir="/other",
         )
 
-    assert server.retire_activation(True)
+    assert server.retire_activation(True, False)
     replacement = opencode.runtime_activation_identity_for_request(SimpleNamespace())
     late_prompt_commit = registry.commit_if_current(identity, lambda: "accepted")
 
@@ -310,7 +310,7 @@ def test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner(
     identity = opencode._attach_server_activation(server)
 
     assert identity is not None
-    assert server.retire_activation(False)
+    assert server.retire_activation(False, False)
     assert not registry.is_current(identity)
 
 
@@ -341,7 +341,7 @@ def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
     identity = opencode._attach_server_activation(server)
 
     assert identity is not None
-    assert not server.retire_activation(False)
+    assert not server.retire_activation(False, False)
     assert registry.is_current(identity)
 
 
@@ -357,7 +357,7 @@ def test_mh_runtime_007_opencode_overlay_restart_ignores_drained_durable_active_
             self.retire_activation = callback
 
         def runtime_has_active_turns(self) -> bool:
-            return False
+            return True
 
     server = _Server()
     opencode = object.__new__(OpenCodeAgent)
@@ -374,7 +374,7 @@ def test_mh_runtime_007_opencode_overlay_restart_ignores_drained_durable_active_
     identity = opencode._attach_server_activation(server)
 
     assert identity is not None
-    assert server.retire_activation(False)
+    assert server.retire_activation(False, True)
     assert not registry.is_current(identity)
 
 

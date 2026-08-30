@@ -714,9 +714,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         set_retire = getattr(server, "set_runtime_activation_retire", None)
         if callable(set_retire):
             set_retire(
-                lambda force=False: self._retire_server_activation(
+                lambda force=False, native_turns_drained=False: self._retire_server_activation(
                     server,
                     force=force,
+                    native_turns_drained=native_turns_drained,
                 )
             )
         return identity
@@ -726,6 +727,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         server: OpenCodeServerManager,
         *,
         force: bool = False,
+        native_turns_drained: bool = False,
     ) -> bool:
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
         identity = self._server_activation_identity(server)
@@ -738,7 +740,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if force:
                 return True
             snapshots = self.runtime_ownership_snapshots()
-            live_native_turn = server.runtime_has_active_turns()
+            live_native_turn = (
+                False
+                if native_turns_drained
+                else server.runtime_has_active_turns()
+            )
             return bool(
                 snapshots is not None
                 and all(
