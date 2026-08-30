@@ -324,7 +324,7 @@ def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
             self.retire_activation = callback
 
         def runtime_has_active_turns(self) -> bool:
-            return True
+            return False
 
     server = _Server()
     opencode = object.__new__(OpenCodeAgent)
@@ -357,7 +357,7 @@ def test_mh_runtime_007_opencode_overlay_restart_ignores_drained_durable_active_
             self.retire_activation = callback
 
         def runtime_has_active_turns(self) -> bool:
-            return True
+            raise AssertionError("explicit drain must not reread PID turn metadata")
 
     server = _Server()
     opencode = object.__new__(OpenCodeAgent)
