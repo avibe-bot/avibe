@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import os
 import sys
@@ -773,6 +774,72 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_awaited_once()
         result = agent.emit_result_message.await_args.args[1]
         assert "![generated image](" in result
+
+    async def test_completed_inline_image_is_persisted_and_appended_to_text_result(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        state = agent._turn_registry.register_turn("turn-1", request)
+        state.pending_assistant = ("Image ready.", "markdown")
+
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"CODEX_HOME": tmpdir}):
+            handler.snapshot_generated_images("thread-1", "session-1")
+            handler.bind_generated_image_snapshot("thread-1", "turn-1", "session-1")
+            await handler._on_item_completed(
+                {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "imageGeneration",
+                        "status": "completed",
+                        "result": base64.b64encode(image).decode(),
+                    },
+                },
+                request,
+            )
+            await handler._on_turn_completed(
+                {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "completed"},
+                },
+                request,
+            )
+
+            generated = list((Path(tmpdir) / "generated_images" / "thread-1").glob("*.png"))
+            assert len(generated) == 1
+            assert generated[0].read_bytes() == image
+
+        result = agent.emit_result_message.await_args.args[1]
+        assert result.startswith("Image ready.\n\n![generated image](file://")
+
+    async def test_inline_image_rejects_invalid_or_unsupported_payloads(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"CODEX_HOME": tmpdir}):
+            handler.snapshot_generated_images("thread-1", "session-1")
+            handler.bind_generated_image_snapshot("thread-1", "turn-1", "session-1")
+            for result in ("not-base64", base64.b64encode(b"plain text").decode()):
+                await handler._on_item_completed(
+                    {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {
+                            "type": "imageGeneration",
+                            "status": "completed",
+                            "result": result,
+                        },
+                    },
+                    request,
+                )
+
+            assert not (Path(tmpdir) / "generated_images" / "thread-1").exists()
 
     def test_generated_images_dir_rejects_dot_segment_thread_ids(self):
         agent = _StubAgent()
