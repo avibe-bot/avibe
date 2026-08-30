@@ -24,6 +24,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
@@ -133,7 +134,7 @@ class _StreamPrelude:
         if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
             self.write(data)
             return
-        await asyncio.to_thread(self.write, data)
+        await run_owned_in_thread(self.write, data)
 
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._closed:
@@ -142,8 +143,8 @@ class _StreamPrelude:
             if self._memory:
                 yield bytes(self._memory)
             return
-        await asyncio.to_thread(self._file.seek, 0)
-        while chunk := await asyncio.to_thread(self._file.read, _STREAM_CHUNK_BYTES):
+        await run_owned_in_thread(self._file.seek, 0)
+        while chunk := await run_owned_in_thread(self._file.read, _STREAM_CHUNK_BYTES):
             yield chunk
 
     def close(self) -> None:
@@ -178,7 +179,7 @@ class _StreamPrelude:
     async def prefix_async(self, limit: int) -> bytes:
         if self._file is None:
             return self.prefix(limit)
-        return await asyncio.to_thread(self.prefix, limit)
+        return await run_owned_in_thread(self.prefix, limit)
 
 
 class _DeadlineReader:
@@ -404,7 +405,7 @@ class EngineClient:
                     observed_payload = await _observe_buffered_protocol_response_async(
                         observe_buffered_protocol_response,
                         request_protocol,
-                        error_body.reader(),
+                        error_body,
                         machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
                     )
                     payload = await error_body.prefix_async(_ERROR_OBSERVATION_BYTES)
@@ -458,7 +459,7 @@ class EngineClient:
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
-                    buffered_body.reader(),
+                    buffered_body,
                     machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
                 )
                 outcome = _reduce_protocol_observation(
@@ -520,6 +521,14 @@ class EngineClient:
                 prelude.close()
                 response.close()
                 await session.close()
+                outcome = _observed_stream_terminal_outcome(
+                    wire_state,
+                    source,
+                    model_id,
+                    response.status,
+                )
+                if outcome is not None and not outcome_future.done():
+                    outcome_future.set_result(outcome)
 
             handle = EngineInvokeHandle(
                 stream=response_stream,
@@ -540,10 +549,14 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request timed out",
-                    stream_started=model_output_started if stream else False,
+                    stream_started=(
+                        wire_state.model_output_started
+                        if stream and wire_state is not None
+                        else model_output_started if stream else False
+                    ),
                 )
             )
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, OSError) as exc:
             if response is not None:
                 response.close()
             await session.close()
@@ -554,8 +567,16 @@ class EngineClient:
                     model_id=model_id,
                     error_code="engine_down",
                     http_status=response.status if response is not None and first_received else None,
-                    message="upstream request failed",
-                    stream_started=model_output_started if stream else False,
+                    message=(
+                        "local response replay failed"
+                        if isinstance(exc, OSError)
+                        else "upstream request failed"
+                    ),
+                    stream_started=(
+                        wire_state.model_output_started
+                        if stream and wire_state is not None
+                        else model_output_started if stream else False
+                    ),
                 )
             )
         finally:
@@ -693,9 +714,11 @@ async def probe_models(
                     )
                 with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
                     while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
-                        await asyncio.to_thread(payload.write, chunk)
-                    payload.seek(0)
-                    projected = await asyncio.to_thread(_project_model_inventory, payload)
+                        await run_owned_in_thread(payload.write, chunk)
+                    projected = await run_owned_in_thread(
+                        _project_model_inventory_from_start,
+                        payload,
+                    )
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
@@ -821,30 +844,40 @@ def _project_before_deadline(
 async def _observe_buffered_protocol_response_async(
     projector: Callable[..., ProtocolObservation],
     protocol: str,
-    reader: BinaryIO,
+    prelude: _StreamPrelude,
     *,
     machine_error_codes: frozenset[str],
 ) -> ProtocolObservation:
     """Drain the finite local projection before its reader can be closed."""
 
-    worker = asyncio.create_task(
-        asyncio.to_thread(
-            projector,
-            protocol,
-            reader,
-            machine_error_codes=machine_error_codes,
-        )
+    return await run_owned_in_thread(
+        _project_buffered_protocol_response,
+        projector,
+        protocol,
+        prelude,
+        machine_error_codes=machine_error_codes,
     )
-    try:
-        return await asyncio.shield(worker)
-    except asyncio.CancelledError as cancelled:
-        while not worker.done():
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                continue
-        worker.result()
-        raise cancelled
+
+
+def _project_buffered_protocol_response(
+    projector: Callable[..., ProtocolObservation],
+    protocol: str,
+    prelude: _StreamPrelude,
+    *,
+    machine_error_codes: frozenset[str],
+) -> ProtocolObservation:
+    return projector(
+        protocol,
+        prelude.reader(),
+        machine_error_codes=machine_error_codes,
+    )
+
+
+def _project_model_inventory_from_start(
+    payload: BinaryIO,
+) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
+    payload.seek(0)
+    return _project_model_inventory(payload)
 
 
 def _copy_sync_response(

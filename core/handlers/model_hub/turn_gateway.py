@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Final, Optional
+from typing import BinaryIO, Final, Optional
 
 from aiohttp import web
 
@@ -25,6 +25,7 @@ from .adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from .async_owner import run_owned_in_thread
 from .classification import ResolutionDecision
 from .provenance import (
     BoundedProvenanceStore,
@@ -79,6 +80,13 @@ logger = logging.getLogger(__name__)
 
 def _gateway_utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _rewind_and_measure(payload: BinaryIO) -> int:
+    payload.seek(0, 2)
+    size = payload.tell()
+    payload.seek(0)
+    return size
 
 
 _PROTOCOL_HEADERS: Final = frozenset(
@@ -739,7 +747,7 @@ class ModelHubTurnGateway:
                 max_size=_BUFFERED_RESPONSE_MEMORY_BYTES
             ) as payload:
                 async for chunk in handle.stream:
-                    await asyncio.to_thread(payload.write, chunk)
+                    await run_owned_in_thread(payload.write, chunk)
                 execution.completed_at = self._now()
                 outcome, settlement, rendered = await self._settle_metered_turn(
                     execution,
@@ -756,21 +764,23 @@ class ModelHubTurnGateway:
                         status_override=settlement.decision.downstream_status,
                         rendered=rendered,
                     )
-                payload.seek(0)
-                rewritten_payload = await asyncio.to_thread(
+                await run_owned_in_thread(payload.seek, 0)
+                rewritten_payload = await run_owned_in_thread(
                     rewrite_buffered_tool_names_file,
                     payload,
                     execution.response_tool_aliases,
                 )
                 response_payload = rewritten_payload or payload
                 try:
-                    response_payload.seek(0, 2)
-                    response_size = response_payload.tell()
-                    response_payload.seek(0)
+                    response_size = await run_owned_in_thread(
+                        _rewind_and_measure,
+                        response_payload,
+                    )
                     if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
+                        body = await run_owned_in_thread(response_payload.read)
                         return web.Response(
                             status=200,
-                            body=response_payload.read(),
+                            body=body,
                             content_type="application/json",
                             headers={
                                 "Cache-Control": "no-store",
@@ -787,7 +797,7 @@ class ModelHubTurnGateway:
                         },
                     )
                     await self._downstream_io(response.prepare(request))
-                    while chunk := await asyncio.to_thread(
+                    while chunk := await run_owned_in_thread(
                         response_payload.read,
                         _RESPONSE_CHUNK_BYTES,
                     ):
@@ -796,7 +806,7 @@ class ModelHubTurnGateway:
                     return response
                 finally:
                     if rewritten_payload is not None:
-                        rewritten_payload.close()
+                        await run_owned_in_thread(rewritten_payload.close)
 
         response = web.StreamResponse(
             status=200,

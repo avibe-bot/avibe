@@ -970,6 +970,36 @@ class DeferredLifecycleHandle(_EngineObservation):
         return self._outcome
 
 
+class ObservedUnsettledHandle(_EngineObservation):
+    """A live handle whose prelude proved billing but not a terminal outcome."""
+
+    def __init__(self, observed: ProtocolSSEState):
+        self._observed = observed
+        self._stream = self._iterate()
+        self.close_calls = 0
+
+    @staticmethod
+    async def _iterate():
+        if False:
+            yield b""
+
+    @property
+    def stream(self):
+        return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return False
+
+    async def close_stream(self) -> None:
+        self.close_calls += 1
+        await self._stream.aclose()
+
+    async def outcome(self) -> RawCallOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class RepeatedCancellationHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome, blocked_phase: str):
         self._outcome = outcome
@@ -3223,6 +3253,59 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
         assert metered["output_tokens"] == 7
         assert service.store.load().sources[0].state.status == "cooldown"
         assert [event["reason"] for event in service.events.list()] == ["rate_limited"]
+
+    asyncio.run(exercise())
+
+
+def test_resolver_meters_an_observed_stream_that_beats_cancellation(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_cancelobs", "Cancelled observed response")
+        observed = ProtocolSSEState("openai_responses")
+        observed.model_output_started = True
+        observed.usage = ProtocolUsageReport.of(
+            input_tokens=144,
+            cached_input_tokens=32,
+            output_tokens=9,
+        )
+        handle = ObservedUnsettledHandle(observed)
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        invoke_started = asyncio.Event()
+        release_invoke = asyncio.Event()
+        invoke = service.adapter.invoke
+
+        async def blocked_invoke(*args, **kwargs):
+            invoke_started.set()
+            await release_invoke.wait()
+            return await invoke(*args, **kwargs)
+
+        service.adapter.invoke = blocked_invoke
+        task = asyncio.create_task(
+            service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request={},
+                stream=True,
+                supply_channel="hub",
+            )
+        )
+        await asyncio.wait_for(invoke_started.wait(), timeout=1)
+        task.cancel()
+        release_invoke.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 144
+        assert metered["cached_input_tokens"] == 32
+        assert metered["output_tokens"] == 9
+        assert handle.close_calls == 1
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
 
     asyncio.run(exercise())
 
@@ -7313,6 +7396,79 @@ def test_gateway_spools_and_replays_a_large_buffered_response(
         assert metered["output_tokens"] == 128
         assert write_threads
         assert event_loop_thread not in write_threads
+
+    asyncio.run(exercise())
+
+
+def test_gateway_drains_a_cancelled_spool_write_before_closing(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_spoolown1", "Owned spool")
+        handle = LiveInvokeHandle(
+            _outcome(
+                RawOutcomeKind.SUCCESS,
+                source_id=source.id,
+                stream_started=True,
+            ),
+            (b'{"output":"ok"}',),
+        )
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_owned_spool_write",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+        write_started = threading.Event()
+        release_write = threading.Event()
+        write_finished = threading.Event()
+        closed = threading.Event()
+        close_raced_write: list[bool] = []
+        spooled_file = tempfile.SpooledTemporaryFile
+
+        class TrackingSpool:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self._file = spooled_file(*args, **kwargs)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                close_raced_write.append(not write_finished.is_set())
+                self._file.close()
+                closed.set()
+
+            def write(self, data: bytes) -> int:
+                write_started.set()
+                assert release_write.wait(timeout=1)
+                result = self._file.write(data)
+                write_finished.set()
+                return result
+
+            def __getattr__(self, name: str):
+                return getattr(self._file, name)
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.tempfile.SpooledTemporaryFile",
+            TrackingSpool,
+        ):
+            task = asyncio.create_task(gateway._handle_request(request))
+            assert await asyncio.to_thread(write_started.wait, 1)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not closed.is_set()
+            release_write.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+
+        assert write_finished.is_set()
+        assert closed.is_set()
+        assert close_raced_write == [False]
+        await gateway.close()
 
     asyncio.run(exercise())
 

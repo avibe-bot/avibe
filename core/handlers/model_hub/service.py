@@ -58,6 +58,7 @@ from .adapter import (
     make_source_observation,
     validate_source_observation,
 )
+from .async_owner import await_owned_task
 from .classification import (
     ResolutionDecision,
     classify_outcome,
@@ -98,6 +99,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest
+from .stream_wire import ProtocolSSEState
 from .resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -468,7 +470,7 @@ async def _acquire_credential_ref_with_cancellation_ownership(
     except asyncio.CancelledError as cancelled:
         # The shield leaves provisioning alive; wait for its ref before settling
         # cancellation so the transient material can be journaled and revoked.
-        transient_ref = await _await_owned_task_before_settling(provision_task)
+        transient_ref = await await_owned_task(provision_task)
         await _rollback_credential_before_settling(
             service,
             rollback_source_id,
@@ -503,23 +505,8 @@ async def _rollback_credential_before_settling(
     try:
         await asyncio.shield(rollback_task)
     except asyncio.CancelledError as cancelled:
-        await _await_owned_task_before_settling(rollback_task)
+        await await_owned_task(rollback_task)
         raise cancelled
-
-
-async def _await_owned_task_before_settling(
-    task: asyncio.Task[Any],
-) -> Any:
-    """Wait through caller cancellation, but never retry a cancelled owned task."""
-
-    while True:
-        if task.cancelled():
-            raise asyncio.CancelledError
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
 
 
 async def _require_credential_cleanup(
@@ -552,7 +539,7 @@ async def _rollback_replacement_before_settling(
     try:
         await asyncio.shield(replacement_task)
     except asyncio.CancelledError as cancelled:
-        await _await_owned_task_before_settling(replacement_task)
+        await await_owned_task(replacement_task)
         raise cancelled
 
 
@@ -5205,17 +5192,24 @@ class ModelHubService:
         stream: bool,
         backend: str,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
+        async def meter_handle(
+            handle: InvokeHandle,
+            outcome: RawCallOutcome | None,
+        ) -> None:
+            await self._meter_call(
+                source_id=source.id,
+                model_id=model_id,
+                outcome=outcome,
+                observed=handle.observed,
+            )
+
         async def meter_available_outcome(
             handle: InvokeHandle,
         ) -> RawCallOutcome | None:
             if handle.stream is not None and not handle.outcome_available:
                 return None
             outcome = await self._engine_call(handle.outcome())
-            await self._meter_call(
-                source_id=source.id,
-                model_id=model_id,
-                outcome=outcome,
-            )
+            await meter_handle(handle, outcome)
             return outcome
 
         async def invoke_and_meter_bodyless() -> tuple[InvokeHandle, Optional[RawCallOutcome]]:
@@ -5237,18 +5231,21 @@ class ModelHubService:
         except asyncio.CancelledError as caught:
             cancelled = caught
             try:
-                handle, outcome = await _await_owned_task_before_settling(attempt_task)
+                handle, outcome = await await_owned_task(attempt_task)
             except BaseException:
                 raise caught
 
         if cancelled is not None and handle.stream is not None:
             async def close_and_meter_observed_stream() -> RawCallOutcome | None:
                 await handle.close_stream()
-                return await meter_available_outcome(handle)
+                outcome = await meter_available_outcome(handle)
+                if outcome is None:
+                    await meter_handle(handle, None)
+                return outcome
 
             cleanup_task = asyncio.create_task(close_and_meter_observed_stream())
             try:
-                outcome = await _await_owned_task_before_settling(cleanup_task)
+                outcome = await await_owned_task(cleanup_task)
             except BaseException:
                 raise cancelled
 
@@ -5295,7 +5292,8 @@ class ModelHubService:
         *,
         source_id: str,
         model_id: str,
-        outcome: RawCallOutcome,
+        outcome: RawCallOutcome | None,
+        observed: ProtocolSSEState | None,
     ) -> None:
         """Fold one bodyless upstream call into the usage ledger, best-effort.
 
@@ -5322,13 +5320,20 @@ class ModelHubService:
         without putting an unresponsive disk in front of the next failover hop.
         """
 
-        if outcome.usage is None:
+        usage = outcome.usage if outcome is not None else None
+        if usage is None and observed is not None:
+            usage = observed.usage
+        reached_model = (
+            outcome is not None
+            and (outcome.kind is RawOutcomeKind.SUCCESS or outcome.stream_started)
+        ) or (observed is not None and observed.reached_model)
+        if usage is None and not reached_model:
             return
         await self.usage_writer.wait_recorded(
             self.usage_writer.record(
                 source_id=source_id,
                 model_id=model_id,
-                usage=outcome.usage,
+                usage=usage,
                 at=self.now(),
             )
         )

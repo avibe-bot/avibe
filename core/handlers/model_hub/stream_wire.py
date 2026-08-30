@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
 
+from .async_owner import run_owned_in_thread
 from .json_wire import JSONEvent, JSONPath, JSONScope, SelectiveJSONParser
 
 
@@ -1231,17 +1231,7 @@ class ProtocolSSEState:
     async def observe_async(self, chunk: bytes) -> None:
         """Observe one transport chunk without monopolizing the event loop."""
 
-        worker = asyncio.create_task(asyncio.to_thread(self.observe, chunk))
-        try:
-            await asyncio.shield(worker)
-        except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-            worker.result()
-            raise cancelled
+        await run_owned_in_thread(self.observe, chunk)
 
     def invalidate_partial_frame(self) -> bytes:
         """Make an already-forwarded partial frame non-terminal, then close it."""

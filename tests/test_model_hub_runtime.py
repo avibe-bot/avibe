@@ -4725,6 +4725,141 @@ def test_buffered_projection_drains_before_its_spool_is_closed(
     asyncio.run(run())
 
 
+def test_closing_an_unstarted_stream_publishes_an_observed_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        first = (
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+            b'"delta":"ok"}\n\nevent: response.completed\ndata: {"type":"response.completed",'
+            b'"response":{"usage":{"input_tokens":12,"output_tokens":3}}}\n\n'
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is not None
+        assert handle.outcome_available is False
+        await handle.close_stream()
+        assert handle.outcome_available is True
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.usage == ProtocolUsageReport.of(
+            input_tokens=12,
+            cached_input_tokens=0,
+            output_tokens=3,
+        )
+
+    asyncio.run(run())
+
+
+def test_stream_replay_failure_preserves_observed_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class FailingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=1)
+
+            def write(self, data: bytes) -> None:
+                raise OSError("temporary storage unavailable")
+
+        first = (
+            b'event: message_start\ndata: {"type":"message_start","message":'
+            b'{"usage":{"input_tokens":77,"output_tokens":1}}}\n\n'
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module, "_StreamPrelude", FailingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="anthropic",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(
+            source,
+            "model-a",
+            {},
+            stream=True,
+            request_protocol="anthropic",
+        )
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.error_code == "engine_down"
+        assert outcome.usage == ProtocolUsageReport.of(
+            input_tokens=77,
+            cached_input_tokens=0,
+            output_tokens=1,
+        )
+
+    asyncio.run(run())
+
+
 def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
