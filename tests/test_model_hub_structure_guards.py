@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 from dataclasses import replace
 from itertools import product
@@ -21,6 +22,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolModelOutputEnvelope,
     ProtocolStreamTaxonomy,
     ProtocolUsageReport,
+    observe_buffered_protocol_response,
     observe_protocol_response,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
@@ -1304,6 +1306,26 @@ def test_chat_role_metadata_does_not_cross_the_model_output_boundary() -> None:
     state = ProtocolSSEState("openai_chat")
     state.observe(b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n')
     assert state.model_output_started is False
+
+
+def test_chat_any_nonempty_choice_crosses_the_model_output_boundary() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(
+        b'data: {"choices":[{"delta":{"content":"hello"}},'
+        b'{"delta":{"content":null}}]}\n\n'
+    )
+
+    assert state.model_output_started is True
+
+
+def test_buffered_error_array_is_not_an_error_envelope() -> None:
+    observation = observe_buffered_protocol_response(
+        "openai_chat",
+        io.BytesIO(b'{"error":[],"choices":[{"message":{"content":"hello"}}]}'),
+    )
+
+    assert observation.outcome == "served"
+    assert observation.error_envelope_paths == ()
 
 
 @pytest.mark.parametrize(

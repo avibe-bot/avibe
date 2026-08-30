@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import re
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ JSONEvent = Literal["start_map", "start_array", "scalar", "nonempty"]
 JSON_STRING_TOKEN_BYTES: Final = 16 * 1024
 JSON_NUMBER_TOKEN_BYTES: Final = 128
 JSON_IO_CHUNK_BYTES: Final = 64 * 1024
+_JSON_STRING_SPECIAL: Final = re.compile(br'["\\\x00-\x1f\x80-\xff]')
 
 
 @dataclass
@@ -46,9 +48,9 @@ class _Container:
 class SelectiveJSONParser:
     """Parse only selected paths while skipping every unrelated value in place.
 
-    Strings and numbers are bounded lexical tokens. Container state is retained
-    only along selected paths; an unrelated subtree uses one nesting counter, so
-    response size and unrelated shape do not become observer memory.
+    Strings and numbers are bounded lexical tokens. Every container retains only
+    its grammar state and selected-path node, so unrelated shape costs O(depth)
+    memory without weakening JSON validation.
     """
 
     def __init__(
@@ -59,9 +61,8 @@ class SelectiveJSONParser:
         self._root = _path_tree(paths)
         self._visitor = visitor
         self._stack: list[_Container] = []
+        self._discard_node = _PathNode()
         self._root_state = "value"
-        self._skip_depth = 0
-        self._skip_types = 0
         self._invalid = False
         self._mode: Literal["normal", "string", "number", "literal"] = "normal"
         self._string = bytearray()
@@ -80,7 +81,6 @@ class SelectiveJSONParser:
             len(self._string)
             + len(self._number)
             + len(self._literal)
-            + (self._skip_types.bit_length() + 7) // 8
             + sum(len(frame.key or "") for frame in self._stack)
         )
 
@@ -90,7 +90,6 @@ class SelectiveJSONParser:
             not self._invalid
             and self._root_state == "done"
             and not self._stack
-            and self._skip_depth == 0
             and self._mode == "normal"
         )
 
@@ -98,7 +97,7 @@ class SelectiveJSONParser:
     def next_value_path(self) -> JSONPath | None:
         """Return the selected path of the next value, if one is expected."""
 
-        if self._invalid or self._skip_depth or self._mode != "normal":
+        if self._invalid or self._mode != "normal":
             return None
         if not self._stack:
             return () if self._root_state == "value" else None
@@ -112,8 +111,13 @@ class SelectiveJSONParser:
         return None
 
     def feed(self, chunk: bytes) -> None:
-        for byte in chunk:
-            self.feed_byte(byte)
+        offset = 0
+        while offset < len(chunk) and not self._invalid:
+            if self._mode == "string":
+                offset = self._feed_string_chunk(chunk, offset)
+                continue
+            self.feed_byte(chunk[offset])
+            offset += 1
 
     def feed_byte(self, byte: int) -> None:
         if self._invalid:
@@ -231,9 +235,34 @@ class SelectiveJSONParser:
         except UnicodeDecodeError:
             self._invalid = True
             return
-        if len(self._string) < JSON_STRING_TOKEN_BYTES:
-            self._string.append(byte)
-        else:
+        self._retain_string_bytes(bytes((byte,)))
+
+    def _feed_string_chunk(self, chunk: bytes, offset: int) -> int:
+        """Consume ordinary ASCII string runs without per-byte codec calls."""
+
+        while offset < len(chunk) and self._mode == "string" and not self._invalid:
+            decoder_pending = bool(self._string_decoder.getstate()[0])
+            if self._escaped or self._unicode_escape_digits or decoder_pending:
+                self._feed_string(chunk[offset])
+                offset += 1
+                continue
+
+            special = _JSON_STRING_SPECIAL.search(chunk, offset)
+            end = special.start() if special is not None else len(chunk)
+            if end > offset:
+                self._retain_string_bytes(chunk[offset:end])
+                offset = end
+            if special is None:
+                break
+            self._feed_string(chunk[offset])
+            offset += 1
+        return offset
+
+    def _retain_string_bytes(self, payload: bytes) -> None:
+        remaining = JSON_STRING_TOKEN_BYTES - len(self._string)
+        if remaining > 0:
+            self._string.extend(payload[:remaining])
+        if len(payload) > remaining:
             self._string_too_long = True
 
     def _finish_number(self) -> None:
@@ -321,20 +350,6 @@ class SelectiveJSONParser:
         self._accept("scalar", values[raw])
 
     def _accept(self, token: str, value: object | None) -> None:
-        if self._skip_depth:
-            if token in {"start_map", "start_array"}:
-                self._skip_types = (self._skip_types << 1) | (token == "start_map")
-                self._skip_depth += 1
-            elif token in {"end_map", "end_array"}:
-                expected_map = bool(self._skip_types & 1)
-                if expected_map != (token == "end_map"):
-                    self._invalid = True
-                    return
-                self._skip_types >>= 1
-                self._skip_depth -= 1
-                if self._skip_depth == 0:
-                    self._complete_value()
-            return
         if not self._stack:
             if self._root_state != "value":
                 self._invalid = True
@@ -425,13 +440,7 @@ class SelectiveJSONParser:
             self._invalid = True
 
     def _skip_value(self, token: str) -> None:
-        if token in {"start_map", "start_array"}:
-            self._skip_depth = 1
-            self._skip_types = int(token == "start_map")
-        elif token in {"string", "scalar"}:
-            self._complete_value()
-        else:
-            self._invalid = True
+        self._start_value((), self._discard_node, token, None)
 
     def _mark_nonempty(self, frame: _Container) -> None:
         if not frame.nonempty:

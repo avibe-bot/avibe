@@ -155,18 +155,35 @@ class SSEObservationTokenizer:
             chunk = prefix[len(UTF8_BOM) :] if prefix.startswith(UTF8_BOM) else prefix
 
         frames: list[SSEObservedFrame] = []
-        for byte in chunk:
-            if self._after_cr:
-                self._after_cr = False
-                if byte == 0x0A:
-                    continue
-            if byte == 0x0D:
-                self._finish_line(frames)
-                self._after_cr = True
-            elif byte == 0x0A:
-                self._finish_line(frames)
+        offset = 0
+        if self._after_cr and chunk:
+            self._after_cr = False
+            if chunk.startswith(b"\n"):
+                offset = 1
+        while offset < len(chunk):
+            cr = chunk.find(b"\r", offset)
+            lf = chunk.find(b"\n", offset)
+            if cr < 0:
+                boundary = lf
+            elif lf < 0:
+                boundary = cr
             else:
-                self._consume_byte(byte)
+                boundary = min(cr, lf)
+            if boundary < 0:
+                self._consume_bytes(chunk[offset:])
+                break
+            self._consume_bytes(chunk[offset:boundary])
+            self._finish_line(frames)
+            if chunk[boundary] == 0x0D:
+                if boundary + 1 < len(chunk) and chunk[boundary + 1] == 0x0A:
+                    offset = boundary + 2
+                elif boundary + 1 < len(chunk):
+                    offset = boundary + 1
+                else:
+                    self._after_cr = True
+                    offset = boundary + 1
+            else:
+                offset = boundary + 1
         return tuple(frames)
 
     def discard_partial_frame(self) -> bool | None:
@@ -179,41 +196,51 @@ class SSEObservationTokenizer:
         self._stream_prefix.clear()
         return line_open
 
-    def _consume_byte(self, byte: int) -> None:
+    def _consume_bytes(self, payload: bytes) -> None:
+        if not payload:
+            return
         self._line_started = True
         self._frame_started = True
         if not self._value_started:
-            if byte == 0x3A:
-                self._value_started = True
-                field_name = bytes(self._field) if not self._field_too_long else b""
-                self._line_kind = (
-                    "event" if field_name == b"event" else "data" if field_name == b"data" else None
-                )
-                self._skip_value_space = True
-                if self._line_kind == "data":
-                    self._start_data_line()
+            colon = payload.find(b":")
+            field_payload = payload if colon < 0 else payload[:colon]
+            if not self._field_too_long:
+                remaining = len(b"event") - len(self._field)
+                if len(field_payload) <= remaining:
+                    self._field.extend(field_payload)
+                else:
+                    self._field.clear()
+                    self._field_too_long = True
+            if colon < 0:
                 return
-            if len(self._field) < len(b"event"):
-                self._field.append(byte)
-            else:
-                self._field_too_long = True
-            return
+            self._value_started = True
+            field_name = bytes(self._field) if not self._field_too_long else b""
+            self._line_kind = (
+                "event" if field_name == b"event" else "data" if field_name == b"data" else None
+            )
+            self._skip_value_space = True
+            if self._line_kind == "data":
+                self._start_data_line()
+            payload = payload[colon + 1 :]
 
-        if self._skip_value_space:
+        if self._skip_value_space and payload:
             self._skip_value_space = False
-            if byte == 0x20:
-                return
+            if payload.startswith(b" "):
+                payload = payload[1:]
+        if not payload:
+            return
         if self._line_kind == "event":
             if self._event_value_too_long:
                 return
-            if len(self._event_value) < SSE_OBSERVATION_EVENT_BYTES:
-                self._event_value.append(byte)
+            remaining = SSE_OBSERVATION_EVENT_BYTES - len(self._event_value)
+            if len(payload) <= remaining:
+                self._event_value.extend(payload)
             else:
                 self._event_value.clear()
                 self._event_value_too_long = True
         elif self._line_kind == "data":
             assert self._data is not None
-            self._data.feed_byte(byte)
+            self._data.feed(payload)
 
     def _finish_line(self, frames: list[SSEObservedFrame]) -> None:
         if not self._line_started:
@@ -836,7 +863,8 @@ class ProtocolFactProjector:
         self.protocol = protocol
         self.taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
         self.machine_error_codes = machine_error_codes
-        self._containers: set[JSONPath] = set()
+        self._maps: set[JSONPath] = set()
+        self._arrays: set[JSONPath] = set()
         self._nonempty: set[JSONPath] = set()
         self._scalars: dict[JSONPath, object] = {}
         self._type_candidates: list[str] = []
@@ -861,8 +889,14 @@ class ProtocolFactProjector:
         self._parser.feed_byte(byte)
 
     def feed(self, chunk: bytes) -> None:
-        for byte in chunk:
-            self.feed_byte(byte)
+        if not self._literal_too_long:
+            remaining = 16 - len(self._literal)
+            if len(chunk) <= remaining:
+                self._literal.extend(chunk)
+            else:
+                self._literal.clear()
+                self._literal_too_long = True
+        self._parser.feed(chunk)
 
     def finish(
         self,
@@ -874,7 +908,7 @@ class ProtocolFactProjector:
         literal = None if self._literal_too_long else bytes(self._literal)
         if streamed and self.taxonomy.success_literal == (event_name, literal):
             return ProtocolObservation(outcome="served")
-        if not self._parser.finish() or () not in self._containers:
+        if not self._parser.finish() or () not in self._maps:
             return ProtocolObservation(outcome="served" if not streamed else None)
 
         usage = _usage_from_scalar_paths(self.taxonomy.usage, self._scalars)
@@ -892,7 +926,7 @@ class ProtocolFactProjector:
             matched_paths = tuple(
                 path
                 for path in self.taxonomy.buffered_error_envelope_paths
-                if path in self._containers
+                if path in self._maps
             )
             return ProtocolObservation(
                 outcome="failed_terminal" if matched_paths else "served",
@@ -907,7 +941,7 @@ class ProtocolFactProjector:
                 continue
             if (
                 envelope.required_error_path is not None
-                and envelope.required_error_path not in self._containers
+                and envelope.required_error_path not in self._maps
             ):
                 continue
             if envelope.required_error_code_path is not None:
@@ -942,12 +976,16 @@ class ProtocolFactProjector:
         )
 
     def _visit(self, path: JSONPath, event: JSONEvent, value: object | None) -> None:
-        if event in {"start_map", "start_array"}:
-            self._containers.add(path)
+        if event == "start_map":
+            self._maps.add(path)
+        elif event == "start_array":
+            self._arrays.add(path)
         elif event == "nonempty":
             self._nonempty.add(path)
         elif event == "scalar":
             self._scalars[path] = value
+            if bool(value):
+                self._nonempty.add(path)
 
         if event != "scalar" or not isinstance(value, str):
             return
@@ -972,9 +1010,8 @@ class ProtocolFactProjector:
         if envelope.selector_value is not None:
             return self._scalars.get(envelope.selector_path) == envelope.selector_value
         if getattr(envelope, "require_nonempty", False):
-            value = self._scalars.get(envelope.selector_path)
-            return bool(value) or envelope.selector_path in self._nonempty
-        return envelope.selector_path in self._containers
+            return envelope.selector_path in self._nonempty
+        return envelope.selector_path in self._maps
 
 
 def observe_buffered_protocol_response(
