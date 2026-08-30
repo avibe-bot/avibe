@@ -29,6 +29,8 @@ _SKIP_ARRAY_VALUE: Final = 6
 _SKIP_ARRAY_COMMA_OR_END: Final = 7
 _SKIP_STATE_BITS: Final = 3
 _SKIP_STATE_MASK: Final = (1 << _SKIP_STATE_BITS) - 1
+_SKIP_STATES_PER_CHUNK: Final = 64
+_SKIP_CHUNK_BYTES: Final = (_SKIP_STATES_PER_CHUNK * _SKIP_STATE_BITS + 7) // 8
 
 
 @dataclass
@@ -75,7 +77,7 @@ class SelectiveJSONParser:
         self._stack: list[_Container] = []
         self._root_state = "value"
         self._skip_depth = 0
-        self._skip_states = 0
+        self._skip_state_chunks: list[int] = []
         self._root_prefix = bytearray()
         self._root_started = False
         self._invalid = False
@@ -97,7 +99,7 @@ class SelectiveJSONParser:
             + len(self._number)
             + len(self._literal)
             + len(self._root_prefix)
-            + (self._skip_states.bit_length() + 7) // 8
+            + len(self._skip_state_chunks) * _SKIP_CHUNK_BYTES
             + sum(len(frame.key or "") for frame in self._stack)
         )
 
@@ -504,7 +506,7 @@ class SelectiveJSONParser:
             self._invalid = True
 
     def _accept_skipped(self, token: str) -> None:
-        state = self._skip_states & _SKIP_STATE_MASK
+        state = self._skip_state()
         if state in {_SKIP_MAP_KEY_OR_END, _SKIP_MAP_KEY}:
             if token == "end_map" and state == _SKIP_MAP_KEY_OR_END:
                 self._pop_skip_state()
@@ -557,14 +559,33 @@ class SelectiveJSONParser:
             self._invalid = True
 
     def _push_skip_state(self, state: int) -> None:
-        self._skip_states = (self._skip_states << _SKIP_STATE_BITS) | state
+        slot = self._skip_depth % _SKIP_STATES_PER_CHUNK
+        if slot == 0:
+            self._skip_state_chunks.append(0)
+        self._skip_state_chunks[-1] |= state << (slot * _SKIP_STATE_BITS)
         self._skip_depth += 1
 
     def _set_skip_state(self, state: int) -> None:
-        self._skip_states = (self._skip_states & ~_SKIP_STATE_MASK) | state
+        slot = (self._skip_depth - 1) % _SKIP_STATES_PER_CHUNK
+        shift = slot * _SKIP_STATE_BITS
+        mask = _SKIP_STATE_MASK << shift
+        self._skip_state_chunks[-1] = (
+            self._skip_state_chunks[-1] & ~mask
+        ) | (state << shift)
+
+    def _skip_state(self) -> int:
+        slot = (self._skip_depth - 1) % _SKIP_STATES_PER_CHUNK
+        return (
+            self._skip_state_chunks[-1] >> (slot * _SKIP_STATE_BITS)
+        ) & _SKIP_STATE_MASK
 
     def _pop_skip_state(self) -> None:
-        self._skip_states >>= _SKIP_STATE_BITS
+        slot = (self._skip_depth - 1) % _SKIP_STATES_PER_CHUNK
+        if slot == 0:
+            self._skip_state_chunks.pop()
+        else:
+            shift = slot * _SKIP_STATE_BITS
+            self._skip_state_chunks[-1] &= ~(_SKIP_STATE_MASK << shift)
         self._skip_depth -= 1
         if self._skip_depth == 0:
             self._complete_value()

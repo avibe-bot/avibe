@@ -635,10 +635,16 @@ def _project_model_inventory(
         if path == () and event == "start_map":
             root_is_map = True
         elif path == ("data",):
+            if event == "replace":
+                data_models.clear()
+                data_ids.clear()
             data_seen = True
             if event != "nonempty":
                 data_is_array = event == "start_array"
         elif path == ("models",):
+            if event == "replace":
+                fallback_models.clear()
+                fallback_ids.clear()
             fallback_seen = True
             if event != "nonempty":
                 fallback_is_array = event == "start_array"

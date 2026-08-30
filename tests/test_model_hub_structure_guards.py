@@ -1344,6 +1344,21 @@ def test_duplicate_buffered_member_replaces_earlier_protocol_facts() -> None:
     assert observation.usage == ProtocolUsageReport(input_tokens=2)
 
 
+def test_buffered_machine_codes_are_scoped_to_the_matched_error_envelope() -> None:
+    observation = observe_buffered_protocol_response(
+        "openai_responses",
+        io.BytesIO(
+            b'{"error":{"type":"server_error"},'
+            b'"response":{"error":{"type":"permission_error"}}}'
+        ),
+        machine_error_codes=frozenset({"permission_error", "server_error"}),
+    )
+
+    assert observation.outcome == "failed_terminal"
+    assert observation.error_envelope_paths == (("error",),)
+    assert observation.error_type_candidates == ("server_error",)
+
+
 def test_sse_data_json_accepts_one_leading_utf8_bom() -> None:
     state = ProtocolSSEState("openai_responses")
     state.observe(
@@ -1370,6 +1385,19 @@ def test_large_selected_string_preserves_its_nonempty_fact() -> None:
     )
 
     assert state.model_output_started is True
+
+
+def test_large_required_error_code_preserves_its_nonempty_fact() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(
+        b'event: response.incomplete\ndata: {"type":"response.incomplete",'
+        b'"response":{"error":{"code":"'
+        + (b"x" * (SSE_OBSERVATION_STRING_BYTES + 1))
+        + b'"}}}\n\n'
+    )
+
+    assert state.terminal_outcome == "failed_terminal"
+    assert state.error_envelope_paths == (("response", "error"),)
 
 
 def test_async_sse_observation_runs_outside_the_event_loop() -> None:

@@ -912,8 +912,6 @@ class ProtocolFactProjector:
             return ProtocolObservation(outcome="served" if not streamed else None)
 
         usage = _usage_from_scalar_paths(self.taxonomy.usage, self._scalars)
-        type_candidates = self._machine_candidates("type")
-        code_candidates = self._machine_candidates("code")
         model_output_started = any(
             envelope.event_name == event_name and self._selector_matches(envelope)
             for envelope in self.taxonomy.model_output_envelopes
@@ -930,6 +928,8 @@ class ProtocolFactProjector:
                 for path in self.taxonomy.buffered_error_envelope_paths
                 if path in self._maps
             )
+            type_candidates = self._machine_candidates("type", matched_paths)
+            code_candidates = self._machine_candidates("code", matched_paths)
             return ProtocolObservation(
                 outcome="failed_terminal" if matched_paths else "served",
                 error_envelope_paths=matched_paths,
@@ -948,8 +948,20 @@ class ProtocolFactProjector:
                 continue
             if envelope.required_error_code_path is not None:
                 code = self._scalars.get(envelope.required_error_code_path)
-                if not isinstance(code, str) or not code:
+                elided_nonempty_string = (
+                    envelope.required_error_code_path in self._scalars
+                    and code is None
+                    and envelope.required_error_code_path in self._nonempty
+                )
+                if not (isinstance(code, str) and code) and not elided_nonempty_string:
                     continue
+            error_paths = (
+                envelope.error_envelope_paths
+                if envelope.terminal_outcome == "failed_terminal"
+                else ()
+            )
+            type_candidates = self._machine_candidates("type", error_paths)
+            code_candidates = self._machine_candidates("code", error_paths)
             return ProtocolObservation(
                 outcome=envelope.terminal_outcome,
                 model_output_started=model_output_started,
@@ -1004,9 +1016,13 @@ class ProtocolFactProjector:
             if not inside(candidate)
         }
 
-    def _machine_candidates(self, field: Literal["type", "code"]) -> tuple[str, ...]:
+    def _machine_candidates(
+        self,
+        field: Literal["type", "code"],
+        error_paths: tuple[ErrorEnvelopePath, ...],
+    ) -> tuple[str, ...]:
         candidates: list[str] = []
-        for error_path in _protocol_error_paths(self.taxonomy):
+        for error_path in error_paths:
             value = self._scalars.get((*error_path, field))
             if not isinstance(value, str):
                 continue

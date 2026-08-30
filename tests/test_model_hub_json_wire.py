@@ -92,6 +92,15 @@ def test_selective_projection_packs_deep_ignored_grammar_state() -> None:
     assert parser.finish() is False
 
 
+def test_selective_projection_closes_deep_ignored_grammar_state() -> None:
+    parser = SelectiveJSONParser({(), ("wanted",)}, lambda *_args: None)
+    parser.feed(b'{"ignored":' + (b"[" * 100_000))
+    parser.feed(b"0" + (b"]" * 100_000) + b',"wanted":true}')
+
+    assert parser.finish() is True
+    assert parser.retained_bytes == 0
+
+
 def test_selective_projection_accepts_one_leading_utf8_bom() -> None:
     observed: list[object] = []
 

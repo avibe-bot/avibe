@@ -1396,6 +1396,26 @@ def _models_endpoint():
         thread.join(timeout=2)
 
 
+def test_model_inventory_duplicate_top_level_members_replace_earlier_values() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":[{"id":"stale-data"}],'
+            b'"data":[{"id":"live-data"}],'
+            b'"models":[{"id":"stale-models"}],'
+            b'"models":[{"id":"live-models"}]}'
+        )
+    )
+
+    assert projected == (
+        True,
+        True,
+        ["live-data"],
+        True,
+        True,
+        ["live-models"],
+    )
+
+
 def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self, store: EngineStateStore) -> None:
