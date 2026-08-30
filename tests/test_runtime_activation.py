@@ -281,6 +281,60 @@ def test_opencode_binding_resolver_returns_pre_prompt_shared_generation() -> Non
     assert registry.is_current(replacement)
 
 
+def test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner() -> None:
+    """MH-RUNTIME-007: a claimed pre-native Turn cannot block its overlay change."""
+
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode.runtime_ownership_snapshots = lambda: (
+        SimpleNamespace(
+            blocks_reclamation=True,
+            blocks_transport_replacement=False,
+        ),
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert server.retire_activation(False)
+    assert not registry.is_current(identity)
+
+
+def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode.runtime_ownership_snapshots = lambda: (
+        SimpleNamespace(
+            blocks_reclamation=True,
+            blocks_transport_replacement=True,
+        ),
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert not server.retire_activation(False)
+    assert registry.is_current(identity)
+
+
 def test_session_binding_lookup_failure_is_not_resource_absence() -> None:
     service = object.__new__(AgentService)
     service.agents = {

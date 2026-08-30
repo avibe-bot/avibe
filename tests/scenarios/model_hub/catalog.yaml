@@ -11,6 +11,7 @@ capability:
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_opencode_server.py
+    - tests/test_runtime_activation.py
     # The user-visible half of metering. A vitest case is the only place these
     # properties can be observed, so the catalog checker resolves both shapes.
     - ui/src/components/settings/models/UsageTab.test.tsx
@@ -164,6 +165,12 @@ scenarios:
     kind: timeout_cancel
     layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics
+  - id: MH-RUNTIME-007
+    name: An OpenCode overlay change retires a pre-native owner without replacing an active native Turn
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_runtime_activation.py::test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered

@@ -120,6 +120,7 @@ capabilities:
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_usage.py
       - tests/test_opencode_server.py
+      - tests/test_runtime_activation.py
       - ui/src/components/settings/models/UsageTab.test.tsx
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
       - ui/src/components/settings/models/RouteChainDialog.test.tsx

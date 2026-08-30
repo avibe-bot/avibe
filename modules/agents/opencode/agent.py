@@ -740,7 +740,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             snapshots = self.runtime_ownership_snapshots()
             return bool(
                 snapshots is not None
-                and all(not snapshot.blocks_reclamation for snapshot in snapshots)
+                and all(
+                    not snapshot.blocks_transport_replacement
+                    for snapshot in snapshots
+                )
             )
 
         return bool(registry.retire_if_current(identity, final_predicate))
