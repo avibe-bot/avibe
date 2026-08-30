@@ -47,7 +47,7 @@ from .stream_wire import (
 )
 from .tool_names import (
     StreamingToolNameRewriter,
-    rewrite_buffered_tool_names,
+    rewrite_buffered_tool_names_file,
     translate_opencode_tool_names,
 )
 from .usage import BoundedUsageLedger, UsageWriter
@@ -737,10 +737,13 @@ class ModelHubTurnGateway:
             ) as payload:
                 async for chunk in handle.stream:
                     payload.write(chunk)
-                payload_size = payload.tell()
                 execution.completed_at = self._now()
                 payload.seek(0)
-                observation = observe_buffered_protocol_response(protocol, payload)
+                observation = await asyncio.to_thread(
+                    observe_buffered_protocol_response,
+                    protocol,
+                    payload,
+                )
                 execution.buffered_usage = observation.usage
                 execution.buffered_outcome = observation.outcome
                 outcome, settlement, rendered = await self._settle_metered_turn(
@@ -759,33 +762,43 @@ class ModelHubTurnGateway:
                         rendered=rendered,
                     )
                 payload.seek(0)
-                if payload_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
-                    return web.Response(
+                rewritten_payload = await asyncio.to_thread(
+                    rewrite_buffered_tool_names_file,
+                    payload,
+                    execution.response_tool_aliases,
+                )
+                response_payload = rewritten_payload or payload
+                try:
+                    response_payload.seek(0, 2)
+                    response_size = response_payload.tell()
+                    response_payload.seek(0)
+                    if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
+                        return web.Response(
+                            status=200,
+                            body=response_payload.read(),
+                            content_type="application/json",
+                            headers={
+                                "Cache-Control": "no-store",
+                                "X-Content-Type-Options": "nosniff",
+                            },
+                        )
+                    response = web.StreamResponse(
                         status=200,
-                        body=rewrite_buffered_tool_names(
-                            payload.read(),
-                            execution.response_tool_aliases,
-                        ),
-                        content_type="application/json",
                         headers={
                             "Cache-Control": "no-store",
+                            "Content-Length": str(response_size),
+                            "Content-Type": "application/json",
                             "X-Content-Type-Options": "nosniff",
                         },
                     )
-                response = web.StreamResponse(
-                    status=200,
-                    headers={
-                        "Cache-Control": "no-store",
-                        "Content-Length": str(payload_size),
-                        "Content-Type": "application/json",
-                        "X-Content-Type-Options": "nosniff",
-                    },
-                )
-                await self._downstream_io(response.prepare(request))
-                while chunk := payload.read(_RESPONSE_CHUNK_BYTES):
-                    await self._downstream_io(response.write(chunk))
-                await self._downstream_io(response.write_eof())
-                return response
+                    await self._downstream_io(response.prepare(request))
+                    while chunk := response_payload.read(_RESPONSE_CHUNK_BYTES):
+                        await self._downstream_io(response.write(chunk))
+                    await self._downstream_io(response.write_eof())
+                    return response
+                finally:
+                    if rewritten_payload is not None:
+                        rewritten_payload.close()
 
         response = web.StreamResponse(
             status=200,

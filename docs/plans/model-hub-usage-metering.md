@@ -702,10 +702,11 @@ with keepalives forever. Observation-before-copy remains the owner ordering, but
 no longer refuse a valid response for its size.
 
 The same rule applies to buffered JSON. Its exact bytes spill once and are replayed from
-that owner; a single taxonomy-backed incremental projection extracts terminal errors,
+that owner; a single taxonomy-backed selective JSON projection extracts terminal errors,
 allowlisted machine fields, and usage for both small and large bodies. The projection
-elides unrelated strings before the JSON parser can retain them. Body size therefore
-changes storage only, never classification or metering, and HTTP error diagnostics keep
+lexes only those finite protocol paths and skips unrelated subtrees without materializing
+their values. Body size therefore changes storage only, never classification or metering,
+and HTTP error diagnostics keep
 only a bounded private prefix after the machine fields have been projected from the full
 body.
 

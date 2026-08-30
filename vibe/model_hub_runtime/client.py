@@ -14,7 +14,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, BinaryIO, Mapping
 
 import aiohttp
-import ijson
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
@@ -23,6 +22,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
 )
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
+from core.handlers.model_hub.json_wire import JSONEvent, JSONPath, project_json_reader
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
@@ -338,7 +338,8 @@ class EngineClient:
                         _read_response_into(response.content, error_body),
                         timeout=self.timeout,
                     )
-                    observed_payload = observe_buffered_protocol_response(
+                    observed_payload = await asyncio.to_thread(
+                        observe_buffered_protocol_response,
                         request_protocol,
                         error_body.reader(),
                         machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
@@ -391,7 +392,8 @@ class EngineClient:
                     _read_response_into(response.content, buffered_body),
                     timeout=self.timeout,
                 )
-                observation = observe_buffered_protocol_response(
+                observation = await asyncio.to_thread(
+                    observe_buffered_protocol_response,
                     request_protocol,
                     buffered_body.reader(),
                     machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
@@ -585,43 +587,18 @@ async def probe_models(
                         f"model discovery returned HTTP {response.status}",
                         status_code=response.status,
                     )
-                data_models: list[str] = []
-                fallback_models: list[str] = []
-                data_seen = False
-                data_is_array = False
-                fallback_seen = False
-                fallback_is_array = False
-                data_ids: set[str] = set()
-                fallback_ids: set[str] = set()
-                root_is_map = False
-                async for prefix, event, value in ijson.parse_async(response.content):
-                    if prefix == "" and event == "start_map":
-                        root_is_map = True
-                    elif prefix == "" and event == "map_key":
-                        if value == "data":
-                            data_seen = True
-                        elif value == "models":
-                            fallback_seen = True
-                    elif prefix == "data" and event == "start_array":
-                        data_is_array = True
-                    elif prefix == "models" and event == "start_array":
-                        fallback_is_array = True
-                    elif prefix in {"data.item", "data.item.id"} and event == "string":
-                        if value and value not in data_ids:
-                            data_ids.add(value)
-                            data_models.append(value)
-                    elif prefix in {"models.item", "models.item.id"} and event == "string":
-                        if value and value not in fallback_ids:
-                            fallback_ids.add(value)
-                            fallback_models.append(value)
+                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
+                    while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
+                        payload.write(chunk)
+                    payload.seek(0)
+                    projected = await asyncio.to_thread(_project_model_inventory, payload)
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
         raise EngineClientError("model discovery failed", error_type="network_error") from None
-    except ijson.JSONError:
-        raise EngineClientError("model discovery returned an invalid payload") from None
-    if not root_is_map:
+    if projected is None:
         raise EngineClientError("model discovery returned an invalid payload")
+    data_seen, data_is_array, data_models, fallback_seen, fallback_is_array, fallback_models = projected
     if data_seen:
         if not data_is_array:
             raise EngineClientError("model discovery returned an invalid payload")
@@ -629,6 +606,61 @@ async def probe_models(
     if not fallback_seen or not fallback_is_array:
         raise EngineClientError("model discovery returned an invalid payload")
     return tuple(fallback_models)
+
+
+def _project_model_inventory(
+    reader: BinaryIO,
+) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
+    paths = {
+        (),
+        ("data",),
+        ("data", "*"),
+        ("data", "*", "id"),
+        ("models",),
+        ("models", "*"),
+        ("models", "*", "id"),
+    }
+    root_is_map = False
+    data_seen = False
+    data_is_array = False
+    fallback_seen = False
+    fallback_is_array = False
+    data_models: list[str] = []
+    fallback_models: list[str] = []
+    data_ids: set[str] = set()
+    fallback_ids: set[str] = set()
+
+    def visit(path: JSONPath, event: JSONEvent, value: object | None) -> None:
+        nonlocal root_is_map, data_seen, data_is_array, fallback_seen, fallback_is_array
+        if path == () and event == "start_map":
+            root_is_map = True
+        elif path == ("data",):
+            data_seen = True
+            if event != "nonempty":
+                data_is_array = event == "start_array"
+        elif path == ("models",):
+            fallback_seen = True
+            if event != "nonempty":
+                fallback_is_array = event == "start_array"
+        elif path in {("data", "*"), ("data", "*", "id")}:
+            if event == "scalar" and isinstance(value, str) and value and value not in data_ids:
+                data_ids.add(value)
+                data_models.append(value)
+        elif path in {("models", "*"), ("models", "*", "id")}:
+            if event == "scalar" and isinstance(value, str) and value and value not in fallback_ids:
+                fallback_ids.add(value)
+                fallback_models.append(value)
+
+    if not project_json_reader(reader, paths, visit) or not root_is_map:
+        return None
+    return (
+        data_seen,
+        data_is_array,
+        data_models,
+        fallback_seen,
+        fallback_is_array,
+        fallback_models,
+    )
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):

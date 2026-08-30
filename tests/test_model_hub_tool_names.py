@@ -103,6 +103,32 @@ def test_buffered_chat_response_restores_only_tool_name_fields() -> None:
     assert message["content"] == "avibe_todo_write remains ordinary content"
 
 
+def test_large_buffered_chat_response_restores_tool_name_without_loading_content() -> None:
+    payload = json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "x" * (512 * 1024),
+                        "tool_calls": [
+                            {"function": {"name": "avibe_todo_write", "arguments": "{}"}}
+                        ],
+                    }
+                }
+            ]
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    rewritten = json.loads(
+        rewrite_buffered_tool_names(payload, {"avibe_todo_write": "todowrite"})
+    )
+
+    message = rewritten["choices"][0]["message"]
+    assert message["tool_calls"][0]["function"]["name"] == "todowrite"
+    assert len(message["content"]) == 512 * 1024
+
+
 def test_streaming_chat_response_restores_alias_across_transport_chunks() -> None:
     first = b'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"avibe_todo_write"}}]}}]}\r\n\r\n'
     second = b'data: {"choices":[{"delta":{"content":"avibe_todo_write"}}]}\n\n'
@@ -195,3 +221,13 @@ def test_streaming_rewriter_fails_open_when_partial_alias_state_exceeds_its_budg
 
     assert output == partial + content + terminal
     assert rewriter.finish() == b""
+
+
+def test_streaming_rewriter_preserves_cr_delimiter_when_partial_frame_exceeds_budget() -> None:
+    partial = b"data: " + b"x" * (256 * 1024) + b"\r"
+    remainder = b"\rdata: [DONE]\r\r"
+    rewriter = StreamingToolNameRewriter({"avibe_todo_write": "todowrite"})
+
+    output = rewriter.feed(partial) + rewriter.feed(remainder) + rewriter.finish()
+
+    assert output == partial + remainder

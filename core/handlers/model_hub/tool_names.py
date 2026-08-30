@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, BinaryIO, Mapping
 
+from .json_wire import rewrite_json_strings
 from .stream_wire import SSEFrameTokenizer, parse_sse_frame
 
 
 _REWRITE_BUFFER_BYTES = 256 * 1024
 _REWRITE_SCAN_BYTES = 16 * 1024
+_BUFFERED_TOOL_NAME_PATHS = frozenset(
+    path
+    for envelope in ("delta", "message")
+    for path in (
+        ("choices", "*", envelope, "function_call", "name"),
+        ("choices", "*", envelope, "tool_calls", "*", "function", "name"),
+    )
+)
 
 
 _OPENCODE_UPSTREAM_TOOL_ALIASES = {
@@ -78,15 +88,27 @@ def translate_opencode_tool_names(request: Mapping[str, Any]) -> ToolNameTransla
 def rewrite_buffered_tool_names(payload: bytes, aliases: Mapping[str, str]) -> bytes:
     """Restore aliased tool names in one buffered OpenAI Chat response."""
 
-    if not aliases:
+    source = BytesIO(payload)
+    rewritten = rewrite_buffered_tool_names_file(source, aliases)
+    if rewritten is None:
         return payload
     try:
-        decoded = json.loads(payload)
-    except (UnicodeDecodeError, ValueError):
-        return payload
-    if not isinstance(decoded, dict) or not _rewrite_chat_response(decoded, aliases):
-        return payload
-    return json.dumps(decoded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return rewritten.read()
+    finally:
+        rewritten.close()
+
+
+def rewrite_buffered_tool_names_file(
+    payload: BinaryIO,
+    aliases: Mapping[str, str],
+) -> BinaryIO | None:
+    """Restore aliases from any buffered body without loading that body in heap."""
+
+    return rewrite_json_strings(
+        payload,
+        target_paths=_BUFFERED_TOOL_NAME_PATHS,
+        replacements=aliases,
+    )
 
 
 class StreamingToolNameRewriter:

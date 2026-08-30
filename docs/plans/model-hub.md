@@ -630,12 +630,13 @@ inventory responses. Request admission limits remain separate request-side polic
 thresholds may spill retained replay bytes to a temporary file, but must never truncate,
 reject, reclassify, or trigger fallback for an otherwise valid response. Pre-output
 replay has one absolute transport deadline, so keepalives cannot renew the wait forever;
-buffered responses spill before replay. One taxonomy-backed incremental projection owns
-their terminal error, machine-code, and usage facts for every body size; it elides
-model-authored strings in its private parser input while the exact body remains on disk
-for replay. Model discovery parses the inventory incrementally. Optional response
-mutation, such as restoring an OpenCode tool alias,
-has its own bounded working set and fails open to the original bytes when it cannot
+buffered responses spill before replay. One taxonomy-backed selective JSON projector owns
+their terminal error, machine-code, and usage facts for every body size; it lexes only
+the finite protocol paths and skips unrelated subtrees while the exact body remains on
+disk for replay. Model discovery uses the same selective projection for its inventory.
+Optional response mutation, such as restoring an OpenCode tool alias, operates on the
+same exact-byte spool for every body size, has a bounded working set, and fails open to
+the original bytes when it cannot
 finish within that set.
 
 Everything else is forwarded and ignored for settlement. Model Hub does not judge

@@ -534,19 +534,18 @@ def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
     client_tree = _tree(CLIENT)
     stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
     gateway_tree = _tree(TURN_GATEWAY)
-    stream_owners = (_functions(client_tree)["invoke"], _functions(stream_tree)["_observe_frame"])
     stream_calls = [
         node
         for tree in (client_tree, stream_tree)
         for node in ast.walk(tree)
         if _call_name(node) == "observe_protocol_response"
     ]
-    assert all(any(call in set(ast.walk(owner)) for owner in stream_owners) for call in stream_calls)
-    assert {
-        value
-        for call in stream_calls
-        if (value := _bool_keyword(call, "streamed")) is not None
-    } == {True}
+    assert stream_calls == []
+    stream_source = (ROOT / "core/handlers/model_hub/stream_wire.py").read_text(
+        encoding="utf-8"
+    )
+    assert "class ProtocolFactProjector" in stream_source
+    assert "observation = frame.observation" in stream_source
     buffered_owners = (
         _functions(client_tree)["invoke"],
         _functions(gateway_tree)["_resolved_response"],
@@ -555,7 +554,9 @@ def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
         node
         for tree in (client_tree, gateway_tree)
         for node in ast.walk(tree)
-        if _call_name(node) == "observe_buffered_protocol_response"
+        if isinstance(node, ast.Name)
+        and node.id == "observe_buffered_protocol_response"
+        and isinstance(node.ctx, ast.Load)
     ]
     assert len(buffered_calls) == 3
     assert all(any(call in set(ast.walk(owner)) for owner in buffered_owners) for call in buffered_calls)
@@ -1377,6 +1378,24 @@ def test_observer_abandons_large_non_string_metadata_without_affecting_next_fram
 
     assert state.model_output_started is False
     assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+def test_large_terminal_projects_its_discriminator_after_unrelated_structure() -> None:
+    state = ProtocolSSEState("openai_responses")
+    payload = json.dumps(
+        {
+            "output": [{"index": index} for index in range(20_000)],
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 11, "output_tokens": 7}},
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    state.observe(b"event: response.completed\ndata: " + payload + b"\n\n")
+
+    assert state.terminal_outcome == "served"
+    assert state.usage == ProtocolUsageReport(input_tokens=11, output_tokens=7)
+    assert state.tokenizer.retained_bytes == 0
 
 
 def test_observer_drops_unrecognized_oversized_event_names() -> None:
