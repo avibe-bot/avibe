@@ -126,8 +126,32 @@ class RuntimeTargetOwnershipSnapshot:
         """Whether durable native-effect evidence vetoes transport replacement.
 
         Pre-native Delivery and Turn rows use the adapter's live-turn fence.
-        This gate covers evidence that can outlive that local fence: unknown
-        ownership, active Activity effects, and fallback Runs with a live PID.
+        This gate also preserves an accepted active Turn when the adapter has
+        not independently proved that its native transport is drained.
+        """
+
+        return bool(
+            self.blocks_transport_replacement_after_turn_drain
+            or self.has_active_turn_evidence
+        )
+
+    @property
+    def has_active_turn_evidence(self) -> bool:
+        """Whether durable state still records an accepted native Turn."""
+
+        return any(
+            "turn:active" in session.reasons
+            for session in self.sessions
+        )
+
+    @property
+    def blocks_transport_replacement_after_turn_drain(self) -> bool:
+        """Whether non-Turn native effects survive an adapter-owned drain.
+
+        A backend may use this narrower gate only while holding the lifecycle
+        lock that proves its live requests and native runs are empty. Unknown
+        ownership, Activities, unmatched claimed deliveries, and live fallback
+        processes remain vetoes after that proof.
         """
 
         if self.disposition is SessionRuntimeDisposition.UNKNOWN:
@@ -138,11 +162,11 @@ class RuntimeTargetOwnershipSnapshot:
             return True
         for session in self.sessions:
             session_reasons = set(session.reasons)
-            if "turn:active" in session_reasons:
-                return True
             if (
                 "delivery:claimed" in session_reasons
-                and "turn:starting" not in session_reasons
+                and not {"turn:starting", "turn:active"}.intersection(
+                    session_reasons
+                )
             ):
                 return True
         reasons = self.reasons + tuple(

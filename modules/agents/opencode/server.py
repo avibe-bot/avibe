@@ -260,12 +260,12 @@ class OpenCodeServerManager:
             object, tuple[Optional[str], Optional[str]]
         ] = {}
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
-        self._runtime_activation_retire: Callable[[bool], bool] | None = None
+        self._runtime_activation_retire: Callable[[bool, bool], bool] | None = None
         self._runtime_generation_token: tuple[int, float | None] | None = None
 
     def set_runtime_activation_retire(
         self,
-        callback: Callable[[bool], bool],
+        callback: Callable[[bool, bool], bool],
     ) -> None:
         self._runtime_activation_retire = callback
 
@@ -286,7 +286,7 @@ class OpenCodeServerManager:
 
     def _retire_runtime_generation_for_replacement(self) -> None:
         retire_activation = self._runtime_activation_retire
-        if callable(retire_activation) and not retire_activation(True):
+        if callable(retire_activation) and not retire_activation(True, False):
             raise RuntimeError(
                 "OpenCode runtime replacement could not retire its activation generation"
             )
@@ -439,9 +439,17 @@ class OpenCodeServerManager:
                 return
             await self._close_http_session_locked()
 
-    async def _restart_for_auth_refresh_locked(self, *, force: bool = False) -> None:
+    async def _restart_for_auth_refresh_locked(
+        self,
+        *,
+        force: bool = False,
+        native_turns_drained: bool = False,
+    ) -> None:
         retire_activation = self._runtime_activation_retire
-        if callable(retire_activation) and not retire_activation(force):
+        if callable(retire_activation) and not retire_activation(
+            force,
+            native_turns_drained,
+        ):
             self._auth_refresh_pending = True
             raise RuntimeError(
                 "OpenCode runtime restart is blocked by a newly admitted owner"
@@ -687,7 +695,9 @@ class OpenCodeServerManager:
                                     logger.info(
                                         "Restarting OpenCode server after Model Hub overlay change"
                                     )
-                                    await self._restart_for_auth_refresh_locked()
+                                    await self._restart_for_auth_refresh_locked(
+                                        native_turns_drained=True,
+                                    )
                                 self._model_hub_overlay_reservations[
                                     transition_owner
                                 ] = (desired_path, desired_hash)

@@ -590,7 +590,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         events = []
         manager._runtime_generation_token = (111, 1.0)
         manager.set_runtime_activation_retire(
-            lambda force: events.append(("retire", force)) or True
+            lambda force, native_turns_drained: events.append(
+                ("retire", force, native_turns_drained)
+            )
+            or True
         )
         manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
@@ -606,14 +609,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         ):
             await manager.ensure_running()
 
-        self.assertEqual(events, [("retire", True), ("start", True)])
+        self.assertEqual(events, [("retire", True, False), ("start", True)])
 
     async def test_ensure_running_retires_generation_when_adopted_pid_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         retired = []
         manager._runtime_generation_token = (111, 1.0)
         manager.set_runtime_activation_retire(
-            lambda force: retired.append(force) or True
+            lambda force, native_turns_drained: retired.append(
+                (force, native_turns_drained)
+            )
+            or True
         )
         manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
@@ -632,7 +638,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         ):
             await manager.ensure_running()
 
-        self.assertEqual(retired, [True])
+        self.assertEqual(retired, [(True, False)])
         self.assertEqual(manager._runtime_generation_token, (222, 2.0))
 
     async def test_prompt_async_percent_encodes_directory_header(self):
@@ -2658,6 +2664,34 @@ def test_changed_overlay_still_waits_for_active_run_before_restart():
     assert manager._model_hub_overlay_path == str(overlay.path)
     assert manager._model_hub_overlay_hash == overlay.content_hash
     manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+
+def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._model_hub_overlay_drain_timeout_seconds = 0
+    manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+        "pid": 321,
+        "port": 4096,
+        "active_run_sessions": ["sess-stale"],
+    }
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    overlay = types.SimpleNamespace(
+        path=Path("/tmp/new-overlay.json"),
+        content_hash="new-hash",
+        content='{"provider": {}}',
+        provider_id="avibe-model-hub-new",
+    )
+
+    reservation = asyncio.run(manager.configure_model_hub_overlay(overlay))
+    asyncio.run(manager.release_model_hub_overlay_reservation(reservation))
+
+    manager._restart_for_auth_refresh_locked.assert_awaited_once_with(
+        native_turns_drained=True,
+    )
 
 
 def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay():
