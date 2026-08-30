@@ -355,62 +355,68 @@ class MemoryRuntime:
                 _RUNTIME_ROOTS[self._root_key] = self
             elif owner is not _root_ownership.owner or not _root_ownership.close_proved:
                 raise MemoryRuntimeBusyError("Memory provider root ownership changed")
-        self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
-        self._provider_root_owner = ProviderRoot(
-            self._provider_root,
-            effective_home=self._effective_home,
-        )
-        self._supervisor_factory: EverOSSupervisorFactory = (
-            supervisor_factory or EverOSSupervisor
-        )
-        self._processing_event = processing_event
-        self._on_config_settled = on_config_settled
-        self._is_enabled_user = is_enabled_user
-        self._lifecycle_snapshot_matches = lifecycle_snapshot_matches
-        self._acquire_lifecycle_admission = acquire_lifecycle_admission
-        self._capture_adapter: MemoryCaptureAdapter = DisabledMemoryAdapter()
-        self._capture_task_factory: Callable[..., asyncio.Task[Any]] | None = None
-        self._compose_capture_adapter(None)
-        # The controller-side port only talks to the private UDS. Credentials
-        # enter an EverOSPort only inside the owned child probe/sidecar.
-        self._provider = EverOSPort(
-            self._socket_path,
-            runtime_active=self._runtime_active,
-        )
-        self._attachment_config_epoch = next(_ATTACHMENT_CONFIG_EPOCHS)
-        self._runtime_error: str | None = None
-        self._released_ownership_blocked = False
-        self._needs_repair_reason: str | None = (
-            "memory_legacy_recovery_required"
-            if config.legacy_needs_repair
-            else None
-        )
-        self._reconcile_lock = asyncio.Lock()
-        self._wake_task: asyncio.Task[dict[str, Any]] | None = None
-        self._artifact_activation_task: asyncio.Task[None] | None = None
-        self._artifact_install_task: asyncio.Task[dict[str, Any]] | None = None
-        self._closing = False
-        self._activation_loop: asyncio.AbstractEventLoop | None = None
-        self._artifact_installing = False
-        self._close_task: asyncio.Task[None] | None = None
-        self._close_phase_tasks: dict[str, asyncio.Task[None]] = {}
-        self._store: MemoryStore | None = None
-        self._module: MemoryModule | None = None
-        self._store_error: Exception | None = None
-        self._insight_reader_override = insight_reader
-        self._insight_reader: MemoryInsightReader | None = None
-        self._supervisor = self._supervisor_factory(
-            provider_root=self._provider_root,
-            effective_home=self._effective_home,
-            socket_path=self._socket_path,
-            on_ready=self._current_sidecar_ready,
-            on_unavailable=self._current_sidecar_unavailable,
-            on_recover=self._recover_current_sidecar,
-        )
-        self._processing_record = MemoryProcessingRecord(
-            self._processing_record_port()
-        )
-        self._open_store(store)
+        try:
+            self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
+            self._provider_root_owner = ProviderRoot(
+                self._provider_root,
+                effective_home=self._effective_home,
+            )
+            self._supervisor_factory: EverOSSupervisorFactory = (
+                supervisor_factory or EverOSSupervisor
+            )
+            self._processing_event = processing_event
+            self._on_config_settled = on_config_settled
+            self._is_enabled_user = is_enabled_user
+            self._lifecycle_snapshot_matches = lifecycle_snapshot_matches
+            self._acquire_lifecycle_admission = acquire_lifecycle_admission
+            self._capture_adapter: MemoryCaptureAdapter = DisabledMemoryAdapter()
+            self._capture_task_factory: Callable[..., asyncio.Task[Any]] | None = None
+            self._compose_capture_adapter(None)
+            # The controller-side port only talks to the private UDS. Credentials
+            # enter an EverOSPort only inside the owned child probe/sidecar.
+            self._provider = EverOSPort(
+                self._socket_path,
+                runtime_active=self._runtime_active,
+            )
+            self._attachment_config_epoch = next(_ATTACHMENT_CONFIG_EPOCHS)
+            self._runtime_error: str | None = None
+            self._released_ownership_blocked = False
+            self._needs_repair_reason: str | None = (
+                "memory_legacy_recovery_required"
+                if config.legacy_needs_repair
+                else None
+            )
+            self._reconcile_lock = asyncio.Lock()
+            self._wake_task: asyncio.Task[dict[str, Any]] | None = None
+            self._artifact_activation_task: asyncio.Task[None] | None = None
+            self._artifact_install_task: asyncio.Task[dict[str, Any]] | None = None
+            self._closing = False
+            self._activation_loop: asyncio.AbstractEventLoop | None = None
+            self._artifact_installing = False
+            self._close_task: asyncio.Task[None] | None = None
+            self._close_phase_tasks: dict[str, asyncio.Task[None]] = {}
+            self._store: MemoryStore | None = None
+            self._module: MemoryModule | None = None
+            self._store_error: Exception | None = None
+            self._insight_reader_override = insight_reader
+            self._insight_reader: MemoryInsightReader | None = None
+            self._supervisor = self._supervisor_factory(
+                provider_root=self._provider_root,
+                effective_home=self._effective_home,
+                socket_path=self._socket_path,
+                on_ready=self._current_sidecar_ready,
+                on_unavailable=self._current_sidecar_unavailable,
+                on_recover=self._recover_current_sidecar,
+            )
+            self._processing_record = MemoryProcessingRecord(
+                self._processing_record_port()
+            )
+            self._open_store(store)
+        except BaseException:
+            with _RUNTIME_ROOTS_LOCK:
+                if _RUNTIME_ROOTS.get(self._root_key) is self:
+                    _RUNTIME_ROOTS.pop(self._root_key, None)
+            raise
 
     def _open_store(self, store: MemoryStore | None = None) -> bool:
         """Open the local store and build the module, absorbing any failure.
@@ -2611,7 +2617,7 @@ class MemoryRuntime:
         await self._join_close_task(self._artifact_activation_task)
         if self._module is not None:
             self._module.pause_claims()
-            async with self._module.provider_root_lifecycle():
+            async with self._module.destructive_lifecycle():
                 if not await self._module.quiesce_claims_for_destructive_reset():
                     raise RuntimeError("Memory writer did not quiesce during close")
                 await self._module.close_writer()

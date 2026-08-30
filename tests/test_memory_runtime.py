@@ -65,12 +65,28 @@ async def test_session_lifecycle_offers_without_waiting_for_capture(tmp_path: Pa
 async def test_reset_handoff_holds_root_until_exact_successor_accepts(
     tmp_path: Path,
 ) -> None:
+    def fail_supervisor(**_kwargs):
+        raise RuntimeError("supervisor construction failed")
+
+    with pytest.raises(RuntimeError) as retained:
+        MemoryRuntime(
+            MemoryConfig(enabled=True),
+            effective_home=tmp_path,
+            supervisor_factory=fail_supervisor,
+        )
+    assert retained.traceback is not None
     runtime = _runtime(tmp_path)
     with pytest.raises(MemoryRuntimeBusyError):
         _runtime(tmp_path)
-    ownership = runtime.begin_root_ownership_handoff()
-
-    await runtime.close(root_ownership=ownership)
+    async with runtime.module.lifecycle():
+        ownership = runtime.begin_root_ownership_handoff()
+        closing = asyncio.create_task(runtime.close(root_ownership=ownership))
+        while "local cleanup" not in runtime._close_phase_tasks:
+            await asyncio.sleep(0)
+        assert closing.done() is False
+        assert (tmp_path / "memory").exists()
+    await closing
+    assert runtime.reset_mutable_data(ownership).data_deleted is True
     with pytest.raises(MemoryRuntimeBusyError):
         _runtime(tmp_path)
 

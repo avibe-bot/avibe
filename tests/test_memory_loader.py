@@ -35,21 +35,10 @@ def test_disabled_loader_never_imports_optional_implementation(monkeypatch: pyte
     importer.assert_not_called()
 
 
-def test_loader_maps_missing_implementation_to_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    import core.memory_loader
-
-    monkeypatch.setattr(
-        core.memory_loader.importlib,
-        "import_module",
-        Mock(side_effect=ModuleNotFoundError("optional package missing")),
-    )
-
-    with pytest.raises(MemoryPluginUnavailableError):
-        load_memory_runtime(_config())
-
-
-def test_entrypoint_probe_maps_missing_implementation_to_unavailable(
+@pytest.mark.parametrize("probe_only", (False, True))
+def test_loader_and_probe_map_missing_implementation_to_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    probe_only: bool,
 ) -> None:
     import core.memory_loader
 
@@ -60,7 +49,10 @@ def test_entrypoint_probe_maps_missing_implementation_to_unavailable(
     )
 
     with pytest.raises(MemoryPluginUnavailableError):
-        probe_memory_runtime_entrypoint()
+        if probe_only:
+            probe_memory_runtime_entrypoint()
+        else:
+            load_memory_runtime(_config())
 
 
 @pytest.mark.parametrize(
@@ -188,26 +180,18 @@ def test_loader_preserves_runtime_root_busy(monkeypatch: pytest.MonkeyPatch) -> 
     assert raised.value is busy
 
 
-def test_loader_constructs_fixed_protocol_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    import core.memory_loader
-
-    async def close() -> None:
-        return None
-
-    runtime = SimpleNamespace(module=object(), available=True, close=close)
-    factory = Mock(return_value=runtime)
-    monkeypatch.setattr(
-        core.memory_loader.importlib,
-        "import_module",
-        Mock(return_value=_implementation(factory)),
-    )
-
-    assert load_memory_runtime(_config(), marker="tested") is runtime
-    factory.assert_called_once_with(_config(), marker="tested")
-
-
-def test_disabled_loader_allows_explicit_maintenance_runtime(
+@pytest.mark.parametrize(
+    ("config", "loader_kwargs", "factory_kwargs"),
+    (
+        (_config(), {"marker": "tested"}, {"marker": "tested"}),
+        (_config(False), {"allow_disabled": True}, {}),
+    ),
+)
+def test_loader_constructs_declared_runtime(
     monkeypatch: pytest.MonkeyPatch,
+    config: SimpleNamespace,
+    loader_kwargs: dict[str, object],
+    factory_kwargs: dict[str, object],
 ) -> None:
     import core.memory_loader
 
@@ -222,9 +206,8 @@ def test_disabled_loader_allows_explicit_maintenance_runtime(
         Mock(return_value=_implementation(factory)),
     )
 
-    config = _config(False)
-    assert load_memory_runtime(config, allow_disabled=True) is runtime
-    factory.assert_called_once_with(config)
+    assert load_memory_runtime(config, **loader_kwargs) is runtime
+    factory.assert_called_once_with(config, **factory_kwargs)
 
 
 def test_loader_rejects_incomplete_runtime_contract(
