@@ -121,11 +121,12 @@ describe('SupplyGraph', () => {
     fireEvent.pointerOver(view.container.querySelector('[data-source-id="src_a"]') as Element);
     await waitFor(() => expect(highlighted()).toEqual([true, false, true]));
 
-    fireEvent.pointerOut(view.container.querySelector('[data-source-id="src_a"]') as Element, { relatedTarget: view.container });
-    await waitFor(() => expect(highlighted()).toEqual([false, false, false]));
-
     fireEvent.focusIn(view.container.querySelector('[data-agent-backend="claude"]') as Element);
+    await waitFor(() => expect(highlighted()).toEqual([true, true, true]));
+
+    fireEvent.pointerOut(view.container.querySelector('[data-source-id="src_a"]') as Element, { relatedTarget: view.container });
     await waitFor(() => expect(highlighted()).toEqual([true, true, false]));
+
     fireEvent.focusOut(view.container.querySelector('[data-agent-backend="claude"]') as Element, { relatedTarget: view.container });
     await waitFor(() => expect(highlighted()).toEqual([false, false, false]));
   });

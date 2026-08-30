@@ -101,15 +101,14 @@ export const SupplyGraph: React.FC<{
   }, [containerRef]);
 
   if (!drawing || drawing.wires.length === 0) return null;
-  const highlightedEndpoint = hoveredEndpoint ?? focusedEndpoint;
   const sourceAnchors = Array.from(new Map(drawing.wires.map((wire) => [wire.sourceId, wire])).values());
   const agentAnchors = Array.from(new Map(drawing.wires.map((wire) => [wire.backend, wire])).values());
   return (
     <svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 hidden size-full overflow-hidden xl:block" viewBox={`0 0 ${drawing.width} ${drawing.height}`} preserveAspectRatio="none">
       {drawing.wires.map((wire) => {
-        const highlighted = highlightedEndpoint?.kind === 'source'
-          ? highlightedEndpoint.id === wire.sourceId
-          : highlightedEndpoint?.kind === 'agent' && highlightedEndpoint.id === wire.backend;
+        const highlighted = [hoveredEndpoint, focusedEndpoint].some((endpoint) => endpoint?.kind === 'source'
+          ? endpoint.id === wire.sourceId
+          : endpoint?.kind === 'agent' && endpoint.id === wire.backend);
         return (
           <path
             key={`${wire.sourceId}:${wire.backend}`}
