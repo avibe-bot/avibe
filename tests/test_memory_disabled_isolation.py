@@ -877,7 +877,7 @@ async def test_cached_plugin_failure_only_retries_for_explicit_recovery(
 
 @pytest.mark.parametrize("ordering", ("reaper-first", "enable-first"))
 @pytest.mark.asyncio
-async def test_disabled_reaper_and_enable_share_root_mutation_gate(
+async def test_disabled_reaper_enable_and_shutdown_share_root_mutation_gate(
     ordering: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -931,6 +931,12 @@ async def test_disabled_reaper_and_enable_share_root_mutation_gate(
         def start_capture_adapter(self, **_kwargs) -> bool:
             return True
 
+        def begin_close(self) -> None:
+            self.closing = True
+
+        async def close(self, **_options: object) -> None:
+            return None
+
     runtime = _Runtime()
 
     def create_runtime(_config, **_kwargs):
@@ -966,9 +972,16 @@ async def test_disabled_reaper_and_enable_share_root_mutation_gate(
         await attach_started.wait()
         await controller._cleanup_disabled_memory_process(memory_dir)
         assert reaper_calls == 0
+        shutdown = asyncio.create_task(
+            controller._close_memory_runtime_for_shutdown(timeout_seconds=0.5)
+        )
+        await asyncio.sleep(0.02)
+        assert shutdown.done() is False
+        assert controller.memory_runtime is None
         attach_release.set()
         assert await reconcile == {"ok": True, "state": "running"}
-        assert controller.memory_runtime is runtime
+        await shutdown
+        assert controller.memory_runtime is None
 
     assert controller._memory_replacement_lock().locked() is False
 

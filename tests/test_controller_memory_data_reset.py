@@ -22,7 +22,7 @@ from config.memory_operation_lock import MemoryOperationLease
 from core.controller import Controller
 from avibe_memory.data_reset import reset_memory_data_roots
 from core.memory_adapter import DisabledMemoryAdapter
-from vibe.memory_contract import MemoryPluginUnavailableError
+from vibe.memory_contract import MemoryPluginUnavailableError, MemoryRuntimeBusyError
 
 
 class _Runtime:
@@ -80,6 +80,9 @@ class _Runtime:
 
     def begin_root_ownership_handoff(self) -> object:
         self.begin_close()
+        if self._fail_stage == "handoff":
+            self._fail_stage = None
+            raise MemoryRuntimeBusyError("Memory provider root ownership changed")
         self.root_handoffs.append(self.root_ownership)
         return self.root_ownership
 
@@ -252,14 +255,14 @@ async def test_repair_requires_exact_loss_and_repair_authority(
     assert runtime.events == []
 
 
-@pytest.mark.parametrize("failure_stage", (None, "close", "settle", "delete"))
+@pytest.mark.parametrize("failure_stage", (None, "handoff", "close", "settle", "delete"))
 @pytest.mark.asyncio
 async def test_repair_reuses_retained_owner_until_reset_proves(
     failure_stage: str | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MEMORY-REPAIR-202/203: failed reset phases retain one retryable owner."""
+    """MEMORY-REPAIR-202/203: failed reset phases retain or recover one owner."""
 
     _roots(tmp_path)
     runtime = _Runtime(
@@ -267,6 +270,8 @@ async def test_repair_reuses_retained_owner_until_reset_proves(
         needs_repair=True,
         fail_stage=failure_stage,
     )
+    if failure_stage == "handoff":
+        runtime.closing = True
     fresh = _Runtime(tmp_path)
     runtime.replacement_runtime = fresh
     controller = _controller(runtime)
@@ -278,19 +283,26 @@ async def test_repair_reuses_retained_owner_until_reset_proves(
         first = await controller.repair_memory(confirm_loss=True)
         if failure_stage is None:
             result = first
+        elif failure_stage == "handoff":
+            assert first["error"] == "memory_operation_in_progress"
         else:
             assert first["ok"] is False
             assert first["state"] == "needs_repair"
     if failure_stage is not None:
-        assert controller.memory_runtime is runtime
-        assert runtime.root_released is False
+        if failure_stage == "handoff":
+            assert controller.memory_runtime is None
+            assert runtime.root_released is True
+            controller._create_memory_runtime = lambda *_args, **_kwargs: runtime
+        else:
+            assert controller.memory_runtime is runtime
+            assert runtime.root_released is False
         assert fresh.events == []
         result = await controller.repair_memory(confirm_loss=True)
 
     assert result["ok"] is True
     assert result["state"] == "running"
     assert all(token is runtime.root_ownership for token in runtime.root_handoffs)
-    assert len(runtime.root_handoffs) == (1 if failure_stage is None else 2)
+    assert len(runtime.root_handoffs) == (1 if failure_stage in {None, "handoff"} else 2)
     assert fresh.events == ["wake"]
     assert controller.memory_runtime is fresh
 

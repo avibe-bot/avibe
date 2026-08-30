@@ -1722,10 +1722,28 @@ class Controller:
             raise MemoryRuntimeBusyError(
                 "Memory destructive operation is still active"
             )
-        runtime = await self._detach_memory_runtime()
-        if runtime is not None:
-            await runtime.close(timeout_seconds=timeout_seconds)
-            await self._clear_memory_runtime(runtime)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_seconds)
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+        effective_home = getattr(runtime, "effective_home", None)
+        lease = await self._try_memory_operation_lease(effective_home)
+        while lease is None and loop.time() < deadline:
+            await asyncio.sleep(min(0.01, deadline - loop.time()))
+            lease = await self._try_memory_operation_lease(effective_home)
+        if lease is None:
+            raise MemoryRuntimeBusyError(
+                "Memory operation is still active during shutdown"
+            )
+        try:
+            runtime = await self._detach_memory_runtime()
+            if runtime is not None:
+                await runtime.close(
+                    timeout_seconds=max(0.0, deadline - loop.time())
+                )
+                await self._clear_memory_runtime(runtime)
+        finally:
+            await run_blocking(lease.release)
 
     async def _reset_memory_data_transaction(
         self,
@@ -1738,13 +1756,14 @@ class Controller:
             runtime, attached = runtime_context
             from avibe_memory.data_reset import unchanged_memory_data_result
 
+            busy = {
+                "ok": False,
+                "operation": operation,
+                "error": "memory_operation_in_progress",
+                "result": "unchanged",
+            }
             if runtime is None:
-                return {
-                    "ok": False,
-                    "operation": operation,
-                    "error": "memory_operation_in_progress",
-                    "result": "unchanged",
-                }
+                return busy
 
             if operation == "repair" and not runtime.needs_repair:
                 return {
@@ -1755,12 +1774,7 @@ class Controller:
                 }
 
             if getattr(runtime, "_artifact_installing", False):
-                return {
-                    "ok": False,
-                    "operation": operation,
-                    "error": "memory_operation_in_progress",
-                    "result": "unchanged",
-                }
+                return busy
             if not bool(getattr(runtime, "closing", False)):
                 try:
                     await runtime.prepare_data_reset()
@@ -1774,17 +1788,16 @@ class Controller:
                         reason="sidecar_termination_unproved",
                     )
 
-            root_ownership = await self._retire_memory_runtime_for_reset(
-                runtime,
-                allow_unpublished=not attached,
-            )
+            try:
+                root_ownership = await self._retire_memory_runtime_for_reset(
+                    runtime,
+                    allow_unpublished=not attached,
+                )
+            except MemoryRuntimeBusyError:
+                await self._settle_retained_memory_runtime(runtime)
+                return busy
             if root_ownership is None:
-                return {
-                    "ok": False,
-                    "operation": operation,
-                    "error": "memory_operation_in_progress",
-                    "result": "unchanged",
-                }
+                return busy
 
             target = replace(
                 deepcopy(target_config or self.config.memory),
@@ -1877,12 +1890,7 @@ class Controller:
                 if failure := await close_reset_runtime():
                     return failure
                 if stale:
-                    failure = {
-                        "ok": False,
-                        "operation": operation,
-                        "error": "memory_operation_in_progress",
-                        "result": "unchanged",
-                    }
+                    failure = busy
                 else:
                     failure = unchanged_memory_data_result(
                         runtime.effective_home,
