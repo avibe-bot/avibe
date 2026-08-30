@@ -113,6 +113,7 @@ from vibe.memory_contract import MemoryRuntimeBusyError, MemoryStoreUnavailableE
 logger = logging.getLogger(__name__)
 
 MEMORY_RUNTIME_PROTOCOL_VERSION = 1
+MEMORY_RUNTIME_LIFECYCLE_CONTRACT = 1
 
 ProcessingEvent = Callable[
     [Literal["fault", "recovered"], Literal["credential", "engine"] | None, str, int],

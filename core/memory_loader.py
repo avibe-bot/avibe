@@ -15,11 +15,13 @@ from vibe.memory_contract import (
 
 MEMORY_RUNTIME_ENTRYPOINT = "avibe_memory.runtime"
 MEMORY_RUNTIME_PROTOCOL_VERSION = 1
+MEMORY_RUNTIME_LIFECYCLE_CONTRACT = 1
 # Host-owned transport bound used by the list route. Keeping this here lets
 # disabled/failing plugin paths validate cursors without importing the optional
 # implementation module.
 MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _PROTOCOL_ATTR = "MEMORY_RUNTIME_PROTOCOL_VERSION"
+_LIFECYCLE_ATTR = "MEMORY_RUNTIME_LIFECYCLE_CONTRACT"
 
 
 def _resolve_memory_runtime_factory() -> Callable[..., Any]:
@@ -33,6 +35,7 @@ def _resolve_memory_runtime_factory() -> Callable[..., Any]:
         ) from exc
     try:
         protocol_version = getattr(implementation, _PROTOCOL_ATTR, None)
+        lifecycle_contract = getattr(implementation, _LIFECYCLE_ATTR, None)
         factory = getattr(implementation, "create_memory_runtime", None)
     except Exception as exc:
         raise MemoryPluginUnavailableError(
@@ -41,6 +44,10 @@ def _resolve_memory_runtime_factory() -> Callable[..., Any]:
     if protocol_version != MEMORY_RUNTIME_PROTOCOL_VERSION:
         raise MemoryPluginIncompatibleError(
             "Memory implementation protocol is incompatible"
+        )
+    if lifecycle_contract != MEMORY_RUNTIME_LIFECYCLE_CONTRACT:
+        raise MemoryPluginIncompatibleError(
+            "Memory implementation lifecycle contract is incompatible"
         )
     if not callable(factory):
         raise MemoryPluginUnavailableError(
@@ -64,7 +71,7 @@ def load_memory_runtime(
     """Load and construct the fixed Memory runtime for an enabled snapshot.
 
     This module intentionally imports no implementation module at import time.
-    The entrypoint, protocol comparison, and constructor are deliberately fixed
+    The entrypoint, compatibility contracts, and constructor are deliberately fixed
     so a missing/broken optional implementation cannot affect core startup.
     """
 

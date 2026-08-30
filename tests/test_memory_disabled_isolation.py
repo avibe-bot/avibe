@@ -1292,6 +1292,8 @@ async def test_memory_indep_015_shutdown_uses_one_budget_after_stage_timeout() -
 
     async def transaction() -> dict[str, object]:
         await release.wait()
+        assert controller.memory_runtime is runtime
+        assert runtime.closed is False
         return {"ok": True}
 
     destructive = asyncio.create_task(transaction())
@@ -1316,11 +1318,14 @@ async def test_memory_indep_015_shutdown_uses_one_budget_after_stage_timeout() -
 
     assert time.monotonic() - started_at < 0.2
     assert destructive.done() is False
-    assert runtime.closed is True
-    assert controller.memory_runtime is None
+    assert runtime.closed is False
+    assert controller.memory_runtime is runtime
     assert controller._shutdown_tainted is True
-    assert 0.0 <= close_deadlines[0] <= controller._memory_shutdown_budget_seconds
+    assert close_deadlines == []
 
     release.set()
     await destructive
-    await asyncio.sleep(0)
+    await controller._shutdown_memory_stack()
+    assert runtime.closed is True
+    assert controller.memory_runtime is None
+    assert 0.0 <= close_deadlines[0] <= controller._memory_shutdown_budget_seconds

@@ -1714,6 +1714,13 @@ class Controller:
             logger.error("Memory runtime close failed during shutdown", exc_info=True)
 
     async def _close_memory_runtime_for_shutdown(self, *, timeout_seconds: float) -> None:
+        if any(
+            not task.done()
+            for task in getattr(self, "_memory_destructive_tasks", ())
+        ):
+            raise MemoryRuntimeBusyError(
+                "Memory destructive operation is still active"
+            )
         runtime = await self._detach_memory_runtime()
         if runtime is not None:
             await runtime.close(timeout_seconds=timeout_seconds)
