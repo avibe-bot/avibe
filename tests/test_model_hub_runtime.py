@@ -4769,6 +4769,71 @@ def test_engine_client_preserves_large_valid_responses(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("status", (200, 503))
+def test_engine_client_projects_machine_errors_from_large_buffered_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    async def run() -> None:
+        payload = json.dumps(
+            {
+                "error": {
+                    "diagnostic": "x" * (2 * 1024 * 1024),
+                    "type": "permission_error",
+                }
+            },
+            separators=(",", ":"),
+        ).encode()
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self) -> None:
+                self.status = status
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=False)
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.error_type == "permission_error"
+        assert outcome.error_candidates == ("permission_error",)
+
+    asyncio.run(run())
+
+
 def test_model_discovery_accepts_large_valid_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

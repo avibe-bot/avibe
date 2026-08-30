@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import socket
@@ -27,7 +28,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
     ProtocolSSEState,
     ProtocolUsageReport,
-    observe_protocol_response,
+    observe_buffered_protocol_response,
 )
 from vibe.model_hub_runtime.state import SourceRecord
 
@@ -36,7 +37,6 @@ _STREAM_CHUNK_BYTES = 64 * 1024
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
-_BUFFERED_OBSERVATION_BYTES = 256 * 1024
 _ERROR_OBSERVATION_BYTES = 256 * 1024
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
@@ -140,15 +140,25 @@ class _StreamPrelude:
             self._file.close()
             self._file = None
 
-    def bytes_if_within(self, limit: int) -> bytes | None:
-        """Return a bounded observation copy, never a second large body copy."""
+    def reader(self) -> BinaryIO:
+        """Return the body from its beginning without copying spilled bytes."""
 
-        if self._closed or self._stored_bytes > limit:
-            return None
+        if self._closed:
+            raise RuntimeError("stream prelude is closed")
         if self._file is None:
-            return bytes(self._memory)
+            return io.BytesIO(self._memory)
         self._file.seek(0)
-        return self._file.read()
+        return self._file
+
+    def prefix(self, limit: int) -> bytes:
+        """Return bounded diagnostic bytes without changing response ownership."""
+
+        if self._closed:
+            return b""
+        if self._file is None:
+            return bytes(self._memory[:limit])
+        self._file.seek(0)
+        return self._file.read(limit)
 
 
 @dataclass(frozen=True)
@@ -322,28 +332,29 @@ class EngineClient:
                 timeout=self.timeout,
             )
             if response.status >= 300:
+                error_body = _StreamPrelude()
                 try:
-                    payload = await asyncio.wait_for(
-                        _read_response_prefix(
-                            response.content,
-                            limit=_ERROR_OBSERVATION_BYTES,
-                        ),
+                    await asyncio.wait_for(
+                        _read_response_into(response.content, error_body),
                         timeout=self.timeout,
                     )
+                    observed_payload = observe_buffered_protocol_response(
+                        request_protocol,
+                        error_body.reader(),
+                        machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                    )
+                    payload = error_body.prefix(_ERROR_OBSERVATION_BYTES)
                 except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
-                observed_payload = observe_protocol_response(
-                    request_protocol,
-                    streamed=False,
-                    data=payload,
-                )
+                    observed_payload = ProtocolObservation()
+                finally:
+                    error_body.close()
                 outcome = _reduce_protocol_observation(
-                    ProtocolObservation(
+                    replace(
+                        observed_payload,
                         outcome="failed_terminal",
                         error_payload=payload,
-                        error_envelope_paths=observed_payload.error_envelope_paths,
                         message=f"upstream returned HTTP {response.status}",
-                        usage=observed_payload.usage,
                     ),
                     source=source,
                     model_id=model_id,
@@ -380,15 +391,10 @@ class EngineClient:
                     _read_response_into(response.content, buffered_body),
                     timeout=self.timeout,
                 )
-                observed_payload = buffered_body.bytes_if_within(_BUFFERED_OBSERVATION_BYTES)
-                observation = (
-                    observe_protocol_response(
-                        request_protocol,
-                        streamed=False,
-                        data=observed_payload,
-                    )
-                    if observed_payload is not None
-                    else ProtocolObservation(outcome="served")
+                observation = observe_buffered_protocol_response(
+                    request_protocol,
+                    buffered_body.reader(),
+                    machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
                 )
                 outcome = _reduce_protocol_observation(
                     observation,
@@ -630,20 +636,6 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-async def _read_response_prefix(
-    content: aiohttp.StreamReader,
-    *,
-    limit: int,
-) -> bytes:
-    payload = bytearray()
-    while len(payload) < limit:
-        chunk = await content.read(min(_STREAM_CHUNK_BYTES, limit - len(payload)))
-        if not chunk:
-            break
-        payload.extend(chunk)
-    return bytes(payload)
-
-
 async def _read_response_into(
     content: aiohttp.StreamReader,
     target: _StreamPrelude,
@@ -856,10 +848,25 @@ def _reduce_protocol_observation(
             usage=observation.usage,
         )
     if observation.outcome == "failed_terminal":
-        error_type, error_code, candidates = _raw_error_fields(
-            observation.error_payload or b"",
-            observation.error_envelope_paths,
+        projected_types = tuple(
+            code
+            for value in observation.error_type_candidates
+            if (code := _safe_error_code(value)) is not None
         )
+        projected_codes = tuple(
+            code
+            for value in observation.error_code_candidates
+            if (code := _safe_error_code(value)) is not None
+        )
+        if projected_types or projected_codes:
+            error_type = projected_types[0] if projected_types else None
+            error_code = projected_codes[0] if projected_codes else None
+            candidates = tuple(dict.fromkeys((*projected_types, *projected_codes)))
+        else:
+            error_type, error_code, candidates = _raw_error_fields(
+                observation.error_payload or b"",
+                observation.error_envelope_paths,
+            )
         return _outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
             source=source,

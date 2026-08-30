@@ -7168,7 +7168,12 @@ def test_gateway_spools_and_replays_a_large_buffered_response(
 ) -> None:
     async def exercise() -> None:
         source = _source("src_largebuf01", "Large buffered response")
-        body = b'{"payload":"' + b"x" * (512 * 1024) + b'"}'
+        body = (
+            b'{"payload":"'
+            + b"x" * (512 * 1024)
+            + b'","usage":{"input_tokens":4096,"input_tokens_details":'
+            b'{"cached_tokens":3072},"output_tokens":128}}'
+        )
         service = _service(
             tmp_path,
             sources=[source],
@@ -7206,7 +7211,10 @@ def test_gateway_spools_and_replays_a_large_buffered_response(
         assert downstream.eof_called is True
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 1
-        assert metered["token_reports"] == 0
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 4096
+        assert metered["cached_input_tokens"] == 3072
+        assert metered["output_tokens"] == 128
 
     asyncio.run(exercise())
 

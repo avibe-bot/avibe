@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Callable, Final, Literal, Mapping
+from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
+
+import ijson
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
@@ -447,6 +449,8 @@ class ProtocolObservation:
     sequence_number: int | None = None
     message: str | None = None
     usage: ProtocolUsageReport | None = None
+    error_type_candidates: tuple[str, ...] = ()
+    error_code_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -798,6 +802,177 @@ def extract_protocol_usage(
             )
             report = candidate if report is None else report.merge(candidate)
     return report
+
+
+def _usage_from_scalar_paths(
+    taxonomy: ProtocolUsageTaxonomy,
+    scalars: Mapping[tuple[str, ...], object],
+) -> ProtocolUsageReport | None:
+    """Project token reports from selected scalar paths in a buffered body."""
+
+    report: ProtocolUsageReport | None = None
+    for container_path in taxonomy.container_paths:
+
+        def usage_sum(paths: tuple[tuple[str, ...], ...]) -> int | None:
+            total: int | None = None
+            for path in paths:
+                value = scalars.get((*container_path, *path))
+                if not isinstance(value, int) or isinstance(value, bool):
+                    continue
+                if value < 0 or value > USAGE_TOKEN_CEILING:
+                    continue
+                total = value if total is None else total + value
+            return None if total is None else min(total, USAGE_TOKEN_CEILING)
+
+        input_tokens = usage_sum(taxonomy.input_paths)
+        cached_input_tokens = usage_sum(taxonomy.cached_input_paths)
+        output_tokens = usage_sum(taxonomy.output_paths)
+        if input_tokens is None and cached_input_tokens is None and output_tokens is None:
+            continue
+        candidate = ProtocolUsageReport.of(
+            input_tokens=input_tokens or 0,
+            cached_input_tokens=cached_input_tokens or 0,
+            output_tokens=output_tokens or 0,
+        )
+        report = candidate if report is None else report.merge(candidate)
+    return report
+
+
+@dataclass
+class _ElidingJSONReader:
+    """Expose valid JSON while bounding each string retained by the parser."""
+
+    source: BinaryIO
+    _pending: bytearray = field(default_factory=bytearray)
+    _string: bytearray = field(default_factory=bytearray)
+    _in_string: bool = False
+    _escaped: bool = False
+    _elided: bool = False
+    _eof: bool = False
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        target = 64 * 1024 if size < 0 else size
+        while len(self._pending) < target and not self._eof:
+            chunk = self.source.read(max(1, min(64 * 1024, target - len(self._pending))))
+            if not chunk:
+                self._eof = True
+                if self._in_string and not self._elided:
+                    self._pending.extend(self._string)
+                    self._string.clear()
+                break
+            for byte in chunk:
+                self._consume(byte)
+        if size < 0:
+            result = bytes(self._pending)
+            self._pending.clear()
+            return result
+        result = bytes(self._pending[:size])
+        del self._pending[:size]
+        return result
+
+    def _consume(self, byte: int) -> None:
+        if not self._in_string:
+            self._pending.append(byte)
+            if byte == 0x22:
+                self._in_string = True
+                self._escaped = False
+                self._elided = False
+                self._string.clear()
+            return
+
+        if self._elided:
+            if self._escaped:
+                self._escaped = False
+            elif byte == 0x5C:
+                self._escaped = True
+            elif byte == 0x22:
+                self._pending.append(byte)
+                self._in_string = False
+            return
+
+        if not self._escaped and byte == 0x22:
+            self._pending.extend(self._string)
+            self._pending.append(byte)
+            self._string.clear()
+            self._in_string = False
+            return
+
+        self._string.append(byte)
+        if self._escaped:
+            self._escaped = False
+        elif byte == 0x5C:
+            self._escaped = True
+        if len(self._string) > SSE_OBSERVATION_STRING_BYTES:
+            self._string.clear()
+            self._pending.extend(b"__avibe_observation_elided__")
+            self._elided = True
+
+
+def observe_buffered_protocol_response(
+    protocol: str,
+    reader: BinaryIO,
+    *,
+    machine_error_codes: AbstractSet[str] = frozenset(),
+) -> ProtocolObservation:
+    """Project buffered protocol facts without retaining the response body.
+
+    The taxonomy owns the small set of facts settlement needs: native error
+    envelopes, their machine fields, and usage. Everything else is parsed and
+    discarded while the exact bytes remain owned by the caller for replay.
+    """
+
+    taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
+    error_paths = set(taxonomy.buffered_error_envelope_paths)
+    observed_error_paths: set[ErrorEnvelopePath] = set()
+    type_candidates: list[str] = []
+    code_candidates: list[str] = []
+    usage_paths = {
+        (*container_path, *leaf_path)
+        for container_path in taxonomy.usage.container_paths
+        for leaf_paths in (
+            taxonomy.usage.input_paths,
+            taxonomy.usage.cached_input_paths,
+            taxonomy.usage.output_paths,
+        )
+        for leaf_path in leaf_paths
+    }
+    usage_scalars: dict[tuple[str, ...], object] = {}
+    root_is_mapping = False
+    try:
+        for prefix, event, value in ijson.parse(_ElidingJSONReader(reader)):
+            path = tuple(prefix.split(".")) if prefix else ()
+            if path == () and event == "start_map":
+                root_is_mapping = True
+            if event == "start_map" and path in error_paths:
+                observed_error_paths.add(path)
+            if event == "number" and path in usage_paths:
+                usage_scalars[path] = value
+            if event != "string" or not isinstance(value, str) or value not in machine_error_codes:
+                continue
+            for error_path in error_paths:
+                if path == (*error_path, "type"):
+                    if value not in type_candidates:
+                        type_candidates.append(value)
+                elif path == (*error_path, "code"):
+                    if value not in code_candidates:
+                        code_candidates.append(value)
+    except (ijson.JSONError, UnicodeError, ValueError, RecursionError):
+        return ProtocolObservation(outcome="served")
+
+    if not root_is_mapping:
+        return ProtocolObservation(outcome="served")
+    matched_paths = tuple(
+        path for path in taxonomy.buffered_error_envelope_paths if path in observed_error_paths
+    )
+    return ProtocolObservation(
+        outcome="failed_terminal" if matched_paths else "served",
+        error_envelope_paths=matched_paths,
+        usage=_usage_from_scalar_paths(taxonomy.usage, usage_scalars),
+        error_type_candidates=tuple(type_candidates),
+        error_code_candidates=tuple(code_candidates),
+    )
 
 
 def _try_parse_payload(data: bytes) -> object | None:

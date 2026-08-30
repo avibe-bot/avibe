@@ -41,7 +41,7 @@ from .stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
     StreamTerminalOutcome,
-    observe_protocol_response,
+    observe_buffered_protocol_response,
     render_protocol_terminal_event,
     render_protocol_terminal_frame,
 )
@@ -62,7 +62,6 @@ from .service import (
 
 _MAX_REQUEST_BYTES: Final = 16 * 1024 * 1024
 _BUFFERED_RESPONSE_MEMORY_BYTES: Final = 256 * 1024
-_BUFFERED_RESPONSE_OBSERVATION_BYTES: Final = 256 * 1024
 _RESPONSE_CHUNK_BYTES: Final = 64 * 1024
 _SUPPORTED_PATHS: Final = frozenset(
     {
@@ -740,20 +739,10 @@ class ModelHubTurnGateway:
                     payload.write(chunk)
                 payload_size = payload.tell()
                 execution.completed_at = self._now()
-                if payload_size <= _BUFFERED_RESPONSE_OBSERVATION_BYTES:
-                    payload.seek(0)
-                    observation = observe_protocol_response(
-                        protocol,
-                        streamed=False,
-                        data=payload.read(),
-                    )
-                    execution.buffered_usage = observation.usage
-                    execution.buffered_outcome = observation.outcome
-                else:
-                    # The adapter handed this boundary a complete 2xx body. A
-                    # private observer declining a large copy must not turn that
-                    # body into an error or make the call disappear from usage.
-                    execution.buffered_outcome = "served"
+                payload.seek(0)
+                observation = observe_buffered_protocol_response(protocol, payload)
+                execution.buffered_usage = observation.usage
+                execution.buffered_outcome = observation.outcome
                 outcome, settlement, rendered = await self._settle_metered_turn(
                     execution,
                     terminalizer,

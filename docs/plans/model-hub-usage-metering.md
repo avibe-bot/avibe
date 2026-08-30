@@ -701,6 +701,14 @@ wait remains bounded by the transport deadline, so an upstream cannot renew disk
 with keepalives forever. Observation-before-copy remains the owner ordering, but copy can
 no longer refuse a valid response for its size.
 
+The same rule applies to buffered JSON. Its exact bytes spill once and are replayed from
+that owner; a single taxonomy-backed incremental projection extracts terminal errors,
+allowlisted machine fields, and usage for both small and large bodies. The projection
+elides unrelated strings before the JSON parser can retain them. Body size therefore
+changes storage only, never classification or metering, and HTTP error diagnostics keep
+only a bounded private prefix after the machine fields have been projected from the full
+body.
+
 **Class D: five copies of one durability property.** The review flagged
 `usage.py:_write` for leaving its temporary file behind when the replacement raised. The
 members were enumerable immediately: `revocations.py`, `events.py`, `usage.py`,

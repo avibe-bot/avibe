@@ -533,12 +533,32 @@ def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
     # Review 4914187655: buffered and streamed facts cannot bypass observation.
     client_tree = _tree(CLIENT)
     stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
-    owners = (_functions(client_tree)["invoke"], _functions(stream_tree)["_observe_frame"])
-    calls = [node for tree in (client_tree, stream_tree) for node in ast.walk(tree) if _call_name(node) == "observe_protocol_response"]
-    assert all(any(call in set(ast.walk(owner)) for owner in owners) for call in calls)
-    assert {value for call in calls if (value := _bool_keyword(call, "streamed")) is not None} == {
-        case["stream"] for case in STREAM_TRANSPORT_FIXTURES
-    }
+    gateway_tree = _tree(TURN_GATEWAY)
+    stream_owners = (_functions(client_tree)["invoke"], _functions(stream_tree)["_observe_frame"])
+    stream_calls = [
+        node
+        for tree in (client_tree, stream_tree)
+        for node in ast.walk(tree)
+        if _call_name(node) == "observe_protocol_response"
+    ]
+    assert all(any(call in set(ast.walk(owner)) for owner in stream_owners) for call in stream_calls)
+    assert {
+        value
+        for call in stream_calls
+        if (value := _bool_keyword(call, "streamed")) is not None
+    } == {True}
+    buffered_owners = (
+        _functions(client_tree)["invoke"],
+        _functions(gateway_tree)["_resolved_response"],
+    )
+    buffered_calls = [
+        node
+        for tree in (client_tree, gateway_tree)
+        for node in ast.walk(tree)
+        if _call_name(node) == "observe_buffered_protocol_response"
+    ]
+    assert len(buffered_calls) == 3
+    assert all(any(call in set(ast.walk(owner)) for owner in buffered_owners) for call in buffered_calls)
     reducer = _functions(client_tree)["_reduce_protocol_observation"]
     assert all(call in set(ast.walk(reducer)) for call in _protocol_outcome_calls(client_tree))
     constructor_owner = _functions(client_tree)["_outcome"]
