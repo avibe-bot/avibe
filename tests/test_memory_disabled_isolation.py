@@ -758,53 +758,11 @@ async def test_overlapping_unpublished_operations_return_busy(
     assert runtime.closed is True
 
 
-@pytest.mark.parametrize("operation", ("preflight", "install"))
+@pytest.mark.parametrize("recovery", ("preflight", "install"))
 @pytest.mark.asyncio
-async def test_explicit_recovery_retries_after_cached_plugin_failure(
-    operation: str,
+async def test_cached_plugin_failure_only_retries_for_explicit_recovery(
+    recovery: str,
 ) -> None:
-    controller = _controller_with_memory()
-    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
-    candidate = replace(controller.config.memory, enabled=True)
-    calls: list[tuple[str, object]] = []
-
-    class _Runtime:
-        module = object()
-        closed = False
-
-        async def preflight(self, config) -> dict[str, object]:
-            calls.append(("preflight", config))
-            return {"ok": True}
-
-        async def install_artifact(self, **_options: object) -> dict[str, object]:
-            calls.append(("install", controller.config.memory))
-            return {"ok": True}
-
-        async def close(self) -> None:
-            self.closed = True
-
-        def begin_close(self) -> None:
-            return None
-
-    runtime = _Runtime()
-    controller._create_memory_runtime = lambda config, **_kwargs: runtime
-
-    if operation == "preflight":
-        result = await controller.preflight_memory(candidate)
-        expected_calls = [("preflight", candidate)]
-    else:
-        result = await controller.install_memory_runtime()
-        expected_calls = [("install", controller.config.memory)]
-
-    assert result == {"ok": True}
-    assert calls == expected_calls
-    assert runtime.closed is True
-    assert controller._memory_plugin_error is None
-    assert controller.memory_runtime is None
-
-
-@pytest.mark.asyncio
-async def test_cached_plugin_failure_only_retries_for_explicit_recovery() -> None:
     controller = _controller_with_memory(
         replace(_disabled_app_config().memory, enabled=True)
     )
@@ -821,57 +779,73 @@ async def test_cached_plugin_failure_only_retries_for_explicit_recovery() -> Non
         )
 
     assert raised.value is failure
+    events: list[str] = []
+
+    class _Runtime:
+        def __init__(self, label: str, *, fail_close: bool = False) -> None:
+            self.label = label
+            self.module = object()
+            self.closing = False
+            self.fail_close = fail_close
+
+        async def install_artifact(self, **_options: object) -> dict[str, object]:
+            assert controller.memory_runtime is None
+            events.append(f"{self.label}:install")
+            return {"ok": True}
+
+        async def preflight(self, _config: object) -> dict[str, object]:
+            events.append(f"{self.label}:preflight")
+            return {"ok": True}
+
+        def begin_close(self) -> None:
+            self.closing = True
+            events.append(f"{self.label}:begin-close")
+
+        async def close(self) -> None:
+            events.append(f"{self.label}:close")
+            if self.fail_close:
+                self.fail_close = False
+                raise RuntimeError("close failed")
+
+    retained = _Runtime("retained", fail_close=True)
+    fresh = _Runtime("fresh")
+    runtimes = iter((retained, fresh))
+    controller._create_memory_runtime = lambda *_args, **_kwargs: next(runtimes)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await controller.install_memory_runtime()
+    assert controller.memory_runtime is retained
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+    if recovery == "preflight":
+        result = await controller.preflight_memory(controller.config.memory)
+    else:
+        result = await controller.install_memory_runtime()
+    assert result == {"ok": True}
+    assert events == [
+        "retained:install",
+        "retained:begin-close",
+        "retained:close",
+        "retained:close",
+        f"fresh:{recovery}",
+        "fresh:begin-close",
+        "fresh:close",
+    ]
+    assert controller.memory_runtime is None
+    assert controller.memory_module is None
+    assert controller._memory_plugin_error is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
     retry_failure = MemoryPluginIncompatibleError("still incompatible")
 
     def fail_retry(_config, **_kwargs):
         raise retry_failure
 
     controller._create_memory_runtime = fail_retry
-
     with pytest.raises(MemoryPluginIncompatibleError) as raised:
         await controller.preflight_memory(controller.config.memory)
-
     assert raised.value is retry_failure
     assert controller._memory_plugin_error is retry_failure
-
-
-@pytest.mark.asyncio
-async def test_disabled_install_keeps_runtime_unpublished_until_close() -> None:
-    controller = _controller_with_memory()
-    events: list[str] = []
-    loader_flags: list[bool] = []
-
-    class _Runtime:
-        def __init__(self) -> None:
-            self.module = object()
-            self.closed = False
-
-        async def install_artifact(self, **_options: object) -> dict[str, object]:
-            assert controller.memory_runtime is None
-            events.append("install")
-            return {"ok": True}
-
-        def begin_close(self) -> None:
-            events.append("begin-close")
-
-        async def close(self) -> None:
-            events.append("close")
-            self.closed = True
-
-    runtime = _Runtime()
-
-    def create_runtime(config, **kwargs):
-        loader_flags.append(bool(kwargs["allow_disabled"]))
-        return runtime
-
-    controller._create_memory_runtime = create_runtime
-
-    assert await controller.install_memory_runtime() == {"ok": True}
-    assert loader_flags == [True]
-    assert events == ["install", "begin-close", "close"]
-    assert controller.memory_runtime is None
-    assert controller.memory_module is None
-    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
 
 @pytest.mark.parametrize("ordering", ("reaper-first", "enable-first"))
@@ -998,8 +972,11 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
     controller.memory_runtime = runtime
     controller.memory_module = runtime.module
 
-    with pytest.raises(RuntimeError, match="close failed"):
-        await controller.reconcile_memory(disabled)
+    assert await controller.reconcile_memory(disabled) == {
+        "ok": False,
+        "state": "disabled",
+        "error": "memory_operation_in_progress",
+    }
 
     assert controller.config.memory == disabled
     assert controller.memory_runtime is runtime

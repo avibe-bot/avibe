@@ -2068,7 +2068,10 @@ class MemoryRuntime:
         try:
             self._require_lifecycle_work()
             if not operation_lease_held:
-                await run_blocking(lease.acquire)
+                await run_blocking(
+                    lease.acquire,
+                    on_cancel_result=lambda _result: lease.release(),
+                )
                 lease_acquired = True
             return await self._install_artifact_with_lease()
         except (MemoryOperationBusy, MemoryRuntimeBusyError):

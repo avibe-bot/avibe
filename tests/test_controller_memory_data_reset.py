@@ -18,6 +18,7 @@ from config.v2_config import (
     MemoryEndpointConfig,
     MemoryProcessingConfig,
 )
+from config.memory_operation_lock import MemoryOperationLease
 from core.controller import Controller
 from avibe_memory.data_reset import reset_memory_data_roots
 from core.memory_adapter import DisabledMemoryAdapter
@@ -722,7 +723,7 @@ async def test_reconfigure_does_not_overwrite_a_change_racing_with_deletion(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
+async def test_reset_disable_and_cancellation_retain_owner_until_settlement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -730,21 +731,10 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
     runtime = _Runtime(tmp_path)
     fresh = _Runtime(tmp_path)
     runtime.replacement_runtime = fresh
-    controller = _controller(runtime, enabled=False)
+    controller = _controller(runtime)
     _persist(monkeypatch, controller)
     deletion_started = threading.Event()
     allow_deletion_to_finish = threading.Event()
-    lease_events: list[str] = []
-
-    class Lease:
-        def __init__(self, _home: Path) -> None:
-            pass
-
-        def acquire(self) -> None:
-            lease_events.append("acquire")
-
-        def release(self) -> None:
-            lease_events.append("release")
 
     def blocking_reset(_root_ownership: object):
         runtime.events.append("delete")
@@ -753,26 +743,36 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
         return reset_memory_data_roots(tmp_path)
 
     runtime.reset_mutable_data = blocking_reset
-    monkeypatch.setattr("core.controller.MemoryOperationLease", Lease)
     task = asyncio.create_task(controller.delete_memory_data(confirm_loss=True))
     assert await asyncio.to_thread(deletion_started.wait, 2)
+    disabled = MemoryConfig(enabled=False)
+    assert await controller.reconcile_memory(disabled) == {
+        "ok": False,
+        "state": "disabled",
+        "error": "memory_operation_in_progress",
+    }
+    assert controller.memory_runtime is runtime
+    assert controller.config.memory == disabled
     task.cancel()
     await asyncio.sleep(0.05)
 
     assert task.done() is False
-    assert lease_events == ["acquire"]
     assert len(controller._memory_destructive_tasks) == 1
 
     allow_deletion_to_finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert lease_events == ["acquire", "release"]
+    lease = MemoryOperationLease(tmp_path)
+    lease.acquire()
+    lease.release()
     assert controller._memory_destructive_tasks == set()
     assert runtime.events == ["reap", "begin_close", "close", "settle", "delete"]
     assert controller.memory_runtime is None
     assert controller.memory_module is None
+    assert controller.config.memory == disabled
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
     assert runtime.replacement_configs == []
+    assert runtime.root_released is True
 
 
 @pytest.mark.asyncio

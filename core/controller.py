@@ -772,7 +772,10 @@ class Controller:
     ) -> MemoryOperationLease | None:
         lease = MemoryOperationLease(effective_home)
         try:
-            await run_blocking(lease.acquire)
+            await run_blocking(
+                lease.acquire,
+                on_cancel_result=lambda _result: lease.release(),
+            )
         except MemoryOperationBusy:
             return None
         return lease
@@ -817,6 +820,55 @@ class Controller:
                     self.memory_runtime = runtime
                     self.memory_module = None
             raise
+
+    async def _settle_retained_memory_runtime(
+        self,
+        runtime: "MemoryRuntime",
+    ) -> bool:
+        async with self._memory_replacement_lock():
+            if getattr(self, "memory_runtime", None) is not runtime:
+                return False
+        try:
+            await runtime.close()
+        except Exception:
+            return False
+        return await self._clear_memory_runtime(runtime)
+
+    @asynccontextmanager
+    async def _memory_mutation_runtime(
+        self,
+        memory_config: MemoryConfig,
+        *,
+        allow_disabled: bool = False,
+    ) -> AsyncIterator[tuple["MemoryRuntime" | None, bool]]:
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+        async with self._memory_operation(
+            getattr(runtime, "effective_home", None)
+        ) as lease:
+            if lease is None:
+                yield None, False
+                return
+            async with self._memory_replacement_lock():
+                if getattr(self, "memory_runtime", None) is not runtime:
+                    yield None, False
+                    return
+            if runtime is not None and bool(getattr(runtime, "closing", False)):
+                if not await self._settle_retained_memory_runtime(runtime):
+                    yield None, False
+                    return
+                runtime = None
+            created = runtime is None
+            if created:
+                try:
+                    runtime = self._retry_memory_runtime(
+                        memory_config,
+                        allow_disabled=allow_disabled,
+                    )
+                except MemoryRuntimeBusyError:
+                    yield None, False
+                    return
+            yield runtime, created
 
     async def _attach_memory_runtime(
         self,
@@ -917,22 +969,10 @@ class Controller:
     async def preflight_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Preflight a candidate without activating capture on a disabled host."""
 
-        async with self._memory_replacement_lock():
-            runtime = getattr(self, "memory_runtime", None)
-        created = runtime is None
-        async with self._memory_operation(
-            getattr(runtime, "effective_home", None)
-        ) as lease:
-            if lease is None:
+        async with self._memory_mutation_runtime(memory_config) as runtime_context:
+            runtime, created = runtime_context
+            if runtime is None:
                 return {"ok": False, "error": "memory_operation_in_progress"}
-            async with self._memory_replacement_lock():
-                if getattr(self, "memory_runtime", None) is not runtime:
-                    return {"ok": False, "error": "memory_operation_in_progress"}
-            if created:
-                try:
-                    runtime = self._retry_memory_runtime(memory_config)
-                except MemoryRuntimeBusyError:
-                    return {"ok": False, "error": "memory_operation_in_progress"}
             try:
                 return await runtime.preflight(memory_config)
             except MemoryRuntimeBusyError:
@@ -944,30 +984,12 @@ class Controller:
     async def install_memory_runtime(self) -> dict[str, Any]:
         """Install the managed artifact through Controller runtime ownership."""
 
-        async with self._memory_replacement_lock():
-            runtime = getattr(self, "memory_runtime", None)
-        if runtime is not None:
-            return await runtime.install_artifact()
-        async with self._memory_operation() as lease:
-            if lease is None:
-                return {
-                    "ok": False,
-                    "reason": "memory_operation_in_progress",
-                    "download_error": None,
-                }
-            async with self._memory_replacement_lock():
-                if getattr(self, "memory_runtime", None) is not None:
-                    return {
-                        "ok": False,
-                        "reason": "memory_operation_in_progress",
-                        "download_error": None,
-                    }
-            try:
-                runtime = self._retry_memory_runtime(
-                    self.config.memory,
-                    allow_disabled=True,
-                )
-            except MemoryRuntimeBusyError:
+        async with self._memory_mutation_runtime(
+            self.config.memory,
+            allow_disabled=True,
+        ) as runtime_context:
+            runtime, created = runtime_context
+            if runtime is None:
                 return {
                     "ok": False,
                     "reason": "memory_operation_in_progress",
@@ -976,36 +998,38 @@ class Controller:
             try:
                 return await runtime.install_artifact(operation_lease_held=True)
             finally:
-                await self._close_unpublished_memory_runtime(runtime)
+                if created:
+                    await self._close_unpublished_memory_runtime(runtime)
 
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without destructive fallback."""
 
-        async with self._memory_replacement_lock():
-            runtime = getattr(self, "memory_runtime", None)
         if not memory_config.enabled:
+            busy = {
+                "ok": False,
+                "state": "disabled",
+                "error": "memory_operation_in_progress",
+            }
             runtime = await self._detach_memory_runtime(
-                runtime,
                 disabled_config=memory_config,
             )
-            if runtime is not None:
-                await runtime.close()
-                await self._clear_memory_runtime(runtime)
+            async with self._memory_operation(
+                getattr(runtime, "effective_home", None)
+            ) as lease:
+                if lease is None:
+                    return busy
+                if runtime is not None and not await self._settle_retained_memory_runtime(
+                    runtime
+                ):
+                    return busy
             await self._recheck_disabled_memory_cleanup()
             return {"ok": True, "state": "disabled"}
 
-        created = runtime is None
-        if created:
-            async with self._memory_operation() as lease:
-                if lease is None:
-                    return {"ok": False, "error": "memory_operation_in_progress"}
-                async with self._memory_replacement_lock():
-                    if getattr(self, "memory_runtime", None) is not None:
-                        return {"ok": False, "error": "memory_operation_in_progress"}
-                try:
-                    runtime = self._retry_memory_runtime(memory_config)
-                except MemoryRuntimeBusyError:
-                    return {"ok": False, "error": "memory_operation_in_progress"}
+        async with self._memory_mutation_runtime(memory_config) as runtime_context:
+            runtime, created = runtime_context
+            if runtime is None:
+                return {"ok": False, "error": "memory_operation_in_progress"}
+            if created:
                 try:
                     await self._attach_memory_runtime(runtime, capture_enabled=False)
                 except BaseException:
@@ -1560,41 +1584,19 @@ class Controller:
     async def _memory_runtime_for_data_reset(
         self,
     ) -> AsyncIterator[tuple["MemoryRuntime" | None, bool]]:
-        async with self._memory_replacement_lock():
-            runtime = getattr(self, "memory_runtime", None)
-        if runtime is None:
-            async with self._memory_operation() as lease:
-                if lease is None:
-                    yield None, False
-                    return
-                async with self._memory_replacement_lock():
-                    if getattr(self, "memory_runtime", None) is not None:
-                        yield None, False
-                        return
-                try:
-                    runtime = self._retry_memory_runtime(
-                        self.config.memory,
-                        allow_disabled=True,
-                    )
-                except MemoryRuntimeBusyError:
-                    yield None, False
-                    return
-                try:
-                    yield runtime, False
-                finally:
-                    if not bool(getattr(runtime, "closing", False)):
-                        await self._close_unpublished_memory_runtime(runtime)
-            return
-        async with self._memory_operation(runtime.effective_home) as lease:
-            if lease is None:
+        async with self._memory_mutation_runtime(
+            self.config.memory,
+            allow_disabled=True,
+        ) as runtime_context:
+            runtime, created = runtime_context
+            if runtime is None:
                 yield None, False
                 return
-            async with self._memory_replacement_lock():
-                ownership_changed = getattr(self, "memory_runtime", None) is not runtime
-            if ownership_changed:
-                yield None, False
-                return
-            yield runtime, True
+            try:
+                yield runtime, not created
+            finally:
+                if created and not bool(getattr(runtime, "closing", False)):
+                    await self._close_unpublished_memory_runtime(runtime)
 
     async def _cancel_memory_reconcile_task(self) -> None:
         task = getattr(self, "_memory_reconcile_task", None)

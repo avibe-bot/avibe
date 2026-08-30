@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import avibe_memory.runtime as runtime_module
+import core.controller as controller_module
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from avibe_memory.artifact import (
     EVEROS_VERSION,
@@ -23,6 +24,7 @@ from avibe_memory.artifact import (
 from avibe_memory.confined_filesystem import ConfinedFilesystemError
 from avibe_memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from config.memory_operation_lock import MemoryOperationBusy
+from core.controller import Controller
 from avibe_memory.process import FakeEverOSProcessFactory
 
 
@@ -287,8 +289,10 @@ async def test_wake_retries_short_operation_lease_contention(
     assert releases == 1
 
 
+@pytest.mark.parametrize("consumer", ("wake", "install", "controller"))
 @pytest.mark.asyncio
-async def test_cancelled_wake_releases_a_completed_lease_acquisition(
+async def test_cancelled_operation_releases_a_completed_lease_acquisition(
+    consumer: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
@@ -310,8 +314,14 @@ async def test_cancelled_wake_releases_a_completed_lease_acquisition(
             lease_events.append("release")
 
     monkeypatch.setattr(runtime_module, "MemoryOperationLease", Lease)
-    runtime = memory_runtime_factory(_config(), effective_home=tmp_path)
-    task = asyncio.create_task(runtime.wake())
+    monkeypatch.setattr(controller_module, "MemoryOperationLease", Lease)
+    if consumer == "controller":
+        controller = Controller.__new__(Controller)
+        task = asyncio.create_task(controller._try_memory_operation_lease(tmp_path))
+    else:
+        runtime = memory_runtime_factory(_config(), effective_home=tmp_path)
+        operation = runtime.wake if consumer == "wake" else runtime.install_artifact
+        task = asyncio.create_task(operation())
     assert await asyncio.to_thread(acquire_started.wait, 2)
 
     task.cancel()
