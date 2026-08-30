@@ -5346,6 +5346,66 @@ def test_model_discovery_accepts_large_valid_inventory(
     asyncio.run(run())
 
 
+def test_model_discovery_projection_uses_the_request_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return b"{}" if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        projection_deadlines: list[float] = []
+
+        def project_before_deadline(_reader, _projector, *, deadline):
+            projection_deadlines.append(deadline)
+            raise TimeoutError("model discovery exceeded its request deadline")
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(
+            client_module,
+            "_project_before_deadline",
+            project_before_deadline,
+        )
+        started = time.monotonic()
+
+        with pytest.raises(EngineClientError) as caught:
+            await client_module.probe_models(
+                vendor="custom",
+                protocol="openai_responses",
+                base_url="https://api.example.test/v1",
+                secret="secret",
+                timeout=1.0,
+            )
+
+        assert caught.value.error_type == "timeout"
+        assert projection_deadlines == pytest.approx([started + 1.0], abs=0.1)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("vendor", "endpoint"),
     [

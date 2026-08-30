@@ -703,6 +703,7 @@ async def probe_models(
             "anthropic-version": "2023-06-01",
             "Accept": "application/json",
         }
+    deadline = time.monotonic() + timeout
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -716,8 +717,9 @@ async def probe_models(
                     while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
                         await run_owned_in_thread(payload.write, chunk)
                     projected = await run_owned_in_thread(
-                        _project_model_inventory_from_start,
+                        _project_model_inventory_before_deadline,
                         payload,
+                        deadline=deadline,
                     )
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
@@ -873,11 +875,17 @@ def _project_buffered_protocol_response(
     )
 
 
-def _project_model_inventory_from_start(
+def _project_model_inventory_before_deadline(
     payload: BinaryIO,
+    *,
+    deadline: float,
 ) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
     payload.seek(0)
-    return _project_model_inventory(payload)
+    return _project_before_deadline(
+        payload,
+        _project_model_inventory,
+        deadline=deadline,
+    )
 
 
 def _copy_sync_response(
