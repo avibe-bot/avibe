@@ -1944,7 +1944,7 @@ Other limits `[derived]`:
 | Many sources (> 6) | The upstream module grows with every source; the enclosing settings route pane scrolls, so the head, groups and footer remain in one reading flow. |
 | Many backends (> 3) | The gateway module grows with every backend; the enclosing settings route pane scrolls and no nested gateway scrollbar appears. |
 | Zero supply relations | The wire layer renders nothing — no placeholder path. |
-| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. Every path leaves its Source at the right-edge midpoint, and every relation targeting the same Agent lands at that Agent card's shared left-edge midpoint while remaining a distinct curve. The SVG follows the natural-height `cols` track and remains clipped before the legend and following page sections. |
+| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. Every path leaves its Source at the shared right-edge midpoint, and every relation targeting the same Agent lands at that Agent card's shared left-edge midpoint while remaining a distinct curve. One neutral marker represents each shared Source or Agent anchor, so relation ordering cannot hide or recolor either endpoint. The SVG follows the natural-height `cols` track and remains clipped before the legend and following page sections. |
 
 ---
 

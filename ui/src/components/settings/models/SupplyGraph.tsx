@@ -55,15 +55,21 @@ export const SupplyGraph: React.FC<{
 
   if (!drawing || drawing.wires.length === 0) return null;
   const yValues = drawing.wires.flatMap((wire) => [wire.startY, wire.endY]);
+  const sourceAnchors = Array.from(new Map(drawing.wires.map((wire) => [wire.sourceId, wire])).values());
+  const agentAnchors = Array.from(new Map(drawing.wires.map((wire) => [wire.backend, wire])).values());
   return (
     <svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 hidden size-full overflow-hidden xl:block" viewBox={`0 0 ${drawing.width} ${drawing.height}`} preserveAspectRatio="none">
       <line className="model-hub-rail-line" x1={drawing.railX} x2={drawing.railX} y1={Math.min(...yValues)} y2={Math.max(...yValues)} />
       {drawing.wires.map((wire) => (
         <g key={`${wire.sourceId}:${wire.backend}`}>
           <path className={`model-hub-wire model-hub-wire--${wire.kind}`} d={wire.path} />
-          <circle className={`model-hub-wire-node model-hub-wire-node--${wire.kind}`} cx={wire.startX} cy={wire.startY} />
-          <circle className={`model-hub-wire-node model-hub-wire-node--${wire.kind}`} cx={wire.endX} cy={wire.endY} />
         </g>
+      ))}
+      {sourceAnchors.map((anchor) => (
+        <circle key={anchor.sourceId} className="model-hub-wire-node model-hub-wire-node--shared-anchor" cx={anchor.startX} cy={anchor.startY} />
+      ))}
+      {agentAnchors.map((anchor) => (
+        <circle key={anchor.backend} className="model-hub-wire-node model-hub-wire-node--shared-anchor" cx={anchor.endX} cy={anchor.endY} />
       ))}
     </svg>
   );

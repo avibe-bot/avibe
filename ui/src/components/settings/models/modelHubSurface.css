@@ -345,6 +345,7 @@
   --model-hub-wire-active-width: 1.75px;
   --model-hub-wire-muted-width: 1px;
   --model-hub-wire-node: 7px;
+  --model-hub-wire-node-stroke: 1.25px;
   --model-hub-footer-action-height: 30px;
   --model-hub-footer-action-radius: 7px;
   --model-hub-footer-action-font-size: 11.5px;
@@ -1849,15 +1850,11 @@
   r: calc(var(--model-hub-wire-node) / 2);
 }
 
-.model-hub-wire-node--native { fill: var(--cyan); }
-.model-hub-wire-node--gateway { fill: var(--mint); }
-.model-hub-wire-node--connected_unused {
+.model-hub-wire-node--shared-anchor {
   fill: var(--background);
-  stroke: color-mix(in srgb, var(--foreground) 15%, transparent);
-  stroke-width: 1.25px;
+  stroke: var(--model-hub-ink-73);
+  stroke-width: var(--model-hub-wire-node-stroke);
 }
-.model-hub-wire-node--takeover { fill: var(--violet); }
-.model-hub-wire-node--unavailable { fill: var(--gold); }
 
 .model-hub-rail-line {
   stroke: color-mix(in srgb, var(--mint) 20%, transparent);

@@ -85,5 +85,14 @@ describe('SupplyGraph', () => {
       'M 30 15 C 60 15, 60 50, 90 50',
       'M 30 35 C 60 35, 60 50, 90 50',
     ]);
+    const anchorCoordinates = () => Array.from(view.container.querySelectorAll<SVGCircleElement>('.model-hub-wire-node--shared-anchor'))
+      .map((anchor) => `${anchor.getAttribute('cx')}:${anchor.getAttribute('cy')}`)
+      .sort();
+    expect(anchorCoordinates()).toEqual(['30:15', '30:35', '90:50']);
+    expect(view.container.querySelectorAll('.model-hub-wire-node--gateway, .model-hub-wire-node--connected_unused')).toHaveLength(0);
+
+    view.rerender(<Fixture relations={[secondRelation, relation]} />);
+    await waitFor(() => expect(anchorCoordinates()).toEqual(['30:15', '30:35', '90:50']));
+    expect(view.container.querySelectorAll('.model-hub-wire-node--gateway, .model-hub-wire-node--connected_unused')).toHaveLength(0);
   });
 });
