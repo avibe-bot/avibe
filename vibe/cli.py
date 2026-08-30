@@ -528,6 +528,7 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
     "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
     "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
+    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
     "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
     "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
     "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",

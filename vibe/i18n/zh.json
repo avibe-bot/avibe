@@ -799,6 +799,7 @@
         "runtimeMissing": "记忆运行时缺失",
         "runtimeUnsupported": "记忆运行时不受支持",
         "runtimeInstallFailed": "记忆运行时安装失败",
+        "runtimeInstallRequiresStoppedMemory": "记忆功能正在运行。请先在「设置 > 记忆」中关闭记忆，再修复运行时。",
         "runtimePreparationImportTimeout": "记忆运行时导入就绪检查超时",
         "runtimePreparationImportFailed": "记忆运行时导入就绪检查失败",
         "runtimePreparationScrubberTimeout": "记忆运行时错误脱敏器就绪检查超时",

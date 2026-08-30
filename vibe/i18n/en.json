@@ -799,6 +799,7 @@
         "runtimeMissing": "Memory runtime missing",
         "runtimeUnsupported": "Memory runtime unsupported",
         "runtimeInstallFailed": "Memory runtime installation failed",
+        "runtimeInstallRequiresStoppedMemory": "Memory is running. Turn it off in Settings > Memory before repairing the runtime.",
         "runtimePreparationImportTimeout": "Memory runtime import readiness check timed out",
         "runtimePreparationImportFailed": "Memory runtime import readiness check failed",
         "runtimePreparationScrubberTimeout": "Memory runtime error-scrubber readiness check timed out",

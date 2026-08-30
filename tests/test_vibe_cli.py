@@ -2248,6 +2248,28 @@ def test_doctor_localizes_bounded_memory_runtime_preparation_reasons(reason, lan
     assert projected != "unknown error"
 
 
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "Memory is running. Turn it off in Settings > Memory before repairing the runtime.",
+        ),
+        (
+            "zh",
+            "记忆功能正在运行。请先在「设置 > 记忆」中关闭记忆，再修复运行时。",
+        ),
+    ],
+)
+def test_doctor_localizes_stopped_memory_repair_prerequisite(language, expected):
+    projected = cli._doctor_memory_reason(
+        "memory_runtime_install_requires_stopped_memory",
+        language,
+    )
+
+    assert projected == expected
+
+
 def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monkeypatch):
     archive_url = (
         "https://github.com/avibe-bot/avibe/releases/download/"
