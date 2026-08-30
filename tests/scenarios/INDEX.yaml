@@ -73,6 +73,7 @@ capabilities:
       - tests/scenario_harness/memory_im_attachments.py
     unit_or_contract_tests:
       - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
+      - tests/test_vibe_cli.py
       - tests/test_memory_admission.py
       - tests/test_memory_im_attachments.py
       - tests/test_inbound_attachments.py
@@ -89,6 +90,7 @@ capabilities:
     scenario_tests:
       - tests/test_ui_memory_routes.py
     unit_or_contract_tests:
+      - tests/test_vibe_cli.py
       - tests/test_memory_wake.py
       - tests/test_memory_supervisor.py
       - tests/test_memory_confined_filesystem.py

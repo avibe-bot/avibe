@@ -1775,6 +1775,26 @@ def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     assert result["results"][0]["status"] == "planned"
 
 
+def test_memory_runtime_doctor_repair_dry_run_does_not_reach_controller(monkeypatch):
+    monkeypatch.setattr(
+        "vibe.internal_client.memory_install_runtime_sync",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("dry-run must not reach the controller")
+        ),
+    )
+
+    result = cli._repair_doctor_targets(["memory-runtime"], dry_run=True)
+
+    assert result["ok"] is True
+    assert result["results"] == [
+        {
+            "target": "memory-runtime",
+            "status": "planned",
+            "message": result["results"][0]["message"],
+        }
+    ]
+
+
 def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monkeypatch):
     status = {
         "provider": "manifest-cache",
@@ -1889,6 +1909,104 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    (
+        "dependency_status",
+        "installed",
+        "required",
+        "reason",
+        "expected_severity",
+        "expected_repair",
+    ),
+    [
+        pytest.param("ready", True, False, None, "pass", False, id="ready"),
+        pytest.param(
+            "missing",
+            False,
+            False,
+            "memory_runtime_missing",
+            "warn",
+            True,
+            id="optional-missing",
+        ),
+        pytest.param(
+            "error",
+            False,
+            False,
+            "memory_runtime_install_failed",
+            "warn",
+            True,
+            id="optional-error",
+        ),
+        pytest.param(
+            "error",
+            False,
+            True,
+            "memory_runtime_install_failed",
+            "fail",
+            True,
+            id="required-error",
+        ),
+        pytest.param(
+            "unsupported",
+            False,
+            True,
+            "memory_runtime_unsupported",
+            "fail",
+            False,
+            id="required-unsupported",
+        ),
+    ],
+)
+def test_managed_dependencies_doctor_reports_memory_runtime_states(
+    monkeypatch,
+    dependency_status,
+    installed,
+    required,
+    reason,
+    expected_severity,
+    expected_repair,
+):
+    """MEMORY-RUNTIME-001: Doctor projects the disk-truthful runtime contract."""
+
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "memory-runtime",
+                    "required": required,
+                    "installed": installed,
+                    "status": dependency_status,
+                    "reason": reason,
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    runtime_item = next(
+        item
+        for item in items
+        if item.get("code") == f"dependencies.memory-runtime.{dependency_status}"
+    )
+    assert runtime_item["status"] == expected_severity
+    assert runtime_item["dependency_status"] == dependency_status
+    assert runtime_item.get("dependency_reason") == reason
+    assert runtime_item["dependency_required"] is required
+    assert (runtime_item.get("repair") or {}).get("target") == (
+        "memory-runtime" if expected_repair else None
+    )
 
 
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
@@ -2069,6 +2187,65 @@ def test_repair_managed_dependency_preserves_structured_download_error():
 
     assert result["status"] == "failed"
     assert result["download_error"] == error
+
+
+def test_memory_runtime_doctor_repair_uses_controller_ipc(monkeypatch):
+    calls = []
+
+    def install_runtime():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(
+        "vibe.internal_client.memory_install_runtime_sync",
+        install_runtime,
+    )
+
+    result = cli._repair_memory_runtime()
+
+    assert calls == [True]
+    assert result["target"] == "memory-runtime"
+    assert result["status"] == "repaired"
+
+
+def test_memory_runtime_doctor_repair_preserves_controller_failure(monkeypatch):
+    download_error = {"kind": "timeout", "attempts": 2}
+    monkeypatch.setattr(
+        "vibe.internal_client.memory_install_runtime_sync",
+        lambda: {
+            "status_code": 200,
+            "body": {
+                "ok": False,
+                "reason": "memory_runtime_install_failed",
+                "download_error": download_error,
+            },
+        },
+    )
+
+    result = cli._repair_memory_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "memory_runtime_install_failed"
+    assert result["download_error"] == download_error
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "memory_runtime_preparation_import_timeout",
+        "memory_runtime_preparation_import_failed",
+        "memory_runtime_preparation_scrubber_timeout",
+        "memory_runtime_preparation_scrubber_failed",
+        "memory_runtime_preparation_sync_contract_failed",
+        "memory_runtime_preparation_failed",
+    ],
+)
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_doctor_localizes_bounded_memory_runtime_preparation_reasons(reason, language):
+    projected = cli._doctor_memory_reason(reason, language)
+
+    assert projected != reason
+    assert projected != "unknown error"
 
 
 def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monkeypatch):
@@ -3341,7 +3518,7 @@ def test_doctor_parser_accepts_show_runtime_repair_target():
 def test_doctor_parser_accepts_managed_dependency_repair_targets():
     parser = cli.build_parser()
 
-    for target in ("askill", "avault", "git-runtime", "tmux"):
+    for target in ("askill", "avault", "git-runtime", "memory-runtime", "tmux"):
         args = parser.parse_args(["doctor", "repair", target, "--yes"])
         assert args.doctor_repair_targets == [target]
     assert args.yes is True
