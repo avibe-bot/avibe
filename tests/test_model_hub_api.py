@@ -123,6 +123,10 @@ class FakeInvokeHandle:
     def stream(self):
         return None
 
+    @property
+    def observed(self):
+        return None
+
     async def outcome(self):
         return self._outcome
 

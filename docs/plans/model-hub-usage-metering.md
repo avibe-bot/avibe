@@ -685,12 +685,30 @@ to.
 and only the second can fail — what they say, and whether there is room to keep a replay
 of them. Whether we can hold a copy is not a question about what happened upstream, so
 it cannot come first. Both arrival sites now go through one owner that observes before it
-buffers, and that owner is the sole caller of `prelude.write`, so an arrival site added
+buffers, and that owner is the sole stream-observation caller of `prelude.write`, so an arrival site added
 later cannot reorder the two questions by forgetting which comes first. The overflow path
 then reaches `ended()`, which has attached the wire's report to the outcome since round 7.
 `test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them` states the
-ordering; `test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered`
-drives it, with the overflowing chunk carrying a complete `message_start`.
+ordering; `test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver`
+drives it, with a complete `message_start` preceding the failed read.
+
+**Later correction (2026-08-30).** The 16 MiB refusal was itself an invalid protocol
+rule: official response schemas do not impose that byte ceiling, and image-generation
+SSE events can legitimately carry much larger Base64 strings. The prelude now spills to
+a temporary file without a total response ceiling, while the wire observer keeps only a
+bounded metadata projection and never changes the forwarded bytes. Its total pre-output
+wait remains bounded by the transport deadline, so an upstream cannot renew disk growth
+with keepalives forever. Observation-before-copy remains the owner ordering, but copy can
+no longer refuse a valid response for its size.
+
+The same rule applies to buffered JSON. Its exact bytes spill once and are replayed from
+that owner; a single taxonomy-backed selective JSON projection extracts terminal errors,
+allowlisted machine fields, and usage for both small and large bodies. The projection
+lexes only those finite protocol paths and skips unrelated subtrees without materializing
+their values. Body size therefore changes storage only, never classification or metering,
+and HTTP error diagnostics keep
+only a bounded private prefix after the machine fields have been projected from the full
+body.
 
 **Class D: five copies of one durability property.** The review flagged
 `usage.py:_write` for leaving its temporary file behind when the replacement raised. The
@@ -714,7 +732,8 @@ something else needs it.
 **Class E: the catalog rows this stage never wrote.** Five `MH-USAGE-*` scenarios now name
 the properties the stage actually claims — a reported token count surviving the turn's
 ending, per-hop attribution on failover, a failed write costing only that write, the
-read-modify-write staying off the event loop, and a report surviving a full prelude buffer.
+read-modify-write staying off the event loop, and a pre-output report surviving a later
+stream failure.
 `tests/test_model_hub_l3.py` and `tests/test_model_hub_usage.py` join `canonical_tests` and
 the project index, and each scenario ID is greppable from its test's docstring.
 

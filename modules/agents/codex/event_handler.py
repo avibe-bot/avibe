@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import hashlib
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _GENERATED_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".webp"}
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_ATTACHMENT_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(attachment://[^)\s]+\)")
 _ImageSnapshot = dict[Path, tuple[int, int]]
 
 
@@ -209,18 +215,16 @@ class CodexEventHandler:
             self._release_stream_turn(tracked_request.context)
             return
 
+        await asyncio.to_thread(self._persist_turn_generated_images, params)
         pending = turn_state.pending_assistant if turn_state else None
-        generated_image_fallback = None
-        if not pending or not (pending[0] or "").strip():
-            generated_image_fallback = self._build_generated_image_fallback(params, tracked_request)
-        else:
-            self._clear_generated_image_snapshot(params)
+        pending_text = pending[0] if pending else None
+        result_text = self._append_generated_images(pending_text, params, tracked_request)
         self._agent._turn_registry.pop_turn(turn_id)
         if pending and (pending[0] or "").strip():
-            pending_text, pending_parse_mode = pending
+            _, pending_parse_mode = pending
             await self._agent.emit_result_message(
                 tracked_request.context,
-                pending_text,
+                result_text,
                 subtype="success",
                 started_at=tracked_request.started_at,
                 parse_mode=pending_parse_mode or "markdown",
@@ -229,7 +233,7 @@ class CodexEventHandler:
         else:
             await self._agent.emit_result_message(
                 tracked_request.context,
-                generated_image_fallback,
+                result_text,
                 subtype="success",
                 started_at=tracked_request.started_at,
                 parse_mode="markdown",
@@ -331,6 +335,20 @@ class CodexEventHandler:
                     parse_mode="markdown",
                 )
 
+        elif item_type == "imageGeneration":
+            await asyncio.to_thread(self._persist_generated_image, params, item)
+
+    def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:
+        turn = params.get("turn")
+        if not isinstance(turn, dict):
+            return
+        items = turn.get("items")
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "imageGeneration":
+                self._persist_generated_image(params, item)
+
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> None:
         recorder = getattr(self._agent, "_record_model_hub_native_failure", None)
         if recorder is not None:
@@ -389,19 +407,20 @@ class CodexEventHandler:
             return error.get("message", "Unknown error")
         return str(error)
 
-    def _build_generated_image_fallback(
+    def _append_generated_images(
         self,
+        text: str | None,
         params: dict[str, Any],
         request: AgentRequest,
     ) -> str | None:
         self._claim_generated_image_snapshot(params, request)
         turn_id = self._extract_turn_id(params)
         if not turn_id:
-            return None
+            return text
 
         snapshot = self._image_snapshots_by_turn.pop(turn_id, None)
         if snapshot is None:
-            return None
+            return text
         thread_id, before = snapshot
 
         current = self._list_generated_images(thread_id)
@@ -410,11 +429,84 @@ class CodexEventHandler:
             key=lambda path: current[path][0],
         )
         if not generated:
-            return None
+            return text
 
+        remaining = iter(generated)
+        consumed: set[Path] = set()
+
+        def replace_attachment(match: re.Match[str]) -> str:
+            path = next(remaining, None)
+            if path is None:
+                return match.group(0)
+            consumed.add(path)
+            return f"![{match.group(1)}]({path.as_uri()})"
+
+        rendered_text = _ATTACHMENT_IMAGE_RE.sub(replace_attachment, text or "")
+        links = "\n".join(
+            f"![generated image]({path.as_uri()})"
+            for path in generated
+            if path not in consumed and path.as_uri() not in rendered_text
+        )
+        if not links:
+            return rendered_text
+        if rendered_text.strip():
+            return f"{rendered_text.rstrip()}\n\n{links}"
         heading = self._t("info.generatedImagesFallback", request)
-        links = "\n".join(f"![generated image]({path.as_uri()})" for path in generated)
         return f"{heading}\n\n{links}"
+
+    def _persist_generated_image(self, params: dict[str, Any], item: dict[str, Any]) -> None:
+        if item.get("status") != "completed":
+            return
+        encoded = item.get("result")
+        if not isinstance(encoded, str) or not encoded:
+            return
+        thread_dir = self._generated_images_dir(self._extract_thread_id(params))
+        if thread_dir is None:
+            return
+
+        try:
+            image = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            logger.warning("Ignoring invalid base64 from Codex image generation item")
+            return
+
+        extension = self._generated_image_extension(image)
+        if extension is None:
+            logger.warning("Ignoring unsupported image data from Codex image generation item")
+            return
+
+        digest = hashlib.sha256(image).hexdigest()
+        item_id = item.get("id")
+        identity = f"{item_id}:{digest}" if isinstance(item_id, str) and item_id else digest
+        filename_digest = hashlib.sha256(identity.encode()).hexdigest()
+        destination = thread_dir / f"image-{filename_digest[:24]}{extension}"
+
+        temp_path: Path | None = None
+        try:
+            thread_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd, temp_name = tempfile.mkstemp(prefix=".image-", suffix=".tmp", dir=thread_dir)
+            temp_path = Path(temp_name)
+            with os.fdopen(fd, "wb") as output:
+                output.write(image)
+            temp_path.chmod(0o600)
+            temp_path.replace(destination)
+        except OSError as exc:
+            logger.warning("Failed to persist Codex generated image: %s", exc)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _generated_image_extension(image: bytes) -> str | None:
+        if image.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if image.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if len(image) >= 12 and image.startswith(b"RIFF") and image[8:12] == b"WEBP":
+            return ".webp"
+        return None
 
     def _clear_generated_image_snapshot(self, params: dict[str, Any]) -> None:
         turn_id = self._extract_turn_id(params)

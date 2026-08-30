@@ -612,11 +612,32 @@ The complete observation surface is limited to these facts:
    event lifecycle.
 3. EOF without a recognized terminal is the existing network family and is
    non-punitive to durable Source health.
-4. `stream_started` flips only when content, refusal, or tool-call model output crosses
-   the caller boundary. Role metadata, transport frames, and error frames do not flip it.
+4. `stream_started` flips only when content, refusal, tool-call, or image-generation
+   model output crosses the caller boundary. Role metadata, transport frames, and error
+   frames do not flip it.
 5. The observer performs only the framing normalization required to see those facts:
-   stripping an initial UTF-8 BOM and splitting bounded SSE lines and events across CRLF,
-   LF, or CR boundaries.
+   stripping an initial UTF-8 BOM and splitting SSE lines and events across CRLF, LF, or
+   CR boundaries. Its private metadata copy has a fixed memory budget: large string
+   values are elided, and an event whose remaining JSON structure still exceeds that
+   budget becomes unobserved rather than invalid. Event names are retained only up to
+   the supported discriminator budget. The original bytes continue downstream
+   unchanged, and no model-output fact is asserted until the event's data discriminator
+   has been observed.
+
+Response size is not a protocol-validity rule. Model Hub applies no local byte ceiling to
+successful upstream response bodies, SSE lines or frames, pre-output replay, or model
+inventory responses. Request admission limits remain separate request-side policy. Memory
+thresholds may spill retained replay bytes to a temporary file, but must never truncate,
+reject, reclassify, or trigger fallback for an otherwise valid response. Pre-output
+replay has one absolute transport deadline, so keepalives cannot renew the wait forever;
+buffered responses spill before replay. One taxonomy-backed selective JSON projector owns
+their terminal error, machine-code, and usage facts for every body size; it lexes only
+the finite protocol paths and skips unrelated subtrees while the exact body remains on
+disk for replay. Model discovery uses the same selective projection for its inventory.
+Optional response mutation, such as restoring an OpenCode tool alias, operates on the
+same exact-byte spool for every body size, has a bounded working set, and fails open to
+the original bytes when it cannot
+finish within that set.
 
 Everything else is forwarded and ignored for settlement. Model Hub does not judge
 `sequence_number` presence or order; completeness of the event vocabulary; lifecycle

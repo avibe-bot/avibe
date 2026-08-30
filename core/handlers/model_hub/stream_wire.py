@@ -4,33 +4,40 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Callable, Final, Literal, Mapping
+from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
+
+from .async_owner import run_owned_in_thread
+from .json_wire import JSONEvent, JSONPath, JSONScope, SelectiveJSONParser
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
-# One line may fill the runtime's 64 KiB transport read; one logical event may
-# span four such reads. Both retained buffers remain bounded under hostile input.
-SSE_MAX_LINE_BYTES: Final = 64 * 1024
-SSE_MAX_FRAME_BYTES: Final = 256 * 1024
-# The pre-output owner shares the buffered-response ceiling; valid preludes are smaller.
-SSE_MAX_PRELUDE_BYTES: Final = 16 * 1024 * 1024
+# Wire observation is a bounded, fail-closed metadata copy. These are not
+# protocol or response limits: the original bytes continue downstream unchanged.
+SSE_OBSERVATION_BYTES: Final = 64 * 1024
+SSE_OBSERVATION_STRING_BYTES: Final = 16 * 1024
+SSE_OBSERVATION_EVENT_BYTES: Final = 256
 UTF8_BOM: Final = b"\xef\xbb\xbf"
-
-
-class SSEFrameLimitError(ValueError):
-    """Raised when retained SSE parser state crosses a configured bound."""
 
 
 @dataclass
 class SSEFrameTokenizer:
-    """Incrementally split SSE frames across CRLF, LF, and CR line endings."""
+    """Incrementally split exact SSE frames for response mutation."""
 
     _line: bytearray = field(default_factory=bytearray)
     _frame_lines: list[bytes] = field(default_factory=list)
     _after_cr: bool = False
-    _frame_size: int = 0
     _stream_prefix: bytearray = field(default_factory=bytearray)
     _stream_started: bool = False
+    _raw_partial: bytearray = field(default_factory=bytearray)
+
+    @property
+    def retained_bytes(self) -> int:
+        return (
+            len(self._stream_prefix)
+            + len(self._line)
+            + sum(map(len, self._frame_lines))
+            + len(self._raw_partial)
+        )
 
     def feed(self, chunk: bytes) -> tuple[bytes, ...]:
         if not self._stream_started:
@@ -46,19 +53,19 @@ class SSEFrameTokenizer:
             if self._after_cr:
                 self._after_cr = False
                 if byte == 0x0A:
+                    if self._raw_partial:
+                        self._raw_partial.append(byte)
                     continue
+            self._raw_partial.append(byte)
             if byte == 0x0D:
-                self._finish_line(frames)
+                if self._finish_line(frames):
+                    self._raw_partial.clear()
                 self._after_cr = True
             elif byte == 0x0A:
-                self._finish_line(frames)
+                if self._finish_line(frames):
+                    self._raw_partial.clear()
             else:
                 self._line.append(byte)
-                if len(self._line) > SSE_MAX_LINE_BYTES:
-                    raise SSEFrameLimitError("SSE line exceeds the configured limit")
-                self._frame_size += 1
-                if self._frame_size > SSE_MAX_FRAME_BYTES:
-                    raise SSEFrameLimitError("SSE frame exceeds the configured limit")
         return tuple(frames)
 
     def discard_partial_frame(self) -> bool | None:
@@ -69,35 +76,238 @@ class SSEFrameTokenizer:
         line_open = bool(self._line)
         self._line.clear()
         self._frame_lines.clear()
-        self._frame_size = 0
         self._after_cr = False
         self._stream_prefix.clear()
+        self._raw_partial.clear()
         return line_open
 
     def drain_partial_frame(self) -> bytes:
-        """Return and clear any unterminated bytes in normalized SSE form."""
+        """Return and clear the exact unterminated wire bytes."""
 
         if not self._stream_started:
             pending = bytes(self._stream_prefix)
         else:
-            pending = b"\n".join((*self._frame_lines, bytes(self._line)))
+            pending = bytes(self._raw_partial)
         self._line.clear()
         self._frame_lines.clear()
-        self._frame_size = 0
         self._after_cr = False
         self._stream_prefix.clear()
+        self._raw_partial.clear()
         return pending
 
-    def _finish_line(self, frames: list[bytes]) -> None:
+    def _finish_line(self, frames: list[bytes]) -> bool:
         line = bytes(self._line)
         self._line.clear()
         if line:
             self._frame_lines.append(line)
-            return
+            return False
         if self._frame_lines:
             frames.append(b"\n".join(self._frame_lines))
             self._frame_lines.clear()
-            self._frame_size = 0
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+class SSEObservedFrame:
+    """The protocol metadata retained from one SSE frame."""
+
+    event_name: str | None
+    observation: ProtocolObservation
+
+
+@dataclass
+class SSEObservationTokenizer:
+    """Observe SSE metadata without retaining model-authored string bodies."""
+
+    protocol: str
+    _field: bytearray = field(default_factory=bytearray)
+    _field_too_long: bool = False
+    _line_kind: str | None = None
+    _value_started: bool = False
+    _skip_value_space: bool = False
+    _line_started: bool = False
+    _frame_started: bool = False
+    _event_value: bytearray = field(default_factory=bytearray)
+    _event_value_too_long: bool = False
+    _current_event_name: str | None = None
+    _current_event_name_unknown: bool = False
+    _has_data: bool = False
+    _data: ProtocolFactProjector | None = None
+    _after_cr: bool = False
+    _stream_prefix: bytearray = field(default_factory=bytearray)
+    _stream_started: bool = False
+
+    @property
+    def retained_bytes(self) -> int:
+        return (
+            len(self._field)
+            + len(self._event_value)
+            + (self._data.retained_bytes if self._data is not None else 0)
+        )
+
+    def feed(self, chunk: bytes) -> tuple[SSEObservedFrame, ...]:
+        if not self._stream_started:
+            self._stream_prefix.extend(chunk)
+            prefix = bytes(self._stream_prefix)
+            if len(prefix) < len(UTF8_BOM) and UTF8_BOM.startswith(prefix):
+                return ()
+            self._stream_started = True
+            self._stream_prefix.clear()
+            chunk = prefix[len(UTF8_BOM) :] if prefix.startswith(UTF8_BOM) else prefix
+
+        frames: list[SSEObservedFrame] = []
+        offset = 0
+        if self._after_cr and chunk:
+            self._after_cr = False
+            if chunk.startswith(b"\n"):
+                offset = 1
+        while offset < len(chunk):
+            cr = chunk.find(b"\r", offset)
+            lf = chunk.find(b"\n", offset)
+            if cr < 0:
+                boundary = lf
+            elif lf < 0:
+                boundary = cr
+            else:
+                boundary = min(cr, lf)
+            if boundary < 0:
+                self._consume_bytes(chunk[offset:])
+                break
+            self._consume_bytes(chunk[offset:boundary])
+            self._finish_line(frames)
+            if chunk[boundary] == 0x0D:
+                if boundary + 1 < len(chunk) and chunk[boundary + 1] == 0x0A:
+                    offset = boundary + 2
+                elif boundary + 1 < len(chunk):
+                    offset = boundary + 1
+                else:
+                    self._after_cr = True
+                    offset = boundary + 1
+            else:
+                offset = boundary + 1
+        return tuple(frames)
+
+    def discard_partial_frame(self) -> bool | None:
+        if not self._frame_started and not self._line_started:
+            return None
+        line_open = self._line_started
+        self._reset_line()
+        self._reset_frame()
+        self._after_cr = False
+        self._stream_prefix.clear()
+        return line_open
+
+    def _consume_bytes(self, payload: bytes) -> None:
+        if not payload:
+            return
+        self._line_started = True
+        self._frame_started = True
+        if not self._value_started:
+            colon = payload.find(b":")
+            field_payload = payload if colon < 0 else payload[:colon]
+            if not self._field_too_long:
+                remaining = len(b"event") - len(self._field)
+                if len(field_payload) <= remaining:
+                    self._field.extend(field_payload)
+                else:
+                    self._field.clear()
+                    self._field_too_long = True
+            if colon < 0:
+                return
+            self._value_started = True
+            field_name = bytes(self._field) if not self._field_too_long else b""
+            self._line_kind = (
+                "event" if field_name == b"event" else "data" if field_name == b"data" else None
+            )
+            self._skip_value_space = True
+            if self._line_kind == "data":
+                self._start_data_line()
+            payload = payload[colon + 1 :]
+
+        if self._skip_value_space and payload:
+            self._skip_value_space = False
+            if payload.startswith(b" "):
+                payload = payload[1:]
+        if not payload:
+            return
+        if self._line_kind == "event":
+            if self._event_value_too_long:
+                return
+            remaining = SSE_OBSERVATION_EVENT_BYTES - len(self._event_value)
+            if len(payload) <= remaining:
+                self._event_value.extend(payload)
+            else:
+                self._event_value.clear()
+                self._event_value_too_long = True
+        elif self._line_kind == "data":
+            assert self._data is not None
+            self._data.feed(payload)
+
+    def _finish_line(self, frames: list[SSEObservedFrame]) -> None:
+        if not self._line_started:
+            if self._frame_started:
+                frames.append(
+                    SSEObservedFrame(
+                        event_name=self._current_event_name,
+                        observation=(
+                            self._data.finish(
+                                streamed=True,
+                                event_name=self._current_event_name,
+                            )
+                            if self._data is not None
+                            and not self._current_event_name_unknown
+                            else ProtocolObservation()
+                        ),
+                    )
+                )
+                self._reset_frame()
+            return
+
+        if not self._value_started and not self._field_too_long:
+            field_name = bytes(self._field)
+            if field_name == b"data":
+                self._start_data_line()
+            elif field_name == b"event":
+                self._line_kind = "event"
+        if self._line_kind == "event":
+            if self._event_value_too_long:
+                self._current_event_name = None
+                self._current_event_name_unknown = True
+            else:
+                try:
+                    decoded = self._event_value.decode("utf-8")
+                    self._current_event_name = decoded or None
+                    self._current_event_name_unknown = False
+                except UnicodeDecodeError:
+                    self._current_event_name = None
+                    self._current_event_name_unknown = True
+        self._reset_line()
+
+    def _start_data_line(self) -> None:
+        if self._has_data:
+            assert self._data is not None
+            self._data.feed_byte(0x0A)
+        else:
+            self._data = ProtocolFactProjector(self.protocol)
+        self._has_data = True
+
+    def _reset_line(self) -> None:
+        self._field.clear()
+        self._field_too_long = False
+        self._line_kind = None
+        self._value_started = False
+        self._skip_value_space = False
+        self._line_started = False
+        self._event_value.clear()
+        self._event_value_too_long = False
+
+    def _reset_frame(self) -> None:
+        self._frame_started = False
+        self._current_event_name = None
+        self._current_event_name_unknown = False
+        self._has_data = False
+        self._data = None
 
 
 def parse_sse_frame(frame: bytes) -> tuple[str | None, bytes | None]:
@@ -223,6 +433,8 @@ class ProtocolObservation:
     sequence_number: int | None = None
     message: str | None = None
     usage: ProtocolUsageReport | None = None
+    error_type_candidates: tuple[str, ...] = ()
+    error_code_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -399,6 +611,12 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 ("type",),
                 "response.function_call_arguments.delta",
             ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/image-generation-call/partial-image
+                "response.image_generation_call.partial_image",
+                ("type",),
+                "response.image_generation_call.partial_image",
+            ),
         ),
         success_literal=None,
         sequence_number_path=("sequence_number",),
@@ -570,6 +788,340 @@ def extract_protocol_usage(
     return report
 
 
+def _usage_from_scalar_paths(
+    taxonomy: ProtocolUsageTaxonomy,
+    scalars: Mapping[tuple[str, ...], object],
+) -> ProtocolUsageReport | None:
+    """Project token reports from selected scalar paths in a buffered body."""
+
+    report: ProtocolUsageReport | None = None
+    for container_path in taxonomy.container_paths:
+
+        def usage_sum(paths: tuple[tuple[str, ...], ...]) -> int | None:
+            total: int | None = None
+            for path in paths:
+                value = scalars.get((*container_path, *path))
+                if not isinstance(value, int) or isinstance(value, bool):
+                    continue
+                if value < 0 or value > USAGE_TOKEN_CEILING:
+                    continue
+                total = value if total is None else total + value
+            return None if total is None else min(total, USAGE_TOKEN_CEILING)
+
+        input_tokens = usage_sum(taxonomy.input_paths)
+        cached_input_tokens = usage_sum(taxonomy.cached_input_paths)
+        output_tokens = usage_sum(taxonomy.output_paths)
+        if input_tokens is None and cached_input_tokens is None and output_tokens is None:
+            continue
+        candidate = ProtocolUsageReport.of(
+            input_tokens=input_tokens or 0,
+            cached_input_tokens=cached_input_tokens or 0,
+            output_tokens=output_tokens or 0,
+        )
+        report = candidate if report is None else report.merge(candidate)
+    return report
+
+
+def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
+    taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
+    paths: set[JSONPath] = {()}
+    for envelope in (*taxonomy.terminal_envelopes, *taxonomy.model_output_envelopes):
+        paths.add(envelope.selector_path)
+        if isinstance(envelope, ProtocolTerminalEnvelope):
+            if envelope.required_error_path is not None:
+                paths.add(envelope.required_error_path)
+            if envelope.required_error_code_path is not None:
+                paths.add(envelope.required_error_code_path)
+    for error_path in _protocol_error_paths(taxonomy):
+        paths.update((error_path, (*error_path, "type"), (*error_path, "code")))
+    if taxonomy.sequence_number_path is not None:
+        paths.add(taxonomy.sequence_number_path)
+    for container_path in taxonomy.usage.container_paths:
+        for leaf_paths in (
+            taxonomy.usage.input_paths,
+            taxonomy.usage.cached_input_paths,
+            taxonomy.usage.output_paths,
+        ):
+            paths.update((*container_path, *leaf_path) for leaf_path in leaf_paths)
+    return frozenset(paths)
+
+
+def _protocol_error_paths(taxonomy: ProtocolStreamTaxonomy) -> frozenset[JSONPath]:
+    return frozenset(
+        (
+            *taxonomy.buffered_error_envelope_paths,
+            *(
+                path
+                for envelope in taxonomy.terminal_envelopes
+                for path in envelope.error_envelope_paths
+            ),
+        )
+    )
+
+
+class ProtocolFactProjector:
+    """Own the finite protocol facts independently of response storage size."""
+
+    def __init__(
+        self,
+        protocol: str,
+        *,
+        machine_error_codes: AbstractSet[str] = frozenset(),
+    ) -> None:
+        self.protocol = protocol
+        self.taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
+        self.machine_error_codes = machine_error_codes
+        self._maps: set[JSONPath] = set()
+        self._arrays: set[JSONPath] = set()
+        self._nonempty: set[JSONPath] = set()
+        self._scoped_nonempty: set[tuple[JSONPath, JSONScope]] = set()
+        self._scalars: dict[JSONPath, object] = {}
+        self._literal = bytearray()
+        self._literal_too_long = False
+        self._parser = SelectiveJSONParser(
+            _protocol_projection_paths(protocol),
+            self._visit,
+        )
+
+    @property
+    def retained_bytes(self) -> int:
+        return self._parser.retained_bytes + len(self._literal)
+
+    def feed_byte(self, byte: int) -> None:
+        if len(self._literal) < 16:
+            self._literal.append(byte)
+        else:
+            self._literal.clear()
+            self._literal_too_long = True
+        self._parser.feed_byte(byte)
+
+    def feed(self, chunk: bytes) -> None:
+        if not self._literal_too_long:
+            remaining = 16 - len(self._literal)
+            if len(chunk) <= remaining:
+                self._literal.extend(chunk)
+            else:
+                self._literal.clear()
+                self._literal_too_long = True
+        self._parser.feed(chunk)
+
+    def finish(
+        self,
+        *,
+        streamed: bool,
+        event_name: str | None = None,
+        previous_sequence_number: int = -1,
+    ) -> ProtocolObservation:
+        literal = None if self._literal_too_long else bytes(self._literal)
+        if streamed and self.taxonomy.success_literal == (event_name, literal):
+            return ProtocolObservation(outcome="served")
+        if not self._parser.finish() or () not in self._maps:
+            return ProtocolObservation(outcome="served" if not streamed else None)
+
+        usage = _usage_from_scalar_paths(self.taxonomy.usage, self._scalars)
+        model_output_started = any(
+            envelope.event_name == event_name and self._selector_matches(envelope)
+            for envelope in self.taxonomy.model_output_envelopes
+        )
+        sequence_number: int | None = None
+        if self.taxonomy.sequence_number_path is not None:
+            candidate = self._scalars.get(self.taxonomy.sequence_number_path)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                sequence_number = max(previous_sequence_number, candidate)
+
+        if not streamed:
+            matched_paths = tuple(
+                path
+                for path in self.taxonomy.buffered_error_envelope_paths
+                if path in self._maps
+            )
+            type_candidates = self._machine_candidates("type", matched_paths)
+            code_candidates = self._machine_candidates("code", matched_paths)
+            return ProtocolObservation(
+                outcome="failed_terminal" if matched_paths else "served",
+                error_envelope_paths=matched_paths,
+                usage=usage,
+                error_type_candidates=(type_candidates if matched_paths else ()),
+                error_code_candidates=(code_candidates if matched_paths else ()),
+            )
+
+        for envelope in self.taxonomy.terminal_envelopes:
+            if envelope.event_name != event_name or not self._selector_matches(envelope):
+                continue
+            if (
+                envelope.required_error_path is not None
+                and envelope.required_error_path not in self._maps
+            ):
+                continue
+            if envelope.required_error_code_path is not None:
+                code = self._scalars.get(envelope.required_error_code_path)
+                elided_nonempty_string = (
+                    envelope.required_error_code_path in self._scalars
+                    and code is None
+                    and envelope.required_error_code_path in self._nonempty
+                )
+                if not (isinstance(code, str) and code) and not elided_nonempty_string:
+                    continue
+            error_paths = (
+                envelope.error_envelope_paths
+                if envelope.terminal_outcome == "failed_terminal"
+                else ()
+            )
+            type_candidates = self._machine_candidates("type", error_paths)
+            code_candidates = self._machine_candidates("code", error_paths)
+            return ProtocolObservation(
+                outcome=envelope.terminal_outcome,
+                model_output_started=model_output_started,
+                error_envelope_paths=(
+                    envelope.error_envelope_paths
+                    if envelope.terminal_outcome == "failed_terminal"
+                    else ()
+                ),
+                sequence_number=sequence_number,
+                usage=usage,
+                error_type_candidates=(
+                    type_candidates
+                    if envelope.terminal_outcome == "failed_terminal"
+                    else ()
+                ),
+                error_code_candidates=(
+                    code_candidates
+                    if envelope.terminal_outcome == "failed_terminal"
+                    else ()
+                ),
+            )
+        return ProtocolObservation(
+            model_output_started=model_output_started,
+            sequence_number=sequence_number,
+            usage=usage,
+        )
+
+    def _visit(
+        self,
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        scope: JSONScope,
+    ) -> None:
+        if event == "replace":
+            self._clear_path(path, scope)
+        elif event == "start_map" and not scope:
+            self._maps.add(path)
+        elif event == "start_array" and not scope:
+            self._arrays.add(path)
+        elif event in {"nonempty", "elided_string"}:
+            if scope:
+                self._scoped_nonempty.add((path, scope))
+            else:
+                self._nonempty.add(path)
+        elif event == "scalar":
+            if scope:
+                if bool(value):
+                    self._scoped_nonempty.add((path, scope))
+            else:
+                self._scalars[path] = value
+                if bool(value):
+                    self._nonempty.add(path)
+        elif event == "scope_end":
+            self._collapse_scope(scope)
+
+    def _collapse_scope(self, scope: JSONScope) -> None:
+        """Fold a completed array member into its parent without retaining its index."""
+
+        if not scope:
+            return
+        completed = {
+            path
+            for path, candidate_scope in self._scoped_nonempty
+            if candidate_scope == scope
+        }
+        self._scoped_nonempty = {
+            candidate
+            for candidate in self._scoped_nonempty
+            if candidate[1] != scope
+        }
+        parent_scope = scope[:-1]
+        if parent_scope:
+            self._scoped_nonempty.update(
+                (path, parent_scope) for path in completed
+            )
+        else:
+            self._nonempty.update(completed)
+
+    def _clear_path(self, path: JSONPath, scope: JSONScope) -> None:
+        def inside(candidate: JSONPath) -> bool:
+            return candidate[: len(path)] == path
+
+        def inside_scope(candidate: tuple[JSONPath, JSONScope]) -> bool:
+            candidate_path, candidate_scope = candidate
+            return inside(candidate_path) and candidate_scope[: len(scope)] == scope
+
+        self._scoped_nonempty = {
+            candidate
+            for candidate in self._scoped_nonempty
+            if not inside_scope(candidate)
+        }
+        if scope:
+            return
+
+        self._maps = {candidate for candidate in self._maps if not inside(candidate)}
+        self._arrays = {candidate for candidate in self._arrays if not inside(candidate)}
+        self._nonempty = {candidate for candidate in self._nonempty if not inside(candidate)}
+        self._scalars = {
+            candidate: value
+            for candidate, value in self._scalars.items()
+            if not inside(candidate)
+        }
+
+    def _machine_candidates(
+        self,
+        field: Literal["type", "code"],
+        error_paths: tuple[ErrorEnvelopePath, ...],
+    ) -> tuple[str, ...]:
+        candidates: list[str] = []
+        for error_path in error_paths:
+            value = self._scalars.get((*error_path, field))
+            if not isinstance(value, str):
+                continue
+            if self.machine_error_codes and value not in self.machine_error_codes:
+                continue
+            if value not in candidates and len(candidates) < 8:
+                candidates.append(value)
+        return tuple(candidates)
+
+    def _selector_matches(
+        self,
+        envelope: ProtocolTerminalEnvelope | ProtocolModelOutputEnvelope,
+    ) -> bool:
+        if envelope.selector_value is not None:
+            return self._scalars.get(envelope.selector_path) == envelope.selector_value
+        if getattr(envelope, "require_nonempty", False):
+            return envelope.selector_path in self._nonempty
+        return envelope.selector_path in self._maps
+
+
+def observe_buffered_protocol_response(
+    protocol: str,
+    reader: BinaryIO,
+    *,
+    machine_error_codes: AbstractSet[str] = frozenset(),
+) -> ProtocolObservation:
+    """Project buffered protocol facts without retaining the response body.
+
+    The taxonomy owns the small set of facts settlement needs: native error
+    envelopes, their machine fields, and usage. Everything else is parsed and
+    discarded while the exact bytes remain owned by the caller for replay.
+    """
+
+    projector = ProtocolFactProjector(
+        protocol,
+        machine_error_codes=machine_error_codes,
+    )
+    while chunk := reader.read(64 * 1024):
+        projector.feed(chunk)
+    return projector.finish(streamed=False)
+
+
 def _try_parse_payload(data: bytes) -> object | None:
     """Parse untrusted observation data without leaking parser failures."""
 
@@ -596,7 +1148,9 @@ def observe_protocol_response(
         return ProtocolObservation(outcome="served")
     payload = _try_parse_payload(data)
     if not isinstance(payload, dict):
-        return ProtocolObservation(outcome="served" if not streamed else None)
+        if not streamed:
+            return ProtocolObservation(outcome="served")
+        return ProtocolObservation()
 
     usage = extract_protocol_usage(protocol, payload)
 
@@ -662,17 +1216,28 @@ class ProtocolSSEState:
     """Observe settlement facts without validating the upstream protocol stream."""
 
     protocol: str
-    tokenizer: SSEFrameTokenizer = field(default_factory=SSEFrameTokenizer)
+    tokenizer: SSEObservationTokenizer = field(init=False)
     terminal_outcome: StreamTerminalOutcome | None = None
     error_payload: bytes | None = None
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     last_sequence_number: int = -1
     model_output_started: bool = False
     usage: ProtocolUsageReport | None = None
+    error_type_candidates: tuple[str, ...] = ()
+    error_code_candidates: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        self.tokenizer = SSEObservationTokenizer(self.protocol)
 
     def observe(self, chunk: bytes) -> None:
-        for frame in self.tokenizer.feed(chunk):
+        frames = self.tokenizer.feed(chunk)
+        for frame in frames:
             self._observe_frame(frame)
+
+    async def observe_async(self, chunk: bytes) -> None:
+        """Observe one transport chunk without monopolizing the event loop."""
+
+        await run_owned_in_thread(self.observe, chunk)
 
     def invalidate_partial_frame(self) -> bytes:
         """Make an already-forwarded partial frame non-terminal, then close it."""
@@ -703,17 +1268,10 @@ class ProtocolSSEState:
 
         return self.terminal_outcome == "served" or self.model_output_started
 
-    def _observe_frame(self, frame: bytes) -> None:
+    def _observe_frame(self, frame: SSEObservedFrame) -> None:
         if self.terminal_outcome is not None:
             return
-        event_name, data = parse_sse_frame(frame)
-        observation = observe_protocol_response(
-            self.protocol,
-            streamed=True,
-            event_name=event_name,
-            data=data,
-            previous_sequence_number=self.last_sequence_number,
-        )
+        observation = frame.observation
         if observation.model_output_started:
             self.model_output_started = True
         if observation.usage is not None:
@@ -725,8 +1283,17 @@ class ProtocolSSEState:
         if observation.error_payload is not None:
             self.error_payload = observation.error_payload
             self.error_envelope_paths = observation.error_envelope_paths
+        elif observation.error_envelope_paths:
+            self.error_envelope_paths = observation.error_envelope_paths
+        if observation.error_type_candidates:
+            self.error_type_candidates = observation.error_type_candidates
+        if observation.error_code_candidates:
+            self.error_code_candidates = observation.error_code_candidates
         if observation.sequence_number is not None:
-            self.last_sequence_number = observation.sequence_number
+            self.last_sequence_number = max(
+                self.last_sequence_number,
+                observation.sequence_number,
+            )
 
     def terminal_observation(self) -> ProtocolObservation | None:
         """Report the settled facts, including everything accumulated to get here.
@@ -744,6 +1311,8 @@ class ProtocolSSEState:
                 error_envelope_paths=self.error_envelope_paths,
                 model_output_started=self.model_output_started,
                 usage=self.usage,
+                error_type_candidates=self.error_type_candidates,
+                error_code_candidates=self.error_code_candidates,
             )
         return None
 

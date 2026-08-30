@@ -196,11 +196,11 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_l3.py::test_neither_metering_owner_writes_the_ledger_on_the_event_loop
   - id: MH-USAGE-005
-    name: A usage report is metered even when the prelude buffer refuses to keep its bytes
+    name: A pre-output usage report remains metered when the stream then fails
     status: covered
     kind: recovery
     layer: unit
-    test: tests/test_model_hub_runtime.py::test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered
+    test: tests/test_model_hub_runtime.py::test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
   - id: MH-USAGE-006
     name: Every model identifier a persisted config still loads is one the ledger can key
     status: covered

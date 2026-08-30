@@ -29,6 +29,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceObservation,
 )
+from core.handlers.model_hub.async_owner import await_owned_task
 from core.handlers.model_hub.classification import (
     SOURCE_SETTLEMENT_AUTHORITY,
     classify_outcome,
@@ -52,7 +53,6 @@ from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
-    _await_owned_task_before_settling,
     _matching_v1_model_id,
 )
 
@@ -138,6 +138,10 @@ class FakeInvokeHandle:
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self.stream = None
+
+    @property
+    def observed(self):
+        return None
 
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
@@ -1670,7 +1674,7 @@ def test_cancelled_owned_task_is_terminal_without_settlement_retry() -> None:
         assert task.cancelled()
         with patch("core.handlers.model_hub.service.asyncio.shield") as shield:
             with pytest.raises(asyncio.CancelledError):
-                await _await_owned_task_before_settling(task)
+                await await_owned_task(task)
         shield.assert_not_called()
 
     asyncio.run(scenario())

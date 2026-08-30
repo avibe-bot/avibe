@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, BinaryIO, Mapping
 
-from .stream_wire import SSE_MAX_FRAME_BYTES, SSEFrameTokenizer, parse_sse_frame
+from .json_wire import rewrite_json_strings
+from .stream_wire import SSEFrameTokenizer, parse_sse_frame
+
+
+_REWRITE_BUFFER_BYTES = 256 * 1024
+_REWRITE_SCAN_BYTES = 16 * 1024
+_BUFFERED_TOOL_NAME_PATHS = frozenset(
+    path
+    for envelope in ("delta", "message")
+    for path in (
+        ("choices", "*", envelope, "function_call", "name"),
+        ("choices", "*", envelope, "tool_calls", "*", "function", "name"),
+    )
+)
 
 
 _OPENCODE_UPSTREAM_TOOL_ALIASES = {
@@ -14,6 +28,47 @@ _OPENCODE_UPSTREAM_TOOL_ALIASES = {
     # case-insensitively and reject OpenCode's otherwise valid definition.
     "todowrite": "avibe_todo_write",
 }
+
+
+@dataclass
+class _SSEFrameBoundaryScanner:
+    """Find the end of one already-forwarded SSE frame without retaining it."""
+
+    _line_has_bytes: bool = False
+    _after_cr: bool = False
+    _blank_cr_pending: bool = False
+
+    def feed(self, chunk: bytes) -> int | None:
+        """Return the offset after the first frame boundary, if one is present."""
+
+        if self._blank_cr_pending:
+            self._blank_cr_pending = False
+            return 1 if chunk.startswith(b"\n") else 0
+
+        offset = 0
+        while offset < len(chunk):
+            byte = chunk[offset]
+            if self._after_cr:
+                self._after_cr = False
+                if byte == 0x0A:
+                    offset += 1
+                    continue
+            if byte == 0x0D:
+                if not self._line_has_bytes:
+                    if offset + 1 == len(chunk):
+                        self._blank_cr_pending = True
+                        return None
+                    return offset + (2 if chunk[offset + 1] == 0x0A else 1)
+                self._line_has_bytes = False
+                self._after_cr = True
+            elif byte == 0x0A:
+                if not self._line_has_bytes:
+                    return offset + 1
+                self._line_has_bytes = False
+            else:
+                self._line_has_bytes = True
+            offset += 1
+        return None
 
 
 @dataclass(frozen=True)
@@ -74,15 +129,27 @@ def translate_opencode_tool_names(request: Mapping[str, Any]) -> ToolNameTransla
 def rewrite_buffered_tool_names(payload: bytes, aliases: Mapping[str, str]) -> bytes:
     """Restore aliased tool names in one buffered OpenAI Chat response."""
 
-    if not aliases:
+    source = BytesIO(payload)
+    rewritten = rewrite_buffered_tool_names_file(source, aliases)
+    if rewritten is None:
         return payload
     try:
-        decoded = json.loads(payload)
-    except (UnicodeDecodeError, ValueError):
-        return payload
-    if not isinstance(decoded, dict) or not _rewrite_chat_response(decoded, aliases):
-        return payload
-    return json.dumps(decoded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return rewritten.read()
+    finally:
+        rewritten.close()
+
+
+def rewrite_buffered_tool_names_file(
+    payload: BinaryIO,
+    aliases: Mapping[str, str],
+) -> BinaryIO | None:
+    """Restore aliases from any buffered body without loading that body in heap."""
+
+    return rewrite_json_strings(
+        payload,
+        target_paths=_BUFFERED_TOOL_NAME_PATHS,
+        replacements=aliases,
+    )
 
 
 class StreamingToolNameRewriter:
@@ -92,19 +159,42 @@ class StreamingToolNameRewriter:
         self._aliases = aliases
         self._tokenizer = SSEFrameTokenizer()
         self._pending_frames: list[tuple[bytes, dict[str, Any]]] = []
-        self._pending_size = 0
+        self._pending_bytes = 0
+        self._discarding_frame: _SSEFrameBoundaryScanner | None = None
 
     def feed(self, chunk: bytes) -> bytes:
         if not self._aliases:
             return chunk
         output: list[bytes] = []
-        for frame in self._tokenizer.feed(chunk):
-            output.extend(self._consume_frame(frame))
+        offset = 0
+        while offset < len(chunk):
+            if self._discarding_frame is not None:
+                boundary = self._discarding_frame.feed(chunk[offset:])
+                if boundary is None:
+                    output.append(chunk[offset:])
+                    break
+                output.append(chunk[offset : offset + boundary])
+                offset += boundary
+                self._discarding_frame = None
+                continue
+            end = min(offset + _REWRITE_SCAN_BYTES, len(chunk))
+            for frame in self._tokenizer.feed(chunk[offset:end]):
+                output.extend(self._consume_frame(frame))
+            offset = end
+            if self._tokenizer.retained_bytes > _REWRITE_BUFFER_BYTES:
+                output.extend(self._flush_pending(rewrite=False))
+                partial = self._tokenizer.drain_partial_frame()
+                if partial:
+                    output.append(partial)
+                    self._discarding_frame = _SSEFrameBoundaryScanner()
+                    assert self._discarding_frame.feed(partial) is None
         return b"".join(output)
 
     def finish(self) -> bytes:
         if not self._aliases:
             return self._tokenizer.drain_partial_frame()
+        if self._discarding_frame is not None:
+            return b""
         return b"".join(
             (*self._flush_pending(rewrite=True), self._tokenizer.drain_partial_frame())
         )
@@ -120,17 +210,13 @@ class StreamingToolNameRewriter:
         if not isinstance(decoded, dict):
             return [*self._flush_pending(rewrite=True), frame + b"\n\n"]
 
-        output: list[bytes] = []
-        if len(frame) > SSE_MAX_FRAME_BYTES:
-            return [*self._flush_pending(rewrite=False), frame + b"\n\n"]
-        if self._pending_size + len(frame) > SSE_MAX_FRAME_BYTES:
-            output.extend(self._flush_pending(rewrite=False))
         self._pending_frames.append((frame, decoded))
-        self._pending_size += len(frame)
+        self._pending_bytes += len(frame) + 2
+        if self._pending_bytes > _REWRITE_BUFFER_BYTES:
+            return self._flush_pending(rewrite=False)
         if self._has_partial_alias():
-            return output
-        output.extend(self._flush_pending(rewrite=True))
-        return output
+            return []
+        return self._flush_pending(rewrite=True)
 
     def _has_partial_alias(self) -> bool:
         for assembled, _locations in self._assembled_stream_names().values():
@@ -177,7 +263,7 @@ class StreamingToolNameRewriter:
             for index, (frame, payload) in enumerate(self._pending_frames)
         ]
         self._pending_frames.clear()
-        self._pending_size = 0
+        self._pending_bytes = 0
         return output
 
 
