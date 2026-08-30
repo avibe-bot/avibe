@@ -39,6 +39,10 @@ def _project(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))["project"]
 
 
+def _build_system(path: Path) -> dict[str, Any]:
+    return tomllib.loads(path.read_text(encoding="utf-8"))["build-system"]
+
+
 def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((WORKFLOW_DIR / name).read_text(encoding="utf-8"))
 
@@ -98,10 +102,10 @@ def _sdist_metadata(wheel: Path, distribution: str) -> Any:
         return Parser().parsestr(metadata.decode("utf-8"))
 
 
-def _sdist_project(wheel: Path, distribution: str) -> dict[str, Any]:
+def _sdist_pyproject(wheel: Path, distribution: str) -> dict[str, Any]:
     sdist = _sdist_path(wheel, distribution)
     with tarfile.open(sdist, "r:gz") as archive:
-        return tomllib.loads(_sdist_member(archive, "pyproject.toml").decode("utf-8"))["project"]
+        return tomllib.loads(_sdist_member(archive, "pyproject.toml").decode("utf-8"))
 
 
 def _sdist_path(wheel: Path, distribution: str) -> Path:
@@ -174,6 +178,12 @@ def test_source_metadata_preserves_the_developer_compatibility_window() -> None:
 
     assert memory_requirement.specifier == COMPATIBILITY
     assert host_requirement.specifier == COMPATIBILITY
+
+
+def test_sdist_rewriter_is_an_explicit_isolated_build_requirement() -> None:
+    for pyproject in (ROOT / "pyproject.toml", MEMORY_PROJECT / "pyproject.toml"):
+        requirement = _requirement(_build_system(pyproject)["requires"], "tomlkit")
+        assert str(requirement.specifier) == ">=0.11.1"
 
 
 def test_pr_artifact_build_uses_an_explicit_prerelease_contract_version() -> None:
@@ -382,8 +392,10 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
     memory_names, memory_metadata = _wheel_metadata(memory_wheel)
     core_sdist_metadata = _sdist_metadata(core_wheel, "avibe_os")
     memory_sdist_metadata = _sdist_metadata(memory_wheel, "avibe_memory")
-    core_sdist_project = _sdist_project(core_wheel, "avibe_os")
-    memory_sdist_project = _sdist_project(memory_wheel, "avibe_memory")
+    core_sdist_pyproject = _sdist_pyproject(core_wheel, "avibe_os")
+    memory_sdist_pyproject = _sdist_pyproject(memory_wheel, "avibe_memory")
+    core_sdist_project = core_sdist_pyproject["project"]
+    memory_sdist_project = memory_sdist_pyproject["project"]
 
     assert core_metadata["Name"] == "avibe-os"
     assert memory_metadata["Name"] == "avibe-memory"
@@ -432,6 +444,9 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
     assert core_build_requirement.marker is None
     assert str(memory_build_requirement.specifier) == f"=={memory_version}"
     assert memory_build_requirement.marker is None
+    for pyproject in (core_sdist_pyproject, memory_sdist_pyproject):
+        build_requirement = _requirement(pyproject["build-system"]["requires"], "tomlkit")
+        assert str(build_requirement.specifier) == ">=0.11.1"
 
 
 def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:
