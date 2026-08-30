@@ -191,7 +191,7 @@ class _DeadlineReader:
 
     def _check_deadline(self) -> None:
         if time.monotonic() >= self._deadline:
-            raise TimeoutError("engine API response exceeded its request deadline")
+            raise asyncio.TimeoutError("engine API response exceeded its request deadline")
 
     def read(self, size: int = -1) -> bytes:
         self._check_deadline()
@@ -201,7 +201,13 @@ class _DeadlineReader:
 
     def readinto(self, buffer: bytearray) -> int | None:
         self._check_deadline()
-        count = self._reader.readinto(buffer)
+        readinto = getattr(self._reader, "readinto", None)
+        if readinto is None:
+            payload = self._reader.read(len(buffer))
+            count = len(payload)
+            buffer[:count] = payload
+        else:
+            count = readinto(buffer)
         self._check_deadline()
         return count
 
@@ -660,7 +666,7 @@ class EngineClient:
                         _project_raw_error_fields,
                         deadline=deadline,
                     )
-            except (TimeoutError, socket.timeout, OSError) as read_error:
+            except (asyncio.TimeoutError, TimeoutError, socket.timeout, OSError) as read_error:
                 raise EngineClientError(
                     "engine API is unavailable",
                     error_type=type(read_error).__name__,
@@ -672,7 +678,13 @@ class EngineClient:
                 error_code=error_code,
                 error_candidates=error_candidates,
             ) from None
-        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            asyncio.TimeoutError,
+            TimeoutError,
+            socket.timeout,
+            OSError,
+        ) as exc:
             raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
 
     def _url(self, path: str, *, query: Mapping[str, str] | None = None) -> str:

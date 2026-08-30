@@ -288,6 +288,21 @@ def test_engine_json_responses_are_read_in_bounded_chunks(
     assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
 
 
+def test_deadline_reader_falls_back_when_reader_has_no_readinto() -> None:
+    class Reader:
+        def __init__(self) -> None:
+            self.body = io.BytesIO(b"fixture")
+
+        def read(self, size: int = -1) -> bytes:
+            return self.body.read(size)
+
+    buffer = bytearray(4)
+    reader = client_module._DeadlineReader(Reader(), time.monotonic() + 1)
+
+    assert reader.readinto(buffer) == 4
+    assert bytes(buffer) == b"fixt"
+
+
 def test_engine_json_response_spooling_uses_one_absolute_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5334,7 +5349,7 @@ def test_buffered_response_projection_uses_the_response_absolute_deadline(
 
         def project_before_deadline(_reader, _projector, *, deadline):
             projection_deadlines.append(deadline)
-            raise TimeoutError("buffered response exceeded its request deadline")
+            raise asyncio.TimeoutError("buffered response exceeded its request deadline")
 
         monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
         monkeypatch.setattr(
@@ -5450,7 +5465,7 @@ def test_model_discovery_projection_uses_the_request_absolute_deadline(
 
         def project_before_deadline(_reader, _projector, *, deadline):
             projection_deadlines.append(deadline)
-            raise TimeoutError("model discovery exceeded its request deadline")
+            raise asyncio.TimeoutError("model discovery exceeded its request deadline")
 
         monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
         monkeypatch.setattr(

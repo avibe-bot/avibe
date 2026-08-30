@@ -30,6 +30,47 @@ _OPENCODE_UPSTREAM_TOOL_ALIASES = {
 }
 
 
+@dataclass
+class _SSEFrameBoundaryScanner:
+    """Find the end of one already-forwarded SSE frame without retaining it."""
+
+    _line_has_bytes: bool = False
+    _after_cr: bool = False
+    _blank_cr_pending: bool = False
+
+    def feed(self, chunk: bytes) -> int | None:
+        """Return the offset after the first frame boundary, if one is present."""
+
+        if self._blank_cr_pending:
+            self._blank_cr_pending = False
+            return 1 if chunk.startswith(b"\n") else 0
+
+        offset = 0
+        while offset < len(chunk):
+            byte = chunk[offset]
+            if self._after_cr:
+                self._after_cr = False
+                if byte == 0x0A:
+                    offset += 1
+                    continue
+            if byte == 0x0D:
+                if not self._line_has_bytes:
+                    if offset + 1 == len(chunk):
+                        self._blank_cr_pending = True
+                        return None
+                    return offset + (2 if chunk[offset + 1] == 0x0A else 1)
+                self._line_has_bytes = False
+                self._after_cr = True
+            elif byte == 0x0A:
+                if not self._line_has_bytes:
+                    return offset + 1
+                self._line_has_bytes = False
+            else:
+                self._line_has_bytes = True
+            offset += 1
+        return None
+
+
 @dataclass(frozen=True)
 class ToolNameTranslation:
     request: Mapping[str, Any]
@@ -119,35 +160,40 @@ class StreamingToolNameRewriter:
         self._tokenizer = SSEFrameTokenizer()
         self._pending_frames: list[tuple[bytes, dict[str, Any]]] = []
         self._pending_bytes = 0
-        self._passthrough = False
+        self._discarding_frame: _SSEFrameBoundaryScanner | None = None
 
     def feed(self, chunk: bytes) -> bytes:
         if not self._aliases:
             return chunk
-        if self._passthrough:
-            return chunk
         output: list[bytes] = []
-        for offset in range(0, len(chunk), _REWRITE_SCAN_BYTES):
+        offset = 0
+        while offset < len(chunk):
+            if self._discarding_frame is not None:
+                boundary = self._discarding_frame.feed(chunk[offset:])
+                if boundary is None:
+                    output.append(chunk[offset:])
+                    break
+                output.append(chunk[offset : offset + boundary])
+                offset += boundary
+                self._discarding_frame = None
+                continue
             end = min(offset + _REWRITE_SCAN_BYTES, len(chunk))
             for frame in self._tokenizer.feed(chunk[offset:end]):
-                if self._passthrough:
-                    output.append(frame + b"\n\n")
-                else:
-                    output.extend(self._consume_frame(frame))
-            if self._passthrough or self._tokenizer.retained_bytes > _REWRITE_BUFFER_BYTES:
+                output.extend(self._consume_frame(frame))
+            offset = end
+            if self._tokenizer.retained_bytes > _REWRITE_BUFFER_BYTES:
                 output.extend(self._flush_pending(rewrite=False))
                 partial = self._tokenizer.drain_partial_frame()
                 if partial:
                     output.append(partial)
-                output.append(chunk[end:])
-                self._passthrough = True
-                break
+                    self._discarding_frame = _SSEFrameBoundaryScanner()
+                    assert self._discarding_frame.feed(partial) is None
         return b"".join(output)
 
     def finish(self) -> bytes:
         if not self._aliases:
             return self._tokenizer.drain_partial_frame()
-        if self._passthrough:
+        if self._discarding_frame is not None:
             return b""
         return b"".join(
             (*self._flush_pending(rewrite=True), self._tokenizer.drain_partial_frame())
@@ -167,7 +213,6 @@ class StreamingToolNameRewriter:
         self._pending_frames.append((frame, decoded))
         self._pending_bytes += len(frame) + 2
         if self._pending_bytes > _REWRITE_BUFFER_BYTES:
-            self._passthrough = True
             return self._flush_pending(rewrite=False)
         if self._has_partial_alias():
             return []

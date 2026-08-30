@@ -204,7 +204,7 @@ def test_streaming_rewriter_does_not_reject_large_content_frames() -> None:
     assert rewriter.finish() == b""
 
 
-def test_streaming_rewriter_fails_open_when_partial_alias_state_exceeds_its_budget() -> None:
+def test_streaming_rewriter_resumes_after_partial_alias_state_exceeds_its_budget() -> None:
     partial = (
         b'data: {"choices":[{"index":0,"delta":{"tool_calls":'
         b'[{"index":0,"function":{"name":"avibe_todo"}}]}}]}\n\n'
@@ -214,20 +214,44 @@ def test_streaming_rewriter_fails_open_when_partial_alias_state_exceeds_its_budg
         + b"x" * (512 * 1024)
         + b'"}}]}\n\n'
     )
+    aliased = (
+        b'data: {"choices":[{"index":2,"delta":{"tool_calls":'
+        b'[{"index":0,"function":{"name":"avibe_todo_write"}}]}}]}\n\n'
+    )
     terminal = b"data: [DONE]\n\n"
     rewriter = StreamingToolNameRewriter({"avibe_todo_write": "todowrite"})
 
-    output = rewriter.feed(partial) + rewriter.feed(content) + rewriter.feed(terminal)
+    output = (
+        rewriter.feed(partial)
+        + rewriter.feed(content)
+        + rewriter.feed(aliased)
+        + rewriter.feed(terminal)
+    )
 
-    assert output == partial + content + terminal
+    frames = SSEFrameTokenizer().feed(output)
+    payloads = [parse_sse_frame(frame)[1] for frame in frames]
+    assert frames[0] + b"\n\n" == partial
+    assert frames[1] + b"\n\n" == content
+    assert json.loads(payloads[2])["choices"][0]["delta"]["tool_calls"][0]["function"][
+        "name"
+    ] == "todowrite"
+    assert payloads[3] == b"[DONE]"
     assert rewriter.finish() == b""
 
 
-def test_streaming_rewriter_preserves_cr_delimiter_when_partial_frame_exceeds_budget() -> None:
+def test_streaming_rewriter_resumes_after_cr_frame_exceeds_budget() -> None:
     partial = b"data: " + b"x" * (256 * 1024) + b"\r"
-    remainder = b"\rdata: [DONE]\r\r"
+    aliased = (
+        b'data: {"choices":[{"delta":{"function_call":'
+        b'{"name":"avibe_todo_write"}}}]}\r\r'
+    )
+    remainder = b"\r" + aliased + b"data: [DONE]\r\r"
     rewriter = StreamingToolNameRewriter({"avibe_todo_write": "todowrite"})
 
     output = rewriter.feed(partial) + rewriter.feed(remainder) + rewriter.finish()
 
-    assert output == partial + remainder
+    assert output.startswith(partial + b"\r")
+    frames = SSEFrameTokenizer().feed(output)
+    payloads = [parse_sse_frame(frame)[1] for frame in frames]
+    assert json.loads(payloads[1])["choices"][0]["delta"]["function_call"]["name"] == "todowrite"
+    assert payloads[2] == b"[DONE]"
