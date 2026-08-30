@@ -397,6 +397,7 @@ class EngineClient:
             )
             if response.status >= 300:
                 error_body = _StreamPrelude()
+                response_deadline = time.monotonic() + self.timeout
                 try:
                     await asyncio.wait_for(
                         _read_response_into(response.content, error_body),
@@ -407,6 +408,7 @@ class EngineClient:
                         request_protocol,
                         error_body,
                         machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                        deadline=response_deadline,
                     )
                     payload = await error_body.prefix_async(_ERROR_OBSERVATION_BYTES)
                 except (asyncio.TimeoutError, aiohttp.ClientError):
@@ -451,6 +453,7 @@ class EngineClient:
             if not stream:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
+                response_deadline = time.monotonic() + self.timeout
                 await buffered_body.write_async(first)
                 await asyncio.wait_for(
                     _read_response_into(response.content, buffered_body),
@@ -461,6 +464,7 @@ class EngineClient:
                     request_protocol,
                     buffered_body,
                     machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                    deadline=response_deadline,
                 )
                 outcome = _reduce_protocol_observation(
                     observation,
@@ -849,6 +853,7 @@ async def _observe_buffered_protocol_response_async(
     prelude: _StreamPrelude,
     *,
     machine_error_codes: frozenset[str],
+    deadline: float,
 ) -> ProtocolObservation:
     """Drain the finite local projection before its reader can be closed."""
 
@@ -858,6 +863,7 @@ async def _observe_buffered_protocol_response_async(
         protocol,
         prelude,
         machine_error_codes=machine_error_codes,
+        deadline=deadline,
     )
 
 
@@ -867,11 +873,16 @@ def _project_buffered_protocol_response(
     prelude: _StreamPrelude,
     *,
     machine_error_codes: frozenset[str],
+    deadline: float,
 ) -> ProtocolObservation:
-    return projector(
-        protocol,
+    return _project_before_deadline(
         prelude.reader(),
-        machine_error_codes=machine_error_codes,
+        lambda reader: projector(
+            protocol,
+            reader,
+            machine_error_codes=machine_error_codes,
+        ),
+        deadline=deadline,
     )
 
 

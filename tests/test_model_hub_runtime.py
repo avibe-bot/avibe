@@ -5296,6 +5296,75 @@ def test_engine_client_projects_machine_errors_from_large_buffered_bodies(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_kind"),
+    ((200, RawOutcomeKind.TIMEOUT), (503, RawOutcomeKind.HTTP_ERROR)),
+)
+def test_buffered_response_projection_uses_the_response_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected_kind: RawOutcomeKind,
+) -> None:
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return b"{}" if self.reads == 1 else b""
+
+        class Response:
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self) -> None:
+                self.status = status
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        projection_deadlines: list[float] = []
+
+        def project_before_deadline(_reader, _projector, *, deadline):
+            projection_deadlines.append(deadline)
+            raise TimeoutError("buffered response exceeded its request deadline")
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(
+            client_module,
+            "_project_before_deadline",
+            project_before_deadline,
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        started = time.monotonic()
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+            timeout=1.0,
+        ).invoke(source, "model-a", {}, stream=False)
+
+        assert (await handle.outcome()).kind is expected_kind
+        assert projection_deadlines == pytest.approx([started + 1.0], abs=0.1)
+
+    asyncio.run(run())
+
+
 def test_model_discovery_accepts_large_valid_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
