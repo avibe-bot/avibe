@@ -2012,7 +2012,7 @@ def test_memory_remember_route_does_not_hold_pointer_lock_during_capture() -> No
             return CaptureAccepted()
 
     module = Module()
-    runtime = SimpleNamespace(retired=False, available=True, module=module)
+    runtime = SimpleNamespace(available=True, module=module)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(
         memory=SimpleNamespace(enabled=True),

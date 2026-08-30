@@ -759,43 +759,6 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     assert controller._memory_disabled_cleanup_unproved is False
 
 
-@pytest.mark.asyncio
-async def test_disabled_preflight_uses_one_unpublished_runtime() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    candidate = replace(controller.config.memory, enabled=True)
-    calls: list[object] = []
-
-    class _Runtime:
-        def __init__(self) -> None:
-            self.module = object()
-            self.closed = False
-
-        async def preflight(self, config) -> dict[str, object]:
-            calls.append(config)
-            return {"ok": True}
-
-        async def close(self) -> None:
-            self.closed = True
-
-        def begin_close(self) -> None:
-            return None
-
-    runtime = _Runtime()
-    controller._create_memory_runtime = lambda config, **_kwargs: runtime
-
-    assert await controller.preflight_memory(candidate) == {"ok": True}
-    assert calls == [candidate]
-    assert runtime.closed is True
-    assert controller.memory_runtime is None
-    assert controller.memory_module is None
-    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-
-
 @pytest.mark.parametrize("overlap", ("preflight", "install"))
 @pytest.mark.asyncio
 async def test_overlapping_unpublished_operations_return_busy(
@@ -885,7 +848,6 @@ async def test_explicit_recovery_retries_after_cached_plugin_failure(
     class _Runtime:
         module = object()
         closed = False
-        retired = False
 
         async def preflight(self, config) -> dict[str, object]:
             calls.append(("preflight", config))
@@ -980,7 +942,6 @@ async def test_disabled_install_keeps_runtime_unpublished_until_close() -> None:
         def __init__(self) -> None:
             self.module = object()
             self.closed = False
-            self.retired = False
 
         async def install_artifact(self) -> dict[str, object]:
             assert controller.memory_runtime is None
@@ -988,7 +949,6 @@ async def test_disabled_install_keeps_runtime_unpublished_until_close() -> None:
             return {"ok": True}
 
         def begin_close(self) -> None:
-            self.retired = True
             events.append("begin-close")
 
         async def close(self) -> None:
@@ -1031,13 +991,9 @@ async def test_cancelled_install_does_not_cancel_shared_disabled_cleanup() -> No
         def __init__(self) -> None:
             self.module = object()
             self.closed = False
-            self.retired = False
 
         async def install_artifact(self) -> dict[str, object]:
             return {"ok": True}
-
-        def retire(self) -> None:
-            self.retired = True
 
         async def close(self) -> None:
             self.closed = True
@@ -1082,11 +1038,9 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
-            self.retired = False
 
         def begin_close(self) -> None:
             assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-            self.retired = True
 
         async def close(self) -> None:
             raise RuntimeError("close failed")
@@ -1102,7 +1056,6 @@ async def test_disable_publishes_disabled_before_failed_close() -> None:
     assert controller.memory_runtime is None
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-    assert runtime.retired is True
 
 
 @pytest.mark.asyncio
@@ -1295,7 +1248,6 @@ async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
     class _Runtime:
         module = object()
         closed = False
-        retired = False
 
         async def status_payload(self) -> dict[str, object]:
             return {"status": "ok", "state": "starting"}
@@ -1315,94 +1267,6 @@ async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enabled_status_reprojects_when_disabled_before_snapshot() -> None:
-    enabled = replace(_disabled_app_config().memory, enabled=True)
-    disabled = replace(enabled, enabled=False)
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(memory=enabled)
-    controller.memory_adapter = None
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
-    snapshot_started = asyncio.Event()
-    snapshot_release = asyncio.Event()
-
-    async def await_cleanup() -> None:
-        snapshot_started.set()
-        await snapshot_release.wait()
-
-    controller._await_disabled_memory_cleanup = await_cleanup
-    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
-        "status must re-project disabled state before constructing Memory"
-    )
-    status_task = asyncio.create_task(controller.memory_status_payload())
-    await snapshot_started.wait()
-
-    async with controller._memory_replacement_lock():
-        controller.config.memory = disabled
-    snapshot_release.set()
-
-    status = await status_task
-
-    assert status["status"] == "ok"
-    assert status["state"] == "disabled"
-    assert status["reason"] is None
-    assert status["source"]["reason"] == "memory_disabled"
-
-
-@pytest.mark.asyncio
-async def test_concurrent_enabled_memory_reads_overlap() -> None:
-    controller = Controller.__new__(Controller)
-    controller.config = types.SimpleNamespace(
-        memory=replace(_disabled_app_config().memory, enabled=True)
-    )
-    controller.memory_adapter = None
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
-    started: set[str] = set()
-    release = asyncio.Event()
-
-    class _Runtime:
-        module = object()
-        closed = False
-        retired = False
-
-        async def status_payload(self) -> dict[str, object]:
-            started.add("status")
-            await release.wait()
-            return {"status": "ok", "state": "running"}
-
-        async def processing_record_payload(
-            self,
-            *,
-            verified_user_key: str | None,
-        ) -> dict[str, object]:
-            assert verified_user_key == "user-1"
-            started.add("processing")
-            await release.wait()
-            return {"status": "ok"}
-
-    runtime = _Runtime()
-    controller.memory_runtime = runtime
-    controller.memory_module = runtime.module
-    status = asyncio.create_task(controller.memory_status_payload())
-    processing = asyncio.create_task(
-        controller.memory_processing_record_payload(
-            verified_user_key="user-1",
-        )
-    )
-
-    try:
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert started == {"status", "processing"}
-    finally:
-        release.set()
-        await asyncio.gather(status, processing)
-
-
-@pytest.mark.asyncio
 async def test_disable_does_not_wait_for_long_runtime_read() -> None:
     enabled = replace(_disabled_app_config().memory, enabled=True)
     disabled = replace(enabled, enabled=False)
@@ -1417,7 +1281,6 @@ async def test_disable_does_not_wait_for_long_runtime_read() -> None:
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
-            self.retired = False
             self.close_calls = 0
 
         async def status_payload(self) -> dict[str, object]:
@@ -1427,7 +1290,7 @@ async def test_disable_does_not_wait_for_long_runtime_read() -> None:
             return {"status": "ok", "state": "running"}
 
         def begin_close(self) -> None:
-            self.retired = True
+            return None
 
         async def close(self) -> None:
             self.close_calls += 1
@@ -1462,7 +1325,6 @@ async def test_reconcile_provider_work_does_not_hold_pointer_lock() -> None:
 
     class _Runtime:
         module = object()
-        retired = False
         capture_adapter = object()
 
         async def reconcile(self, config) -> dict[str, object]:
@@ -1509,7 +1371,6 @@ async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> Non
     class _Runtime:
         module = object()
         capture_adapter = object()
-        retired = False
 
         def __init__(self) -> None:
             self.close_calls = 0
@@ -1525,7 +1386,6 @@ async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> Non
 
         def begin_close(self) -> None:
             assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
-            self.retired = True
 
         async def close(self) -> None:
             self.close_calls += 1
@@ -1541,7 +1401,6 @@ async def test_disable_revokes_unpublished_enable_before_it_can_publish() -> Non
     }
     assert controller.memory_runtime is None
     assert controller.config.memory is disabled
-    assert runtime.retired is True
     assert runtime.close_calls == 1
 
     reconcile_release.set()

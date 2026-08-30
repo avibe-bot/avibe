@@ -36,6 +36,7 @@ class EverOSSupervisorStatus:
 
     state: Literal["stopped", "starting", "running", "degraded", "closed"]
     retains_configuration: bool
+    epoch: int
 
     @property
     def running(self) -> bool:
@@ -154,6 +155,7 @@ class EverOSSupervisor:
         return EverOSSupervisorStatus(
             state=state,
             retains_configuration=retains_configuration,
+            epoch=self._epoch,
         )
 
     def begin_close(self) -> None:

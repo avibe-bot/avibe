@@ -11,12 +11,9 @@ from avibe_memory.capture_adapter import EnabledMemoryAdapter
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from avibe_memory.everos import ProviderHealthSnapshot
 from avibe_memory.processing_record import RuntimeHealthProjection, SourceObservation
-from avibe_memory.runtime import (
-    MemoryConfig,
-    MemoryRuntime,
-    MemoryRuntimeRootBusyError,
-)
+from avibe_memory.runtime import MemoryConfig, MemoryRuntime
 from avibe_memory.store import MemoryStore
+from vibe.memory_contract import MemoryRuntimeBusyError
 
 
 def _runtime(tmp_path: Path) -> MemoryRuntime:
@@ -68,7 +65,7 @@ async def test_runtime_close_releases_provider_root_for_one_replacement(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
-    with pytest.raises(MemoryRuntimeRootBusyError):
+    with pytest.raises(MemoryRuntimeBusyError):
         _runtime(tmp_path)
 
     await runtime.close()
@@ -109,50 +106,37 @@ async def test_runtime_close_timeouts_still_attempt_everos_stop(
     monkeypatch.setattr(runtime_module, "MEMORY_CAPTURE_CLOSE_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(runtime_module, "MEMORY_LOCAL_CLOSE_TIMEOUT_SECONDS", 0.01)
 
-    await runtime.close()
+    with pytest.raises(RuntimeError, match="local cleanup"):
+        await runtime.close()
 
     assert phases == ["capture", "local", "provider"]
-    replacement = _runtime(tmp_path)
-    await replacement.close()
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
     release.set()
     await asyncio.sleep(0)
 
 
+@pytest.mark.parametrize("operation", ("reconcile", "wake"))
 @pytest.mark.asyncio
-async def test_failed_provider_stop_prevents_second_runtime(
+async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
+    operation: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
-
-    async def fail_stop() -> None:
-        raise RuntimeError("stop failed")
-
-    monkeypatch.setattr(runtime._supervisor, "close", fail_stop)
-
-    with pytest.raises(RuntimeError, match="stop failed"):
-        await runtime.close()
-    with pytest.raises(MemoryRuntimeRootBusyError):
-        _runtime(tmp_path)
-
-
-@pytest.mark.asyncio
-async def test_revoked_reconcile_stops_before_provider_root_side_effects(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    probe_started = asyncio.Event()
-    probe_release = asyncio.Event()
+    stop_started = asyncio.Event()
+    stop_release = asyncio.Event()
     side_effects: list[str] = []
 
     async def ownership_reconciled() -> bool:
         return True
 
-    async def delayed_probe(_python: Path, _config: MemoryConfig) -> bool:
-        probe_started.set()
-        await probe_release.wait()
+    async def processing_ready(_python: Path, _config: MemoryConfig) -> bool:
         return True
+
+    async def delayed_stop() -> None:
+        stop_started.set()
+        await stop_release.wait()
 
     async def unexpected_async(name: str, *_args, **_kwargs):
         side_effects.append(name)
@@ -166,13 +150,10 @@ async def test_revoked_reconcile_stops_before_provider_root_side_effects(
         return None
 
     monkeypatch.setattr(runtime, "_reconcile_released_ownership", ownership_reconciled)
-    monkeypatch.setattr(runtime, "_probe_processing", delayed_probe)
+    monkeypatch.setattr(runtime, "_probe_processing", processing_ready)
+    monkeypatch.setattr(runtime, "artifact_admitted", lambda: True)
     monkeypatch.setattr(runtime._artifact_manager, "resolve_python", lambda: Path("python"))
-    monkeypatch.setattr(
-        runtime._supervisor,
-        "stop",
-        lambda: unexpected_async("provider stop"),
-    )
+    monkeypatch.setattr(runtime._supervisor, "stop", delayed_stop)
     monkeypatch.setattr(
         runtime._supervisor,
         "wake",
@@ -192,17 +173,21 @@ async def test_revoked_reconcile_stops_before_provider_root_side_effects(
     monkeypatch.setattr(runtime, "_close_local_runtime", no_op)
     monkeypatch.setattr(runtime._supervisor, "close", no_op)
 
-    reconcile = asyncio.create_task(runtime.reconcile(MemoryConfig(enabled=True)))
-    await probe_started.wait()
+    lifecycle = asyncio.create_task(
+        runtime.reconcile(MemoryConfig(enabled=True))
+        if operation == "reconcile"
+        else runtime.wake(operation_lease_held=True)
+    )
+    await stop_started.wait()
     runtime.begin_close()
-    await runtime.close()
-    probe_release.set()
+    stop_release.set()
 
-    assert await reconcile == {
-        "ok": False,
-        "error": "memory_operation_in_progress",
-    }
+    expected = {"ok": False, "error": "memory_operation_in_progress"}
+    if operation == "wake":
+        expected["state"] = "starting"
+    assert await lifecycle == expected
     assert side_effects == []
+    await runtime.close()
 
 
 @pytest.mark.asyncio

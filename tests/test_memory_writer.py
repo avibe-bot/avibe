@@ -39,10 +39,11 @@ PRINCIPAL = "u-" + "1" * 32
 
 def _writer(tmp_path: Path, provider: FakeMemoryProvider, **kwargs: object) -> BestEffortMemoryWriter:
     store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite", effective_home=tmp_path)
+    enabled = kwargs.pop("enabled", lambda: True)
     return BestEffortMemoryWriter(
         store=store,
         provider=provider,
-        enabled=lambda: True,
+        enabled=enabled,
         **kwargs,
     )
 
@@ -194,7 +195,7 @@ async def test_revoked_runtime_drops_detached_provider_completion(
         return AddAck(request_id="old-runtime", status="accumulated")
 
     provider.add = delayed_add
-    writer = _writer(tmp_path, provider, runtime_active=lambda: active)
+    writer = _writer(tmp_path, provider, enabled=lambda: active)
     writer._store.mark_capture_success = lambda: successes.append("published")
     _reserve_and_offer(writer, 0)
     await provider_entered.wait()

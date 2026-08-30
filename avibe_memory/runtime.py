@@ -18,12 +18,12 @@ import weakref
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from config import paths
 from config.v2_config import (
@@ -117,6 +117,7 @@ ProcessingEvent = Callable[
     [Literal["fault", "recovered"], Literal["credential", "engine"] | None, str, int],
     Awaitable[bool],
 ]
+_LifecycleResult = TypeVar("_LifecycleResult")
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
@@ -130,56 +131,43 @@ _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
 _WAKE_LEASE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 0.5, 1.0, 2.0)
 
 
-class MemoryRuntimeRootBusyError(MemoryRuntimeBusyError):
-    """Another live Memory runtime still owns this provider root."""
-
-
 class _RuntimeRootAuthority:
     """One process-local, revocable claim on an exact provider root."""
 
     _lock = threading.Lock()
     _owners: dict[str, "_RuntimeRootAuthority"] = {}
 
-    def __init__(self, key: str) -> None:
-        self._key = key
-        self._active = True
-        self._released = False
-
-    @classmethod
-    def acquire(cls, provider_root: Path) -> "_RuntimeRootAuthority":
-        key = os.path.normcase(os.path.abspath(os.fspath(provider_root)))
-        with cls._lock:
-            if key in cls._owners:
-                raise MemoryRuntimeRootBusyError(
+    def __init__(self, provider_root: Path) -> None:
+        self._key = os.path.normcase(os.path.abspath(os.fspath(provider_root)))
+        self._revoked = False
+        with self._lock:
+            if self._key in self._owners:
+                raise MemoryRuntimeBusyError(
                     "Memory provider root is already owned by a live runtime"
                 )
-            authority = cls(key)
-            cls._owners[key] = authority
-            return authority
+            self._owners[self._key] = self
 
     def active(self) -> bool:
         with self._lock:
             return (
-                self._active
-                and not self._released
+                not self._revoked
                 and self._owners.get(self._key) is self
             )
 
     def revoke(self) -> None:
         with self._lock:
-            self._active = False
+            self._revoked = True
 
     def release(self) -> None:
         with self._lock:
             if self._owners.get(self._key) is self:
                 self._owners.pop(self._key, None)
-            self._active = False
-            self._released = True
+            self._revoked = True
 
     @property
     def released(self) -> bool:
         with self._lock:
-            return self._released
+            return self._owners.get(self._key) is not self
 
 
 @asynccontextmanager
@@ -198,11 +186,9 @@ async def _concurrent_episode_lists(
 
 @dataclass(frozen=True, slots=True)
 class _ProcessingRuntimeSnapshot:
-    revision: int
     transition_active: bool
     enabled: bool
     store_available: bool
-    retired: bool
     closing: bool
     supervisor: EverOSSupervisorStatus
     runtime_error: str | None
@@ -214,7 +200,7 @@ class _ProcessingRuntimeSnapshot:
             return "memory_sidecar_unavailable"
         if maintenance_reason is not None:
             return maintenance_reason
-        if self.retired or self.transition_active or self.closing:
+        if self.transition_active or self.closing:
             return "busy"
         if not self.supervisor.running:
             return self.runtime_error or "memory_sidecar_unavailable"
@@ -230,48 +216,19 @@ class _ProcessingRuntimeSnapshot:
             return "memory_store_unavailable"
         if maintenance_reason is not None:
             return maintenance_reason
-        if self.retired or self.transition_active or self.closing:
+        if self.transition_active or self.closing:
             return "busy"
         return None
 
     def same_lifecycle(self, other: _ProcessingRuntimeSnapshot) -> bool:
         return (
-            self.revision == other.revision
-            and self.transition_active == other.transition_active
+            self.transition_active == other.transition_active
             and self.enabled == other.enabled
             and self.store_available == other.store_available
-            and self.retired == other.retired
             and self.closing == other.closing
             and self.supervisor == other.supervisor
             and self.runtime_error == other.runtime_error
         )
-
-
-class _LifecycleGenerationLock:
-    """Publish reconcile transitions without making health readers wait."""
-
-    def __init__(self, on_transition: Callable[[], None]) -> None:
-        self._lock = asyncio.Lock()
-        self._on_transition = on_transition
-
-    async def acquire(self) -> bool:
-        acquired = await self._lock.acquire()
-        self._on_transition()
-        return acquired
-
-    def release(self) -> None:
-        self._lock.release()
-        self._on_transition()
-
-    def locked(self) -> bool:
-        return self._lock.locked()
-
-    async def __aenter__(self) -> _LifecycleGenerationLock:
-        await self.acquire()
-        return self
-
-    async def __aexit__(self, *_exc: object) -> None:
-        self.release()
 
 
 def _source_observation_payload(source: SourceObservation) -> dict[str, Any]:
@@ -405,7 +362,7 @@ class MemoryRuntime:
             effective_home or paths.get_vibe_remote_dir()
         )
         self._effective_home = self._filesystem_root.physical_home
-        self._runtime_authority = _RuntimeRootAuthority.acquire(self._provider_root)
+        self._runtime_authority = _RuntimeRootAuthority(self._provider_root)
         construction_guard = weakref.finalize(self, self._runtime_authority.release)
         self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
         self._provider_root_owner = ProviderRoot(
@@ -436,16 +393,13 @@ class MemoryRuntime:
             if config.legacy_needs_repair
             else None
         )
-        self._lifecycle_revision = 0
-        self._reconcile_lock = _LifecycleGenerationLock(self._advance_lifecycle_revision)
+        self._reconcile_lock = asyncio.Lock()
         self._wake_task: asyncio.Task[dict[str, Any]] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
-        self._retired = False
         self._close_task: asyncio.Task[None] | None = None
-        self._provider_close_task: asyncio.Task[None] | None = None
         self._store: MemoryStore | None = None
         self._module: MemoryModule | None = None
         self._store_error: Exception | None = None
@@ -585,20 +539,26 @@ class MemoryRuntime:
     def available(self) -> bool:
         """Whether the local store opened. False keeps every read closed."""
 
-        return self._module is not None and not self._retired
+        return self._module is not None and not self._closing
 
-    def _accepts_lifecycle_work(self) -> bool:
-        """Return whether this runtime may still mutate its provider root."""
+    def _require_lifecycle_work(self) -> None:
+        if self._closing or not self._runtime_authority.active():
+            raise MemoryRuntimeBusyError("Memory runtime authority was revoked")
 
-        return (
-            not self._closing
-            and not self._retired
-            and self._runtime_authority.active()
-        )
+    async def _lifecycle_checkpoint(
+        self,
+        operation: Coroutine[Any, Any, _LifecycleResult],
+    ) -> _LifecycleResult:
+        """Run one awaited boundary only while this runtime owns its root."""
 
-    @staticmethod
-    def _lifecycle_busy_result() -> dict[str, Any]:
-        return {"ok": False, "error": "memory_operation_in_progress"}
+        try:
+            self._require_lifecycle_work()
+        except BaseException:
+            operation.close()
+            raise
+        result = await operation
+        self._require_lifecycle_work()
+        return result
 
     @property
     def needs_repair(self) -> bool:
@@ -649,12 +609,6 @@ class MemoryRuntime:
         return reset_memory_data_roots(self._effective_home)
 
     @property
-    def retired(self) -> bool:
-        """Whether this aggregate has been permanently retired."""
-
-        return self._retired
-
-    @property
     def effective_home(self) -> Path:
         """Return the pinned home used by this aggregate's mutable state."""
 
@@ -676,12 +630,6 @@ class MemoryRuntime:
             acquire_lifecycle_admission=self._acquire_lifecycle_admission,
         )
 
-    def retire(self) -> None:
-        """Tombstone this aggregate and its module before mutable roots die."""
-
-        self._retired = True
-        self.begin_close()
-
     def begin_close(self) -> None:
         """Synchronously revoke provider-root publication before host detachment."""
 
@@ -690,6 +638,7 @@ class MemoryRuntime:
         self._closing = True
         self._runtime_authority.revoke()
         self._supervisor.begin_close()
+        self._activation_loop = None
         adapter = self._capture_adapter
         quiesce = getattr(adapter, "quiesce_memory_capture_tasks", None)
         if callable(quiesce):
@@ -697,9 +646,6 @@ class MemoryRuntime:
         cancel_nowait = getattr(adapter, "cancel_memory_capture_tasks_nowait", None)
         if callable(cancel_nowait):
             cancel_nowait()
-        if self._module is not None:
-            self._module.retire()
-        self._advance_lifecycle_revision()
 
     def artifact_admitted(self) -> bool:
         """Return whether the pinned artifact is valid for a reset admission."""
@@ -713,29 +659,6 @@ class MemoryRuntime:
             )
         except Exception:
             return False
-
-    async def activate_fresh(self, config: MemoryConfig) -> dict[str, Any]:
-        """Activate a newly constructed aggregate without re-reading old intent."""
-
-        if self._retired:
-            return {"ok": False, "error": "memory_operation_in_progress"}
-        if not self.available:
-            return {"ok": False, "error": "memory_store_unavailable"}
-        self._activation_loop = asyncio.get_running_loop()
-        self.module.pause_claims()
-        async with self._reconcile_lock:
-            async with self.module.lifecycle():
-                result = await self._reconcile_locked(
-                    config,
-                    claims_already_paused=True,
-                    skip_embedding_guard=True,
-                    resume_claims_on_failure=False,
-                )
-                if result.get("ok") is True:
-                    # Fresh runtimes start fenced while the child is proved;
-                    # settled recovery must leave ordinary capture admission open.
-                    self.module.resume_claims()
-                return result
 
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
@@ -819,17 +742,12 @@ class MemoryRuntime:
             raise self._unavailable()
         return await run_blocking(self._store.principal_for_user_key, user_key)
 
-    def _advance_lifecycle_revision(self) -> None:
-        self._lifecycle_revision += 1
-
     def _processing_runtime_snapshot(self) -> _ProcessingRuntimeSnapshot:
         module = self._module
         return _ProcessingRuntimeSnapshot(
-            revision=self._lifecycle_revision,
             transition_active=self._reconcile_lock.locked(),
             enabled=self._config.enabled,
             store_available=module is not None,
-            retired=bool(module and module.retired),
             closing=self._closing,
             supervisor=self._supervisor.status,
             runtime_error=self._runtime_error,
@@ -883,8 +801,7 @@ class MemoryRuntime:
         """Best-effort compatibility cleanup for ordinary non-destructive flows."""
 
         async with self._reconcile_lock:
-            if not self._accepts_lifecycle_work():
-                return False
+            self._require_lifecycle_work()
             was_blocked = self._released_ownership_blocked
             try:
                 required_no_follow_flag()
@@ -893,9 +810,9 @@ class MemoryRuntime:
                 self._released_ownership_blocked = True
                 self._runtime_error = "memory_sidecar_unavailable"
                 return False
-            reconciled = await self._supervisor.reconcile_orphans()
-            if not self._accepts_lifecycle_work():
-                return False
+            reconciled = await self._lifecycle_checkpoint(
+                self._supervisor.reconcile_orphans()
+            )
             if not reconciled and self._supervisor.status.retains_configuration:
                 # The current supervisor-owned child is not released ownership.
                 reconciled = True
@@ -909,9 +826,11 @@ class MemoryRuntime:
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
-        return await self._reconcile(config)
+        try:
+            self._require_lifecycle_work()
+            return await self._reconcile(config)
+        except MemoryRuntimeBusyError:
+            return {"ok": False, "error": "memory_operation_in_progress"}
 
     async def _reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Run one reconciliation owned by the public lifecycle operation."""
@@ -921,8 +840,6 @@ class MemoryRuntime:
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
         reconciled = await self._reconcile_released_ownership()
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
         if not reconciled:
             return {
                 "ok": False,
@@ -930,15 +847,12 @@ class MemoryRuntime:
                 "error": "memory_sidecar_unavailable",
             }
         if not self.available:
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
             self._config = config
             if not config.enabled:
                 async with self._reconcile_lock:
-                    if not self._accepts_lifecycle_work():
-                        return self._lifecycle_busy_result()
+                    self._require_lifecycle_work()
                     self._wake_config = deepcopy(config)
                     return {"ok": True, "state": "disabled"}
             if not self._open_store():
@@ -950,24 +864,22 @@ class MemoryRuntime:
                 }
             self.start_capture_adapter()
         async with self._reconcile_lock:
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            self._require_lifecycle_work()
             self._activation_loop = asyncio.get_running_loop()
             if self._artifact_installing:
                 return {"ok": False, "error": "memory_runtime_install_failed"}
             async with self.module.lifecycle():
-                if not self._accepts_lifecycle_work():
-                    return self._lifecycle_busy_result()
+                self._require_lifecycle_work()
                 result = await self._reconcile_locked(config)
-                if result.get("ok") is True and self._accepts_lifecycle_work():
+                if result.get("ok") is True:
+                    self._require_lifecycle_work()
                     self._wake_config = deepcopy(config)
                 return result
 
     async def _disable_locked(self, config: MemoryConfig) -> dict[str, Any]:
         """Stop every active Memory component without consulting maintenance state."""
 
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        self._require_lifecycle_work()
         self.module.pause_claims()
         self._config = config
         self._configure_insight_reader(config)
@@ -976,12 +888,8 @@ class MemoryRuntime:
             runtime_active=self._runtime_authority.active,
         )
         self.module.replace_provider(self._provider)
-        await self._close_writer()
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
-        await self._supervisor.stop()
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        await self._lifecycle_checkpoint(self._close_writer())
+        await self._lifecycle_checkpoint(self._supervisor.stop())
         self._runtime_error = None
         return {"ok": True, "state": "disabled"}
 
@@ -995,8 +903,7 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
 
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        self._require_lifecycle_work()
         if self.needs_repair:
             if not config.enabled:
                 result = await self._disable_locked(config)
@@ -1011,12 +918,8 @@ class MemoryRuntime:
                     "error": reason,
                 }
             self.module.pause_claims()
-            await self._close_writer()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
-            await self._supervisor.stop()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            await self._lifecycle_checkpoint(self._close_writer())
+            await self._lifecycle_checkpoint(self._supervisor.stop())
             self._config = deepcopy(config)
             self._wake_config = deepcopy(config)
             self._runtime_error = self._needs_repair_reason
@@ -1035,12 +938,8 @@ class MemoryRuntime:
         )
         if cloud_identity_changed:
             self.module.pause_claims()
-            await self._close_writer()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
-            await self._supervisor.stop()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            await self._lifecycle_checkpoint(self._close_writer())
+            await self._lifecycle_checkpoint(self._supervisor.stop())
             self._config = deepcopy(config)
             self._wake_config = deepcopy(config)
             self._runtime_error = "memory_loss_confirmation_required"
@@ -1055,12 +954,8 @@ class MemoryRuntime:
             # a pause, never a fallback to saved custom providers. Capture can
             # keep queuing while claims and the old sidecar stay fenced.
             self.module.pause_claims()
-            await self._close_writer()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
-            await self._supervisor.stop()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            await self._lifecycle_checkpoint(self._close_writer())
+            await self._lifecycle_checkpoint(self._supervisor.stop())
             self._config = deepcopy(config)
             self._wake_config = deepcopy(config)
             self._configure_insight_reader(config)
@@ -1085,27 +980,22 @@ class MemoryRuntime:
         if embedding_changed:
             # Fence and join volatile writer work before inspecting provider
             # state, so no old-embedding call can cross this boundary.
-            quiesced = await self.module.quiesce_claims()
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            quiesced = await self._lifecycle_checkpoint(self.module.quiesce_claims())
             if not quiesced:
                 if resume_claims_on_failure:
                     self._defer_wake_until_writer_closed()
                 self._runtime_error = "memory_loss_confirmation_required"
                 return {"ok": False, "state": "degraded", "error": self._runtime_error}
             claims_paused = True
-            admissible = await self._embedding_change_is_admissible(
-                self._config,
-                config,
+            admissible = await self._lifecycle_checkpoint(
+                self._embedding_change_is_admissible(self._config, config)
             )
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
             if not admissible:
                 restored = False
                 if resume_claims_on_failure:
-                    restored = await self._restore_provisional_claims(previous_config)
-                    if not self._accepts_lifecycle_work():
-                        return self._lifecycle_busy_result()
+                    restored = await self._lifecycle_checkpoint(
+                        self._restore_provisional_claims(previous_config)
+                    )
                 if not restored:
                     self._runtime_error = "memory_loss_confirmation_required"
                 return {
@@ -1125,13 +1015,14 @@ class MemoryRuntime:
             processing_health_check=self._processing_healthy,
             runtime_active=self._runtime_authority.active,
         )
-        python = await asyncio.to_thread(self._artifact_manager.resolve_python)
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        python = await self._lifecycle_checkpoint(
+            asyncio.to_thread(self._artifact_manager.resolve_python)
+        )
         if python is None:
-            error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            status = await self._lifecycle_checkpoint(
+                asyncio.to_thread(self._artifact_manager.status)
+            )
+            error = _runtime_error_for_status(status)
             if not self._supervisor.status.retains_configuration:
                 # No retained supervisor can run now or relaunch with the prior
                 # settings, including one that exhausted its wake budget.
@@ -1140,57 +1031,55 @@ class MemoryRuntime:
                 self._config = config
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
-                await self._restore_provisional_claims(previous_config)
-                if not self._accepts_lifecycle_work():
-                    return self._lifecycle_busy_result()
+                await self._lifecycle_checkpoint(
+                    self._restore_provisional_claims(previous_config)
+                )
             return {"ok": False, "error": error}
-        processing_ready = await self._probe_processing(python, config)
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        processing_ready = await self._lifecycle_checkpoint(
+            self._probe_processing(python, config)
+        )
         if not processing_ready:
             error = "memory_processing_failed"
             if not self._supervisor.status.running:
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
-                await self._restore_provisional_claims(previous_config)
-                if not self._accepts_lifecycle_work():
-                    return self._lifecycle_busy_result()
+                await self._lifecycle_checkpoint(
+                    self._restore_provisional_claims(previous_config)
+                )
             return {"ok": False, "error": error}
 
         # Every enabled reconciliation receives a fresh process. Endpoint,
         # model, and key changes belong exclusively in its allowlisted child
         # environment and must never leave an old sidecar running.
-        quiesced = claims_paused or await self.module.quiesce_claims()
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        quiesced = claims_paused or await self._lifecycle_checkpoint(
+            self.module.quiesce_claims()
+        )
         if not quiesced:
             if resume_claims_on_failure:
                 self._defer_wake_until_writer_closed()
             self._runtime_error = "memory_runtime_busy"
             return {"ok": False, "state": "degraded", "error": self._runtime_error}
-        await self._close_writer()
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
-        await self._supervisor.stop()
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        await self._lifecycle_checkpoint(self._close_writer())
+        await self._lifecycle_checkpoint(self._supervisor.stop())
 
         self._config = config
         self._configure_insight_reader(config)
         self._provider = candidate_provider
         self.module.replace_provider(self._provider)
         try:
-            meta = await asyncio.to_thread(self._store.ensure_meta)
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
-            active_metadata = self._active_provider_root_metadata()
-            await run_blocking(
-                self._provider_root_owner.ensure,
-                meta,
-                active_metadata,
+            meta = await self._lifecycle_checkpoint(
+                asyncio.to_thread(self._store.ensure_meta)
             )
-            if not self._accepts_lifecycle_work():
-                return self._lifecycle_busy_result()
+            active_metadata = self._active_provider_root_metadata()
+            await self._lifecycle_checkpoint(
+                run_blocking(
+                    self._provider_root_owner.ensure,
+                    meta,
+                    active_metadata,
+                )
+            )
+        except MemoryRuntimeBusyError:
+            raise
         except Exception as exc:
             if _local_data_failure_requires_repair(exc):
                 self._needs_repair_reason = "memory_local_data_unusable"
@@ -1203,10 +1092,8 @@ class MemoryRuntime:
             return {"ok": False, "state": state, "error": self._runtime_error}
 
         settings = _process_settings(config)
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
-        try:
-            started = await self._supervisor.wake(
+        started = await self._lifecycle_checkpoint(
+            self._supervisor.wake(
                 python,
                 settings,
                 provider_root_guard=lambda: self._require_current_provider_root(
@@ -1214,10 +1101,7 @@ class MemoryRuntime:
                     active_metadata,
                 ),
             )
-        except BaseException:
-            raise
-        if not self._accepts_lifecycle_work():
-            return self._lifecycle_busy_result()
+        )
         if not started:
             self._runtime_error = "memory_sidecar_unavailable"
             return {"ok": False, "state": "degraded", "error": self._runtime_error}
@@ -1415,7 +1299,7 @@ class MemoryRuntime:
             or not self._module.attachment_intake_enabled
         ):
             return None
-        return self._lifecycle_revision
+        return id(self._provider)
 
     async def failure_log_payload(
         self,
@@ -2202,7 +2086,7 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Validate the artifact and non-destructively wake the existing root."""
 
-        if self._closing or self._retired:
+        if self._closing:
             return {
                 "ok": False,
                 "state": self.runtime_state(),
@@ -2215,16 +2099,13 @@ class MemoryRuntime:
                 for delay_seconds in _WAKE_LEASE_RETRY_DELAYS_SECONDS:
                     if delay_seconds:
                         await asyncio.sleep(delay_seconds)
-                    if self._closing or self._retired:
-                        return {
-                            "ok": False,
-                            "state": self.runtime_state(),
-                            "error": "memory_operation_in_progress",
-                        }
+                    self._require_lifecycle_work()
                     try:
-                        await run_blocking(
-                            lease.acquire,
-                            on_cancel_result=lambda _result: lease.release(),
+                        await self._lifecycle_checkpoint(
+                            run_blocking(
+                                lease.acquire,
+                                on_cancel_result=lambda _result: lease.release(),
+                            )
                         )
                     except MemoryOperationBusy:
                         continue
@@ -2250,13 +2131,16 @@ class MemoryRuntime:
                 self._wake_config.enabled
                 and not self.available
                 and not self.needs_repair
-                and not await run_blocking(self._open_store)
             ):
-                return {
-                    "ok": False,
-                    "state": "needs_repair" if self.needs_repair else "degraded",
-                    "error": self._runtime_error or "memory_store_unavailable",
-                }
+                opened = await self._lifecycle_checkpoint(
+                    run_blocking(self._open_store)
+                )
+                if not opened:
+                    return {
+                        "ok": False,
+                        "state": "needs_repair" if self.needs_repair else "degraded",
+                        "error": self._runtime_error or "memory_store_unavailable",
+                    }
             self.start_capture_adapter()
             if self.needs_repair:
                 return {
@@ -2270,26 +2154,37 @@ class MemoryRuntime:
                     "state": "disabled",
                     "error": "memory_disabled",
                 }
-            if not await run_blocking(self.artifact_admitted):
+            artifact_admitted = await self._lifecycle_checkpoint(
+                run_blocking(self.artifact_admitted)
+            )
+            if not artifact_admitted:
                 if self.available:
                     async with self._reconcile_lock, self.module.lifecycle():
+                        self._require_lifecycle_work()
                         self.module.pause_claims()
-                        if not await self.module.quiesce_claims(timeout_seconds=5.0):
+                        quiesced = await self._lifecycle_checkpoint(
+                            self.module.quiesce_claims(timeout_seconds=5.0)
+                        )
+                        if not quiesced:
                             return {
                                 "ok": False,
                                 "state": "degraded",
                                 "error": "memory_runtime_busy",
                             }
-                        await self._close_writer()
+                        await self._lifecycle_checkpoint(self._close_writer())
                         try:
-                            await self._supervisor.stop()
+                            await self._lifecycle_checkpoint(self._supervisor.stop())
+                        except MemoryRuntimeBusyError:
+                            raise
                         except Exception:
                             return {
                                 "ok": False,
                                 "state": "degraded",
                                 "error": "memory_wake_failed",
                             }
-                installed = await self._install_artifact_with_lease()
+                installed = await self._lifecycle_checkpoint(
+                    self._install_artifact_with_lease()
+                )
                 if installed.get("ok") is not True:
                     self._runtime_error = str(
                         installed.get("reason") or "memory_wake_failed"
@@ -2307,7 +2202,14 @@ class MemoryRuntime:
                         "error": self._runtime_error,
                     }
             async with self._reconcile_lock:
+                self._require_lifecycle_work()
                 return await self._wake_locked()
+        except MemoryRuntimeBusyError:
+            return {
+                "ok": False,
+                "state": self.runtime_state(),
+                "error": "memory_operation_in_progress",
+            }
         except MemoryOperationBusy:
             return {"ok": False, "error": "memory_operation_in_progress"}
         except Exception as exc:
@@ -2338,7 +2240,7 @@ class MemoryRuntime:
     def _current_sidecar_unavailable(self) -> None:
         """Project supervisor-owned crash state into Memory policy."""
 
-        if self._closing or self._retired or self.needs_repair:
+        if self._closing or self.needs_repair:
             return
         self.module.pause_claims()
         self._runtime_error = "memory_sidecar_unavailable"
@@ -2400,8 +2302,7 @@ class MemoryRuntime:
     async def _wake_locked(self) -> dict[str, Any]:
         """Wake the admitted sidecar while preserving the existing data root."""
 
-        if self._closing or self._retired:
-            return {"ok": False, "error": "memory_operation_in_progress"}
+        self._require_lifecycle_work()
         if self.needs_repair:
             return {
                 "ok": False,
@@ -2421,17 +2322,24 @@ class MemoryRuntime:
         replay = deepcopy(self._wake_config)
         if not replay.enabled:
             return {"ok": False, "state": "disabled", "error": "memory_disabled"}
-        python = await asyncio.to_thread(self._artifact_manager.resolve_python)
+        python = await self._lifecycle_checkpoint(
+            asyncio.to_thread(self._artifact_manager.resolve_python)
+        )
         if python is None:
             self._runtime_error = "memory_wake_failed"
             return {"ok": False, "state": "degraded", "error": self._runtime_error}
 
         async with self.module.lifecycle():
+            self._require_lifecycle_work()
             self.module.pause_claims()
             try:
-                quiesced = await self.module.quiesce_claims(timeout_seconds=5.0)
+                quiesced = await self._lifecycle_checkpoint(
+                    self.module.quiesce_claims(timeout_seconds=5.0)
+                )
                 if quiesced:
-                    await self._close_writer()
+                    await self._lifecycle_checkpoint(self._close_writer())
+            except MemoryRuntimeBusyError:
+                raise
             except Exception:
                 quiesced = False
             if not quiesced:
@@ -2439,7 +2347,9 @@ class MemoryRuntime:
                 return {"ok": False, "state": "degraded", "error": self._runtime_error}
 
             try:
-                await self._supervisor.stop()
+                await self._lifecycle_checkpoint(self._supervisor.stop())
+            except MemoryRuntimeBusyError:
+                raise
             except Exception:
                 logger.exception("Memory wake could not prove the old sidecar stopped")
                 self._runtime_error = "memory_wake_failed"
@@ -2454,13 +2364,19 @@ class MemoryRuntime:
             )
             self.module.replace_provider(self._provider)
             try:
-                meta = await asyncio.to_thread(self._store.ensure_meta)
-                active_metadata = self._active_provider_root_metadata()
-                await run_blocking(
-                    self._provider_root_owner.ensure,
-                    meta,
-                    active_metadata,
+                meta = await self._lifecycle_checkpoint(
+                    asyncio.to_thread(self._store.ensure_meta)
                 )
+                active_metadata = self._active_provider_root_metadata()
+                await self._lifecycle_checkpoint(
+                    run_blocking(
+                        self._provider_root_owner.ensure,
+                        meta,
+                        active_metadata,
+                    )
+                )
+            except MemoryRuntimeBusyError:
+                raise
             except Exception as exc:
                 if _local_data_failure_requires_repair(exc):
                     self._needs_repair_reason = "memory_local_data_unusable"
@@ -2472,14 +2388,18 @@ class MemoryRuntime:
                 return {"ok": False, "state": state, "error": self._runtime_error}
 
             try:
-                started = await self._supervisor.wake(
-                    python,
-                    _process_settings(replay),
-                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
-                        meta,
-                        active_metadata,
-                    ),
+                started = await self._lifecycle_checkpoint(
+                    self._supervisor.wake(
+                        python,
+                        _process_settings(replay),
+                        provider_root_guard=lambda: self._require_current_provider_root(
+                            meta,
+                            active_metadata,
+                        ),
+                    )
                 )
+            except MemoryRuntimeBusyError:
+                raise
             except Exception as exc:
                 self._runtime_error = _degraded_runtime_reason(
                     exc,
@@ -2494,8 +2414,9 @@ class MemoryRuntime:
             for delay in (0.0, 0.25, 0.5, 1.0):
                 if delay:
                     await asyncio.sleep(delay)
+                    self._require_lifecycle_work()
                 try:
-                    await self._provider.health_snapshot()
+                    await self._lifecycle_checkpoint(self._provider.health_snapshot())
                     readiness_error = None
                     break
                 except MemoryProviderFailure as failure:
@@ -2508,6 +2429,7 @@ class MemoryRuntime:
                 return {"ok": False, "state": "degraded", "error": readiness_error}
 
             self._runtime_error = None
+            self._require_lifecycle_work()
             self.module.resume_claims()
             self._resume_writer()
             return {"ok": True, "state": "running"}
@@ -2522,44 +2444,46 @@ class MemoryRuntime:
                 name="memory-runtime-close",
             )
         cancellation = await self._join_shutdown_task(self._close_task)
-        cleanup_error: BaseException | None = None
-        try:
-            self._close_task.result()
-        except BaseException as error:
-            cleanup_error = error
+        error = self._close_task.exception()
         if cancellation is not None:
-            if cleanup_error is not None:
-                logger.error(
-                    "Memory runtime cleanup failed while close was cancelled: %s",
-                    cleanup_error,
-                )
+            if error is not None:
+                logger.error("Memory close failed during cancellation: %s", error)
             raise cancellation
-        if cleanup_error is not None:
-            raise cleanup_error
+        if error is not None:
+            raise error
 
     async def _close_once(self) -> None:
-        local_failures: list[str] = []
-        if not await self._run_bounded_close_phase(
-            self._cancel_capture_tasks(),
-            timeout_seconds=MEMORY_CAPTURE_CLOSE_TIMEOUT_SECONDS,
-            label="capture cancellation",
-        ):
-            local_failures.append("capture cancellation")
-        if not await self._run_bounded_close_phase(
-            self._close_local_runtime(),
-            timeout_seconds=MEMORY_LOCAL_CLOSE_TIMEOUT_SECONDS,
-            label="local cleanup",
-        ):
-            local_failures.append("local cleanup")
-
-        await self._close_provider_root()
-        self._artifact_manager.set_activation_coordinator(None)
-        self._advance_lifecycle_revision()
-        if local_failures:
-            logger.warning(
-                "Memory runtime crossed its provider stop boundary after bounded %s",
-                " and ".join(local_failures),
+        local_proved = True
+        phases = (
+            (
+                self._cancel_capture_tasks(),
+                MEMORY_CAPTURE_CLOSE_TIMEOUT_SECONDS,
+                "capture cancellation",
+            ),
+            (
+                self._close_local_runtime(),
+                MEMORY_LOCAL_CLOSE_TIMEOUT_SECONDS,
+                "local cleanup",
+            ),
+        )
+        for operation, timeout_seconds, label in phases:
+            proved = await self._run_bounded_close_phase(
+                operation,
+                timeout_seconds=timeout_seconds,
+                label=label,
             )
+            local_proved = proved and local_proved
+        self._artifact_manager.set_activation_coordinator(None)
+        provider_proved = await self._run_bounded_close_phase(
+            self._supervisor.close(),
+            timeout_seconds=MEMORY_PROVIDER_CLOSE_TIMEOUT_SECONDS,
+            label="provider stop",
+        )
+        if not provider_proved:
+            raise RuntimeError("Memory provider stop did not prove completion")
+        if not local_proved:
+            raise RuntimeError("Memory local cleanup did not prove completion")
+        self._runtime_authority.release()
 
     async def _cancel_capture_tasks(self) -> None:
         cancel_capture = getattr(
@@ -2585,57 +2509,33 @@ class MemoryRuntime:
                 label,
                 timeout_seconds,
             )
-            task.add_done_callback(
-                lambda settled: self._log_late_close_phase(settled, label)
-            )
+            task.add_done_callback(self._log_late_close)
             task.cancel()
             return False
-        try:
-            task.result()
-        except asyncio.CancelledError:
+        if task.cancelled():
             logger.error("Memory %s was cancelled during close", label)
             return False
-        except Exception:
-            logger.exception("Memory %s failed during close", label)
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Memory %s failed during close",
+                label,
+                exc_info=(type(error), error, error.__traceback__),
+            )
             return False
         return True
 
     @staticmethod
-    def _log_late_close_phase(task: asyncio.Task[None], label: str) -> None:
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.error("Memory %s failed after its close budget", label, exc_info=True)
-
-    async def _close_provider_root(self) -> None:
-        if self._provider_close_task is None:
-            self._provider_close_task = asyncio.create_task(
-                self._supervisor.close(),
-                name="memory-provider-root-close",
-            )
-            self._provider_close_task.add_done_callback(
-                self._release_root_after_provider_close
-            )
-        done, _pending = await asyncio.wait(
-            {self._provider_close_task},
-            timeout=MEMORY_PROVIDER_CLOSE_TIMEOUT_SECONDS,
-        )
-        if self._provider_close_task not in done:
-            raise TimeoutError(
-                "Memory provider stop did not complete within its close budget"
-            )
-        self._provider_close_task.result()
-
-    def _release_root_after_provider_close(self, task: asyncio.Task[None]) -> None:
+    def _log_late_close(task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
-        try:
-            task.result()
-        except Exception:
-            return
-        self._runtime_authority.release()
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "%s failed after its close budget",
+                task.get_name(),
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     @staticmethod
     async def _join_shutdown_task(
@@ -2658,7 +2558,6 @@ class MemoryRuntime:
     async def _close_local_runtime(self) -> None:
         """Settle local tasks without deciding provider-root ownership."""
 
-        cleanup_error: BaseException | None = None
         wake = self._wake_task
         if wake is not None and wake is not asyncio.current_task():
             if not wake.done():
@@ -2678,24 +2577,10 @@ class MemoryRuntime:
                 pass
         if self._module is not None:
             self._module.pause_claims()
-            try:
-                await self._close_writer()
-            except BaseException as error:
-                cleanup_error = error
             async with self._module.provider_root_lifecycle():
-                try:
-                    if (
-                        self._retired
-                        and not await self._module.quiesce_claims_for_destructive_reset()
-                    ):
-                        raise RuntimeError(
-                            "Memory writer did not quiesce during retired close"
-                        )
-                    await self._module.close_writer()
-                except BaseException as error:
-                    cleanup_error = cleanup_error or error
-        if cleanup_error is not None:
-            raise cleanup_error
+                if not await self._module.quiesce_claims_for_destructive_reset():
+                    raise RuntimeError("Memory writer did not quiesce during close")
+                await self._module.close_writer()
 
     def _active_provider_root_metadata(self) -> ProviderRootMetadata:
         provider_root_format = (
@@ -2721,8 +2606,7 @@ class MemoryRuntime:
     ) -> None:
         """Reject a launch after this runtime's root authority was revoked."""
 
-        if not self._accepts_lifecycle_work():
-            raise ProviderRootError("Memory runtime authority was revoked")
+        self._require_lifecycle_work()
         self._provider_root_owner.require_owned(meta, active_metadata)
 
     def _coordinate_artifact_activation(
@@ -2922,7 +2806,7 @@ class MemoryRuntime:
         """Prove old ownership ended and reuse the settled runtime when requested."""
 
         await self._supervisor.stop()
-        if recover and not self._closing and not self._retired:
+        if recover and not self._closing:
             self._defer_wake_until_writer_closed()
         return True
 

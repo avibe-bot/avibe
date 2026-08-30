@@ -73,7 +73,6 @@ class _Runtime:
     def __init__(self, module) -> None:
         self.module = module
         self.available = True
-        self.retired = False
         self.attachment_status = "ready"
         self.attachment_generation: int | None = 1
         self.barrier_offers = 0
