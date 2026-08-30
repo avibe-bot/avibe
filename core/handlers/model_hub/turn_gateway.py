@@ -7,9 +7,9 @@ import json
 import logging
 import socket
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Final, Optional
 
@@ -43,6 +43,11 @@ from .stream_wire import (
     observe_protocol_response,
     render_protocol_terminal_event,
     render_protocol_terminal_frame,
+)
+from .tool_names import (
+    StreamingToolNameRewriter,
+    rewrite_buffered_tool_names,
+    translate_opencode_tool_names,
 )
 from .usage import BoundedUsageLedger, UsageWriter
 from .service import (
@@ -115,6 +120,9 @@ class _TurnExecution:
     # the record that this turn has already been metered. A flag would only say
     # the write was started by something whose own death could still take it.
     usage_write: asyncio.Future[None] | None = None
+    # OpenCode owns its public tool names; the gateway may use collision-free
+    # upstream aliases, but those names must never escape back to OpenCode.
+    response_tool_aliases: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def upstream_observation(self) -> ProtocolSSEState | None:
@@ -648,6 +656,10 @@ class ModelHubTurnGateway:
             protocol_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in _PROTOCOL_HEADERS
             }
+            if backend == "opencode" and _REQUEST_PROTOCOLS[endpoint] == "openai_chat":
+                translation = translate_opencode_tool_names(payload)
+                payload = translation.request
+                execution.response_tool_aliases = translation.response_aliases
             resolved = await self.service.resolve(
                 backend=backend,
                 model_id=resolution_model,
@@ -748,7 +760,10 @@ class ModelHubTurnGateway:
                 )
             return web.Response(
                 status=200,
-                body=bytes(payload),
+                body=rewrite_buffered_tool_names(
+                    bytes(payload),
+                    execution.response_tool_aliases,
+                ),
                 content_type="application/json",
                 headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
             )
@@ -765,12 +780,18 @@ class ModelHubTurnGateway:
         await self._downstream_io(response.prepare(request))
         wire_state = ProtocolSSEState(protocol)
         execution.wire_state = wire_state
+        tool_name_rewriter = StreamingToolNameRewriter(execution.response_tool_aliases)
         async for chunk in handle.stream:
             output_started_before = wire_state.model_output_started
             wire_state.observe(chunk)
             if wire_state.model_output_started and not output_started_before:
                 terminalizer.mark_stream_started()
-            await self._downstream_io(response.write(chunk))
+            rewritten = tool_name_rewriter.feed(chunk)
+            if rewritten:
+                await self._downstream_io(response.write(rewritten))
+        trailing = tool_name_rewriter.finish()
+        if trailing:
+            await self._downstream_io(response.write(trailing))
         execution.completed_at = self._now()
         _outcome, _settlement, rendered = await self._settle_metered_turn(
             execution,

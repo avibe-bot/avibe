@@ -74,6 +74,20 @@ class SSEFrameTokenizer:
         self._stream_prefix.clear()
         return line_open
 
+    def drain_partial_frame(self) -> bytes:
+        """Return and clear any unterminated bytes in normalized SSE form."""
+
+        if not self._stream_started:
+            pending = bytes(self._stream_prefix)
+        else:
+            pending = b"\n".join((*self._frame_lines, bytes(self._line)))
+        self._line.clear()
+        self._frame_lines.clear()
+        self._frame_size = 0
+        self._after_cr = False
+        self._stream_prefix.clear()
+        return pending
+
     def _finish_line(self, frames: list[bytes]) -> None:
         line = bytes(self._line)
         self._line.clear()

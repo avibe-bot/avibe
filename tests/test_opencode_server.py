@@ -123,6 +123,39 @@ class _FakeSession:
 
 
 class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        process = types.SimpleNamespace(pid=4321, returncode=None)
+        manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        manager._write_pid_file = Mock()  # type: ignore[method-assign]
+        manager._clear_pid_file = Mock()  # type: ignore[method-assign]
+        manager._apply_resource_governance = Mock()  # type: ignore[method-assign]
+        terminate = AsyncMock()
+
+        with (
+            patch.object(
+                SERVER_MODULE.asyncio,
+                "create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch.object(SERVER_MODULE.asyncio, "sleep", AsyncMock()),
+            patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 61.0]),
+            patch.object(SERVER_MODULE, "server_environment", return_value={}),
+            patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed to start within 60s"):
+                await manager._start_server()
+
+        terminate.assert_awaited_once_with(
+            process,
+            SERVER_MODULE.logger,
+            "OpenCode server after startup timeout",
+            terminate_timeout=5,
+        )
+        self.assertEqual(manager._clear_pid_file.call_count, 2)
+        self.assertIsNone(manager._process)
+        self.assertIsNone(manager._process_loop)
+
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pid_file = Path(tmp_dir) / "opencode_server.json"
