@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import MutableMapping, MutableSequence
 import csv
 from email import policy
 from email.parser import BytesParser
@@ -253,6 +254,27 @@ def _pin_sdist(
         pinned_content,
     )
 
+    pyproject_indexes = [
+        index
+        for index, (member, _content) in enumerate(entries)
+        if member.isfile() and PurePosixPath(member.name).name == "pyproject.toml"
+    ]
+    if len(pyproject_indexes) != 1:
+        raise RuntimeError(f"Sdist must contain exactly one pyproject.toml file: {artifact.name}")
+    pyproject_index = pyproject_indexes[0]
+    member, content = entries[pyproject_index]
+    if content is None:
+        raise RuntimeError(f"Sdist pyproject.toml is unreadable: {artifact.name}")
+    pinned_content = _pin_sdist_build_input(
+        content,
+        project_name=project_name,
+        peer_name=peer_name,
+        package_version=package_version,
+        peer_extra=peer_extra,
+    )
+    member.size = len(pinned_content)
+    entries[pyproject_index] = (member, pinned_content)
+
     temporary = _temporary_artifact_path(artifact)
     try:
         with tarfile.open(temporary, "w:gz", format=tarfile.PAX_FORMAT, pax_headers=pax_headers) as sdist:
@@ -261,6 +283,97 @@ def _pin_sdist(
         os.replace(temporary, artifact)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _pin_sdist_build_input(
+    content: bytes,
+    *,
+    project_name: str,
+    peer_name: str,
+    package_version: str,
+    peer_extra: str | None,
+) -> bytes:
+    try:
+        import tomlkit
+
+        document = tomlkit.parse(content.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"{project_name} sdist has an invalid pyproject.toml") from exc
+
+    project = document.get("project")
+    if not isinstance(project, MutableMapping):
+        raise RuntimeError(f"{project_name} sdist pyproject.toml has no project table")
+    metadata_name = project.get("name")
+    if not isinstance(metadata_name, str) or canonicalize_name(metadata_name) != canonicalize_name(project_name):
+        raise RuntimeError(f"Sdist build input is not for {project_name}")
+
+    dependencies = _project_peer_dependencies(project, project_name=project_name, peer_extra=peer_extra)
+    peer_index, peer_requirement = _find_peer_requirement(
+        dependencies,
+        project_name=project_name,
+        peer_name=peer_name,
+    )
+    if peer_requirement.url or peer_requirement.extras or peer_requirement.marker is not None:
+        raise RuntimeError(f"{project_name} sdist cannot exact-pin a qualified {peer_name} dependency")
+    dependencies[peer_index] = f"{peer_name}=={package_version}"
+
+    pinned = tomlkit.dumps(document).encode("utf-8")
+    verified = tomlkit.parse(pinned.decode("utf-8"))["project"]
+    verified_dependencies = _project_peer_dependencies(
+        verified,
+        project_name=project_name,
+        peer_extra=peer_extra,
+    )
+    _index, verified_requirement = _find_peer_requirement(
+        verified_dependencies,
+        project_name=project_name,
+        peer_name=peer_name,
+    )
+    if str(verified_requirement.specifier) != f"=={package_version}" or verified_requirement.marker is not None:
+        raise RuntimeError(f"{project_name} sdist build input did not retain the exact {peer_name} pin")
+    return pinned
+
+
+def _project_peer_dependencies(
+    project: MutableMapping,
+    *,
+    project_name: str,
+    peer_extra: str | None,
+) -> MutableSequence:
+    if peer_extra is None:
+        dependencies = project.get("dependencies")
+    else:
+        optional = project.get("optional-dependencies")
+        dependencies = optional.get(peer_extra) if isinstance(optional, MutableMapping) else None
+    if not isinstance(dependencies, MutableSequence):
+        label = "dependencies" if peer_extra is None else f"optional-dependencies.{peer_extra}"
+        raise RuntimeError(f"{project_name} sdist pyproject.toml has no {label} array")
+    return dependencies
+
+
+def _find_peer_requirement(
+    dependencies: MutableSequence,
+    *,
+    project_name: str,
+    peer_name: str,
+) -> tuple[int, Requirement]:
+    parsed: list[Requirement] = []
+    for value in dependencies:
+        if not isinstance(value, str):
+            raise RuntimeError(f"{project_name} sdist emitted a non-string dependency")
+        try:
+            parsed.append(Requirement(value))
+        except InvalidRequirement as exc:
+            raise RuntimeError(f"{project_name} sdist emitted an invalid dependency: {value}") from exc
+    peer_indexes = [
+        index
+        for index, requirement in enumerate(parsed)
+        if canonicalize_name(requirement.name) == canonicalize_name(peer_name)
+    ]
+    if len(peer_indexes) != 1:
+        raise RuntimeError(f"{project_name} sdist must declare exactly one {peer_name} dependency")
+    peer_index = peer_indexes[0]
+    return peer_index, parsed[peer_index]
 
 
 def _temporary_artifact_path(artifact: Path) -> Path:

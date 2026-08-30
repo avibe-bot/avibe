@@ -7,7 +7,6 @@ import hashlib
 import io
 import os
 from pathlib import Path
-import site
 import subprocess
 import sys
 import tarfile
@@ -93,18 +92,64 @@ def _wheel_metadata(wheel: Path) -> tuple[set[str], Any]:
 
 
 def _sdist_metadata(wheel: Path, distribution: str) -> Any:
+    sdist = _sdist_path(wheel, distribution)
+    with tarfile.open(sdist, "r:gz") as archive:
+        metadata = _sdist_member(archive, "PKG-INFO")
+        return Parser().parsestr(metadata.decode("utf-8"))
+
+
+def _sdist_project(wheel: Path, distribution: str) -> dict[str, Any]:
+    sdist = _sdist_path(wheel, distribution)
+    with tarfile.open(sdist, "r:gz") as archive:
+        return tomllib.loads(_sdist_member(archive, "pyproject.toml").decode("utf-8"))["project"]
+
+
+def _sdist_path(wheel: Path, distribution: str) -> Path:
     matches = list(wheel.parent.glob(f"{distribution}-*.tar.gz"))
     assert len(matches) == 1
-    with tarfile.open(matches[0], "r:gz") as archive:
-        metadata_members = [
-            member
-            for member in archive.getmembers()
-            if member.isfile() and Path(member.name).name == "PKG-INFO"
-        ]
-        assert len(metadata_members) == 1
-        metadata_file = archive.extractfile(metadata_members[0])
-        assert metadata_file is not None
-        return Parser().parsestr(metadata_file.read().decode("utf-8"))
+    return matches[0]
+
+
+def _sdist_member(archive: tarfile.TarFile, name: str) -> bytes:
+    matches = [
+        member
+        for member in archive.getmembers()
+        if member.isfile() and Path(member.name).name == name
+    ]
+    assert len(matches) == 1
+    member_file = archive.extractfile(matches[0])
+    assert member_file is not None
+    return member_file.read()
+
+
+def _write_minimal_wheel(directory: Path, distribution: str, version: str) -> Path:
+    normalized = distribution.replace("-", "_")
+    dist_info = f"{normalized}-{version}.dist-info"
+    wheel = directory / f"{normalized}-{version}-py3-none-any.whl"
+    entries = {
+        f"{dist_info}/METADATA": f"Metadata-Version: 2.4\nName: {distribution}\nVersion: {version}\n\n",
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\n"
+            "Generator: avibe-package-contract-test\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: py3-none-any\n\n"
+        ),
+    }
+    entries[f"{dist_info}/RECORD"] = "".join(f"{name},,\n" for name in entries) + f"{dist_info}/RECORD,,\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return wheel
+
+
+def _parent_site_packages() -> list[Path]:
+    paths = [
+        path
+        for value in sys.path
+        if value and (path := Path(value).resolve()).name in {"site-packages", "dist-packages"}
+    ]
+    assert paths
+    return paths
 
 
 def _run(python: Path, *args: str, cwd: Path) -> None:
@@ -337,6 +382,8 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
     memory_names, memory_metadata = _wheel_metadata(memory_wheel)
     core_sdist_metadata = _sdist_metadata(core_wheel, "avibe_os")
     memory_sdist_metadata = _sdist_metadata(memory_wheel, "avibe_memory")
+    core_sdist_project = _sdist_project(core_wheel, "avibe_os")
+    memory_sdist_project = _sdist_project(memory_wheel, "avibe_memory")
 
     assert core_metadata["Name"] == "avibe-os"
     assert memory_metadata["Name"] == "avibe-memory"
@@ -379,6 +426,13 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
         assert str(host_requirement.specifier) == f"=={memory_version}"
         assert host_requirement.marker is None
 
+    core_build_requirement = _requirement(core_sdist_project["optional-dependencies"]["memory"], "avibe-memory")
+    memory_build_requirement = _requirement(memory_sdist_project["dependencies"], "avibe-os")
+    assert str(core_build_requirement.specifier) == f"=={core_version}"
+    assert core_build_requirement.marker is None
+    assert str(memory_build_requirement.specifier) == f"=={memory_version}"
+    assert memory_build_requirement.marker is None
+
 
 def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:
     core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
@@ -399,7 +453,7 @@ def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path
         text=True,
     ).stdout.strip()
     Path(child_site_packages, "avibe-test-environment.pth").write_text(
-        "".join(f"{path}\n" for path in site.getsitepackages()),
+        "".join(f"{path}\n" for path in _parent_site_packages()),
         encoding="utf-8",
     )
     _run(
@@ -425,6 +479,64 @@ def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path
         "--find-links",
         str(memory_wheel.parent),
         f"avibe-os[memory]=={core_version}",
+        cwd=tmp_path,
+    )
+    _run(
+        python,
+        "-c",
+        (
+            "from importlib.metadata import version; "
+            f"assert version('avibe-os') == version('avibe-memory') == {str(core_version)!r}"
+        ),
+        cwd=tmp_path,
+    )
+
+
+def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
+    core_sdist = _sdist_path(core_wheel, "avibe_os")
+    memory_sdist = _sdist_path(memory_wheel, "avibe_memory")
+    core_version = Version(_sdist_metadata(core_wheel, "avibe_os")["Version"])
+    decoy_version = Version("3.0.99rc2")
+    assert decoy_version > core_version
+
+    links = tmp_path / "links"
+    links.mkdir()
+    _write_minimal_wheel(links, "avibe-memory", str(decoy_version))
+
+    environment = tmp_path / "sdist-resolver"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    child_site_packages = subprocess.run(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    Path(child_site_packages, "avibe-test-build-environment.pth").write_text(
+        "".join(f"{path}\n" for path in _parent_site_packages()),
+        encoding="utf-8",
+    )
+
+    _run(
+        python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-build-isolation",
+        "--no-index",
+        "--find-links",
+        str(memory_sdist.parent),
+        "--find-links",
+        str(links),
+        f"avibe-os[memory] @ {core_sdist.as_uri()}",
         cwd=tmp_path,
     )
     _run(
