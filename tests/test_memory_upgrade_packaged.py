@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import base64
-import csv
-import hashlib
-import io
 import os
-import re
 import shutil
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -34,41 +28,8 @@ def _wheel(project: Path, version: str, wheelhouse: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def _pin_host_memory_extra(wheel: Path, version: str) -> None:
-    """Give each fixture host release its own target-owned Memory pin."""
-
-    with zipfile.ZipFile(wheel) as archive:
-        entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
-    metadata_name = next(name for name in entries if name.endswith(".dist-info/METADATA"))
-    record_name = next(name for name in entries if name.endswith(".dist-info/RECORD"))
-    metadata = re.sub(
-        rb"Requires-Dist: avibe-memory[^\r\n]*",
-        f'Requires-Dist: avibe-memory=={version}; extra == "memory"'.encode(),
-        entries[metadata_name],
-    )
-    assert metadata != entries[metadata_name]
-    entries[metadata_name] = metadata
-
-    rows = list(csv.reader(io.StringIO(entries[record_name].decode())))
-    digest = base64.urlsafe_b64encode(hashlib.sha256(metadata).digest()).rstrip(b"=").decode()
-    for row in rows:
-        if row[0] == metadata_name:
-            row[1:] = [f"sha256={digest}", str(len(metadata))]
-        elif row[0] == record_name:
-            row[1:] = ["", ""]
-    record = io.StringIO()
-    csv.writer(record, lineterminator="\n").writerows(rows)
-    entries[record_name] = record.getvalue().encode()
-
-    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for name, payload in entries.items():
-            archive.writestr(name, payload)
-
-
 def _build_release_wheels(version: str, wheelhouse: Path) -> None:
     _wheel(ROOT, version, wheelhouse)
-    host_wheel = next(wheelhouse.glob(f"avibe_os-{version}-*.whl"))
-    _pin_host_memory_extra(host_wheel, version)
     _wheel(ROOT / "packaging" / "avibe-memory", version, wheelhouse)
 
 

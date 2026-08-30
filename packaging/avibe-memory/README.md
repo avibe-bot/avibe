@@ -7,9 +7,17 @@ Install it through the host extra so the resolver selects a compatible pair:
 pip install "avibe-os[memory]"
 ```
 
-The `3.0.x` package line implements Memory runtime protocol `1` and requires
-`avibe-os>=3.0.14.dev0,<3.1`. The host extra applies the same compatibility
-range to this distribution.
+The `3.0.x` package line implements Memory runtime protocol `1`. Every built
+wheel and sdist requires the peer distribution at exactly the same normalized
+version: `avibe-memory==X` requires `avibe-os==X`, and the `memory` extra on
+`avibe-os==X` requires `avibe-memory==X`. This is the same identity used by the
+Dependencies readiness check.
+
+The source projects retain the `>=3.0.14.dev0,<3.1` compatibility window so a
+source or editable checkout can use an available development peer before that
+exact version is published. The Hatch build hooks replace that development
+range in every publishable artifact and fail the build unless the resulting
+metadata contains the reciprocal exact pin.
 
 ## Distribution contract
 

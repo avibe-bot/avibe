@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import base64
+import csv
 from email.parser import Parser
+import hashlib
+import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tarfile
 from typing import Any
 import zipfile
 
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
-from packaging.utils import canonicalize_name
+from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 import pytest
 import yaml
+
+from hatch_exact_peer import pin_peer_dependency
 
 try:
     import tomllib
@@ -24,11 +32,16 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PROJECT = ROOT / "packaging" / "avibe-memory"
 COMPATIBILITY = SpecifierSet(">=3.0.14.dev0,<3.1")
+PACKAGE_CONTRACT_VERSION = Version("3.0.99rc1")
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
 
 
 def _project(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))["project"]
+
+
+def _build_system(path: Path) -> dict[str, Any]:
+    return tomllib.loads(path.read_text(encoding="utf-8"))["build-system"]
 
 
 def _workflow(name: str) -> dict[str, Any]:
@@ -71,10 +84,106 @@ def _wheel_metadata(wheel: Path) -> tuple[set[str], Any]:
         names = set(archive.namelist())
         metadata_paths = [name for name in names if name.endswith(".dist-info/METADATA")]
         assert len(metadata_paths) == 1
-        metadata = Parser().parsestr(
-            archive.read(metadata_paths[0]).decode("utf-8")
-        )
+        metadata_content = archive.read(metadata_paths[0])
+        metadata = Parser().parsestr(metadata_content.decode("utf-8"))
+        record_paths = [name for name in names if name.endswith(".dist-info/RECORD")]
+        assert len(record_paths) == 1
+        record = list(csv.reader(io.StringIO(archive.read(record_paths[0]).decode("utf-8"))))
+        metadata_record = [row for row in record if row and row[0] == metadata_paths[0]]
+        assert len(metadata_record) == 1
+        digest = base64.urlsafe_b64encode(hashlib.sha256(metadata_content).digest()).rstrip(b"=").decode("ascii")
+        assert metadata_record[0][1:] == [f"sha256={digest}", str(len(metadata_content))]
     return names, metadata
+
+
+def _sdist_metadata(wheel: Path, distribution: str) -> Any:
+    sdist = _sdist_path(wheel, distribution)
+    with tarfile.open(sdist, "r:gz") as archive:
+        metadata = _sdist_member(archive, "PKG-INFO")
+        return Parser().parsestr(metadata.decode("utf-8"))
+
+
+def _sdist_pyproject(wheel: Path, distribution: str) -> dict[str, Any]:
+    sdist = _sdist_path(wheel, distribution)
+    with tarfile.open(sdist, "r:gz") as archive:
+        return tomllib.loads(_sdist_member(archive, "pyproject.toml").decode("utf-8"))
+
+
+def _sdist_path(wheel: Path, distribution: str) -> Path:
+    matches = list(wheel.parent.glob(f"{distribution}-*.tar.gz"))
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _sdist_member(archive: tarfile.TarFile, name: str) -> bytes:
+    matches = [
+        member
+        for member in archive.getmembers()
+        if member.isfile() and Path(member.name).name == name
+    ]
+    assert len(matches) == 1
+    member_file = archive.extractfile(matches[0])
+    assert member_file is not None
+    return member_file.read()
+
+
+def _write_minimal_wheel(directory: Path, distribution: str, version: str) -> Path:
+    normalized = distribution.replace("-", "_")
+    dist_info = f"{normalized}-{version}.dist-info"
+    wheel = directory / f"{normalized}-{version}-py3-none-any.whl"
+    entries = {
+        f"{dist_info}/METADATA": f"Metadata-Version: 2.4\nName: {distribution}\nVersion: {version}\n\n",
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\n"
+            "Generator: avibe-package-contract-test\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: py3-none-any\n\n"
+        ),
+    }
+    entries[f"{dist_info}/RECORD"] = "".join(f"{name},,\n" for name in entries) + f"{dist_info}/RECORD,,\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return wheel
+
+
+def _parent_site_packages() -> list[Path]:
+    paths = [
+        path
+        for value in sys.path
+        if value and (path := Path(value).resolve()).name in {"site-packages", "dist-packages"}
+    ]
+    assert paths
+    return paths
+
+
+def _provision_build_requirement_wheelhouse(pyprojects: tuple[dict[str, Any], ...], directory: Path) -> None:
+    requirements = sorted(
+        {
+            value
+            for pyproject in pyprojects
+            for value in pyproject["build-system"]["requires"]
+        }
+    )
+    parsed = [Requirement(value) for value in requirements]
+    directory.mkdir()
+    _run(
+        Path(sys.executable),
+        "-m",
+        "pip",
+        "download",
+        "--disable-pip-version-check",
+        "--only-binary=:all:",
+        "--dest",
+        str(directory),
+        *requirements,
+        cwd=directory.parent,
+    )
+
+    wheels = list(directory.glob("*.whl"))
+    assert wheels
+    downloaded_names = {canonicalize_name(parse_wheel_filename(wheel.name)[0]) for wheel in wheels}
+    assert {canonicalize_name(requirement.name) for requirement in parsed} <= downloaded_names
 
 
 def _run(python: Path, *args: str, cwd: Path) -> None:
@@ -90,7 +199,7 @@ def _run(python: Path, *args: str, cwd: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_memory_extra_and_distribution_share_one_compatibility_window() -> None:
+def test_source_metadata_preserves_the_developer_compatibility_window() -> None:
     host = _project(ROOT / "pyproject.toml")
     memory = _project(MEMORY_PROJECT / "pyproject.toml")
 
@@ -99,6 +208,49 @@ def test_memory_extra_and_distribution_share_one_compatibility_window() -> None:
 
     assert memory_requirement.specifier == COMPATIBILITY
     assert host_requirement.specifier == COMPATIBILITY
+
+
+def test_sdist_rewriter_is_an_explicit_isolated_build_requirement() -> None:
+    for pyproject in (ROOT / "pyproject.toml", MEMORY_PROJECT / "pyproject.toml"):
+        requirement = _requirement(_build_system(pyproject)["requires"], "tomlkit")
+        assert str(requirement.specifier) == ">=0.11.1"
+
+
+def test_pr_artifact_build_uses_an_explicit_prerelease_contract_version() -> None:
+    step = _step(_workflow("lint.yml")["jobs"]["build-linux-artifacts"], "Build package artifact")
+    environment = step["env"]
+
+    assert Version(environment["AVIBE_PACKAGE_CONTRACT_VERSION"]) == PACKAGE_CONTRACT_VERSION
+    assert PACKAGE_CONTRACT_VERSION.is_prerelease
+    assert environment["SETUPTOOLS_SCM_PRETEND_VERSION"] == str(PACKAGE_CONTRACT_VERSION)
+    assert environment["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS"] == str(PACKAGE_CONTRACT_VERSION)
+    assert environment["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY"] == str(PACKAGE_CONTRACT_VERSION)
+    assert "python -m build\n" in step["run"]
+
+
+def test_publishable_metadata_without_the_peer_contract_fails_closed(tmp_path: Path) -> None:
+    wheel = tmp_path / "avibe_os-3.0.99rc1-py3-none-any.whl"
+    dist_info = "avibe_os-3.0.99rc1.dist-info"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            f"{dist_info}/METADATA",
+            "Metadata-Version: 2.4\nName: avibe-os\nVersion: 3.0.99rc1\n\n",
+        )
+        archive.writestr(
+            f"{dist_info}/RECORD",
+            f"{dist_info}/METADATA,,\n{dist_info}/RECORD,,\n",
+        )
+
+    with pytest.raises(RuntimeError, match="exactly one avibe-memory dependency"):
+        pin_peer_dependency(
+            str(wheel),
+            project_name="avibe-os",
+            peer_name="avibe-memory",
+            package_version="3.0.99rc1",
+            peer_extra="memory",
+        )
+
+    assert not wheel.exists()
 
 
 def test_distribution_release_contract_is_forward_only_and_memory_first() -> None:
@@ -263,11 +415,17 @@ def test_each_trusted_publisher_receives_only_its_distribution(
     assert publish_steps[0]["with"]["skip-existing"] is True
 
 
-def test_built_wheels_have_independent_contents_and_compatible_metadata() -> None:
+def test_built_distributions_have_independent_contents_and_exact_peer_metadata() -> None:
     core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
     memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
     core_names, core_metadata = _wheel_metadata(core_wheel)
     memory_names, memory_metadata = _wheel_metadata(memory_wheel)
+    core_sdist_metadata = _sdist_metadata(core_wheel, "avibe_os")
+    memory_sdist_metadata = _sdist_metadata(memory_wheel, "avibe_memory")
+    core_sdist_pyproject = _sdist_pyproject(core_wheel, "avibe_os")
+    memory_sdist_pyproject = _sdist_pyproject(memory_wheel, "avibe_memory")
+    core_sdist_project = core_sdist_pyproject["project"]
+    memory_sdist_project = memory_sdist_pyproject["project"]
 
     assert core_metadata["Name"] == "avibe-os"
     assert memory_metadata["Name"] == "avibe-memory"
@@ -290,20 +448,160 @@ def test_built_wheels_have_independent_contents_and_compatible_metadata() -> Non
             ROOT / "vibe/memory_runtime_manifest.json"
         ).read_bytes()
 
-    core_requires = core_metadata.get_all("Requires-Dist") or []
-    memory_requires = memory_metadata.get_all("Requires-Dist") or []
-    memory_requirement = _requirement(core_requires, "avibe-memory")
-    host_requirement = _requirement(memory_requires, "avibe-os")
     core_version = Version(core_metadata["Version"])
     memory_version = Version(memory_metadata["Version"])
-
-    assert memory_requirement.specifier == COMPATIBILITY
-    assert memory_requirement.marker is not None
-    assert memory_requirement.marker.evaluate({"extra": "memory"})
-    assert memory_version in memory_requirement.specifier
-    assert host_requirement.specifier == COMPATIBILITY
-    assert core_version in host_requirement.specifier
     assert memory_version == core_version
+    explicit_version = os.environ.get("AVIBE_PACKAGE_CONTRACT_VERSION")
+    if explicit_version is not None:
+        assert core_version == Version(explicit_version) == PACKAGE_CONTRACT_VERSION
+
+    for metadata in (core_metadata, core_sdist_metadata):
+        assert Version(metadata["Version"]) == core_version
+        memory_requirement = _requirement(metadata.get_all("Requires-Dist") or [], "avibe-memory")
+        assert str(memory_requirement.specifier) == f"=={core_version}"
+        assert memory_requirement.marker is not None
+        assert memory_requirement.marker.evaluate({"extra": "memory"})
+        assert not memory_requirement.marker.evaluate({"extra": "not-memory"})
+    for metadata in (memory_metadata, memory_sdist_metadata):
+        assert Version(metadata["Version"]) == memory_version
+        host_requirement = _requirement(metadata.get_all("Requires-Dist") or [], "avibe-os")
+        assert str(host_requirement.specifier) == f"=={memory_version}"
+        assert host_requirement.marker is None
+
+    core_build_requirement = _requirement(core_sdist_project["optional-dependencies"]["memory"], "avibe-memory")
+    memory_build_requirement = _requirement(memory_sdist_project["dependencies"], "avibe-os")
+    assert str(core_build_requirement.specifier) == f"=={core_version}"
+    assert core_build_requirement.marker is None
+    assert str(memory_build_requirement.specifier) == f"=={memory_version}"
+    assert memory_build_requirement.marker is None
+    for pyproject in (core_sdist_pyproject, memory_sdist_pyproject):
+        build_requirement = _requirement(pyproject["build-system"]["requires"], "tomlkit")
+        assert str(build_requirement.specifier) == ">=0.11.1"
+
+
+def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
+    core_version = Version(_wheel_metadata(core_wheel)[1]["Version"])
+    environment = tmp_path / "same-version-resolver"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    child_site_packages = subprocess.run(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    Path(child_site_packages, "avibe-test-environment.pth").write_text(
+        "".join(f"{path}\n" for path in _parent_site_packages()),
+        encoding="utf-8",
+    )
+    _run(
+        python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-deps",
+        "--force-reinstall",
+        str(core_wheel),
+        cwd=tmp_path,
+    )
+    _run(
+        python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-index",
+        "--find-links",
+        str(core_wheel.parent),
+        "--find-links",
+        str(memory_wheel.parent),
+        f"avibe-os[memory]=={core_version}",
+        cwd=tmp_path,
+    )
+    _run(
+        python,
+        "-c",
+        (
+            "from importlib.metadata import version; "
+            f"assert version('avibe-os') == version('avibe-memory') == {str(core_version)!r}"
+        ),
+        cwd=tmp_path,
+    )
+
+
+def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
+    core_sdist = _sdist_path(core_wheel, "avibe_os")
+    memory_sdist = _sdist_path(memory_wheel, "avibe_memory")
+    core_pyproject = _sdist_pyproject(core_wheel, "avibe_os")
+    memory_pyproject = _sdist_pyproject(memory_wheel, "avibe_memory")
+    core_version = Version(_sdist_metadata(core_wheel, "avibe_os")["Version"])
+    decoy_version = Version("3.0.99rc2")
+    assert decoy_version > core_version
+
+    package_links = tmp_path / "package-links"
+    package_links.mkdir()
+    shutil.copy2(memory_sdist, package_links / memory_sdist.name)
+    _write_minimal_wheel(package_links, "avibe-memory", str(decoy_version))
+    build_links = tmp_path / "build-links"
+    _provision_build_requirement_wheelhouse((core_pyproject, memory_pyproject), build_links)
+
+    environment = tmp_path / "sdist-resolver"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    child_site_packages = subprocess.run(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    Path(child_site_packages, "avibe-test-runtime-dependencies.pth").write_text(
+        "".join(f"{path}\n" for path in _parent_site_packages()),
+        encoding="utf-8",
+    )
+
+    install_command = [
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-index",
+        "--find-links",
+        str(package_links),
+        "--find-links",
+        str(build_links),
+        f"avibe-os[memory] @ {core_sdist.as_uri()}",
+    ]
+    assert "--no-build-isolation" not in install_command
+    assert install_command.count("--find-links") == 2
+    _run(
+        python,
+        *install_command,
+        cwd=tmp_path,
+    )
+    _run(
+        python,
+        "-c",
+        (
+            "from importlib.metadata import version; "
+            f"assert version('avibe-os') == version('avibe-memory') == {str(core_version)!r}"
+        ),
+        cwd=tmp_path,
+    )
 
 
 @pytest.mark.parametrize("installation", ["core-only", "core+memory"])

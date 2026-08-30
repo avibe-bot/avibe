@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling", "hatch-vcs", "tomlkit>=0.11.1"]
 build-backend = "hatchling.build"
 
 [project]
@@ -127,6 +127,7 @@ include = [
     "modules/**",
     "storage/**",
     "hatch_build.py",
+    "hatch_exact_peer.py",
     "main.py",
     "scripts/prepare_local_show_runtime_manifest.py",
     "scripts/show_runtime_manifest_asset.py",
