@@ -729,6 +729,11 @@ async def probe_models(
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
         raise EngineClientError("model discovery failed", error_type="network_error") from None
+    except OSError as exc:
+        raise EngineClientError(
+            "model discovery failed",
+            error_type=type(exc).__name__,
+        ) from None
     if projected is None:
         raise EngineClientError("model discovery returned an invalid payload")
     data_seen, data_is_array, data_models, fallback_seen, fallback_is_array, fallback_models = projected

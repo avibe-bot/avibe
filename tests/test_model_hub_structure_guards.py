@@ -1604,6 +1604,28 @@ def test_observer_drops_unrecognized_oversized_event_names() -> None:
     assert state.model_output_started is False
 
 
+@pytest.mark.parametrize(
+    "data",
+    (
+        b"[DONE]",
+        b'{"choices":[{"delta":{"content":"hello"}}]}',
+    ),
+)
+def test_oversized_chat_event_name_is_not_the_default_event(data: bytes) -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(
+        b"event: "
+        + b"x" * (SSE_OBSERVATION_EVENT_BYTES + 1)
+        + b"\ndata: "
+        + data
+        + b"\n\n"
+    )
+
+    assert state.terminal_observation() is None
+    assert state.model_output_started is False
+    assert state.tokenizer.retained_bytes == 0
+
+
 @pytest.mark.parametrize("split_at", (1, 2, 3))
 def test_initial_utf8_bom_is_normalized_for_terminal_observation(split_at: int) -> None:
     state = ProtocolSSEState("openai_responses")

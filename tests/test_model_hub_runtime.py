@@ -5475,6 +5475,71 @@ def test_model_discovery_projection_uses_the_request_absolute_deadline(
     asyncio.run(run())
 
 
+def test_model_discovery_translates_local_spool_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        payload = b"x" * (client_module._PRELUDE_MEMORY_BYTES + 1)
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        class UnavailableSpool:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def write(self, data: bytes) -> None:
+                assert len(data) > client_module._PRELUDE_MEMORY_BYTES
+                raise OSError("temporary storage unavailable")
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(
+            client_module.tempfile,
+            "SpooledTemporaryFile",
+            lambda **_: UnavailableSpool(),
+        )
+
+        with pytest.raises(EngineClientError) as caught:
+            await client_module.probe_models(
+                vendor="custom",
+                protocol="openai_responses",
+                base_url="https://api.example.test/v1",
+                secret="secret",
+            )
+
+        assert str(caught.value) == "model discovery failed"
+        assert caught.value.error_type == "OSError"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("vendor", "endpoint"),
     [

@@ -131,6 +131,7 @@ class SSEObservationTokenizer:
     _event_value: bytearray = field(default_factory=bytearray)
     _event_value_too_long: bool = False
     _current_event_name: str | None = None
+    _current_event_name_unknown: bool = False
     _has_data: bool = False
     _data: ProtocolFactProjector | None = None
     _after_cr: bool = False
@@ -255,6 +256,7 @@ class SSEObservationTokenizer:
                                 event_name=self._current_event_name,
                             )
                             if self._data is not None
+                            and not self._current_event_name_unknown
                             else ProtocolObservation()
                         ),
                     )
@@ -271,12 +273,15 @@ class SSEObservationTokenizer:
         if self._line_kind == "event":
             if self._event_value_too_long:
                 self._current_event_name = None
+                self._current_event_name_unknown = True
             else:
                 try:
                     decoded = self._event_value.decode("utf-8")
                     self._current_event_name = decoded or None
+                    self._current_event_name_unknown = False
                 except UnicodeDecodeError:
                     self._current_event_name = None
+                    self._current_event_name_unknown = True
         self._reset_line()
 
     def _start_data_line(self) -> None:
@@ -300,6 +305,7 @@ class SSEObservationTokenizer:
     def _reset_frame(self) -> None:
         self._frame_started = False
         self._current_event_name = None
+        self._current_event_name_unknown = False
         self._has_data = False
         self._data = None
 
