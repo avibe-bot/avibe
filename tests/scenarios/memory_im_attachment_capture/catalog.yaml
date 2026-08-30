@@ -5,6 +5,7 @@ capability:
   canonical_tests:
     - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
     - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py
+    - tests/test_vibe_cli.py
     - tests/test_memory_admission.py
     - tests/test_memory_im_attachments.py
     - tests/test_inbound_attachments.py
@@ -111,3 +112,12 @@ scenarios:
     layer: scenario
     delivery_slice: 9
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_cancelled_unproven_pin_cleanup_disables_only_attachment_intake
+  - id: MEMORY-IM-ATTACH-014
+    name: Doctor reports sidecar-visible Office attachment readiness
+    status: covered
+    kind: observability
+    layer: scenario
+    delivery_slice: 10
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_doctor_reports_office_attachment_readiness_from_sidecar_probe
+    related_tests:
+      - tests/test_memory_modality.py::test_office_probe_uses_sidecar_path_and_macos_fallback

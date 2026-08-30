@@ -128,6 +128,7 @@ DOCTOR_REPAIR_TARGETS = (
     "askill",
     "avault",
     "git-runtime",
+    "memory-runtime",
     "show-runtime",
     "tmux",
 )
@@ -141,6 +142,7 @@ DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
     "askill": "doctor.repair.dryAskill",
     "avault": "doctor.repair.dryAvault",
     "git-runtime": "doctor.repair.dryGitRuntime",
+    "memory-runtime": "doctor.repair.dryMemoryRuntime",
     "show-runtime": "doctor.repair.dryShowRuntime",
     "tmux": "doctor.repair.dryTmux",
 }
@@ -548,6 +550,15 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
     "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
     "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
+}
+_DOCTOR_MEMORY_REASON_I18N_KEYS = {
+    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
+    "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
+    "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
+    "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",
+    "memory_runtime_preparation_scrubber_failed": "memory.cli.reason.runtimePreparationScrubberFailed",
+    "memory_runtime_preparation_sync_contract_failed": "memory.cli.reason.runtimePreparationSyncContractFailed",
+    "memory_runtime_preparation_failed": "memory.cli.reason.runtimePreparationFailed",
 }
 
 
@@ -11075,21 +11086,23 @@ def _add_dependency_download_failure(
 def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     from core.dependency_network import probe_url
 
+    language = _configured_cli_language()
     labels = {
         "askill": "askill",
         "avault": "avault",
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
+        "memory-runtime": i18n_t("doctor.value.memoryRuntime", language),
         "node": "Node.js",
     }
     repair_targets = {
         "askill": "askill",
         "avault": "avault",
         "git-runtime": "git-runtime",
+        "memory-runtime": "memory-runtime",
         "tmux": "tmux",
     }
     items: list[dict] = []
-    language = _configured_cli_language()
     try:
         dependencies = list(api.dependencies_status(offline=True).get("deps") or [])
         from core.git_runtime import git_runtime_status
@@ -11128,6 +11141,14 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         status = str(dependency.get("status") or "missing")
         ready = bool(dependency.get("installed")) and status == "ready"
         version = dependency.get("version")
+        memory_details = (
+            {
+                "dependency_reason": dependency.get("reason"),
+                "dependency_required": bool(dependency.get("required")),
+            }
+            if dependency_id == "memory-runtime"
+            else {}
+        )
         if ready:
             if dependency_id == "git-runtime" and dependency.get("source") == "system":
                 _add_doctor_item(
@@ -11147,6 +11168,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                         version=version,
                     ),
                     code=f"dependencies.{dependency_id}.ready",
+                    dependency_status=status if dependency_id == "memory-runtime" else None,
+                    **memory_details,
                 )
             continue
 
@@ -11163,13 +11186,19 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             continue
 
         dependency_reason = str(dependency.get("reason") or "")
-        if dependency_reason.endswith("_platform_unsupported"):
+        if status == "unsupported" or dependency_reason.endswith("_platform_unsupported"):
             _add_doctor_item(
                 items,
                 severity,
                 i18n_t("doctor.item.dependencyPlatformUnsupported", language, label=label),
                 i18n_t("doctor.action.dependencyPlatformUnsupported", language),
-                code=f"dependencies.{dependency_id}.platform_unsupported",
+                code=(
+                    f"dependencies.{dependency_id}.unsupported"
+                    if dependency_id == "memory-runtime"
+                    else f"dependencies.{dependency_id}.platform_unsupported"
+                ),
+                dependency_status=status if dependency_id == "memory-runtime" else None,
+                **memory_details,
             )
             continue
 
@@ -11210,13 +11239,32 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             severity,
-            i18n_t("doctor.item.dependencyNotReady", language, label=label),
+            (
+                i18n_t(
+                    (
+                        "doctor.item.memoryRuntimeMissing"
+                        if status == "missing"
+                        else "doctor.item.memoryRuntimeError"
+                    ),
+                    language,
+                    reason=_doctor_memory_reason(dependency_reason, language),
+                )
+                if dependency_id == "memory-runtime"
+                else i18n_t("doctor.item.dependencyNotReady", language, label=label)
+            ),
             i18n_t("doctor.action.dependencyNotReady", language, retry=retry_action),
-            code=f"dependencies.{dependency_id}.not_ready",
+            code=(
+                f"dependencies.{dependency_id}.{status}"
+                if dependency_id == "memory-runtime"
+                else f"dependencies.{dependency_id}.not_ready"
+            ),
             repair_target=repair_target,
             repair_risk="low",
             dependency_status=status,
+            **memory_details,
         )
+        if dependency_id == "memory-runtime":
+            continue
         if not deep:
             continue
 
@@ -11274,6 +11322,30 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 code=f"dependencies.{dependency_id}.probe_unavailable",
                 probe_reason=probe.get("reason"),
             )
+    return items
+
+
+def _office_attachment_doctor_items() -> list[dict]:
+    from core.memory.modality import office_conversion_available
+
+    language = _configured_cli_language()
+    available = office_conversion_available()
+    capability_status = "ready" if available else "missing"
+    items: list[dict] = []
+    _add_doctor_item(
+        items,
+        "pass" if available else "warn",
+        i18n_t(
+            (
+                "doctor.item.officeAttachmentsReady"
+                if available
+                else "doctor.item.officeAttachmentsMissing"
+            ),
+            language,
+        ),
+        code=f"dependencies.office-attachments.{capability_status}",
+        capability_status=capability_status,
+    )
     return items
 
 
@@ -12012,6 +12084,7 @@ def _doctor(*, deep: bool = False):
     dependency_items = [
         *_managed_dependencies_doctor_items(deep=deep),
         *_show_runtime_doctor_items(deep=deep),
+        *_office_attachment_doctor_items(),
     ]
     for item in dependency_items:
         status = item.get("status")
@@ -12386,6 +12459,17 @@ def _doctor_display_value(value: object, category: str, language: str) -> str:
     raw_value = str(value or "unknown")
     key = DOCTOR_DISPLAY_PROJECTIONS.get(category, {}).get(raw_value)
     return i18n_t(key, language) if key else i18n_t("doctor.value.unknown", language)
+
+
+def _doctor_memory_reason(reason: object, language: str) -> str:
+    reason_code = reason.strip() if isinstance(reason, str) else ""
+    key = _DOCTOR_MEMORY_REASON_I18N_KEYS.get(
+        reason_code,
+        _MEMORY_CLI_REASON_I18N_KEYS.get(reason_code),
+    )
+    if key:
+        return i18n_t(key, language)
+    return reason_code or i18n_t("doctor.value.unknownError", language)
 
 
 def _doctor_managed_reason_key(reason: str) -> str | None:
@@ -12841,6 +12925,54 @@ def _repair_tmux(*, dry_run: bool = False) -> dict:
     return _repair_managed_dependency("tmux", ensure_tmux_installed, dry_run=dry_run)
 
 
+def _repair_memory_runtime(*, dry_run: bool = False) -> dict:
+    target = "memory-runtime"
+    language = _configured_cli_language()
+    if dry_run:
+        return _doctor_repair_result(
+            target,
+            "planned",
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+        )
+
+    try:
+        from vibe import internal_client
+
+        response = internal_client.memory_install_runtime_sync()
+    except Exception as exc:  # noqa: BLE001
+        return _doctor_repair_result(
+            target,
+            "failed",
+            i18n_t("doctor.repair.memoryRuntimeControllerUnavailable", language, reason=exc),
+            reason="memory_runtime_install_failed",
+        )
+
+    payload = response.get("body") if isinstance(response.get("body"), dict) else {}
+    reason = str(payload.get("reason") or "memory_runtime_install_failed")
+    download_error = (
+        payload.get("download_error")
+        if isinstance(payload.get("download_error"), dict)
+        else None
+    )
+    if response.get("status_code") == 200 and payload.get("ok") is True:
+        return _doctor_repair_result(
+            target,
+            "repaired",
+            i18n_t("doctor.repair.memoryRuntimeReady", language),
+        )
+    return _doctor_repair_result(
+        target,
+        "failed",
+        i18n_t(
+            "doctor.repair.memoryRuntimeFailed",
+            language,
+            reason=_doctor_memory_reason(reason, language),
+        ),
+        reason=reason,
+        download_error=download_error,
+    )
+
+
 def _repair_git_runtime(*, dry_run: bool = False) -> dict:
     from core.git_runtime import GitRuntimeManager
 
@@ -13065,6 +13197,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
         "askill": _repair_askill,
         "avault": _repair_avault,
         "git-runtime": _repair_git_runtime,
+        "memory-runtime": _repair_memory_runtime,
         "show-runtime": _repair_show_runtime,
         "tmux": _repair_tmux,
     }

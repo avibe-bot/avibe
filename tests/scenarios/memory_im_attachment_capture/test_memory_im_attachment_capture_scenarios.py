@@ -554,3 +554,38 @@ def test_enabled_platform_attachment_fact_reaches_memory_admission(
 
     assert facts.is_ordinary_attachment is True
     assert admission.admits_attachment_turn(facts) is True
+
+
+@pytest.mark.parametrize(
+    ("available", "expected_status", "expected_capability_status"),
+    [
+        pytest.param(True, "pass", "ready", id="ready"),
+        pytest.param(False, "warn", "missing", id="missing"),
+    ],
+)
+def test_doctor_reports_office_attachment_readiness_from_sidecar_probe(
+    monkeypatch,
+    available: bool,
+    expected_status: str,
+    expected_capability_status: str,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-014."""
+
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: available,
+    )
+
+    items = cli._office_attachment_doctor_items()
+
+    assert items == [
+        {
+            "status": expected_status,
+            "message": items[0]["message"],
+            "code": f"dependencies.office-attachments.{expected_capability_status}",
+            "capability_status": expected_capability_status,
+        }
+    ]
+    assert "Office" in items[0]["message"]
+    assert "action" not in items[0]
+    assert "repair" not in items[0]
