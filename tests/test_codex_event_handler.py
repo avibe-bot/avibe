@@ -789,24 +789,31 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"CODEX_HOME": tmpdir}):
             handler.snapshot_generated_images("thread-1", "session-1")
             handler.bind_generated_image_snapshot("thread-1", "turn-1", "session-1")
+            items = []
             for item_id in ("image-call-1", "image-call-2"):
+                item = {
+                    "id": item_id,
+                    "type": "imageGeneration",
+                    "status": "completed",
+                    "result": base64.b64encode(image).decode(),
+                }
+                items.append(item)
                 await handler._on_item_completed(
                     {
                         "threadId": "thread-1",
                         "turnId": "turn-1",
-                        "item": {
-                            "id": item_id,
-                            "type": "imageGeneration",
-                            "status": "completed",
-                            "result": base64.b64encode(image).decode(),
-                        },
+                        "item": item,
                     },
                     request,
                 )
             await handler._on_turn_completed(
                 {
                     "threadId": "thread-1",
-                    "turn": {"id": "turn-1", "status": "completed"},
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": items,
+                    },
                 },
                 request,
             )
@@ -818,6 +825,86 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         result = agent.emit_result_message.await_args.args[1]
         assert result.startswith("Image ready.\n\n![generated image](file://")
         assert result.count("![generated image](") == 2
+
+    async def test_terminal_turn_snapshot_persists_image_without_item_notification(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        state = agent._turn_registry.register_turn("turn-1", request)
+        state.pending_assistant = ("Image ready.", "markdown")
+
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        item = {
+            "id": "image-call-1",
+            "type": "imageGeneration",
+            "status": "completed",
+            "result": base64.b64encode(image).decode(),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"CODEX_HOME": tmpdir}):
+            handler.snapshot_generated_images("thread-1", "session-1")
+            handler.bind_generated_image_snapshot("thread-1", "turn-1", "session-1")
+            await handler._on_turn_completed(
+                {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [item],
+                    },
+                },
+                request,
+            )
+
+            generated = list((Path(tmpdir) / "generated_images" / "thread-1").glob("*.png"))
+            assert len(generated) == 1
+            assert generated[0].read_bytes() == image
+
+        result = agent.emit_result_message.await_args.args[1]
+        assert result.startswith("Image ready.\n\n![generated image](file://")
+
+    async def test_terminal_turn_snapshot_replaces_attachment_placeholder(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        state = agent._turn_registry.register_turn("turn-1", request)
+        state.pending_assistant = (
+            "![Generated puppy](attachment://generated-image.png)",
+            "markdown",
+        )
+
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"CODEX_HOME": tmpdir}):
+            handler.snapshot_generated_images("thread-1", "session-1")
+            handler.bind_generated_image_snapshot("thread-1", "turn-1", "session-1")
+            await handler._on_turn_completed(
+                {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {
+                                "id": "image-call-1",
+                                "type": "imageGeneration",
+                                "status": "completed",
+                                "result": base64.b64encode(image).decode(),
+                            }
+                        ],
+                    },
+                },
+                request,
+            )
+
+        result = agent.emit_result_message.await_args.args[1]
+        assert result.startswith("![Generated puppy](file://")
+        assert "attachment://" not in result
+        assert result.count("![") == 1
 
     async def test_inline_image_rejects_invalid_or_unsupported_payloads(self):
         agent = _StubAgent()

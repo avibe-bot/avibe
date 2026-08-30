@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _GENERATED_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".webp"}
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_ATTACHMENT_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(attachment://[^)\s]+\)")
 _ImageSnapshot = dict[Path, tuple[int, int]]
 
 
@@ -214,6 +215,7 @@ class CodexEventHandler:
             self._release_stream_turn(tracked_request.context)
             return
 
+        await asyncio.to_thread(self._persist_turn_generated_images, params)
         pending = turn_state.pending_assistant if turn_state else None
         pending_text = pending[0] if pending else None
         result_text = self._append_generated_images(pending_text, params, tracked_request)
@@ -336,6 +338,17 @@ class CodexEventHandler:
         elif item_type == "imageGeneration":
             await asyncio.to_thread(self._persist_generated_image, params, item)
 
+    def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:
+        turn = params.get("turn")
+        if not isinstance(turn, dict):
+            return
+        items = turn.get("items")
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "imageGeneration":
+                self._persist_generated_image(params, item)
+
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> None:
         recorder = getattr(self._agent, "_record_model_hub_native_failure", None)
         if recorder is not None:
@@ -418,15 +431,26 @@ class CodexEventHandler:
         if not generated:
             return text
 
+        remaining = iter(generated)
+        consumed: set[Path] = set()
+
+        def replace_attachment(match: re.Match[str]) -> str:
+            path = next(remaining, None)
+            if path is None:
+                return match.group(0)
+            consumed.add(path)
+            return f"![{match.group(1)}]({path.as_uri()})"
+
+        rendered_text = _ATTACHMENT_IMAGE_RE.sub(replace_attachment, text or "")
         links = "\n".join(
             f"![generated image]({path.as_uri()})"
             for path in generated
-            if path.as_uri() not in (text or "")
+            if path not in consumed and path.as_uri() not in rendered_text
         )
         if not links:
-            return text
-        if text and text.strip():
-            return f"{text.rstrip()}\n\n{links}"
+            return rendered_text
+        if rendered_text.strip():
+            return f"{rendered_text.rstrip()}\n\n{links}"
         heading = self._t("info.generatedImagesFallback", request)
         return f"{heading}\n\n{links}"
 
