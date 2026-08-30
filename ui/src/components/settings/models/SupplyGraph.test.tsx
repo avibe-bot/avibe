@@ -8,6 +8,7 @@ import type { SupplyRelation } from './supplyRelations';
 
 const relation: SupplyRelation = { sourceId: 'src_a', backend: 'claude', kind: 'gateway' };
 const secondRelation: SupplyRelation = { sourceId: 'src_b', backend: 'claude', kind: 'connected_unused' };
+const codexRelation: SupplyRelation = { sourceId: 'src_a', backend: 'codex', kind: 'gateway' };
 
 const rect = (left: number, top: number, width: number, height: number): DOMRect => ({
   x: left,
@@ -28,6 +29,7 @@ const Fixture: React.FC<{ relations?: SupplyRelation[] }> = ({ relations = [rela
       <div data-source-id="src_a" />
       <div data-source-id="src_b" />
       <div data-agent-backend="claude" />
+      <div data-agent-backend="codex" />
       <SupplyGraph containerRef={ref} relations={relations} />
     </div>
   );
@@ -57,6 +59,7 @@ describe('SupplyGraph', () => {
     const svg = view.container.querySelector('svg');
     expect(svg?.classList.contains('overflow-hidden')).toBe(true);
     expect(svg?.classList.contains('overflow-visible')).toBe(false);
+    expect(svg?.querySelector('.model-hub-rail-line')).toBeNull();
     expect(path.getAttribute('d')).toContain('M 30 15');
 
     sourceTop = 30;
@@ -94,5 +97,36 @@ describe('SupplyGraph', () => {
     view.rerender(<Fixture relations={[secondRelation, relation]} />);
     await waitFor(() => expect(anchorCoordinates()).toEqual(['30:15', '30:35', '90:50']));
     expect(view.container.querySelectorAll('.model-hub-wire-node--gateway, .model-hub-wire-node--connected_unused')).toHaveLength(0);
+  });
+
+  it('highlights only relations connected to the hovered or focused endpoint', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
+      if (this.dataset.testid === 'graph-root') return rect(0, 0, 120, 120);
+      if (this.dataset.sourceId === 'src_a') return rect(10, 10, 20, 10);
+      if (this.dataset.sourceId === 'src_b') return rect(10, 30, 20, 10);
+      if (this.dataset.agentBackend === 'claude') return rect(90, 40, 20, 20);
+      if (this.dataset.agentBackend === 'codex') return rect(90, 80, 20, 20);
+      return rect(0, 0, 0, 0);
+    });
+
+    const view = render(<Fixture relations={[relation, secondRelation, codexRelation]} />);
+    const paths = await waitFor(() => {
+      const elements = Array.from(view.container.querySelectorAll<SVGPathElement>('.model-hub-wire'));
+      expect(elements).toHaveLength(3);
+      return elements;
+    });
+    const highlighted = () => paths.map((path) => path.classList.contains('model-hub-wire--highlighted'));
+    expect(highlighted()).toEqual([false, false, false]);
+
+    fireEvent.pointerOver(view.container.querySelector('[data-source-id="src_a"]') as Element);
+    await waitFor(() => expect(highlighted()).toEqual([true, false, true]));
+
+    fireEvent.pointerOut(view.container.querySelector('[data-source-id="src_a"]') as Element, { relatedTarget: view.container });
+    await waitFor(() => expect(highlighted()).toEqual([false, false, false]));
+
+    fireEvent.focusIn(view.container.querySelector('[data-agent-backend="claude"]') as Element);
+    await waitFor(() => expect(highlighted()).toEqual([true, true, false]));
+    fireEvent.focusOut(view.container.querySelector('[data-agent-backend="claude"]') as Element, { relatedTarget: view.container });
+    await waitFor(() => expect(highlighted()).toEqual([false, false, false]));
   });
 });

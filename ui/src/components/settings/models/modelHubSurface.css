@@ -1814,8 +1814,14 @@
 
 .model-hub-wire {
   fill: none;
+  opacity: 0.24;
   stroke-linecap: round;
   stroke-linejoin: round;
+  transition: opacity 120ms ease;
+}
+
+.model-hub-wire--highlighted {
+  opacity: 1;
 }
 
 .model-hub-wire--native {
@@ -1854,11 +1860,6 @@
   fill: var(--background);
   stroke: var(--model-hub-ink-73);
   stroke-width: var(--model-hub-wire-node-stroke);
-}
-
-.model-hub-rail-line {
-  stroke: color-mix(in srgb, var(--mint) 20%, transparent);
-  stroke-width: 2px;
 }
 
 .model-hub-legend {
