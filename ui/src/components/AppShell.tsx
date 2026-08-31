@@ -34,10 +34,11 @@ import {
 } from '../lib/adminNavigation';
 import {
   closeSettingsOverlay,
+  isSettingsEntryPath,
   isSettingsRoutePath,
-  settingsOverlayOpenState,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
+import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 
 type ShellNavItem = {
   to?: string;
@@ -180,7 +181,9 @@ export const AppShell: React.FC = () => {
   const navigate = useNavigate();
   const settingsOverlayOrigin = useSettingsOverlayOrigin(location);
   const settingsOpen = isSettingsRoutePath(location.pathname);
-  const settingsOverlayOpen = isDesktop && settingsOpen && settingsOverlayOrigin !== null;
+  const settingsOverlayOpen = isDesktop
+    && isSettingsEntryPath(location.pathname)
+    && settingsOverlayOrigin !== null;
   const surfaceLocation = settingsOverlayOpen ? settingsOverlayOrigin.location : location;
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
@@ -357,6 +360,7 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
+    <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider enabled={canUseApps}>
@@ -426,7 +430,6 @@ export const AppShell: React.FC = () => {
                   to={isDesktop
                     ? settingsLandingPath(capabilities.can_manage_instance)
                     : '/settings'}
-                  state={isDesktop ? settingsOverlayOpenState(location) : undefined}
                   title={t('appShell.openControlPanel')}
                   aria-label={t('appShell.openControlPanel')}
                   className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
@@ -562,5 +565,6 @@ export const AppShell: React.FC = () => {
     </DockProvider>
     </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
+    </SettingsOverlayNavigationBoundary>
   );
 };

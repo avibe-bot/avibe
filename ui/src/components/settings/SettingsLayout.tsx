@@ -31,7 +31,6 @@ import { useIsDesktop } from '@/lib/useIsDesktop';
 import {
   closeSettingsOverlay,
   useSettingsOverlayContext,
-  useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
 import { AccountMenu } from '../AccountMenu';
 import { LanguageSwitcher } from '../LanguageSwitcher';
@@ -190,9 +189,7 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
-  const routeOverlayOrigin = useSettingsOverlayOrigin(location);
-  const contextOverlayOrigin = useSettingsOverlayContext();
-  const overlayOrigin = contextOverlayOrigin ?? routeOverlayOrigin;
+  const overlayOrigin = useSettingsOverlayContext();
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);

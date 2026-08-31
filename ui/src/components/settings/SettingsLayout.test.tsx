@@ -3,10 +3,14 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { Location } from 'react-router-dom';
 
-import { settingsOverlayOpenState } from '@/lib/settingsOverlay';
+import {
+  SettingsOverlayOriginContext,
+  settingsOverlayOpenState,
+  useSettingsOverlayOrigin,
+} from '@/lib/settingsOverlay';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -60,12 +64,16 @@ const NavigationProbe = () => {
   );
 };
 
-const SettingsLayoutHarness = () => (
-  <>
-    <SettingsLayout />
-    <NavigationProbe />
-  </>
-);
+const SettingsLayoutHarness = () => {
+  const location = useLocation();
+  const origin = useSettingsOverlayOrigin(location);
+  return (
+    <SettingsOverlayOriginContext.Provider value={origin}>
+      <SettingsLayout />
+      <NavigationProbe />
+    </SettingsOverlayOriginContext.Provider>
+  );
+};
 
 type SettingsTestEntry = string | {
   pathname: string;

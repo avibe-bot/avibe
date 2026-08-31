@@ -10,9 +10,11 @@ import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 export const RouteSurfaceActivityBoundary = ({
   active,
   children,
+  inactiveReplace,
 }: {
   active: boolean;
   children: ReactNode;
+  inactiveReplace?: Navigator['replace'];
 }) => {
   const navigation = useContext(NavigationContext);
   // A retained route owns visual state, not the foreground URL. Deny route
@@ -23,9 +25,9 @@ export const RouteSurfaceActivityBoundary = ({
       ...navigation.navigator,
       go: () => {},
       push: () => {},
-      replace: () => {},
+      replace: inactiveReplace ?? (() => {}),
     };
-  }, [active, navigation.navigator]);
+  }, [active, inactiveReplace, navigation.navigator]);
   const scopedNavigation = useMemo(
     () => ({ ...navigation, navigator }),
     [navigation, navigator],

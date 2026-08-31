@@ -40,3 +40,12 @@ export const LEGACY_SETTINGS_REDIRECTS: LegacySettingsRedirect[] = [
   { from: '/doctor', to: '/settings/diagnostics' },
   { from: '/doctor/logs', to: '/settings/diagnostics/logs' },
 ];
+
+const LEGACY_SETTINGS_ENTRY_PATHS = new Set(
+  LEGACY_SETTINGS_REDIRECTS
+    .filter(({ to }) => to === '/settings' || to.startsWith('/settings/'))
+    .map(({ from }) => from),
+);
+
+export const isLegacySettingsEntryPath = (pathname: string): boolean =>
+  LEGACY_SETTINGS_ENTRY_PATHS.has(pathname);

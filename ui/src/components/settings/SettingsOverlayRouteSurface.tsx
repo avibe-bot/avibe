@@ -1,57 +1,77 @@
+import { useCallback } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import { Route, Routes, useLocation } from 'react-router-dom';
+import { resolvePath, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import type { Navigator } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { RouteSurfaceActivityBoundary } from '@/components/RouteSurfaceActivityBoundary';
-import { useIsDesktop } from '@/lib/useIsDesktop';
 import {
-  isSettingsRoutePath,
+  isSettingsEntryPath,
+  locationPath,
   SettingsOverlayOriginContext,
+  settingsOverlayStateForOrigin,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
 
 type SettingsOverlayRouteSurfaceProps = {
   children: ReactNode;
   fallbackElement: ReactElement;
-  settingsRoute: ReactElement;
 };
 
 export const SettingsOverlayRouteSurface = ({
   children,
   fallbackElement,
-  settingsRoute,
 }: SettingsOverlayRouteSurfaceProps) => {
   const { t } = useTranslation();
   const location = useLocation();
-  const isDesktop = useIsDesktop();
+  const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
-  const overlayOpen = isDesktop && isSettingsRoutePath(location.pathname) && origin !== null;
+  const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
+  const replaceBackground = useCallback<Navigator['replace']>((to, state) => {
+    if (!origin) return;
+    const path = resolvePath(to, origin.location.pathname);
+    const nextOrigin = {
+      ...origin,
+      location: {
+        ...origin.location,
+        ...path,
+        state,
+      },
+    };
+    navigate(locationPath(location), {
+      replace: true,
+      state: settingsOverlayStateForOrigin(nextOrigin, location.state),
+    });
+  }, [location, navigate, origin]);
 
   return (
     <>
       <div
         className="contents"
-        aria-hidden={overlayOpen || undefined}
-        inert={overlayOpen || undefined}
+        aria-hidden={settingsSurfaceOpen || undefined}
+        inert={settingsSurfaceOpen || undefined}
       >
-        <RouteSurfaceActivityBoundary active={!overlayOpen}>
-          <Routes location={overlayOpen ? origin.location : location}>
+        <RouteSurfaceActivityBoundary
+          active={!settingsSurfaceOpen}
+          inactiveReplace={replaceBackground}
+        >
+          <Routes location={settingsSurfaceOpen ? origin.location : location}>
             {children}
             <Route path="*" element={fallbackElement} />
           </Routes>
         </RouteSurfaceActivityBoundary>
       </div>
-      {overlayOpen ? (
+      {settingsSurfaceOpen ? (
         <SettingsOverlayOriginContext.Provider value={origin}>
           <div
             role="dialog"
             aria-label={t('nav.settings')}
             aria-modal="true"
             data-settings-overlay="true"
-            className="fixed inset-y-0 left-[240px] right-0 z-30 overflow-hidden border-l border-border bg-background shadow-2xl"
+            className="fixed inset-y-0 left-0 right-0 z-30 overflow-hidden border-l border-border bg-background shadow-2xl md:left-[240px]"
           >
             <Routes location={location}>
-              {settingsRoute}
+              {children}
               <Route path="*" element={fallbackElement} />
             </Routes>
           </div>

@@ -148,6 +148,7 @@ import {
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
+import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
 import { sessionAgentDisplayName } from './sessionAgentName';
 
 // While a turn is in flight, reconcile the working/Stop state against the
@@ -2427,14 +2428,28 @@ export const ChatPage: React.FC = () => {
   // starts. Clear the state afterwards so a manual page refresh (which preserves
   // history state) doesn't resend it.
   useEffect(() => {
-    const initialMessage = (location.state as { initialMessage?: string } | null)?.initialMessage;
-    if (!initialMessage || !sessionId) return;
-    if (initialHandledSessionRef.current === sessionId) return;
-    if (loading || !session) return;
-    initialHandledSessionRef.current = sessionId;
+    const handoff = pendingInitialMessageHandoff({
+      handledSessionId: initialHandledSessionRef.current,
+      loadedSessionId: session?.id,
+      loading,
+      locationState: location.state,
+      routeSurfaceActive,
+      sessionId,
+    });
+    if (!handoff) return;
+    initialHandledSessionRef.current = handoff.sessionId;
     navigate(location.pathname, { replace: true, state: null });
-    void sendMessage(initialMessage);
-  }, [location.state, location.pathname, loading, session, sessionId, navigate, sendMessage]);
+    void sendMessage(handoff.message);
+  }, [
+    location.state,
+    location.pathname,
+    loading,
+    session?.id,
+    sessionId,
+    navigate,
+    routeSurfaceActive,
+    sendMessage,
+  ]);
 
   // Scoped to the open chat: a write still draining for a session the user has
   // left must not spin the header of the one they are looking at. Either group

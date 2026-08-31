@@ -709,7 +709,6 @@ const settingsRoute = () => (
 const WorkbenchRouteSurface = () => (
   <SettingsOverlayRouteSurface
     fallbackElement={<Navigate to="/" replace />}
-    settingsRoute={settingsRoute()}
   >
     <Route path="/setup" element={<Wizard />} />
 
