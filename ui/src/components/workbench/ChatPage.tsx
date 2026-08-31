@@ -40,6 +40,7 @@ import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
@@ -272,6 +273,7 @@ export const ChatPage: React.FC = () => {
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
+  const routeSurfaceActive = useRouteSurfaceActive();
   const pageActive = usePageActive();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -364,7 +366,7 @@ export const ChatPage: React.FC = () => {
   // user-configured chord such as Ctrl+Z. Starting remains limited to a writable,
   // visible Chat surface; once recording, Composer still accepts the chord as
   // Finish after focus moves elsewhere in this document.
-  const voiceShortcutCanStart = pageActive && writable && !showPageActive;
+  const voiceShortcutCanStart = routeSurfaceActive && pageActive && writable && !showPageActive;
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       composerRef.current?.handleVoiceShortcut(event, voiceShortcutCanStart);
@@ -2394,6 +2396,7 @@ export const ChatPage: React.FC = () => {
     if (!canChat) return;
     if (!canMarkConversationRead({
       pageActive,
+      routeSurfaceActive,
       sessionReady: !loading && session?.id === sessionId,
       viewResolved: showPageViewResolved,
       historicalWindow,
@@ -2412,6 +2415,7 @@ export const ChatPage: React.FC = () => {
     showPageViewResolved,
     historicalWindow,
     pageActive,
+    routeSurfaceActive,
     showPageActive,
     isDesktop,
     foregroundAppWindowId,
@@ -2515,7 +2519,7 @@ export const ChatPage: React.FC = () => {
   // keyboard" — it stays mounted under app windows and dialogs — so a keystroke
   // belonging to a foreground surface is left to that surface (Codex).
   useEffect(() => {
-    if (!canArchive) return;
+    if (!canArchive || !routeSurfaceActive) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (!isArchiveSessionKeydown(e, e.target as Element | null)) return;
       e.preventDefault();
@@ -2523,17 +2527,17 @@ export const ChatPage: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [canArchive, requestArchive]);
+  }, [canArchive, requestArchive, routeSurfaceActive]);
 
   // A keydown inside the Show Page iframe never reaches this window, so the same
   // chord is bound to the frame's own document while it is mounted — otherwise the
   // shortcut silently dies as soon as the user clicks into the page they asked for.
   useEffect(() => {
-    if (!canArchive) return;
+    if (!canArchive || !routeSurfaceActive) return;
     const frame = showPageFrameRef.current;
     if (!frame) return;
     return bindFrameChord(frame, (event) => isArchiveSessionChord(event), requestArchive);
-  }, [canArchive, requestArchive, showPageActive, showPageUrl]);
+  }, [canArchive, requestArchive, routeSurfaceActive, showPageActive, showPageUrl]);
 
   // Ordered media-proxy image URLs across the whole session — feeds the lightbox
   // so it pages left/right through every image, in render order (each message's

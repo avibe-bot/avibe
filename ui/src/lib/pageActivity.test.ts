@@ -412,6 +412,7 @@ describe('canMarkConversationRead', () => {
   it('requires the visible chat transcript to be current and active', () => {
     const visibleTranscript = {
       pageActive: true,
+      routeSurfaceActive: true,
       sessionReady: true,
       viewResolved: true,
       historicalWindow: false,
@@ -421,6 +422,7 @@ describe('canMarkConversationRead', () => {
 
     expect(canMarkConversationRead(visibleTranscript)).toBe(true);
     expect(canMarkConversationRead({ ...visibleTranscript, pageActive: false })).toBe(false);
+    expect(canMarkConversationRead({ ...visibleTranscript, routeSurfaceActive: false })).toBe(false);
     expect(canMarkConversationRead({ ...visibleTranscript, sessionReady: false })).toBe(false);
     expect(canMarkConversationRead({ ...visibleTranscript, viewResolved: false })).toBe(false);
     expect(canMarkConversationRead({ ...visibleTranscript, historicalWindow: true })).toBe(false);

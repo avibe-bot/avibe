@@ -332,9 +332,33 @@ describe('AppShell persistent Workbench chrome', () => {
     await user.click(settingsToggle);
 
     expect(await screen.findByTestId('settings')).toBeTruthy();
-    settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
-    expect(settingsToggle.getAttribute('href')).toBe('/chat/session-1');
+    settingsToggle = screen.getByRole('button', { name: 'appShell.openControlPanel' });
     await user.click(settingsToggle);
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+  });
+
+  it('returns to chat when a recovery action opens Settings without route state', async () => {
+    viewport.isDesktop = true;
+    api.getConfig.mockResolvedValue({
+      config_recovery: { required: true, warnings: ['invalid-config'] },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+            <Route path="settings/diagnostics" element={<div data-testid="diagnostics" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('link', { name: 'configRecovery.action' }));
+    expect(await screen.findByTestId('diagnostics')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'appShell.openControlPanel' }));
     expect(await screen.findByTestId('chat')).toBeTruthy();
   });
 });

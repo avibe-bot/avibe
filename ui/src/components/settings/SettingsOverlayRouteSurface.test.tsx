@@ -16,10 +16,11 @@ import {
 } from 'react-router-dom';
 
 import {
-  locationPath,
-  settingsOverlayOpenState,
+  closeSettingsOverlay,
+  useSettingsOverlayContext,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
 
 let chatMounts = 0;
@@ -27,6 +28,8 @@ let chatUnmounts = 0;
 
 const ChatProbe = () => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const routeSurfaceActive = useRouteSurfaceActive();
   const [count, setCount] = useState(0);
 
   useEffect(() => {
@@ -36,12 +39,17 @@ const ChatProbe = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (!routeSurfaceActive) navigate('/escaped');
+  }, [navigate, routeSurfaceActive]);
+
   return (
     <main>
       <div data-testid="chat-location">{`${location.pathname}${location.search}${location.hash}`}</div>
       <div data-testid="chat-count">{count}</div>
+      <div data-testid="chat-active">{String(routeSurfaceActive)}</div>
       <button type="button" onClick={() => setCount((value) => value + 1)}>increment-chat</button>
-      <Link to="/settings/replies" state={settingsOverlayOpenState(location)}>open-settings</Link>
+      <Link to="/settings/replies">open-settings</Link>
     </main>
   );
 };
@@ -49,17 +57,21 @@ const ChatProbe = () => {
 const SettingsFrame = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const origin = useSettingsOverlayOrigin(location);
+  const contextOrigin = useSettingsOverlayContext();
+  const routeOrigin = useSettingsOverlayOrigin(location);
+  const origin = contextOrigin ?? routeOrigin;
 
   return (
     <aside>
-      <Link
-        to={origin ? locationPath(origin.location) : '/'}
-        state={origin?.location.state}
-        replace={origin !== null}
+      <button
+        type="button"
+        onClick={() => {
+          if (origin) closeSettingsOverlay(navigate, origin);
+          else navigate('/');
+        }}
       >
         close-settings
-      </Link>
+      </button>
       <button type="button" onClick={() => navigate('/settings/advanced')}>open-advanced</button>
       <Outlet />
     </aside>
@@ -79,6 +91,7 @@ const Harness = () => (
     settingsRoute={settingsRoute()}
   >
     <Route path="/chat/:sessionId" element={<ChatProbe />} />
+    <Route path="/escaped" element={<div>escaped-route</div>} />
     {settingsRoute()}
     <Route path="/" element={<div>workbench</div>} />
   </SettingsOverlayRouteSurface>
@@ -120,9 +133,11 @@ describe('SettingsOverlayRouteSurface', () => {
 
     await user.click(screen.getByRole('link', { name: 'open-settings' }));
     expect(screen.getByText('replies-settings')).toBeTruthy();
-    expect(document.querySelector('[data-settings-overlay="true"]')).not.toBeNull();
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
     expect(screen.getByTestId('chat-count').textContent).toBe('1');
+    expect(screen.getByTestId('chat-active').textContent).toBe('false');
+    expect(screen.queryByText('escaped-route')).toBeNull();
     expect(chatMounts).toBe(1);
     expect(chatUnmounts).toBe(0);
 
@@ -132,10 +147,11 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(chatMounts).toBe(1);
     expect(chatUnmounts).toBe(0);
 
-    await user.click(screen.getByRole('link', { name: 'close-settings' }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull();
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
     expect(screen.getByTestId('chat-count').textContent).toBe('1');
+    expect(screen.getByTestId('chat-active').textContent).toBe('true');
     expect(chatMounts).toBe(1);
     expect(chatUnmounts).toBe(0);
   });

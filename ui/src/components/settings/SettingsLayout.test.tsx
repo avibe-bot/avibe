@@ -138,8 +138,7 @@ describe('SettingsLayout', () => {
       state: settingsOverlayOpenState(origin),
     });
 
-    const close = screen.getByRole('link', { name: 'settings.close' });
-    expect(close.getAttribute('href')).toBe('/chat/ses_7?message=m1#tail');
+    const close = screen.getByRole('button', { name: 'settings.close' });
     await user.click(close);
     expect(await screen.findByText('chat-body')).toBeTruthy();
   });

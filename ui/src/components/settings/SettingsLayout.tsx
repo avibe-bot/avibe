@@ -28,7 +28,11 @@ import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { rememberSettingsPath, settingsLandingPath } from '@/lib/adminNavigation';
 import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
-import { locationPath, useSettingsOverlayOrigin } from '@/lib/settingsOverlay';
+import {
+  closeSettingsOverlay,
+  useSettingsOverlayContext,
+  useSettingsOverlayOrigin,
+} from '@/lib/settingsOverlay';
 import { AccountMenu } from '../AccountMenu';
 import { LanguageSwitcher } from '../LanguageSwitcher';
 import { ThemeToggle } from '../ThemeToggle';
@@ -186,7 +190,9 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
-  const overlayOrigin = useSettingsOverlayOrigin(location);
+  const routeOverlayOrigin = useSettingsOverlayOrigin(location);
+  const contextOverlayOrigin = useSettingsOverlayContext();
+  const overlayOrigin = contextOverlayOrigin ?? routeOverlayOrigin;
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
@@ -329,15 +335,24 @@ export const SettingsLayout: React.FC = () => {
               <VersionBadge />
             </div>
           )}
-          <NavLink
-            to={overlayOrigin ? locationPath(overlayOrigin.location) : '/'}
-            state={overlayOrigin?.location.state}
-            replace={overlayOrigin !== null}
-            aria-label={t('settings.close')}
-            className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
-          >
-            <X className="size-4" />
-          </NavLink>
+          {overlayOrigin ? (
+            <button
+              type="button"
+              onClick={() => closeSettingsOverlay(navigate, overlayOrigin)}
+              aria-label={t('settings.close')}
+              className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
+            >
+              <X className="size-4" />
+            </button>
+          ) : (
+            <NavLink
+              to="/"
+              aria-label={t('settings.close')}
+              className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
+            >
+              <X className="size-4" />
+            </NavLink>
+          )}
         </div>
       </header>
 

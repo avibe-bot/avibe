@@ -12,6 +12,7 @@ export function isPageActive(snapshot: PageActivitySnapshot): boolean {
 
 export function canMarkConversationRead({
   pageActive,
+  routeSurfaceActive,
   sessionReady,
   viewResolved,
   historicalWindow,
@@ -19,6 +20,7 @@ export function canMarkConversationRead({
   foregroundAppWindow,
 }: {
   pageActive: boolean;
+  routeSurfaceActive: boolean;
   sessionReady: boolean;
   viewResolved: boolean;
   historicalWindow: boolean;
@@ -27,6 +29,7 @@ export function canMarkConversationRead({
 }): boolean {
   return (
     pageActive &&
+    routeSurfaceActive &&
     sessionReady &&
     viewResolved &&
     !historicalWindow &&

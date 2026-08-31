@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -33,8 +33,8 @@ import {
   settingsLandingPath,
 } from '../lib/adminNavigation';
 import {
+  closeSettingsOverlay,
   isSettingsRoutePath,
-  locationPath,
   settingsOverlayOpenState,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
@@ -177,6 +177,7 @@ export const AppShell: React.FC = () => {
   } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
+  const navigate = useNavigate();
   const settingsOverlayOrigin = useSettingsOverlayOrigin(location);
   const settingsOpen = isSettingsRoutePath(location.pathname);
   const settingsOverlayOpen = isDesktop && settingsOpen && settingsOverlayOrigin !== null;
@@ -407,31 +408,32 @@ export const AppShell: React.FC = () => {
           <div className="relative flex flex-col gap-3 px-4 pb-4">
             <div className="flex items-stretch gap-2">
               {canUseApps && <AppsLauncher />}
-              <Link
-                to={settingsOpen
-                  ? settingsOverlayOrigin
-                    ? locationPath(settingsOverlayOrigin.location)
-                    : '/'
-                  : isDesktop
+              {settingsOpen ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (settingsOverlayOrigin) closeSettingsOverlay(navigate, settingsOverlayOrigin);
+                    else navigate('/');
+                  }}
+                  title={t('appShell.openControlPanel')}
+                  aria-label={t('appShell.openControlPanel')}
+                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint/[0.08] text-foreground transition-colors"
+                >
+                  <Settings className="size-[18px] text-mint-ink" />
+                </button>
+              ) : (
+                <Link
+                  to={isDesktop
                     ? settingsLandingPath(capabilities.can_manage_instance)
                     : '/settings'}
-                state={settingsOpen
-                  ? settingsOverlayOrigin?.location.state
-                  : isDesktop
-                    ? settingsOverlayOpenState(location)
-                    : undefined}
-                replace={settingsOpen && settingsOverlayOrigin !== null}
-                title={t('appShell.openControlPanel')}
-                aria-label={t('appShell.openControlPanel')}
-                className={clsx(
-                  'group flex w-11 shrink-0 items-center justify-center rounded-lg border text-foreground transition-colors',
-                  settingsOpen
-                    ? 'border-mint/40 bg-mint/[0.08]'
-                    : 'border-border-strong hover:bg-foreground/[0.04]',
-                )}
-              >
-                <Settings className={clsx('size-[18px]', settingsOpen ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
-              </Link>
+                  state={isDesktop ? settingsOverlayOpenState(location) : undefined}
+                  title={t('appShell.openControlPanel')}
+                  aria-label={t('appShell.openControlPanel')}
+                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
+                >
+                  <Settings className="size-[18px] text-muted group-hover:text-foreground" />
+                </Link>
+              )}
             </div>
 
             {config?.runtime?.hostname && (
