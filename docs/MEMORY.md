@@ -92,12 +92,18 @@ in-process only when Memory is required; a missing, incompatible, or failed
 package degrades Memory without making Avibe or its Agent unavailable.
 
 Forward upgrades preserve the Memory package when Memory is enabled or the
-package is already present. A successful upgrade schedules the ordinary Avibe
-restart when the runtime is active. Package resolution, installation, upgrade,
-or restart failures are structured terminal results, and a later explicit
-attempt is allowed. Avibe performs no automatic package rollback and keeps no
-rollback plan, lifecycle reservation, quarantine, Gate 5 lifecycle verifier, or
-recovery bootstrap.
+package is already present. The immutable upgrader in a bundled-Memory release
+can only install the new core on its first split-package upgrade. After that
+core starts, the existing background dependency reconciler sees the persisted
+enabled state, installs the exact same-version companion, and schedules one
+ordinary Avibe restart. Disabled, source, editable, and already-ready installs
+do not trigger that convergence.
+
+Package resolution, installation, upgrade, or restart failures leave core
+Avibe running and are reported as structured terminal results; a later startup
+or explicit attempt may retry. Avibe performs no automatic package rollback
+and keeps no rollback plan, lifecycle reservation, quarantine, Gate 5 lifecycle
+verifier, or general recovery bootstrap.
 
 Published Memory Runtime artifacts retain their manifest, hash, fetch, verify,
 and backup availability safeguards. Those checks protect immutable release

@@ -9326,6 +9326,35 @@ def _prepare_memory_package_job() -> dict:
     }
 
 
+def reconcile_memory_package_on_startup() -> dict:
+    """Converge an enabled published install onto its exact Memory companion.
+
+    The first upgrade from a bundled-Memory release is executed by the old
+    upgrader, which can only request ``avibe-os``.  Once the new core starts,
+    the persisted enabled state is the durable fact that requires the optional
+    companion.  Reuse the explicit repair path so package identity, mutation,
+    and restart behavior have one implementation.
+    """
+
+    package, _runtime = _memory_dependencies_status(offline=True)
+    if package.get("required") is True and package.get("action_class") == "repairable":
+        return _prepare_memory_package_job()
+
+    reason = package.get("reason")
+    if not isinstance(reason, str) or not reason:
+        if package.get("required") is False:
+            reason = "memory_not_required"
+        elif package.get("action_class") == "none":
+            reason = "memory_package_ready"
+        else:
+            reason = "memory_package_not_repairable"
+    return {
+        "ok": True,
+        "skipped": True,
+        "reason": reason,
+    }
+
+
 def _prepare_tmux_job() -> dict:
     try:
         from core.tmux_runtime import ensure_tmux_installed
@@ -9424,6 +9453,7 @@ def reconcile_startup_dependencies() -> dict:
     started_at = time.monotonic()
     result: dict[str, Any] = {
         "ok": True,
+        "memory_package": {"ok": False, "status": "unknown"},
         "node": {"ok": False, "status": "unknown"},
         "askill": {"ok": False, "status": "unknown"},
         "avault": {"ok": False, "status": "unknown"},
@@ -9431,6 +9461,27 @@ def reconcile_startup_dependencies() -> dict:
         "tmux": {"ok": False, "status": "unknown"},
     }
     try:
+        try:
+            memory_package = reconcile_memory_package_on_startup()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Startup dependency reconcile failed to repair Memory package: %s", exc, exc_info=True)
+            memory_package = {
+                "ok": False,
+                "message": "memory_package_install_failed",
+                "reason": "memory_package_install_failed",
+            }
+        result["memory_package"] = memory_package
+        if memory_package.get("restarting"):
+            deferred = {
+                "ok": True,
+                "status": "deferred",
+                "reason": "memory_package_restart_pending",
+            }
+            for dependency in ("node", "askill", "avault", "show_runtime", "tmux"):
+                result[dependency] = dict(deferred)
+            result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
+            return result
+
         try:
             askill = ensure_askill_installed(force=False)
         except Exception as exc:  # noqa: BLE001
@@ -9501,7 +9552,8 @@ def reconcile_startup_dependencies() -> dict:
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
-            bool(result["askill"].get("ok"))
+            bool(result["memory_package"].get("ok"))
+            and bool(result["askill"].get("ok"))
             and bool(result["avault"].get("ok"))
             and bool(result["show_runtime"].get("ok"))
         )

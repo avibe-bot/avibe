@@ -152,3 +152,9 @@ scenarios:
     kind: correctness
     layer: scenario
     test: tests/test_upgrade_flow.py::test_memory_indep_025_failed_upgrade_is_terminal_and_retryable
+  - id: MEMORY-INDEP-026
+    name: An enabled bundled-Memory install automatically converges after its first split-package upgrade
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/e2e/test_upgrade_command.py::test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation

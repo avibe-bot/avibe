@@ -16071,9 +16071,18 @@ async def _reconcile_startup_dependencies_task() -> None:
             logger.info("Startup dependencies reconciled in %sms", duration_ms)
         else:
             askill = result.get("askill") if isinstance(result.get("askill"), dict) else {}
+            memory_package = (
+                result.get("memory_package")
+                if isinstance(result.get("memory_package"), dict)
+                else {}
+            )
             logger.warning(
-                "Startup dependency reconcile completed with issues in %sms: askill=%s show_runtime=%s",
+                "Startup dependency reconcile completed with issues in %sms: memory_package=%s askill=%s show_runtime=%s",
                 duration_ms,
+                memory_package.get("message")
+                or memory_package.get("reason")
+                or memory_package.get("status")
+                or memory_package.get("ok"),
                 askill.get("message") or askill.get("status") or askill.get("ok"),
                 show_runtime.get("reason") or show_runtime.get("status") or show_runtime.get("ok"),
             )

@@ -329,25 +329,31 @@ The package split does not silently disable Memory for existing users.
 1. Publish `avibe-memory` before the first `avibe-os` release that can load it.
 2. Add an `avibe-os[memory]` extra that resolves a host-compatible
    `avibe-memory` release.
-3. The existing upgrade planner chooses the extra when either Memory is enabled
+3. The post-split upgrade planner chooses the extra when either Memory is enabled
    or the optional package is already installed. Disabled core-only installs
    continue upgrading without it.
-4. An enabled upgrade fails before replacing the current installation if the
-   compatible optional package cannot be resolved. It does not install a new
-   core and silently drop Memory.
-5. A successful upgrade schedules the ordinary Avibe restart when the runtime is
-   active. Install, upgrade, or restart failures are structured terminal results;
-   they do not block a later explicit attempt.
-6. The existing Dependencies/Memory install action may explicitly reinstall the
-   current tool with the Memory extra. Controller startup never installs or
-   downloads Python packages.
-7. A configured but missing package leaves Memory unavailable and the rest of
-   Avibe healthy; Settings and CLI explain the explicit install action.
+4. An immutable bundled-Memory upgrader can only install the first split core.
+   After the new core starts, the existing UI background dependency reconciler
+   reads the persisted enabled state, reuses the exact-version Memory package
+   install action, and schedules one ordinary restart. Controller startup never
+   installs or downloads Python packages.
+5. Later enabled upgrades fail before replacing the current installation if the
+   compatible optional package cannot be resolved. The first-hop convergence
+   fails closed with Memory unavailable and core Avibe healthy; it never changes
+   Memory config or provider data and retries only on a later startup or explicit
+   action.
+6. A successful upgrade or first-hop convergence schedules the ordinary Avibe
+   restart when the runtime is active. Install, upgrade, or restart failures are
+   structured terminal results and do not block a later explicit attempt.
+7. The existing Dependencies/Memory install action remains available to
+   explicitly reinstall the current tool with the Memory extra.
 8. EverOS runtime download/install remains an explicit Memory dependency action,
    but its manifest and implementation move with `avibe-memory`.
 
 There is no automatic package rollback, rollback plan, package-lifecycle
-reservation, quarantine, Gate 5 lifecycle verifier, or recovery bootstrap. The
+reservation, quarantine, Gate 5 lifecycle verifier, or general recovery
+bootstrap. The enabled-package startup convergence above is the one dependency
+invariant needed to bridge immutable bundled-Memory upgraders. The
 retained manifest, hash, fetch, verify, and backup safeguards protect published
 Memory Runtime artifact availability; they do not mutate installed Python
 packages or recover an upgrade attempt.

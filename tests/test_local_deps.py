@@ -1911,6 +1911,13 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
     askill_calls = []
     avault_calls = []
+    memory_calls = []
+
+    def reconcile_memory_package():
+        memory_calls.append("reconcile")
+        return {"ok": True, "skipped": True, "reason": "memory_not_required"}
+
+    monkeypatch.setattr(api, "reconcile_memory_package_on_startup", reconcile_memory_package)
 
     def fake_ensure(force=False):
         askill_calls.append(force)
@@ -1957,6 +1964,8 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     out = api.reconcile_startup_dependencies()
 
     assert out["ok"] is True
+    assert memory_calls == ["reconcile"]
+    assert out["memory_package"]["reason"] == "memory_not_required"
     assert askill_calls == [False]
     assert avault_calls == [False]
     assert manager.prepared == [(False, True)]
@@ -1966,6 +1975,161 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     assert out["show_runtime"]["policy"]["state"] == "allowed"
     assert out["show_runtime"]["install"]["state"] == "installed"
     assert out["show_runtime"]["runtime"]["state"] == "unchecked"
+
+
+def test_memory_indep_026_startup_repairs_required_missing_companion_once(monkeypatch):
+    """MEMORY-INDEP-026: a split-first startup converges through exact repair."""
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda *, offline: (
+            {
+                "required": True,
+                "readiness": "not_ready",
+                "reason": "memory_package_missing",
+                "action_class": "repairable",
+            },
+            {},
+        ),
+    )
+
+    def repair() -> dict:
+        calls.append(True)
+        return {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+            "restart": {"job_id": "restart"},
+        }
+
+    monkeypatch.setattr(api, "_prepare_memory_package_job", repair)
+
+    result = api.reconcile_memory_package_on_startup()
+
+    assert calls == [True]
+    assert result == {
+        "ok": True,
+        "message": "memory_package_ready",
+        "reason": None,
+        "restarting": True,
+        "restart": {"job_id": "restart"},
+    }
+
+
+def test_startup_memory_repair_defers_other_mutations_until_restart(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda **_kwargs: pytest.fail("the replaced environment must restart before more imports or mutations"),
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda **_kwargs: pytest.fail("the replaced environment must restart before more imports or mutations"),
+    )
+
+    result = api.reconcile_startup_dependencies()
+
+    assert result["ok"] is True
+    assert result["memory_package"]["restarting"] is True
+    assert result["show_runtime"] == {
+        "ok": True,
+        "status": "deferred",
+        "reason": "memory_package_restart_pending",
+    }
+
+
+@pytest.mark.parametrize(
+    "package",
+    (
+        {
+            "required": False,
+            "readiness": "not_required",
+            "reason": None,
+            "action_class": "none",
+        },
+        {
+            "required": True,
+            "readiness": "ready",
+            "reason": None,
+            "action_class": "none",
+        },
+        {
+            "required": True,
+            "readiness": "not_ready",
+            "reason": "memory_package_source_build",
+            "action_class": "operator_only",
+        },
+    ),
+    ids=("disabled", "ready", "source"),
+)
+def test_startup_memory_package_reconcile_skips_nonrepairable_states(monkeypatch, package):
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda *, offline: (package, {}),
+    )
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda: pytest.fail("a non-repairable package state must not install"),
+    )
+
+    result = api.reconcile_memory_package_on_startup()
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+
+
+def test_startup_memory_repair_failure_keeps_other_dependency_reconcile_running(monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "reason": "memory_package_install_failed",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda *, force: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda *, force: events.append("avault") or {"ok": True},
+    )
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {"node_available": False, "node_supported": None, "node_version": None}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == ["askill", "avault"]
+    assert result["ok"] is False
+    assert result["memory_package"]["reason"] == "memory_package_install_failed"
 
 
 def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
