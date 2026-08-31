@@ -1325,7 +1325,6 @@ def cloud_init_user_data() -> str:
         "  - python3-venv",
         "  - rsync",
         "  - sudo",
-        "  - libreoffice-nogui",
         "users:",
         f"  - name: {SERVICE_USER}",
         "    groups: sudo",
@@ -1473,26 +1472,6 @@ def ensure_proxy_device(runner: Runner, target: RegressionTarget, *, remote: str
     )
 
 
-def ensure_office_converter(
-    runner: Runner,
-    target: RegressionTarget,
-    *,
-    remote: str | None,
-) -> None:
-    runner.run(
-        root_exec(
-            target,
-            "set -euo pipefail; "
-            "if ! PATH=/usr/bin:/bin command -v soffice >/dev/null 2>&1; then "
-            "export DEBIAN_FRONTEND=noninteractive; "
-            "apt-get update; "
-            "apt-get install -y --no-install-recommends libreoffice-nogui; "
-            "fi",
-            remote=remote,
-        )
-    )
-
-
 def ensure_project_and_instance(
     runner: Runner,
     target: RegressionTarget,
@@ -1543,7 +1522,6 @@ def ensure_project_and_instance(
             remote=remote,
         )
     )
-    ensure_office_converter(runner, target, remote=remote)
     runner.run(
         root_exec(
             target,
@@ -2452,7 +2430,7 @@ def cmd_build_base(args: argparse.Namespace) -> int:
                 """\
                 set -euo pipefail
                 apt-get update
-                apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux libreoffice-nogui
+                apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
                 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
                 apt-get install -y nodejs
                 # Install the agent backends under the service user's home so the

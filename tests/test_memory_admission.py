@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import os
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -521,14 +519,6 @@ def _upload(uploads: Path, filename: str, mimetype: str) -> SimpleNamespace:
     return SimpleNamespace(name=filename, mimetype=mimetype, local_path=str(path))
 
 
-def _xlsx_bytes() -> bytes:
-    payload = io.BytesIO()
-    with zipfile.ZipFile(payload, "w") as archive:
-        archive.writestr("[Content_Types].xml", b"content types")
-        archive.writestr("xl/workbook.xml", b"workbook")
-    return payload.getvalue()
-
-
 def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, tmp_path: Path) -> None:
     """The runtime answers an unparseable extension with a permanent rejection.
 
@@ -543,8 +533,7 @@ def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, 
             _upload(uploads, "notes.txt", "text/plain"),
             _upload(uploads, "export.json", "application/json"),
             _upload(uploads, "receipt.pdf", "application/pdf"),
-            # Office bytes that are not a convertible container stay out even when
-            # LibreOffice is present, so a malformed xlsx cannot abort the batch.
+            # Formats that need an external converter never enter Memory.
             _upload(uploads, "report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             # In the runtime's IMAGE set, but needs the absent cairosvg support.
             _upload(uploads, "logo.svg", "image/svg+xml"),
@@ -555,41 +544,6 @@ def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, 
     assert [attachment.name for attachment in converted] == ["notes.txt", "receipt.pdf", "diagram.png"]
     assert [attachment.ext for attachment in converted] == ["txt", "pdf", "png"]
     assert [attachment.kind for attachment in converted] == ["doc", "pdf", "image"]
-
-
-def test_workbench_office_uploads_require_soffice_and_convertible_bytes(
-    monkeypatch, tmp_path: Path
-) -> None:
-    uploads = _uploads_dir(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
-        lambda: True,
-    )
-    valid = uploads / "report.xlsx"
-    valid.write_bytes(_xlsx_bytes())
-    fake = _upload(
-        uploads,
-        "broken.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
-
-    converted = workbench_capture_attachments(
-        [
-            SimpleNamespace(
-                name="report.xlsx",
-                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                local_path=str(valid),
-            ),
-            fake,
-            _upload(uploads, "logo.svg", "image/svg+xml"),
-        ]
-    )
-
-    assert [attachment.name for attachment in converted] == ["report.xlsx"]
-    assert [attachment.kind for attachment in converted] == ["doc"]
-    assert [attachment.ext for attachment in converted] == ["xlsx"]
-
-
 def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch, tmp_path: Path) -> None:
     uploads = _uploads_dir(monkeypatch, tmp_path)
     ordinary = is_ordinary_workbench_text(

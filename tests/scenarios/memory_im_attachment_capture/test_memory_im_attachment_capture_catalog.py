@@ -13,7 +13,7 @@ LOCKED_CONTRACT = {
     "admission": "bound_enabled_one_to_one_dm_fail_closed",
     "opt_in": "explicit_complete_multimodal_endpoint",
     "degradation": "text_and_valid_attachments_survive_independently",
-    "formats": "everos_parser_minus_svg_video_office_requires_live_soffice",
+    "formats": "everos_self_contained_parser_formats_only",
     "limits": "memory_only_8_files_25_mib_each_100_mib_bundle",
     "preflight": "generated_image_without_user_data",
     "workbench_compatibility": "implicit_main_llm_for_one_cycle",
@@ -70,7 +70,6 @@ def test_memory_im_attachment_catalog_is_indexed_and_locks_the_approved_contract
         ("MEMORY-IM-ATTACH-011", "degradation", 7),
         ("MEMORY-IM-ATTACH-012", "boundary", 8),
         ("MEMORY-IM-ATTACH-013", "degradation", 9),
-        ("MEMORY-IM-ATTACH-014", "observability", 10),
     ],
 )
 def test_memory_im_attachment_covered_scenario_contract(
@@ -98,7 +97,6 @@ def test_memory_im_attachment_covered_scenario_contract(
         "MEMORY-IM-ATTACH-011",
         "MEMORY-IM-ATTACH-012",
         "MEMORY-IM-ATTACH-013",
-        "MEMORY-IM-ATTACH-014",
     }
     assert rows[scenario_id]["status"] == "covered"
     assert rows[scenario_id]["kind"] == kind

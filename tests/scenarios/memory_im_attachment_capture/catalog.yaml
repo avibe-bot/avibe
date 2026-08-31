@@ -14,7 +14,7 @@ contract:
   admission: bound_enabled_one_to_one_dm_fail_closed
   opt_in: explicit_complete_multimodal_endpoint
   degradation: text_and_valid_attachments_survive_independently
-  formats: everos_parser_minus_svg_video_office_requires_live_soffice
+  formats: everos_self_contained_parser_formats_only
   limits: memory_only_8_files_25_mib_each_100_mib_bundle
   preflight: generated_image_without_user_data
   workbench_compatibility: implicit_main_llm_for_one_cycle
@@ -99,12 +99,12 @@ scenarios:
     delivery_slice: 7
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_provider_attachment_rejection_retries_caption_as_text_only
   - id: MEMORY-IM-ATTACH-012
-    name: Office attachments require LibreOffice at admission and delivery
+    name: Formats requiring external conversion are excluded without losing valid siblings
     status: covered
     kind: boundary
     layer: scenario
     delivery_slice: 8
-    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_office_attachment_requires_soffice_and_preserves_valid_siblings
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_external_conversion_attachment_preserves_valid_siblings
   - id: MEMORY-IM-ATTACH-013
     name: Unproven cleanup during cancelled pinning disables only attachment intake
     status: covered
@@ -112,12 +112,3 @@ scenarios:
     layer: scenario
     delivery_slice: 9
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_cancelled_unproven_pin_cleanup_disables_only_attachment_intake
-  - id: MEMORY-IM-ATTACH-014
-    name: Doctor reports sidecar-visible Office attachment readiness
-    status: covered
-    kind: observability
-    layer: scenario
-    delivery_slice: 10
-    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_doctor_reports_office_attachment_readiness_from_sidecar_probe
-    related_tests:
-      - tests/test_memory_modality.py::test_office_probe_uses_sidecar_path_and_macos_fallback

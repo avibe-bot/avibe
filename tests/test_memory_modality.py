@@ -1,22 +1,34 @@
-import io
-import struct
-import subprocess
 import sys
-import zipfile
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-import core.memory.modality as modality_module
 from core.memory.modality import (
-    OFFICE_ATTACHMENT_EXTENSIONS,
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
     classify_pinned_attachment,
-    office_conversion_available,
     pinned_modality_contract_matches,
     pinned_modality_contract_script,
+)
+
+
+EXTERNALLY_CONVERTED_EXTENSIONS = frozenset(
+    {
+        "docx",
+        "pptx",
+        "xlsx",
+        "doc",
+        "ppt",
+        "xls",
+        "pages",
+        "key",
+        "numbers",
+        "odt",
+        "ods",
+        "odp",
+        "rtf",
+    }
 )
 
 
@@ -121,103 +133,16 @@ def test_pinned_modality_admission_script_accepts_supported_upstream_containers(
     exec(pinned_modality_contract_script(), {})
 
 
-_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-_RTF_MAGIC = b"{\\rtf office"
-_FREE_SECTOR = 0xFFFFFFFF
-_END_OF_CHAIN = 0xFFFFFFFE
-_FAT_SECTOR = 0xFFFFFFFD
+def test_classifier_excludes_every_externally_converted_format(tmp_path: Path) -> None:
+    assert EXTERNALLY_CONVERTED_EXTENSIONS <= PINNED_UPSTREAM_EXCLUDED_EXTENSIONS
+    assert EXTERNALLY_CONVERTED_EXTENSIONS.isdisjoint(SUPPORTED_ATTACHMENT_EXTENSIONS)
 
-
-def _ole_document(*stream_names: str) -> bytes:
-    def directory_entry(
-        name: str,
-        object_type: int,
-        *,
-        start_sector: int = _END_OF_CHAIN,
-        size: int = 0,
-        child: int = _FREE_SECTOR,
-        right: int = _FREE_SECTOR,
-    ) -> bytes:
-        entry = bytearray(128)
-        encoded_name = (name + "\0").encode("utf-16le")
-        entry[: len(encoded_name)] = encoded_name
-        struct.pack_into(
-            "<HBBIII",
-            entry,
-            64,
-            len(encoded_name),
-            object_type,
-            1,
-            _FREE_SECTOR,
-            right,
-            child,
+    for extension in EXTERNALLY_CONVERTED_EXTENSIONS:
+        path = _write_private(tmp_path / f"attachment.{extension}", b"payload")
+        assert (
+            classify_pinned_attachment(path.name, "application/octet-stream", path)
+            is None
         )
-        struct.pack_into("<I", entry, 116, start_sector)
-        struct.pack_into("<Q", entry, 120, size)
-        return bytes(entry)
-
-    header = bytearray(512)
-    header[:8] = _OLE_MAGIC
-    struct.pack_into("<HHHHH", header, 24, 0x3E, 3, 0xFFFE, 9, 6)
-    struct.pack_into(
-        "<IIIIIIIII",
-        header,
-        40,
-        0,
-        1,
-        0,
-        0,
-        4096,
-        _END_OF_CHAIN,
-        0,
-        _END_OF_CHAIN,
-        0,
-    )
-    struct.pack_into(
-        "<109I",
-        header,
-        76,
-        1,
-        *([_FREE_SECTOR] * 108),
-    )
-
-    entries = [directory_entry("Root Entry", 5, child=1)]
-    streams: list[bytes] = []
-    fat = [_FREE_SECTOR] * 128
-    fat[0] = _END_OF_CHAIN
-    fat[1] = _FAT_SECTOR
-    for index, stream_name in enumerate(stream_names):
-        start_sector = 2 + (8 * index)
-        right = index + 2 if index + 1 < len(stream_names) else _FREE_SECTOR
-        entries.append(
-            directory_entry(
-                stream_name,
-                2,
-                start_sector=start_sector,
-                size=4096,
-                right=right,
-            )
-        )
-        for sector in range(start_sector, start_sector + 7):
-            fat[sector] = sector + 1
-        fat[start_sector + 7] = _END_OF_CHAIN
-        streams.append(stream_name.encode("ascii").ljust(4096, b"\0"))
-
-    directory = b"".join(entries).ljust(512, b"\0")
-    return bytes(
-        header
-        + directory
-        + struct.pack("<128I", *fat)
-        + b"".join(streams)
-    )
-
-
-def _office_zip(*entries: str, mimetype: str | None = None) -> bytes:
-    payload = io.BytesIO()
-    with zipfile.ZipFile(payload, "w") as archive:
-        for entry in entries:
-            archive.writestr(entry, mimetype if entry == "mimetype" else b"content")
-    return payload.getvalue()
 
 
 def test_classifier_keeps_svg_out_of_the_live_allowlist(tmp_path: Path) -> None:
@@ -228,356 +153,3 @@ def test_classifier_keeps_svg_out_of_the_live_allowlist(tmp_path: Path) -> None:
 
     assert "svg" in PINNED_UPSTREAM_EXCLUDED_EXTENSIONS
     assert classify_pinned_attachment("logo.svg", "image/svg+xml", path) is None
-
-
-def test_office_probe_uses_sidecar_path_and_macos_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: dict[str, object] = {}
-
-    def fake_which(name: str, path: str | None = None) -> str | None:
-        seen["name"] = name
-        seen["path"] = path
-        return None
-
-    monkeypatch.setattr("core.memory.modality.shutil.which", fake_which)
-    monkeypatch.setattr(
-        "core.memory.modality._MACOS_SOFFICE",
-        tmp_path / "missing-soffice",
-    )
-    assert office_conversion_available() is False
-    assert seen == {"name": "soffice", "path": "/usr/bin:/bin"}
-
-    fallback = _write_private(tmp_path / "soffice", b"")
-    monkeypatch.setattr("core.memory.modality._MACOS_SOFFICE", fallback)
-    assert office_conversion_available() is False
-
-    fallback.chmod(0o700)
-    assert office_conversion_available() is True
-
-
-def test_office_conversion_preflight_uses_isolated_bounded_soffice(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = _write_private(tmp_path / "report.xlsx", b"office")
-    converter = tmp_path / "soffice"
-    seen: dict[str, object] = {}
-
-    def fake_run(command, **kwargs):
-        seen["command"] = command
-        seen["kwargs"] = kwargs
-        output_dir = Path(command[command.index("--outdir") + 1])
-        (output_dir / "report.pdf").write_bytes(b"%PDF-1.7\nconverted")
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(modality_module, "_office_converter_path", lambda: converter)
-    monkeypatch.setattr(modality_module.subprocess, "run", fake_run)
-
-    assert modality_module.office_document_conversion_succeeds(source) is True
-    command = seen["command"]
-    kwargs = seen["kwargs"]
-    assert "--headless" in command
-    assert "--convert-to" in command
-    assert any(str(value).startswith("-env:UserInstallation=file:") for value in command)
-    assert kwargs["env"]["PATH"] == "/usr/bin:/bin"
-    assert kwargs["timeout"] == 30
-    assert kwargs["check"] is False
-
-
-def test_classifier_skips_office_without_soffice(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
-    path = _write_private(
-        tmp_path / "report.docx",
-        _office_zip("[Content_Types].xml", "word/document.xml"),
-    )
-
-    assert classify_pinned_attachment(
-        "report.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        path,
-    ) is None
-
-
-def test_classifier_accepts_office_when_soffice_is_present(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(
-        tmp_path / "report.xlsx",
-        _office_zip("[Content_Types].xml", "xl/workbook.xml"),
-    )
-
-    assert classify_pinned_attachment(
-        "report.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        path,
-    ) == ("doc", "xlsx")
-
-
-def test_classifier_rejects_office_bytes_that_are_not_convertible(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / "report.docx", b"not an office container")
-
-    assert classify_pinned_attachment(
-        "report.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        path,
-    ) is None
-
-
-def test_classifier_rejects_an_ordinary_zip_renamed_as_office(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / "report.docx", _office_zip("notes.txt"))
-
-    assert classify_pinned_attachment(
-        "report.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        path,
-    ) is None
-
-
-def test_classifier_rejects_office_zip_entry_amplification_before_opening(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    entries = ["[Content_Types].xml", "word/document.xml"]
-    entries.extend(
-        f"padding/{index}"
-        for index in range(modality_module._MAX_OFFICE_ZIP_ENTRIES - 1)
-    )
-    payload = bytearray(_office_zip(*entries))
-    eocd_offset = payload.rfind(modality_module._ZIP_EOCD_SIGNATURE)
-    assert eocd_offset >= 0
-    struct.pack_into("<HH", payload, eocd_offset + 8, 1, 1)
-    path = _write_private(tmp_path / "report.docx", bytes(payload))
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-
-    def refuse_zipfile(*_args, **_kwargs):
-        raise AssertionError("entry-count rejection must precede ZipFile construction")
-
-    monkeypatch.setattr(modality_module.zipfile, "ZipFile", refuse_zipfile)
-
-    assert classify_pinned_attachment(
-        "report.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        path,
-    ) is None
-
-
-@pytest.mark.parametrize("budget", ["member", "aggregate"])
-def test_classifier_rejects_office_zip_uncompressed_size_amplification(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    budget: str,
-) -> None:
-    entries = ["[Content_Types].xml", "word/document.xml"]
-    if budget == "aggregate":
-        entries.extend(f"padding/{index}" for index in range(4))
-    payload = bytearray(_office_zip(*entries))
-    central_offsets: list[int] = []
-    search_offset = 0
-    while True:
-        central_offset = payload.find(
-            modality_module._ZIP_CENTRAL_DIRECTORY_SIGNATURE,
-            search_offset,
-        )
-        if central_offset < 0:
-            break
-        central_offsets.append(central_offset)
-        search_offset = central_offset + 4
-    assert len(central_offsets) == len(entries)
-
-    if budget == "member":
-        sizes = [modality_module._MAX_OFFICE_ZIP_MEMBER_BYTES + 1]
-    else:
-        aggregate_member_size = (
-            modality_module._MAX_OFFICE_ZIP_TOTAL_UNCOMPRESSED_BYTES // 4
-        ) + 1
-        assert aggregate_member_size < modality_module._MAX_OFFICE_ZIP_MEMBER_BYTES
-        sizes = [1, 1, *([aggregate_member_size] * 4)]
-    for central_offset, uncompressed_size in zip(central_offsets, sizes):
-        struct.pack_into("<L", payload, central_offset + 24, uncompressed_size)
-
-    path = _write_private(tmp_path / "report.docx", bytes(payload))
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-
-    assert classify_pinned_attachment(
-        "report.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        path,
-    ) is None
-
-
-@pytest.mark.parametrize(
-    ("filename", "mimetype"),
-    [
-        ("report.pages", "application/vnd.apple.pages"),
-        ("slides.key", "application/vnd.apple.keynote"),
-        ("budget.numbers", "application/vnd.apple.numbers"),
-    ],
-)
-def test_classifier_accepts_registered_iwork_mime_types(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    filename: str,
-    mimetype: str,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / filename, _office_zip("Index/Document.iwa"))
-
-    assert classify_pinned_attachment(filename, mimetype, path) == (
-        "doc",
-        Path(filename).suffix.lstrip("."),
-    )
-
-
-def test_classifier_requires_the_mime_for_the_same_office_extension(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(
-        tmp_path / "report.docx",
-        _office_zip("[Content_Types].xml", "word/document.xml"),
-    )
-
-    assert classify_pinned_attachment(
-        "report.docx",
-        "application/vnd.ms-excel",
-        path,
-    ) is None
-
-
-def test_classifier_requires_the_registered_odf_package_mimetype(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    valid = _write_private(
-        tmp_path / "notes.odt",
-        _office_zip(
-            "mimetype",
-            "content.xml",
-            mimetype="application/vnd.oasis.opendocument.text",
-        ),
-    )
-    wrong = _write_private(
-        tmp_path / "sheet.odt",
-        _office_zip(
-            "mimetype",
-            "content.xml",
-            mimetype="application/vnd.oasis.opendocument.spreadsheet",
-        ),
-    )
-
-    assert classify_pinned_attachment(
-        "notes.odt",
-        "application/vnd.oasis.opendocument.text",
-        valid,
-    ) == ("doc", "odt")
-    assert classify_pinned_attachment(
-        "sheet.odt",
-        "application/vnd.oasis.opendocument.text",
-        wrong,
-    ) is None
-
-
-@pytest.mark.parametrize(
-    ("filename", "mimetype", "streams"),
-    [
-        (
-            "legacy.doc",
-            "application/msword",
-            ("WordDocument", "1Table"),
-        ),
-        (
-            "slides.ppt",
-            "application/vnd.ms-powerpoint",
-            ("PowerPoint Document",),
-        ),
-        (
-            "budget.xls",
-            "application/vnd.ms-excel",
-            ("Workbook",),
-        ),
-    ],
-)
-def test_classifier_accepts_structurally_valid_legacy_office_documents(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    filename: str,
-    mimetype: str,
-    streams: tuple[str, ...],
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / filename, _ole_document(*streams))
-
-    assert classify_pinned_attachment(filename, mimetype, path) == (
-        "doc",
-        Path(filename).suffix.lstrip("."),
-    )
-
-
-@pytest.mark.parametrize(
-    ("filename", "mimetype", "payload"),
-    [
-        (
-            "legacy.doc",
-            "application/msword",
-            _OLE_MAGIC + b"truncated",
-        ),
-        (
-            "legacy.doc",
-            "application/msword",
-            _ole_document("Workbook"),
-        ),
-        (
-            "slides.ppt",
-            "application/vnd.ms-powerpoint",
-            _ole_document("WordDocument", "1Table"),
-        ),
-        (
-            "budget.xls",
-            "application/vnd.ms-excel",
-            _ole_document("PowerPoint Document"),
-        ),
-    ],
-)
-def test_classifier_rejects_invalid_or_wrong_application_ole_containers(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    filename: str,
-    mimetype: str,
-    payload: bytes,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / filename, payload)
-
-    assert classify_pinned_attachment(filename, mimetype, path) is None
-
-
-def test_classifier_accepts_rtf_container(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / "notes.rtf", _RTF_MAGIC)
-
-    assert classify_pinned_attachment(
-        "notes.rtf",
-        "application/rtf",
-        path,
-    ) == ("doc", "rtf")
-    assert "rtf" in OFFICE_ATTACHMENT_EXTENSIONS
