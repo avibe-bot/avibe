@@ -9,6 +9,7 @@ import { FilesApiError, contentUrl, downloadFile, fileMeta, joinPath, parentDir,
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
 import { IS_APPLE } from '../../lib/platform';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
@@ -578,56 +579,47 @@ export const EditorApp: React.FC<{
 
   // ⌘O Open Folder · ⌘N New File — only while THIS editor window holds focus (several windows can
   // be open). Capture phase + preventDefault so ⌘O doesn't fall through to the browser's open dialog.
-  useEffect(() => {
-    if (!windowId) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-      // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
-      // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
-      if (picker || wm.focusedId !== windowId) return;
-      const k = e.key.toLowerCase();
-      // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
-      // Monaco's built-in in-file find widget when the editor has focus.)
-      if (e.shiftKey) {
-        if (k !== 'f') return;
-        e.preventDefault();
-        setView('search');
-        setExplorerCollapsed(false); // ⇧⌘F must reveal the panel even when it's collapsed
-        setSearchFocus((n) => n + 1);
-        return;
-      }
-      if (k !== 'o' && k !== 'n') return;
-      e.preventDefault();
-      if (k === 'o') openFolder();
-      else newFile();
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [windowId, openFolder, newFile, picker, wm.focusedId]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+    // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
+    // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
+    if (picker || wm.focusedId !== windowId) return;
+    const k = event.key.toLowerCase();
+    // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
+    // Monaco's built-in in-file find widget when the editor has focus.)
+    if (event.shiftKey) {
+      if (k !== 'f') return;
+      event.preventDefault();
+      setView('search');
+      setExplorerCollapsed(false); // ⇧⌘F must reveal the panel even when it's collapsed
+      setSearchFocus((n) => n + 1);
+      return;
+    }
+    if (k !== 'o' && k !== 'n') return;
+    event.preventDefault();
+    if (k === 'o') openFolder();
+    else newFile();
+  }, Boolean(windowId), true);
 
   // Claim browser-style zoom only for the focused Editor surface. A window additionally checks real
   // DOM focus so an Editor left open while the user works in the sidebar doesn't steal browser zoom.
   // The route stays inactive while a floating window is on top. Capture prevents Monaco's session-only
   // font zoom from also handling the key.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const focusedWindow = document.activeElement instanceof Element
-        ? document.activeElement.closest('[data-window-id]')?.getAttribute('data-window-id')
-        : null;
-      const foreground = windowId
-        ? wm.focusedId === windowId && focusedWindow === windowId
-        : wm.focusedId === null && !!rootRef.current?.contains(document.activeElement);
-      if (!foreground) return;
-      const zoom = fontZoomIntent(e);
-      if (!zoom) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (zoom === 'reset') resetEditorFontSize();
-      else adjustEditorFontSize(zoom === 'in' ? 1 : -1);
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [windowId, wm.focusedId]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    const focusedWindow = document.activeElement instanceof Element
+      ? document.activeElement.closest('[data-window-id]')?.getAttribute('data-window-id')
+      : null;
+    const foreground = windowId
+      ? wm.focusedId === windowId && focusedWindow === windowId
+      : wm.focusedId === null && !!rootRef.current?.contains(document.activeElement);
+    if (!foreground) return;
+    const zoom = fontZoomIntent(event);
+    if (!zoom) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (zoom === 'reset') resetEditorFontSize();
+    else adjustEditorFontSize(zoom === 'in' ? 1 : -1);
+  }, true, true);
 
   // Selecting a file from the mobile explorer returns the editor to the foreground. This keeps
   // the narrow screen useful after every open while leaving the desktop panel behavior unchanged.

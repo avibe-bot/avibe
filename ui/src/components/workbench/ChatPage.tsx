@@ -40,6 +40,7 @@ import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
@@ -147,6 +148,7 @@ import {
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
+import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
 import { sessionAgentDisplayName } from './sessionAgentName';
 
 // While a turn is in flight, reconcile the working/Stop state against the
@@ -272,6 +274,7 @@ export const ChatPage: React.FC = () => {
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
+  const routeSurfaceActive = useRouteSurfaceActive();
   const pageActive = usePageActive();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -364,14 +367,10 @@ export const ChatPage: React.FC = () => {
   // user-configured chord such as Ctrl+Z. Starting remains limited to a writable,
   // visible Chat surface; once recording, Composer still accepts the chord as
   // Finish after focus moves elsewhere in this document.
-  const voiceShortcutCanStart = pageActive && writable && !showPageActive;
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      composerRef.current?.handleVoiceShortcut(event, voiceShortcutCanStart);
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [voiceShortcutCanStart]);
+  const voiceShortcutCanStart = routeSurfaceActive && pageActive && writable && !showPageActive;
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    composerRef.current?.handleVoiceShortcut(event, voiceShortcutCanStart);
+  }, true, true);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -2394,6 +2393,7 @@ export const ChatPage: React.FC = () => {
     if (!canChat) return;
     if (!canMarkConversationRead({
       pageActive,
+      routeSurfaceActive,
       sessionReady: !loading && session?.id === sessionId,
       viewResolved: showPageViewResolved,
       historicalWindow,
@@ -2412,6 +2412,7 @@ export const ChatPage: React.FC = () => {
     showPageViewResolved,
     historicalWindow,
     pageActive,
+    routeSurfaceActive,
     showPageActive,
     isDesktop,
     foregroundAppWindowId,
@@ -2423,14 +2424,28 @@ export const ChatPage: React.FC = () => {
   // starts. Clear the state afterwards so a manual page refresh (which preserves
   // history state) doesn't resend it.
   useEffect(() => {
-    const initialMessage = (location.state as { initialMessage?: string } | null)?.initialMessage;
-    if (!initialMessage || !sessionId) return;
-    if (initialHandledSessionRef.current === sessionId) return;
-    if (loading || !session) return;
-    initialHandledSessionRef.current = sessionId;
+    const handoff = pendingInitialMessageHandoff({
+      handledSessionId: initialHandledSessionRef.current,
+      loadedSessionId: session?.id,
+      loading,
+      locationState: location.state,
+      routeSurfaceActive,
+      sessionId,
+    });
+    if (!handoff) return;
+    initialHandledSessionRef.current = handoff.sessionId;
     navigate(location.pathname, { replace: true, state: null });
-    void sendMessage(initialMessage);
-  }, [location.state, location.pathname, loading, session, sessionId, navigate, sendMessage]);
+    void sendMessage(handoff.message);
+  }, [
+    location.state,
+    location.pathname,
+    loading,
+    session?.id,
+    sessionId,
+    navigate,
+    routeSurfaceActive,
+    sendMessage,
+  ]);
 
   // Scoped to the open chat: a write still draining for a session the user has
   // left must not spin the header of the one they are looking at. Either group
@@ -2514,26 +2529,21 @@ export const ChatPage: React.FC = () => {
   // and do nothing in return. And "ChatPage is mounted" is not "chat owns the
   // keyboard" — it stays mounted under app windows and dialogs — so a keystroke
   // belonging to a foreground surface is left to that surface (Codex).
-  useEffect(() => {
-    if (!canArchive) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!isArchiveSessionKeydown(e, e.target as Element | null)) return;
-      e.preventDefault();
-      requestArchive();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [canArchive, requestArchive]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (!isArchiveSessionKeydown(event, event.target as Element | null)) return;
+    event.preventDefault();
+    requestArchive();
+  }, canArchive);
 
   // A keydown inside the Show Page iframe never reaches this window, so the same
   // chord is bound to the frame's own document while it is mounted — otherwise the
   // shortcut silently dies as soon as the user clicks into the page they asked for.
   useEffect(() => {
-    if (!canArchive) return;
+    if (!canArchive || !routeSurfaceActive) return;
     const frame = showPageFrameRef.current;
     if (!frame) return;
     return bindFrameChord(frame, (event) => isArchiveSessionChord(event), requestArchive);
-  }, [canArchive, requestArchive, showPageActive, showPageUrl]);
+  }, [canArchive, requestArchive, routeSurfaceActive, showPageActive, showPageUrl]);
 
   // Ordered media-proxy image URLs across the whole session — feeds the lightbox
   // so it pages left/right through every image, in render order (each message's

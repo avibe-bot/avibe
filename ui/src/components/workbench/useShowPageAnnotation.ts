@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
 import { useLatestRef } from '../../lib/useLatestRef';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { bindFrameChord } from '../apps/windowChords';
 
 // postMessage bridge between the chat host and the annotation overlay running
@@ -64,6 +65,7 @@ function annotationShortcutBlocked(target: Element | null): boolean {
  * and so one session's state never briefly shows over another's page.
  */
 export function useShowPageAnnotation(src: string | null): AnnotationBridge {
+  const routeSurfaceActive = useRouteSurfaceActive();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const frameShortcutCleanupRef = useRef<() => void>(() => undefined);
   const [state, setState] = useState<AnnotationState | null>(null);
@@ -143,23 +145,11 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     }
   }, []);
 
-  const escapeListeningRef = useRef(false);
-  const startEscapeListening = useCallback(() => {
-    if (escapeListeningRef.current) return;
-    window.addEventListener('keydown', onParentKeyDown);
-    escapeListeningRef.current = true;
-  }, [onParentKeyDown]);
-  const stopEscapeListening = useCallback(() => {
-    if (!escapeListeningRef.current) return;
-    window.removeEventListener('keydown', onParentKeyDown);
-    escapeListeningRef.current = false;
-  }, [onParentKeyDown]);
-
-  useEffect(() => {
-    if (state?.enabled === true && iframeRef.current) startEscapeListening();
-    else stopEscapeListening();
-    return stopEscapeListening;
-  }, [startEscapeListening, state?.enabled, stopEscapeListening]);
+  useRouteSurfaceWindowEvent(
+    'keydown',
+    onParentKeyDown,
+    state?.enabled === true,
+  );
 
   const post = useCallback((message: ControlMessage) => {
     const win = iframeRef.current?.contentWindow;
@@ -203,21 +193,18 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
 
   const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
     (iframe) => {
-      if (iframeRef.current !== iframe) {
-        stopEscapeListening();
-      }
       frameShortcutCleanupRef.current();
       frameShortcutCleanupRef.current = () => undefined;
       iframeRef.current = iframe;
       if (!iframe) return;
       startListening();
-      if (stateRef.current?.enabled === true) startEscapeListening();
       frameShortcutCleanupRef.current = bindFrameChord(
         iframe,
         (event, activeInFrame) => {
           return (
             !event.defaultPrevented
             && !event.repeat
+            && routeSurfaceActive
             && stateRef.current?.available === true
             && stateRef.current.enabled !== true
             && actionShortcutMatches(event, shortcutRef.current)
@@ -229,11 +216,10 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     },
     [
       enableFromShortcut,
+      routeSurfaceActive,
       shortcutRef,
-      startEscapeListening,
       startListening,
       stateRef,
-      stopEscapeListening,
     ],
   );
 

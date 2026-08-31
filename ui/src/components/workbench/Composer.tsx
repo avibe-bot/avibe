@@ -57,6 +57,7 @@ import {
 } from '../../lib/workbenchUpload';
 import { Button } from '../ui/button';
 import { inForegroundSurface } from './chatShortcuts';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import {
   MentionEditor,
   type AgentSearchResult,
@@ -1147,17 +1148,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   // ESC aborts an in-progress recording (discard, no transcribe).
-  useEffect(() => {
-    if (!recording) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (isPlainEscape(e)) {
-        e.preventDefault();
-        abortRecording();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [abortRecording, recording]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (isPlainEscape(event)) {
+      event.preventDefault();
+      abortRecording();
+    }
+  }, recording);
 
   const trimmed = value.trim();
   const readyAttachments = attachments.filter((a) => a.status === 'ready');

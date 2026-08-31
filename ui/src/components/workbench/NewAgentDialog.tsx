@@ -15,6 +15,7 @@ import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Button } from '../ui/button';
 import { errorMessage } from '@/lib/errorMessage';
+import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 
 type BackendKey = 'claude' | 'opencode' | 'codex';
 
@@ -105,16 +106,11 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     }
   }, [effortOptions, effort]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      // Don't let Esc close the whole create dialog when the expand editor is
-      // open on top — that Esc belongs to the editor.
-      if (e.key === 'Escape' && !editorOpen) onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose, editorOpen]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    // Don't let Esc close the whole create dialog when the expand editor is
+    // open on top — that Esc belongs to the editor.
+    if (event.key === 'Escape' && !editorOpen) onClose();
+  }, open);
 
   if (!open) return null;
 

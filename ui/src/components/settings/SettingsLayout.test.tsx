@@ -3,8 +3,14 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import type { Location } from 'react-router-dom';
 
+import {
+  SettingsOverlayOriginContext,
+  settingsOverlayOpenState,
+  useSettingsOverlayOrigin,
+} from '@/lib/settingsOverlay';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -58,15 +64,24 @@ const NavigationProbe = () => {
   );
 };
 
-const SettingsLayoutHarness = () => (
-  <>
-    <SettingsLayout />
-    <NavigationProbe />
-  </>
-);
+const SettingsLayoutHarness = () => {
+  const location = useLocation();
+  const origin = useSettingsOverlayOrigin(location);
+  return (
+    <SettingsOverlayOriginContext.Provider value={origin}>
+      <SettingsLayout />
+      <NavigationProbe />
+    </SettingsOverlayOriginContext.Provider>
+  );
+};
 
-const renderLayout = (path: string) => render(
-  <MemoryRouter initialEntries={[path]}>
+type SettingsTestEntry = string | {
+  pathname: string;
+  state?: unknown;
+};
+
+const renderLayout = (entry: SettingsTestEntry) => render(
+  <MemoryRouter initialEntries={[entry]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="backends" element={<div>backends-body</div>} />
@@ -79,6 +94,7 @@ const renderLayout = (path: string) => render(
         <Route path="platforms/users" element={<div>users-body</div>} />
         <Route path="platforms/groups" element={<div>groups-body</div>} />
       </Route>
+      <Route path="/chat/:sessionId" element={<div>chat-body</div>} />
     </Routes>
   </MemoryRouter>,
 );
@@ -114,6 +130,27 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
+  it('closes a desktop overlay back to its exact opening route', async () => {
+    media.matches = true;
+    const user = userEvent.setup();
+    const origin: Location = {
+      pathname: '/chat/ses_7',
+      search: '?message=m1',
+      hash: '#tail',
+      state: { source: 'search' },
+      key: 'chat-origin',
+    };
+
+    renderLayout({
+      pathname: '/settings/replies',
+      state: settingsOverlayOpenState(origin),
+    });
+
+    const close = screen.getByRole('button', { name: 'settings.close' });
+    await user.click(close);
+    expect(await screen.findByText('chat-body')).toBeTruthy();
+  });
+
   it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
     renderLayout('/settings/replies');
 
