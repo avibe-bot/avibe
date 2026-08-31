@@ -1813,6 +1813,7 @@ def test_memory_indep_021_status_import_fence(tmp_path, case) -> None:
 import importlib.abc
 import json
 import sys
+from types import SimpleNamespace
 
 from config import paths
 from config.v2_config import V2Config
@@ -1850,6 +1851,8 @@ def inspect_metadata():
     return api._MemoryPackageMetadata(0, None)
 
 api._inspect_memory_package_metadata = inspect_metadata
+api._published_running_version = lambda: "3.0.14"
+api.get_build_identity = lambda: SimpleNamespace(kind="package")
 package, runtime = api._memory_dependencies_status(offline=True)
 if case == "whole-config-failure":
     assert package["readiness"] == "memory_requirement_unreadable"
