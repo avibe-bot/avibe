@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useEffect, useState } from 'react';
@@ -17,6 +17,7 @@ import {
 
 import {
   closeSettingsOverlay,
+  useSettingsOverlayOrigin,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
@@ -103,8 +104,26 @@ const settingsRoute = () => (
   </Route>
 );
 
+const SettingsToggle = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const origin = useSettingsOverlayOrigin(location);
+  return origin ? (
+    <button
+      type="button"
+      data-settings-toggle="true"
+      onClick={() => closeSettingsOverlay(navigate, origin)}
+    >
+      shell-settings
+    </button>
+  ) : (
+    <Link to="/settings/replies" data-settings-toggle="true">shell-settings</Link>
+  );
+};
+
 const Harness = ({ desktop }: { desktop: boolean }) => (
   <SettingsOverlayNavigationBoundary desktop={desktop}>
+    <SettingsToggle />
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/chat/:sessionId" element={<ChatProbe />} />
       <Route path="/escaped" element={<div>escaped-route</div>} />
@@ -160,9 +179,16 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(screen.getByTestId('chat-count').textContent).toBe('1');
     expect(chatMounts).toBe(1);
 
-    await user.click(screen.getByRole('link', { name: 'open-settings' }));
+    const settingsIngress = screen.getByRole('link', { name: 'shell-settings' });
+    await user.click(settingsIngress);
     expect(screen.getByText('replies-settings')).toBeTruthy();
-    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+    const dialog = screen.getByRole('dialog', { name: 'nav.settings' });
+    expect(dialog).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'close-settings' }),
+    ));
+    await user.tab({ shift: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
     expect(screen.getByTestId('chat-count').textContent).toBe('1');
     expect(screen.getByTestId('chat-active').textContent).toBe('false');
@@ -194,6 +220,9 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
     expect(chatMounts).toBe(1);
     expect(chatUnmounts).toBe(0);
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('link', { name: 'shell-settings' }),
+    ));
   });
 
   it('carries the origin through a guard remount', async () => {
@@ -212,6 +241,24 @@ describe('SettingsOverlayRouteSurface', () => {
 
     await user.click(screen.getByRole('button', { name: 'close-settings' }));
     expect(await screen.findByTestId('chat-location')).toBeTruthy();
+  });
+
+  it('closes when the persistent Settings toggle is clicked again', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+    const backdrop = document.querySelector<HTMLElement>('[data-dialog-surface-backdrop="true"]');
+    expect(backdrop).not.toBeNull();
+    await user.click(backdrop!);
+
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
   });
 
   it('keeps legacy redirects out of origins while preserving real ingress origins', async () => {

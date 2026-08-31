@@ -7,6 +7,7 @@ import {
   settingsOverlayHistoryDelta,
   settingsOverlayNavigationState,
   settingsOverlayOriginFromState,
+  settingsOverlayPreservesCurrentLocation,
   type SettingsOverlayOrigin,
 } from './settingsOverlay';
 
@@ -94,5 +95,29 @@ describe('Settings overlay navigation ownership', () => {
       targetState: undefined,
     });
     expect(settingsOverlayOriginFromState(state)).toBeNull();
+  });
+
+  it('identifies only an ingress that preserves the current route', () => {
+    const current = origin().location;
+    const overlayState = settingsOverlayNavigationState({
+      destinationPathname: '/settings/replies',
+      desktop: true,
+      historyState: { idx: 2 },
+      source: current,
+      targetState: undefined,
+    });
+
+    expect(settingsOverlayPreservesCurrentLocation(
+      current,
+      location('/settings/replies', overlayState),
+    )).toBe(true);
+    expect(settingsOverlayPreservesCurrentLocation(
+      location('/chat/another'),
+      location('/settings/replies', overlayState),
+    )).toBe(false);
+    expect(settingsOverlayPreservesCurrentLocation(
+      current,
+      location('/settings/replies'),
+    )).toBe(false);
   });
 });

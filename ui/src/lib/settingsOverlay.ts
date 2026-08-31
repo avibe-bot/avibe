@@ -115,6 +115,16 @@ export const settingsOverlayNavigationState = ({
 export const locationPath = (location: Pick<Location, 'pathname' | 'search' | 'hash'>): string =>
   `${location.pathname}${location.search}${location.hash}`;
 
+export const settingsOverlayPreservesCurrentLocation = (
+  currentLocation: Location,
+  nextLocation: Location,
+): boolean => {
+  const origin = settingsOverlayOriginFromState(nextLocation.state);
+  return origin !== null
+    && origin.location.key === currentLocation.key
+    && locationPath(origin.location) === locationPath(currentLocation);
+};
+
 export const settingsOverlayHistoryDelta = (
   origin: SettingsOverlayOrigin,
   historyState: unknown = currentHistoryState(),

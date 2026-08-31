@@ -415,6 +415,7 @@ export const AppShell: React.FC = () => {
               {settingsOpen ? (
                 <button
                   type="button"
+                  data-settings-toggle="true"
                   onClick={() => {
                     if (settingsOverlayOrigin) closeSettingsOverlay(navigate, settingsOverlayOrigin);
                     else navigate('/');
@@ -427,6 +428,7 @@ export const AppShell: React.FC = () => {
                 </button>
               ) : (
                 <Link
+                  data-settings-toggle="true"
                   to={isDesktop
                     ? settingsLandingPath(capabilities.can_manage_instance)
                     : '/settings'}

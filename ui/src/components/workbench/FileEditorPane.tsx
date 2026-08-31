@@ -8,6 +8,7 @@ import { useWindowCloseGuard } from '../../context/WindowManagerContext';
 import { Button } from '../ui/button';
 import { FilesApiError, fileBrowserErrorMessage, fileMeta, readText, writeFile } from '../../lib/filesApi';
 import { editorPreviewKind } from '../../lib/filePreview';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { FilePreview } from '../ui/file-preview';
 
 // Monaco (the VS Code kernel) is heavy; lazy-load it so it stays out of the main
@@ -155,17 +156,12 @@ export const FileEditorPane: React.FC<{
   // While previewing, Monaco (the usual ⌘S owner) is unmounted, so the foreground tab registers a
   // window-level ⌘S. `saveRef` holds the latest save() so the listener never saves a stale buffer.
   const saveRef = useRef<() => void>(() => {});
-  useEffect(() => {
-    if (!(saveHotkey && previewable && mode === 'preview')) return;
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        void saveRef.current();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [saveHotkey, previewable, mode]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's') {
+      event.preventDefault();
+      void saveRef.current();
+    }
+  }, saveHotkey && Boolean(previewable) && mode === 'preview', true);
 
   // Tracks the path the last read targeted, so a rename (path changing from one real file to another)
   // can be told apart from an initial open or a forced reload.

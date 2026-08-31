@@ -40,7 +40,7 @@ import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
-import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
@@ -368,13 +368,9 @@ export const ChatPage: React.FC = () => {
   // visible Chat surface; once recording, Composer still accepts the chord as
   // Finish after focus moves elsewhere in this document.
   const voiceShortcutCanStart = routeSurfaceActive && pageActive && writable && !showPageActive;
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      composerRef.current?.handleVoiceShortcut(event, voiceShortcutCanStart);
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [voiceShortcutCanStart]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    composerRef.current?.handleVoiceShortcut(event, voiceShortcutCanStart);
+  }, true, true);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -2533,16 +2529,11 @@ export const ChatPage: React.FC = () => {
   // and do nothing in return. And "ChatPage is mounted" is not "chat owns the
   // keyboard" — it stays mounted under app windows and dialogs — so a keystroke
   // belonging to a foreground surface is left to that surface (Codex).
-  useEffect(() => {
-    if (!canArchive || !routeSurfaceActive) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!isArchiveSessionKeydown(e, e.target as Element | null)) return;
-      e.preventDefault();
-      requestArchive();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [canArchive, requestArchive, routeSurfaceActive]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (!isArchiveSessionKeydown(event, event.target as Element | null)) return;
+    event.preventDefault();
+    requestArchive();
+  }, canArchive);
 
   // A keydown inside the Show Page iframe never reaches this window, so the same
   // chord is bound to the frame's own document while it is mounted — otherwise the

@@ -5,7 +5,9 @@ import type { Navigator } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { RouteSurfaceActivityBoundary } from '@/components/RouteSurfaceActivityBoundary';
+import { Dialog, DialogSurfaceContent, DialogTitle } from '@/components/ui/dialog';
 import {
+  closeSettingsOverlay,
   isSettingsEntryPath,
   locationPath,
   SettingsOverlayOriginContext,
@@ -62,20 +64,31 @@ export const SettingsOverlayRouteSurface = ({
         </RouteSurfaceActivityBoundary>
       </div>
       {settingsSurfaceOpen ? (
-        <SettingsOverlayOriginContext.Provider value={origin}>
-          <div
-            role="dialog"
-            aria-label={t('nav.settings')}
-            aria-modal="true"
-            data-settings-overlay="true"
-            className="fixed inset-y-0 left-0 right-0 z-30 overflow-hidden border-l border-border bg-background shadow-2xl md:left-[240px]"
-          >
-            <Routes location={location}>
-              {children}
-              <Route path="*" element={fallbackElement} />
-            </Routes>
-          </div>
-        </SettingsOverlayOriginContext.Provider>
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) closeSettingsOverlay(navigate, origin);
+          }}
+        >
+          <SettingsOverlayOriginContext.Provider value={origin}>
+            <DialogSurfaceContent
+              data-settings-overlay="true"
+              aria-describedby={undefined}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                window.requestAnimationFrame(() => {
+                  document.querySelector<HTMLElement>('[data-settings-toggle="true"]')?.focus();
+                });
+              }}
+            >
+              <DialogTitle className="sr-only">{t('nav.settings')}</DialogTitle>
+              <Routes location={location}>
+                {children}
+                <Route path="*" element={fallbackElement} />
+              </Routes>
+            </DialogSurfaceContent>
+          </SettingsOverlayOriginContext.Provider>
+        </Dialog>
       ) : null}
     </>
   );
