@@ -1,4 +1,5 @@
 import { useBlocker } from 'react-router-dom';
+import type { Location } from 'react-router-dom';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
 
@@ -14,6 +15,7 @@ import {
   type UnsavedChangesRegistrationId,
   type UnsavedChangesRegistry,
 } from '../lib/unsavedChangesRegistry';
+import { settingsOverlayPreservesCurrentLocation } from '../lib/settingsOverlay';
 
 export const UnsavedChangesProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const registryRef = useRef<UnsavedChangesRegistry>(new Map());
@@ -31,7 +33,14 @@ export const UnsavedChangesProvider: React.FC<{ children: ReactNode }> = ({ chil
 
   // React Router 7.17 supports one blocker per router. Keep that blocker mounted here and let the
   // registry decide synchronously whether the current transition needs confirmation.
-  const shouldBlock = useCallback(() => {
+  const shouldBlock = useCallback(({
+    currentLocation,
+    nextLocation,
+  }: {
+    currentLocation: Location;
+    nextLocation: Location;
+  }) => {
+    if (settingsOverlayPreservesCurrentLocation(currentLocation, nextLocation)) return false;
     const hasUnsavedChanges = getUnsavedChangesMessage(registryRef.current) !== null;
     return navigationGateRef.current.shouldBlock(hasUnsavedChanges);
   }, []);

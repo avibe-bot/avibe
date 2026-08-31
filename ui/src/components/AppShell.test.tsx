@@ -310,26 +310,56 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.queryByTestId('account-menu')).toBeNull();
   });
 
-  it('uses the Settings button to close an open Settings surface', async () => {
+  it('uses the Settings button to return to the route that opened Settings', async () => {
     viewport.isDesktop = true;
     const user = userEvent.setup();
 
     render(
-      <MemoryRouter initialEntries={['/settings/replies']}>
+      <MemoryRouter initialEntries={['/chat/session-1']}>
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<div data-testid="workbench" />} />
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
             <Route path="settings/replies" element={<div data-testid="settings" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId('settings')).toBeTruthy();
-    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
-    expect(settingsToggle.getAttribute('href')).toBe('/');
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    let settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/replies');
     await user.click(settingsToggle);
-    expect(await screen.findByTestId('workbench')).toBeTruthy();
+
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    settingsToggle = screen.getByRole('button', { name: 'appShell.openControlPanel' });
+    await user.click(settingsToggle);
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+  });
+
+  it('returns to chat when a recovery action opens Settings without route state', async () => {
+    viewport.isDesktop = true;
+    api.getConfig.mockResolvedValue({
+      config_recovery: { required: true, warnings: ['invalid-config'] },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+            <Route path="settings/diagnostics" element={<div data-testid="diagnostics" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('link', { name: 'configRecovery.action' }));
+    expect(await screen.findByTestId('diagnostics')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('chat')).toBeTruthy();
   });
 });
 

@@ -35,6 +35,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -231,15 +232,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     selectionAnchorRef.current = null;
   }, []);
 
-  // Escape is the universal way out of a selection. Preview/dialog handlers still own their own
-  // Escape behavior; clearing a background selection at the same time is harmless and predictable.
-  useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') clearSelection();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [clearSelection]);
+  // Escape is the universal way out of a selection while this route owns the foreground.
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (event.key === 'Escape') clearSelection();
+  });
 
   // Long-press is only a selection gesture on coarse pointers. Movement beyond a small slop cancels
   // it so scrolling the list never unexpectedly enters selection mode.
@@ -261,17 +257,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // Mobile quick look stays inside the Files surface because phones have no window layer. Keep the
   // edit capability with the preview so editable formats can switch surfaces from its toolbar.
   const [preview, setPreview] = useState<{ path: string; name: string; mtime: number | null; editable: boolean } | null>(null);
-  useEffect(() => {
-    if (!preview) return;
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        ev.preventDefault();
-        setPreview(null);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [preview]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setPreview(null);
+    }
+  }, preview !== null);
 
   const navSeq = useRef(0);
   const navigate = useCallback(
