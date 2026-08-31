@@ -66,6 +66,7 @@ export const SettingsOverlayRouteSurface = ({
       {settingsSurfaceOpen ? (
         <Dialog
           open
+          modal={false}
           onOpenChange={(open) => {
             if (!open) closeSettingsOverlay(navigate, origin);
           }}
@@ -74,6 +75,15 @@ export const SettingsOverlayRouteSurface = ({
             <DialogSurfaceContent
               data-settings-overlay="true"
               aria-describedby={undefined}
+              onInteractOutside={(event) => {
+                const target = event.target;
+                if (
+                  target instanceof Element
+                  && target.closest('[data-settings-toggle="true"]')
+                ) {
+                  event.preventDefault();
+                }
+              }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
                 window.requestAnimationFrame(() => {
