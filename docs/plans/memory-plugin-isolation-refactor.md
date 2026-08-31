@@ -25,10 +25,10 @@ Avibe keeps a small host integration surface:
 - lightweight host-owned request/authentication contracts that do not import
   Memory runtime implementation.
 
-This plan defines "independent plugin" behaviorally: the optional implementation
-package may be deleted or never installed without making Avibe's main product
-unavailable. It does not mean removing every Memory label or explicit user
-surface from the host.
+This plan defines the companion-package boundary behaviorally: the optional
+implementation package may be deleted or never installed without making Avibe's
+main product unavailable. It does not mean removing every Memory label or
+explicit user surface from the host.
 
 ## Why There Is No Second Memory Process
 
@@ -98,7 +98,7 @@ fails closed with its stable error shape for unknown lifecycle failures.
 - It starts no Memory task and no EverOS process.
 - An enabled config with a missing or incompatible package degrades only Memory;
   chat, Agent dispatch, `/new`, archive, startup, and shutdown remain available.
-- Explicit Memory routes return `memory_plugin_unavailable` with a stable
+- Explicit Memory routes return `memory_implementation_unavailable` with a stable
   user-facing explanation.
 
 An existing disabled installation may need to reap an EverOS process left by an
@@ -352,9 +352,11 @@ retained manifest, hash, fetch, verify, and backup safeguards protect published
 Memory Runtime artifact availability; they do not mutate installed Python
 packages or recover an upgrade attempt.
 
-Core and optional-package protocol compatibility is checked at lazy load. A
-mismatch selects `DisabledMemoryAdapter` and reports
-`memory_plugin_incompatible`; it never fails service startup.
+Publishable core and optional-package artifacts carry reciprocal exact-version
+dependencies. The fixed lazy loader validates the factory and constructed runtime
+surface directly. A missing or incompatible implementation selects
+`DisabledMemoryAdapter` and reports `memory_implementation_unavailable` or
+`memory_implementation_incompatible`; it never fails service startup.
 
 ## Completed Migration Waves
 
@@ -451,7 +453,7 @@ Compatibility: the package move kept current data and config formats readable.
 Delivered:
 
 - publish the matched optional distribution and `avibe-os[memory]` extra;
-- update forward upgrades to preserve plugin presence;
+- update forward upgrades to preserve companion-package presence;
 - move runtime manifest/build/release guard ownership;
 - add core-only and core-plus-Memory wheel matrices;
 - remove `core.memory`, temporary adapters, new-write legacy metadata paths, and

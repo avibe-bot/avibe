@@ -41,8 +41,8 @@ from core.controller import Controller
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
 from vibe.memory_contract import (
-    MemoryPluginIncompatibleError,
-    MemoryPluginUnavailableError,
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
     MemoryStoreUnavailableError,
 )
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
@@ -545,24 +545,24 @@ def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> Non
 @pytest.mark.parametrize(
     ("error_type", "expected_code"),
     [
-        ("MemoryPluginUnavailableError", "memory_plugin_unavailable"),
-        ("MemoryPluginIncompatibleError", "memory_plugin_incompatible"),
+        ("MemoryImplementationUnavailableError", "memory_implementation_unavailable"),
+        ("MemoryImplementationIncompatibleError", "memory_implementation_incompatible"),
     ],
 )
-def test_memory_projects_plugin_failure_uses_stable_plugin_envelope(
+def test_memory_projects_implementation_failure_uses_stable_error_envelope(
     error_type: str,
     expected_code: str,
 ) -> None:
     from core import internal_server as server
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
     from vibe.memory_contract import (
-        MemoryPluginIncompatibleError,
-        MemoryPluginUnavailableError,
+        MemoryImplementationIncompatibleError,
+        MemoryImplementationUnavailableError,
     )
 
     error_class = {
-        "MemoryPluginUnavailableError": MemoryPluginUnavailableError,
-        "MemoryPluginIncompatibleError": MemoryPluginIncompatibleError,
+        "MemoryImplementationUnavailableError": MemoryImplementationUnavailableError,
+        "MemoryImplementationIncompatibleError": MemoryImplementationIncompatibleError,
     }[error_type]
     controller = _build_controller_double()
     controller.memory_scope_for_cli_session.return_value = (
@@ -586,25 +586,25 @@ def test_memory_projects_plugin_failure_uses_stable_plugin_envelope(
     assert response.json() == {"status": "failed", "error": expected_code}
 
 
-def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary() -> None:
+def test_memory_projects_implementation_failure_preserves_admitted_cli_session_boundary() -> None:
     from core import internal_server as server
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
-    from vibe.memory_contract import MemoryPluginUnavailableError
+    from vibe.memory_contract import MemoryImplementationUnavailableError
 
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
-    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_implementation_error = MemoryImplementationUnavailableError("injected")
     controller._memory_scopes_by_session = {}
     controller._memory_cli_facts_by_session = {}
-    controller._memory_plugin_cli_sessions = set()
+    controller._memory_implementation_cli_sessions = set()
     controller._memory_admission = lambda: pytest.fail(
-        "plugin failure must be projected before admission imports"
+        "implementation failure must be projected before admission imports"
     )
     controller._memory_turn_facts = lambda _context: pytest.fail(
-        "plugin failure must be projected before facts imports"
+        "implementation failure must be projected before facts imports"
     )
     controller.memory_projects_payload = AsyncMock(
-        side_effect=MemoryPluginUnavailableError("injected")
+        side_effect=MemoryImplementationUnavailableError("injected")
     )
 
     context = SimpleNamespace(
@@ -618,7 +618,7 @@ def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary(
         context,
         admitted=True,
     )
-    assert controller._memory_plugin_cli_sessions == {"session-1"}
+    assert controller._memory_implementation_cli_sessions == {"session-1"}
     app = server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
@@ -632,32 +632,34 @@ def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary(
     response = asyncio.run(_exercise())
 
     assert response.status_code == 503
-    assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
+    assert response.json() == {"status": "failed", "error": "memory_implementation_unavailable"}
 
 
 @pytest.mark.parametrize(
-    ("plugin_error", "expected_error"),
+    ("implementation_error", "expected_error"),
     [
-        (MemoryPluginUnavailableError("injected"), "memory_plugin_unavailable"),
-        (MemoryPluginIncompatibleError("injected"), "memory_plugin_incompatible"),
+        (MemoryImplementationUnavailableError("injected"), "memory_implementation_unavailable"),
+        (MemoryImplementationIncompatibleError("injected"), "memory_implementation_incompatible"),
     ],
 )
-def test_memory_remember_plugin_failure_uses_stable_plugin_envelope(
+def test_memory_remember_implementation_failure_uses_stable_error_envelope(
     monkeypatch: pytest.MonkeyPatch,
-    plugin_error: BaseException,
+    implementation_error: BaseException,
     expected_error: str,
 ) -> None:
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
-    controller._memory_plugin_error = plugin_error
+    controller._memory_implementation_error = implementation_error
     controller.memory_scope_for_cli_session = lambda _session_id: (
         "u-11111111111111111111111111111111",
         "default",
     )
     controller.capture_memory = Mock(
-        side_effect=AssertionError("plugin failure must short-circuit before capture")
+        side_effect=AssertionError(
+            "implementation failure must short-circuit before capture"
+        )
     )
     real_import = builtins.__import__
 

@@ -22,7 +22,7 @@ from config.memory_operation_lock import MemoryOperationLease
 from core.controller import Controller
 from avibe_memory.data_reset import reset_memory_data_roots
 from core.memory_adapter import DisabledMemoryAdapter
-from vibe.memory_contract import MemoryPluginUnavailableError, MemoryRuntimeBusyError
+from vibe.memory_contract import MemoryImplementationUnavailableError, MemoryRuntimeBusyError
 
 
 class _Runtime:
@@ -156,14 +156,14 @@ def _persist(monkeypatch: pytest.MonkeyPatch, controller: Controller) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_reaches_plugin_boundary_before_importing_reset_helpers(
+async def test_reset_reaches_implementation_boundary_before_importing_reset_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = Controller.__new__(Controller)
 
     @asynccontextmanager
     async def unavailable_runtime():
-        raise MemoryPluginUnavailableError("implementation missing")
+        raise MemoryImplementationUnavailableError("implementation missing")
         yield
 
     controller._memory_runtime_for_data_reset = unavailable_runtime
@@ -176,7 +176,7 @@ async def test_reset_reaches_plugin_boundary_before_importing_reset_helpers(
 
     monkeypatch.setattr(builtins, "__import__", block_reset_helper)
 
-    with pytest.raises(MemoryPluginUnavailableError, match="implementation missing"):
+    with pytest.raises(MemoryImplementationUnavailableError, match="implementation missing"):
         await controller._reset_memory_data_transaction(operation="delete_data")
 
 
@@ -590,7 +590,7 @@ async def test_unpublished_reset_blocks_concurrent_enable_before_construction(
 ) -> None:
     controller = _controller(None, enabled=False)
     controller.memory_adapter = DisabledMemoryAdapter()
-    controller._memory_plugin_error = None
+    controller._memory_implementation_error = None
     runtime = _Runtime(tmp_path)
     reset_started = asyncio.Event()
     reset_release = asyncio.Event()

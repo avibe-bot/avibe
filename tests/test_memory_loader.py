@@ -7,8 +7,8 @@ import pytest
 
 from core.memory_loader import load_memory_runtime, probe_memory_runtime_entrypoint
 from vibe.memory_contract import (
-    MemoryPluginIncompatibleError,
-    MemoryPluginUnavailableError,
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
     MemoryRuntimeBusyError,
 )
 
@@ -18,11 +18,7 @@ def _config(enabled: bool = True) -> SimpleNamespace:
 
 
 def _implementation(factory: object) -> SimpleNamespace:
-    return SimpleNamespace(
-        MEMORY_RUNTIME_PROTOCOL_VERSION=1,
-        MEMORY_RUNTIME_LIFECYCLE_CONTRACT=1,
-        create_memory_runtime=factory,
-    )
+    return SimpleNamespace(create_memory_runtime=factory)
 
 
 def test_disabled_loader_never_imports_optional_implementation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,43 +44,23 @@ def test_loader_and_probe_map_missing_implementation_to_unavailable(
         Mock(side_effect=ModuleNotFoundError("optional package missing")),
     )
 
-    with pytest.raises(MemoryPluginUnavailableError):
+    with pytest.raises(MemoryImplementationUnavailableError):
         if probe_only:
             probe_memory_runtime_entrypoint()
         else:
             load_memory_runtime(_config())
 
 
-@pytest.mark.parametrize(
-    ("attribute", "value"),
-    (
-        ("MEMORY_RUNTIME_PROTOCOL_VERSION", 99),
-        ("MEMORY_RUNTIME_LIFECYCLE_CONTRACT", None),
-        ("MEMORY_RUNTIME_LIFECYCLE_CONTRACT", 99),
-    ),
-)
-def test_entrypoint_probe_rejects_legacy_or_incompatible_contract(
-    monkeypatch: pytest.MonkeyPatch,
-    attribute: str,
-    value: int | None,
-) -> None:
+def test_entrypoint_contract_has_no_parallel_integer_version_markers() -> None:
     import core.memory_loader
+    import avibe_memory.runtime
 
-    factory = Mock()
-    implementation = _implementation(factory)
-    if value is None:
-        delattr(implementation, attribute)
-    else:
-        setattr(implementation, attribute, value)
-    monkeypatch.setattr(
-        core.memory_loader.importlib,
-        "import_module",
-        Mock(return_value=implementation),
+    retired_markers = (
+        "MEMORY_RUNTIME_PROTOCOL_VERSION",
+        "MEMORY_RUNTIME_LIFECYCLE_CONTRACT",
     )
-
-    with pytest.raises(MemoryPluginIncompatibleError):
-        probe_memory_runtime_entrypoint()
-    factory.assert_not_called()
+    assert all(not hasattr(core.memory_loader, name) for name in retired_markers)
+    assert all(not hasattr(avibe_memory.runtime, name) for name in retired_markers)
 
 
 @pytest.mark.parametrize("factory", (None, object()))
@@ -100,7 +76,7 @@ def test_entrypoint_probe_rejects_missing_or_noncallable_factory(
         Mock(return_value=_implementation(factory)),
     )
 
-    with pytest.raises(MemoryPluginUnavailableError):
+    with pytest.raises(MemoryImplementationUnavailableError):
         probe_memory_runtime_entrypoint()
 
 
@@ -123,8 +99,6 @@ def test_entrypoint_probe_validates_contract_without_constructing_runtime(
 @pytest.mark.parametrize(
     "attribute",
     (
-        "MEMORY_RUNTIME_PROTOCOL_VERSION",
-        "MEMORY_RUNTIME_LIFECYCLE_CONTRACT",
         "create_memory_runtime",
     ),
 )
@@ -146,7 +120,7 @@ def test_loader_translates_implementation_attribute_probe_failure(
         Mock(return_value=_BrokenImplementation()),
     )
 
-    with pytest.raises(MemoryPluginUnavailableError):
+    with pytest.raises(MemoryImplementationUnavailableError):
         load_memory_runtime(_config())
 
 
@@ -160,7 +134,7 @@ def test_loader_maps_constructor_failure_to_unavailable(monkeypatch: pytest.Monk
         Mock(return_value=_implementation(factory)),
     )
 
-    with pytest.raises(MemoryPluginUnavailableError):
+    with pytest.raises(MemoryImplementationUnavailableError):
         load_memory_runtime(_config())
 
 
@@ -221,7 +195,7 @@ def test_loader_rejects_incomplete_runtime_contract(
         Mock(return_value=_implementation(Mock(return_value=SimpleNamespace()))),
     )
 
-    with pytest.raises(MemoryPluginIncompatibleError):
+    with pytest.raises(MemoryImplementationIncompatibleError):
         load_memory_runtime(_config())
 
 
@@ -241,5 +215,5 @@ def test_loader_maps_runtime_contract_probe_failure_to_incompatible(
         Mock(return_value=_implementation(Mock(return_value=_BrokenRuntime()))),
     )
 
-    with pytest.raises(MemoryPluginIncompatibleError):
+    with pytest.raises(MemoryImplementationIncompatibleError):
         load_memory_runtime(_config())

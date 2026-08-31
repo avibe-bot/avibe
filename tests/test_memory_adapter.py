@@ -637,10 +637,45 @@ async def test_reset_and_archive_events_preserve_barriers() -> None:
     """Scenarios: MEMORY-INDEP-005, MEMORY-INDEP-010."""
 
     module = _Module()
+    first_started = asyncio.Event()
+    first_continue = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def capture(request, **_options: object) -> object:
+        if request.text == "first capture":
+            first_started.set()
+            await first_continue.wait()
+        else:
+            second_started.set()
+        module.captures.append(request)
+        return SimpleNamespace(status="accepted")
+
+    module.capture = capture
     adapter, _ = _adapter(module)
+
+    first_lease = _Lease()
+    second_lease = _Lease()
+    adapter.offer(_event(text="first capture", lease=first_lease))
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+
+    adapter.offer(_event(text="second capture", lease=second_lease))
     adapter.offer(SessionReset("session-reset"))
     adapter.offer(SessionArchived("session-archived"))
-    await _settle(adapter)
+    await asyncio.wait_for(second_started.wait(), timeout=1.0)
+
+    async def wait_for_barriers() -> None:
+        while len(module.barriers) < 2:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_barriers(), timeout=1.0)
 
     assert module.barriers == ["session-reset", "session-archived"]
+    assert [request.text for request in module.captures] == ["second capture"]
+    assert first_lease.retained == 1
+    assert first_lease.released == 0
+    assert second_lease.retained == second_lease.released == 1
+
+    first_continue.set()
+    await _settle(adapter)
+    assert first_lease.retained == first_lease.released == 1
     await adapter.cancel_memory_capture_tasks()

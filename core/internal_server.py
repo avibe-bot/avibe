@@ -54,8 +54,8 @@ from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
 from vibe.memory_contract import (
-    MemoryPluginIncompatibleError,
-    MemoryPluginUnavailableError,
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
     MemoryStoreUnavailableError,
 )
 from vibe.message_identity import HARNESS_TYPE, is_input_turn
@@ -66,11 +66,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 
-def _memory_plugin_error_code(error: BaseException) -> str:
+def _memory_implementation_error_code(error: BaseException) -> str:
     return (
-        "memory_plugin_incompatible"
-        if isinstance(error, MemoryPluginIncompatibleError)
-        else "memory_plugin_unavailable"
+        "memory_implementation_incompatible"
+        if isinstance(error, MemoryImplementationIncompatibleError)
+        else "memory_implementation_unavailable"
     )
 _SOCKET_MODE = 0o600
 _SOCKET_UMASK_MODE = 0o700
@@ -1023,7 +1023,7 @@ def create_app(
         except ImportError:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": "memory_plugin_unavailable"},
+                content={"ok": False, "error": "memory_implementation_unavailable"},
             )
         except Exception as exc:
             if type(exc).__name__ == "MemoryRuntimeActivationError":
@@ -1032,10 +1032,10 @@ def create_app(
                     status_code=503,
                     content={"ok": False, "error": "memory_runtime_install_failed"},
                 )
-            if isinstance(exc, (MemoryPluginUnavailableError, MemoryPluginIncompatibleError)):
+            if isinstance(exc, (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError)):
                 return JSONResponse(
                     status_code=503,
-                    content={"ok": False, "error": _memory_plugin_error_code(exc)},
+                    content={"ok": False, "error": _memory_implementation_error_code(exc)},
                 )
             logger.exception("internal memory reconcile failed")
             return JSONResponse(
@@ -1049,8 +1049,8 @@ def create_app(
 
         try:
             result = await controller.wake_memory()
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-            result = {"ok": False, "state": "degraded", "error": _memory_plugin_error_code(exc)}
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            result = {"ok": False, "state": "degraded", "error": _memory_implementation_error_code(exc)}
         except Exception:
             logger.exception("internal memory wake failed")
             result = {"ok": False, "state": "degraded", "error": "memory_wake_failed"}
@@ -1092,11 +1092,11 @@ def create_app(
             )
         try:
             result = await handler(confirm_loss=True)
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             result = {
                 "ok": False,
                 "operation": operation,
-                "error": _memory_plugin_error_code(exc),
+                "error": _memory_implementation_error_code(exc),
                 "result": "failed",
             }
         except Exception:
@@ -1171,11 +1171,11 @@ def create_app(
                 status_code=400,
                 content={"ok": False, "operation": "reconfigure", "error": "memory_invalid_input"},
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             result = {
                 "ok": False,
                 "operation": "reconfigure",
-                "error": _memory_plugin_error_code(exc),
+                "error": _memory_implementation_error_code(exc),
             }
         except Exception:
             logger.exception("internal Memory reconfigure failed")
@@ -1196,10 +1196,10 @@ def create_app(
         try:
             result = await controller.install_memory_runtime()
             return JSONResponse(status_code=200, content=result)
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "reason": _memory_plugin_error_code(exc)},
+                content={"ok": False, "reason": _memory_implementation_error_code(exc)},
             )
         except Exception:
             logger.exception("internal memory runtime install failed")
@@ -1218,10 +1218,10 @@ def create_app(
             if not callable(preflight):
                 return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
             return JSONResponse(status_code=200, content=await preflight(config))
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": _memory_plugin_error_code(exc)},
+                content={"ok": False, "error": _memory_implementation_error_code(exc)},
             )
         except Exception:
             logger.exception("internal memory preflight failed")
@@ -1237,11 +1237,11 @@ def create_app(
         scope = resolve(session_id) if callable(resolve) else None
         if not bool(getattr(getattr(getattr(controller, "config", None), "memory", None), "enabled", False)):
             return None
-        plugin_sessions = getattr(controller, "_memory_plugin_cli_sessions", None)
+        implementation_sessions = getattr(controller, "_memory_implementation_cli_sessions", None)
         if (
-            getattr(controller, "_memory_plugin_error", None) is not None
-            and isinstance(plugin_sessions, set)
-            and session_id in plugin_sessions
+            getattr(controller, "_memory_implementation_error", None) is not None
+            and isinstance(implementation_sessions, set)
+            and session_id in implementation_sessions
             and isinstance(scope, tuple)
             and len(scope) == 2
         ):
@@ -1361,8 +1361,8 @@ def create_app(
     async def _memory_status() -> Any:
         try:
             return await controller.memory_status_payload()
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-            return JSONResponse(status_code=503, content={"error": _memory_plugin_error_code(exc)})
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(status_code=503, content={"error": _memory_implementation_error_code(exc)})
         except Exception:
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
@@ -1373,10 +1373,10 @@ def create_app(
             return await controller.memory_processing_record_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except Exception:
             logger.warning("internal memory Processing Record read failed")
@@ -1391,8 +1391,8 @@ def create_app(
             return await controller.memory_failure_log_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-            return JSONResponse(status_code=503, content={"error": _memory_plugin_error_code(exc)})
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(status_code=503, content={"error": _memory_implementation_error_code(exc)})
         except Exception:
             logger.warning("internal memory failure log failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
@@ -1403,10 +1403,10 @@ def create_app(
             return await controller.memory_maintenance_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except Exception:
             logger.warning("internal memory maintenance read failed")
@@ -1431,10 +1431,10 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
@@ -1476,10 +1476,10 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(
@@ -1526,10 +1526,10 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(
@@ -1566,11 +1566,11 @@ def create_app(
                 verified_user_key=verified_user_key,
                 cli_scope=cli_scope,
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             logger.warning("internal memory project list failed")
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except MemoryStoreUnavailableError:
             logger.warning("internal memory project list failed")
@@ -1622,7 +1622,7 @@ def create_app(
         except (TypeError, ValueError):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         except ImportError:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_plugin_unavailable"})
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_implementation_unavailable"})
         current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
         try:
             return await controller.memory_search_payload(
@@ -1640,10 +1640,10 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
@@ -1771,10 +1771,10 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(
@@ -1820,12 +1820,12 @@ def create_app(
         source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
-            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            implementation_error = getattr(controller, "_memory_implementation_error", None)
             if isinstance(
-                plugin_error,
-                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+                implementation_error,
+                (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError),
             ):
-                raise plugin_error
+                raise implementation_error
             from avibe_memory import CaptureRequest
 
             capture = getattr(controller, "capture_memory", None)
@@ -1847,41 +1847,41 @@ def create_app(
                     occurred_at_ms=int(time.time() * 1000),
                 )
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             logger.warning("internal memory remember failed")
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
             )
         except ImportError:
-            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            implementation_error = getattr(controller, "_memory_implementation_error", None)
             if isinstance(
-                plugin_error,
-                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+                implementation_error,
+                (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError),
             ):
                 return JSONResponse(
                     status_code=503,
                     content={
                         "status": "failed",
-                        "error": _memory_plugin_error_code(plugin_error),
+                        "error": _memory_implementation_error_code(implementation_error),
                     },
                 )
             logger.warning("internal memory remember implementation unavailable")
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": "memory_plugin_unavailable"},
+                content={"status": "failed", "error": "memory_implementation_unavailable"},
             )
         except Exception:
-            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            implementation_error = getattr(controller, "_memory_implementation_error", None)
             if isinstance(
-                plugin_error,
-                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+                implementation_error,
+                (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError),
             ):
                 return JSONResponse(
                     status_code=503,
                     content={
                         "status": "failed",
-                        "error": _memory_plugin_error_code(plugin_error),
+                        "error": _memory_implementation_error_code(implementation_error),
                     },
                 )
             logger.warning("internal memory remember failed")

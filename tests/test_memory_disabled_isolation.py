@@ -20,8 +20,8 @@ from core.controller import Controller
 from avibe_memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter
 from vibe.memory_contract import (
-    MemoryPluginIncompatibleError,
-    MemoryPluginUnavailableError,
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
     MemoryStoreUnavailableError,
 )
 
@@ -65,7 +65,7 @@ def _controller_with_memory(memory=None) -> Controller:
     controller._memory_reconcile_task = None
     controller._memory_disabled_cleanup_task = None
     controller._memory_disabled_cleanup_unproved = False
-    controller._memory_plugin_error = None
+    controller._memory_implementation_error = None
     return controller
 
 
@@ -94,24 +94,24 @@ def _memory_state_entries(home: Path) -> list[Path]:
     ]
 
 
-def test_memory_cli_session_keeps_authenticated_boundary_when_plugin_is_unavailable() -> None:
+def test_memory_cli_session_keeps_authenticated_boundary_when_implementation_is_unavailable() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(
         memory=types.SimpleNamespace(enabled=True),
     )
-    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_implementation_error = MemoryImplementationUnavailableError("injected")
     controller._memory_scopes_by_session = {}
     controller._memory_cli_facts_by_session = {}
-    controller._memory_plugin_cli_sessions = set()
+    controller._memory_implementation_cli_sessions = set()
     controller._memory_admission = lambda: pytest.fail(
-        "plugin failure must be projected before admission imports"
+        "implementation failure must be projected before admission imports"
     )
     controller._memory_turn_facts = lambda _context: pytest.fail(
-        "plugin failure must be projected before facts imports"
+        "implementation failure must be projected before facts imports"
     )
     context = types.SimpleNamespace(
         platform_specific={
-            "agent_session_target": {"id": "session-plugin"},
+            "agent_session_target": {"id": "session-implementation"},
         },
         platform="avibe",
     )
@@ -121,8 +121,8 @@ def test_memory_cli_session_keeps_authenticated_boundary_when_plugin_is_unavaila
         context,
         admitted=True,
     )
-    assert Controller.memory_scope_for_cli_session(controller, "session-plugin") == (
-        "__memory_plugin_error__",
+    assert Controller.memory_scope_for_cli_session(controller, "session-implementation") == (
+        "__memory_implementation_error__",
         "default",
     )
 
@@ -347,12 +347,12 @@ from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
 from core.memory_adapter import DisabledMemoryAdapter
-from vibe.memory_contract import MemoryPluginUnavailableError
+from vibe.memory_contract import MemoryImplementationUnavailableError
 
 
 class BrokenRuntime(types.ModuleType):
     def __getattr__(self, name):
-        if name in {"MEMORY_RUNTIME_PROTOCOL_VERSION", "create_memory_runtime"}:
+        if name == "create_memory_runtime":
             raise RuntimeError("broken optional runtime attribute")
         raise AttributeError(name)
 
@@ -388,7 +388,7 @@ config = to_app_config(V2Config.from_payload({
 controller = Controller(config)
 assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 assert controller.memory_runtime is None
-assert isinstance(controller._memory_plugin_error, MemoryPluginUnavailableError)
+assert isinstance(controller._memory_implementation_error, MemoryImplementationUnavailableError)
 '''
     environment = os.environ.copy()
     environment["AVIBE_HOME"] = str(tmp_path / "home")
@@ -787,19 +787,19 @@ async def test_overlapping_unpublished_operations_return_busy(
 
 @pytest.mark.parametrize("recovery", ("preflight", "install"))
 @pytest.mark.asyncio
-async def test_cached_plugin_failure_only_retries_for_explicit_recovery(
+async def test_cached_implementation_failure_only_retries_for_explicit_recovery(
     recovery: str,
 ) -> None:
     controller = _controller_with_memory(
         replace(_disabled_app_config().memory, enabled=True)
     )
-    failure = MemoryPluginUnavailableError("startup failed")
-    controller._memory_plugin_error = failure
+    failure = MemoryImplementationUnavailableError("startup failed")
+    controller._memory_implementation_error = failure
     controller._create_memory_runtime = lambda *_args, **_kwargs: pytest.fail(
-        "ordinary reads must not retry a cached plugin failure"
+        "ordinary reads must not retry a cached implementation failure"
     )
 
-    with pytest.raises(MemoryPluginUnavailableError) as raised:
+    with pytest.raises(MemoryImplementationUnavailableError) as raised:
         await controller.memory_projects_payload(
             verified_user_key=None,
             cli_scope=("u-11111111111111111111111111111111", "default"),
@@ -860,19 +860,19 @@ async def test_cached_plugin_failure_only_retries_for_explicit_recovery(
     ]
     assert controller.memory_runtime is None
     assert controller.memory_module is None
-    assert controller._memory_plugin_error is None
+    assert controller._memory_implementation_error is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
-    retry_failure = MemoryPluginIncompatibleError("still incompatible")
+    retry_failure = MemoryImplementationIncompatibleError("still incompatible")
 
     def fail_retry(_config, **_kwargs):
         raise retry_failure
 
     controller._create_memory_runtime = fail_retry
-    with pytest.raises(MemoryPluginIncompatibleError) as raised:
+    with pytest.raises(MemoryImplementationIncompatibleError) as raised:
         await controller.preflight_memory(controller.config.memory)
     assert raised.value is retry_failure
-    assert controller._memory_plugin_error is retry_failure
+    assert controller._memory_implementation_error is retry_failure
 
 
 @pytest.mark.parametrize("ordering", ("reaper-first", "enable-first"))
@@ -1124,7 +1124,7 @@ async def test_disabled_operations_do_not_construct_runtime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plugin_failure_rechecked_after_blocked_capture_lock() -> None:
+async def test_implementation_failure_rechecked_after_blocked_capture_lock() -> None:
     controller = _controller_with_memory(
         replace(_disabled_app_config().memory, enabled=True)
     )
@@ -1135,10 +1135,10 @@ async def test_plugin_failure_rechecked_after_blocked_capture_lock() -> None:
     capture = asyncio.create_task(controller.capture_memory(request))
     await asyncio.sleep(0)
     assert not capture.done()
-    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_implementation_error = MemoryImplementationUnavailableError("injected")
     gate.release()
 
-    with pytest.raises(MemoryPluginUnavailableError):
+    with pytest.raises(MemoryImplementationUnavailableError):
         await capture
 
 

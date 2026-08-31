@@ -165,8 +165,8 @@ MemoryErrorCode = Literal[
     "memory_delete_data_failed",
     "memory_reconfigure_failed",
     "memory_operation_in_progress",
-    "memory_plugin_unavailable",
-    "memory_plugin_incompatible",
+    "memory_implementation_unavailable",
+    "memory_implementation_incompatible",
 ]
 
 # This transport vocabulary is wider than the persistable failure vocabulary.
@@ -204,8 +204,8 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_delete_data_failed",
         "memory_reconfigure_failed",
         "memory_operation_in_progress",
-        "memory_plugin_unavailable",
-        "memory_plugin_incompatible",
+        "memory_implementation_unavailable",
+        "memory_implementation_incompatible",
     }
 )
 
@@ -224,9 +224,9 @@ class MemoryRuntimeBusyError(RuntimeError):
     """The provider root already belongs to another live Memory runtime."""
 
 
-class MemoryPluginUnavailableError(RuntimeError):
+class MemoryImplementationUnavailableError(RuntimeError):
     """The optional Memory implementation is absent or cannot be constructed."""
 
 
-class MemoryPluginIncompatibleError(RuntimeError):
-    """The optional Memory implementation exposes an unsupported protocol."""
+class MemoryImplementationIncompatibleError(RuntimeError):
+    """The optional Memory implementation lacks the required runtime surface."""

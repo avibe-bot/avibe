@@ -522,11 +522,11 @@ def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypa
 @pytest.mark.parametrize(
     ("code", "label"),
     [
-        ("memory_plugin_unavailable", "Memory implementation unavailable"),
-        ("memory_plugin_incompatible", "Memory implementation is incompatible"),
+        ("memory_implementation_unavailable", "Memory implementation unavailable"),
+        ("memory_implementation_incompatible", "Memory implementation is incompatible"),
     ],
 )
-def test_memory_cli_plugin_failure_localizes_human_error_without_changing_json_code(
+def test_memory_cli_implementation_failure_localizes_human_error_without_changing_json_code(
     monkeypatch,
     capsys,
     code,
