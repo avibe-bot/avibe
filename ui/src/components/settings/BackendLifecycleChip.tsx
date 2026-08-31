@@ -13,7 +13,7 @@ import {
 import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
-type Phase = 'idle' | 'loading' | 'upgrading' | 'restarting';
+type Operation = 'idle' | 'upgrading' | 'restarting';
 type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'error' | 'loading';
 type BadgeVariant = 'secondary' | 'success' | 'info' | 'warning' | 'destructive';
 
@@ -58,11 +58,11 @@ const deriveVisual = (
   enabled: boolean,
   cliStatus: CliStatus,
   runtime: BackendRuntimeInfo | null,
-  phase: Phase,
+  operation: Operation,
 ): Visual => {
   // An in-flight upgrade outranks a stale "disabled" — if the user toggles a
   // backend off mid-install we still want the progress affordance visible.
-  if (phase === 'upgrading') return 'updating';
+  if (operation === 'upgrading') return 'updating';
   if (!enabled) return 'disabled';
   if (cliStatus === 'missing') return 'error';
   // ``runtime.installed`` is probed against the *persisted* cli_path. When
@@ -100,7 +100,8 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   const { showToast } = useToast();
   const [isOpen, setIsOpen] = React.useState(false);
   const [runtime, setRuntime] = React.useState<BackendRuntimeInfo | null>(null);
-  const [phase, setPhase] = React.useState<Phase>('idle');
+  const [runtimeLoading, setRuntimeLoading] = React.useState(false);
+  const [operation, setOperation] = React.useState<Operation>('idle');
   const popupRef = React.useRef<HTMLDivElement>(null);
   const isMountedRef = React.useRef(true);
   // Monotonic token guards against stale async writes when toggle/detect
@@ -128,7 +129,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const loadRuntime = React.useCallback(async () => {
     const myToken = ++loadTokenRef.current;
-    setPhase('loading');
+    setRuntimeLoading(true);
     let info: BackendRuntimeInfo | null = null;
     try {
       info = await api.getBackendRuntime(name);
@@ -139,29 +140,36 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       // unmounted while we were in flight.
       if (isMountedRef.current && loadTokenRef.current === myToken) {
         setRuntime(info);
-        setPhase('idle');
+        setRuntimeLoading(false);
       }
     }
   }, [api, name]);
 
-  // Refresh when the chip opens, when the user toggles enabled, or when the CLI
-  // path is freshly detected. Keeps the chip in sync with the surrounding card.
+  // Refresh when the user toggles enabled or when the CLI path is freshly
+  // detected. Runtime loading is independent from a long-running operation so
+  // a probe can never replace an active upgrade with stale version data.
   React.useEffect(() => {
     if (!enabled) {
       // Bump the token so any in-flight probe drops its result.
       loadTokenRef.current += 1;
       setRuntime(null);
+      setRuntimeLoading(false);
       return;
     }
-    if (cliStatus === 'ok' || isOpen) {
-      void loadRuntime();
-    }
-  }, [enabled, cliStatus, isOpen, loadRuntime]);
+    if (cliStatus === 'ok') void loadRuntime();
+  }, [enabled, cliStatus, loadRuntime]);
 
-  const visual = deriveVisual(enabled, cliStatus, runtime, phase);
+  // Opening asks for a fresh projection; closing is presentation-only and
+  // must not mutate lifecycle state.
+  React.useEffect(() => {
+    if (enabled && isOpen) void loadRuntime();
+  }, [enabled, isOpen, loadRuntime]);
+
+  const visual = deriveVisual(enabled, cliStatus, runtime, operation);
+  const busy = runtimeLoading || operation !== 'idle';
 
   const handleUpgrade = async () => {
-    setPhase('upgrading');
+    setOperation('upgrading');
     try {
       const result = await api.installAgent(name);
       if (result.ok) {
@@ -175,12 +183,12 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
-      if (isMountedRef.current) setPhase('idle');
+      if (isMountedRef.current) setOperation('idle');
     }
   };
 
   const handleRestart = async () => {
-    setPhase('restarting');
+    setOperation('restarting');
     try {
       const result = await api.restartBackend(name);
       showToast(
@@ -191,7 +199,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
-      if (isMountedRef.current) setPhase('idle');
+      if (isMountedRef.current) setOperation('idle');
     }
   };
 
@@ -245,11 +253,11 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
                 size="icon"
                 className="h-7 w-7 text-muted hover:text-foreground"
                 onClick={() => void loadRuntime()}
-                disabled={phase !== 'idle'}
+                disabled={busy}
                 aria-label={t('common.refresh')}
                 title={t('common.refresh')}
               >
-                <RefreshCw size={14} className={phase === 'loading' ? 'animate-spin' : ''} />
+                <RefreshCw size={14} className={runtimeLoading ? 'animate-spin' : ''} />
               </Button>
               <Button
                 variant="ghost"
@@ -267,7 +275,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
             <ChipPopoverBody
               visual={visual}
               runtime={runtime}
-              phase={phase}
+              operation={operation}
               name={name}
             />
           </div>
@@ -275,13 +283,13 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
           {visual !== 'disabled' && visual !== 'updating' && (
             <div className="flex flex-wrap justify-end gap-2 border-t border-border px-4 py-3">
               {visual === 'update' && (
-                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={phase !== 'idle'}>
+                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={busy}>
                   <Download size={14} />
                   {t('backendLifecycle.upgradeNow')}
                 </Button>
               )}
               {visual === 'error' && (
-                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={phase !== 'idle'}>
+                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={busy}>
                   <Download size={14} />
                   {t('backendLifecycle.reinstall')}
                 </Button>
@@ -291,9 +299,9 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
                   variant="secondary"
                   size="xs"
                   onClick={() => void handleRestart()}
-                  disabled={phase !== 'idle'}
+                  disabled={busy}
                 >
-                  <RotateCw size={14} className={phase === 'restarting' ? 'animate-spin' : ''} />
+                  <RotateCw size={14} className={operation === 'restarting' ? 'animate-spin' : ''} />
                   {t('backendLifecycle.restart')}
                 </Button>
               )}
@@ -308,9 +316,9 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 const ChipPopoverBody: React.FC<{
   visual: Visual;
   runtime: BackendRuntimeInfo | null;
-  phase: Phase;
+  operation: Operation;
   name: string;
-}> = ({ visual, runtime, phase, name }) => {
+}> = ({ visual, runtime, operation, name }) => {
   const { t } = useTranslation();
 
   if (visual === 'disabled') {
@@ -333,20 +341,20 @@ const ChipPopoverBody: React.FC<{
           <span className="font-mono font-medium text-foreground">{runtime.latest_version}</span>
         </div>
       )}
-      <StateBlock visual={visual} phase={phase} runtime={runtime} name={name} />
+      <StateBlock visual={visual} operation={operation} runtime={runtime} name={name} />
     </>
   );
 };
 
 const StateBlock: React.FC<{
   visual: Visual;
-  phase: Phase;
+  operation: Operation;
   runtime: BackendRuntimeInfo | null;
   name: string;
-}> = ({ visual, phase, runtime, name }) => {
+}> = ({ visual, operation, runtime, name }) => {
   const { t } = useTranslation();
 
-  if (phase === 'upgrading') {
+  if (operation === 'upgrading') {
     return (
       <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
         <RefreshCw size={16} className="shrink-0 animate-spin" />
