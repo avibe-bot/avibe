@@ -42,6 +42,11 @@ from avibe_memory.confined_filesystem import (
     remove_confined_path,
     replace_confined,
 )
+from avibe_memory.artifact_contract import (
+    EMBEDDED_PYTHON_VERSION,
+    EVEROS_VERSION,
+    run_cold_artifact_admission,
+)
 from avibe_memory.provider_root import (
     PROVIDER_ROOT_CONTROL_FILES,
     ROOT_SENTINEL_FILENAME,
@@ -50,11 +55,6 @@ from avibe_memory.provider_root import (
     ProviderRootMetadata,
     ProviderRootState,
 )
-from avibe_memory.modality import pinned_modality_contract_script
-
-
-EVEROS_VERSION = "1.2.3"
-EMBEDDED_PYTHON_VERSION = "3.12.12"
 PACKAGE_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 RUNTIME_BUILDER_UV_VERSION = "0.9.18"
 ARTIFACT_ADMISSION_REVISION = 1
@@ -70,27 +70,17 @@ _SPEC = ManagedRuntimeSpec(
     version_field="everos_version",
     default_bin_path="bin/python",
 )
-_SMOKE_SCRIPT = (
-    "from importlib.metadata import version\n"
-    "import platform\n"
-    "import everos\n"
-    "import uvicorn\n"
-    "from everos.entrypoints.api.app import create_app\n"
-    "import everos.entrypoints.cli.main\n"
-    "import everos.memory.cascade\n"
-    f"assert version('everos') == '{EVEROS_VERSION}'\n"
-    "assert platform.python_version() == '3.12.12'\n"
-    "assert everos is not None and uvicorn is not None\n"
-    "assert callable(create_app)\n"
-    + pinned_modality_contract_script()
-    +
-    "print(version('everos'))\n"
-    "print(platform.python_version())\n"
-)
 _SCRUBBER_ADMISSION_SCRIPT = (
     "from avibe_memory.secret_scrubber import install_error_scrubbers\n"
     "install_error_scrubbers()\n"
 )
+_SCRUBBER_ADMISSION_TIMEOUT_SECONDS = 30
+_SCRUBBER_ADMISSION_TIMEOUT_REASON = "memory_runtime_preparation_scrubber_timeout"
+_SCRUBBER_ADMISSION_FAILURE_REASON = "memory_runtime_preparation_scrubber_failed"
+_SYNC_ADMISSION_FAILURE_REASON = "memory_runtime_preparation_sync_contract_failed"
+_PREPARATION_FAILURE_REASON = "memory_runtime_preparation_failed"
+_LATEST_INSTALL_FAILURE_FILENAME = "last-install-failure.json"
+_MAX_LATEST_INSTALL_FAILURE_BYTES = 4 * 1024
 _PROVIDER_ROOT_REPAIR_MARKERS = (
     "incompatible",
     "does not match",
@@ -205,6 +195,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if self._dev_runtime_configured():
             return self._dev_runtime_status(self._dev_runtime_python())
         self._install_reason = None
+        latest_failure = self._read_latest_install_failure()
         manifest = self._load_manifest(allow_network=False)
         if manifest is not None:
             self._manifest_installable(manifest)
@@ -215,11 +206,14 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         except OSError:
             binary = None
             invalid = True
-        if (
-            pointer is not None
+        admission_rejected = (
+            not invalid
+            and pointer is not None
+            and binary is not None
             and pointer.get("admission_revision") == ARTIFACT_ADMISSION_REVISION
             and pointer.get("admission_ok") is not True
-        ):
+        )
+        if admission_rejected:
             binary = None
             invalid = True
         invalid = invalid or (pointer is not None and binary is None)
@@ -257,6 +251,15 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 except (MemoryRuntimeActivationError, ValueError):
                     matches_manifest = False
         installed_version = pointer.get("runtime_version") if binary is not None else None
+        persisted_reason = latest_failure.get("reason") if latest_failure is not None else None
+        if admission_rejected and persisted_reason is not None:
+            failure_reason = persisted_reason
+        elif invalid:
+            failure_reason = "memory_runtime_install_failed"
+        else:
+            failure_reason = persisted_reason or (
+                self._install_reason if binary is None else None
+            )
         return {
             "id": self.spec.runtime_id,
             "provider": "manifest",
@@ -265,12 +268,16 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             "version": installed_version,
             "selected_version": selected_version,
             "matches_manifest": matches_manifest,
-            "status": "ready" if binary is not None else ("error" if invalid else "missing"),
+            "status": (
+                "ready"
+                if binary is not None
+                else ("error" if invalid or persisted_reason is not None else "missing")
+            ),
             "path": str(binary) if binary is not None else None,
             "install_dir": pointer.get("install_dir") if binary is not None else None,
             "manifest": self._manifest_status_payload(manifest),
             "archive": self._archive_status_payload(archive),
-            "reason": "memory_runtime_install_failed" if invalid else (self._install_reason if binary is None else None),
+            "reason": failure_reason,
             "download_error": self._download_error,
         }
 
@@ -478,10 +485,10 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             preparation = self._prepare_binary(binary, sync_contract=sync_contract)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to admit existing Memory runtime binary")
-            preparation = {"ok": False}
+            preparation = {"ok": False, "reason": _PREPARATION_FAILURE_REASON}
         if preparation.get("ok") is not True:
             return self._failure(
-                "memory_runtime_install_failed",
+                str(preparation.get("reason") or _PREPARATION_FAILURE_REASON),
                 manifest=manifest,
                 archive=archive,
             )
@@ -615,6 +622,45 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             archive=archive,
         )
 
+    def _success_payload(
+        self,
+        binary: Path,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+        *,
+        changed: bool,
+    ) -> dict[str, Any]:
+        payload = super()._success_payload(
+            binary,
+            install_dir,
+            manifest,
+            archive,
+            changed=changed,
+        )
+        self._clear_latest_install_failure()
+        return payload
+
+    def _failure(
+        self,
+        reason: str,
+        *,
+        manifest: ManagedRuntimeManifest | None = None,
+        archive: ManagedRuntimeArchive | None = None,
+        message: str | None = None,
+        skipped: bool = False,
+    ) -> dict[str, Any]:
+        payload = super()._failure(
+            reason,
+            manifest=manifest,
+            archive=archive,
+            message=message,
+            skipped=skipped,
+        )
+        if not skipped:
+            self._write_latest_install_failure(reason)
+        return payload
+
     def _candidate_from_manifest(self, manifest: ManagedRuntimeManifest) -> MemoryArtifactCandidate:
         provider_root_format = manifest.payload.get("provider_root_format")
         compatible_values = manifest.payload.get("compatible_provider_root_formats", [])
@@ -735,7 +781,11 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             admitted_pointer["admission_ok"] = admission_ok
             self._restore_current_pointer(admitted_pointer)
             if not admission_ok:
-                self._install_reason = "memory_runtime_install_failed"
+                admission_reason = str(
+                    preparation.get("reason") or _PREPARATION_FAILURE_REASON
+                )
+                self._install_reason = admission_reason
+                self._write_latest_install_failure(admission_reason)
                 return None
         except Exception:  # noqa: BLE001
             self._install_reason = "memory_runtime_install_failed"
@@ -752,7 +802,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         archive: ManagedRuntimeArchive,
         candidate: MemoryArtifactCandidate,
     ) -> None:
-        _write_memory_pointer_atomic(
+        _write_memory_state_atomic(
             self.runtime_dir,
             self.runtime_dir / "current.json",
             {
@@ -785,7 +835,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                     "memory runtime pointer could not be removed safely"
                 ) from error
             return
-        _write_memory_pointer_atomic(self.runtime_dir, current, pointer)
+        _write_memory_state_atomic(self.runtime_dir, current, pointer)
 
     def _binary_version(self, binary: Path | None) -> str | None:
         if binary is None or not binary.is_file():
@@ -812,23 +862,23 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         *,
         sync_contract: tuple[int, tuple[str, ...], str, str] | None = None,
     ) -> dict[str, Any]:
-        try:
-            result = subprocess.run(
-                [str(binary), "-I", "-c", _SMOKE_SCRIPT],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-                **isolated_subprocess_kwargs(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return {"ok": False, "reason": "memory_runtime_install_failed"}
-        if result.returncode != 0 or result.stdout.splitlines() != [EVEROS_VERSION, EMBEDDED_PYTHON_VERSION]:
-            return {"ok": False, "reason": "memory_runtime_install_failed"}
-        if not self._admit_error_scrubbers(binary):
-            return {"ok": False, "reason": "memory_runtime_install_failed"}
+        cold_admission = run_cold_artifact_admission(binary)
+        logger.info(
+            "Memory runtime cold import admission completed in %d ms (ok=%s, reason=%s)",
+            cold_admission.duration_ms,
+            cold_admission.ok,
+            cold_admission.reason,
+        )
+        if not cold_admission.ok:
+            return {
+                "ok": False,
+                "reason": cold_admission.reason or _PREPARATION_FAILURE_REASON,
+            }
+        scrubber_failure = self._admit_error_scrubbers(binary)
+        if scrubber_failure is not None:
+            return {"ok": False, "reason": scrubber_failure}
         if not self._admit_sync_contract(binary, sync_contract):
-            return {"ok": False, "reason": "memory_runtime_install_failed"}
+            return {"ok": False, "reason": _SYNC_ADMISSION_FAILURE_REASON}
         return {
             "ok": True,
             "everos_version": EVEROS_VERSION,
@@ -867,7 +917,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         except (OSError, UnicodeError):
             return False
 
-    def _admit_error_scrubbers(self, binary: Path) -> bool:
+    def _admit_error_scrubbers(self, binary: Path) -> str | None:
         """Prove the child can install mandatory diagnostic scrubbers before launch."""
 
         source_root = Path(__file__).resolve().parents[1]
@@ -878,7 +928,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                     [str(binary), "-c", _SCRUBBER_ADMISSION_SCRIPT],
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=_SCRUBBER_ADMISSION_TIMEOUT_SECONDS,
                     check=False,
                     cwd=str(source_root),
                     env={
@@ -893,12 +943,80 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                     },
                     **isolated_subprocess_kwargs(),
                 )
+        except subprocess.TimeoutExpired:
+            return _SCRUBBER_ADMISSION_TIMEOUT_REASON
         except (OSError, subprocess.SubprocessError):
-            return False
-        return result.returncode == 0
+            return _SCRUBBER_ADMISSION_FAILURE_REASON
+        return None if result.returncode == 0 else _SCRUBBER_ADMISSION_FAILURE_REASON
+
+    def _read_latest_install_failure(self) -> dict[str, str] | None:
+        path = self.runtime_dir / _LATEST_INSTALL_FAILURE_FILENAME
+        try:
+            expected = path.lstat()
+        except OSError:
+            return None
+        if (
+            not stat.S_ISREG(expected.st_mode)
+            or expected.st_size > _MAX_LATEST_INSTALL_FAILURE_BYTES
+        ):
+            return None
+        try:
+            ensure_private_directory(self.runtime_dir, self.runtime_dir)
+            descriptor = open_and_harden_confined_regular_file(self.runtime_dir, path)
+        except (ConfinedFilesystemError, OSError):
+            return None
+        try:
+            actual = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(actual.st_mode)
+                or actual.st_dev != expected.st_dev
+                or actual.st_ino != expected.st_ino
+                or actual.st_size > _MAX_LATEST_INSTALL_FAILURE_BYTES
+            ):
+                return None
+            encoded = os.read(descriptor, _MAX_LATEST_INSTALL_FAILURE_BYTES + 1)
+        except OSError:
+            return None
+        finally:
+            os.close(descriptor)
+        if len(encoded) > _MAX_LATEST_INSTALL_FAILURE_BYTES:
+            return None
+        try:
+            payload = json.loads(encoded.decode("utf-8"))
+        except (RecursionError, UnicodeError, ValueError):
+            return None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("status") != "error"
+            or not _safe_metadata_value(payload.get("reason"))
+        ):
+            return None
+        return {"status": "error", "reason": payload["reason"]}
+
+    def _write_latest_install_failure(self, reason: str) -> None:
+        bounded_reason = reason if _safe_metadata_value(reason) else _PREPARATION_FAILURE_REASON
+        try:
+            _write_memory_state_atomic(
+                self.runtime_dir,
+                self.runtime_dir / _LATEST_INSTALL_FAILURE_FILENAME,
+                {"status": "error", "reason": bounded_reason},
+            )
+        except MemoryRuntimeActivationError:
+            logger.warning("Failed to persist Memory runtime install failure", exc_info=True)
+
+    def _clear_latest_install_failure(self) -> None:
+        try:
+            remove_confined_path(
+                self.runtime_dir,
+                self.runtime_dir / _LATEST_INSTALL_FAILURE_FILENAME,
+            )
+        except FileNotFoundError:
+            pass
+        except (ConfinedFilesystemError, OSError):
+            logger.warning("Failed to clear Memory runtime install failure", exc_info=True)
 
 
-def _write_memory_pointer_atomic(
+def _write_memory_state_atomic(
     runtime_root: Path,
     path: Path,
     payload: dict[str, Any],
@@ -913,7 +1031,7 @@ def _write_memory_pointer_atomic(
         while view:
             written = os.write(descriptor, view)
             if written <= 0:
-                raise OSError("memory runtime pointer write made no progress")
+                raise OSError("memory runtime state write made no progress")
             view = view[written:]
         os.fsync(descriptor)
         os.close(descriptor)
@@ -922,7 +1040,7 @@ def _write_memory_pointer_atomic(
         fsync_directory(runtime_root)
     except (ConfinedFilesystemError, OSError) as error:
         raise MemoryRuntimeActivationError(
-            "memory runtime pointer could not be written safely"
+            "memory runtime state could not be written safely"
         ) from error
     finally:
         if descriptor is not None:

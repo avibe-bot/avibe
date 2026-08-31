@@ -135,6 +135,11 @@ def test_publish_survives_concurrent_subscribe_churn():
         try:
             while not stop.is_set():
                 broker.publish("ping", {"n": 1})
+                # Preserve sustained cross-thread contention without queuing an
+                # unbounded number of callbacks ahead of the churn coroutine.
+                # The lock race needs overlap, not event-loop starvation.
+                if stop.wait(0.0005):
+                    break
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 

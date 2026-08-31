@@ -405,7 +405,7 @@ class Controller:
     def _init_model_hub(self) -> None:
         """Create the Model Hub aggregate only for an explicit release opt-in."""
 
-        from config.v2_config import is_model_hub_enabled
+        from config.v2_config import V2Config, is_model_hub_enabled
 
         self.model_hub_service = None
         self.model_hub_turn_gateway = None
@@ -418,6 +418,7 @@ class Controller:
         from core.handlers.model_hub import create_default_service
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
+        from vibe.api import resolve_cli_paths
 
         def default_vibe_agent_model(backend: str) -> Optional[str]:
             agent = self.vibe_agent_store.get_default_agent()
@@ -439,28 +440,65 @@ class Controller:
             ]
 
         cli_presence: dict[str, bool] = {}
+        cli_presence_lock = threading.Lock()
+        cli_presence_generation: dict[str, int] = {}
+        next_cli_presence_generation = 0
 
         def cli_present(backend: str) -> bool:
             # Payload assembly runs on the controller loop. Read only the last
-            # worker-produced snapshot here; a missing/erroring probe is false.
+            # complete worker-produced snapshot here.
             return cli_presence.get(backend, False)
 
-        def refresh_cli_presence() -> None:
-            from config.v2_config import V2Config
-            from vibe.api import resolve_cli_path
-
+        def refresh_cli_presence(
+            include_npm_global: bool,
+            backends: tuple[str, ...] | None = None,
+        ) -> None:
+            nonlocal cli_presence, next_cli_presence_generation
+            selected_backends = backends or ("claude", "codex", "opencode")
+            with cli_presence_lock:
+                next_cli_presence_generation += 1
+                generation = next_cli_presence_generation
+                for backend in selected_backends:
+                    cli_presence_generation[backend] = generation
             try:
                 v2_config = V2Config.load()
             except FileNotFoundError:
                 v2_config = None
-            for backend in ("claude", "codex", "opencode"):
+            except Exception:
+                logger.warning("Model Hub CLI config probe failed", exc_info=True)
+                v2_config = None
+            configured_paths: dict[str, str] = {}
+            for backend in selected_backends:
                 backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
-                configured_path = getattr(backend_config, "cli_path", None) or backend
-                try:
-                    cli_presence[backend] = resolve_cli_path(str(configured_path)) is not None
-                except Exception:
-                    logger.warning("Model Hub CLI presence probe failed for %s", backend, exc_info=True)
-                    cli_presence[backend] = False
+                configured_paths[backend] = str(
+                    getattr(backend_config, "cli_path", None) or backend
+                )
+            try:
+                resolved_paths = resolve_cli_paths(
+                    list(configured_paths.values()),
+                    include_npm_global=include_npm_global,
+                )
+            except Exception:
+                logger.warning("Model Hub CLI presence probe failed", exc_info=True)
+                return
+            refreshed = {
+                backend: resolved_paths.get(configured_path) is not None
+                for backend, configured_path in configured_paths.items()
+            }
+            with cli_presence_lock:
+                cli_presence = {
+                    **cli_presence,
+                    **{
+                        backend: present
+                        for backend, present in refreshed.items()
+                        if cli_presence_generation.get(backend) == generation
+                    },
+                }
+
+        # Seed only filesystem and PATH facts before the internal RPC surface
+        # exists. The page publishes npm-only installs through an explicit
+        # post-paint refresh, so controller readiness never waits on npm.
+        refresh_cli_presence(False, None)
 
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,
@@ -2642,6 +2680,15 @@ class Controller:
             self.request_shutdown("runtime owner recovery failed")
             raise
 
+        agent_service = getattr(self, "agent_service", None)
+        codex_agent = getattr(agent_service, "agents", {}).get("codex")
+        prepare_codex_hub = getattr(codex_agent, "prepare_model_hub_runtime", None)
+        if callable(prepare_codex_hub):
+            try:
+                await prepare_codex_hub()
+            except Exception as exc:  # noqa: BLE001 - direct Codex remains usable
+                logger.warning("Codex Hub model catalog preparation failed: %s", exc)
+
         # --- everything above must have succeeded for the service to be up ---
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
@@ -2691,14 +2738,14 @@ class Controller:
         """Restore durable execution owners before any producer can admit work."""
 
         model_hub_service = getattr(self, "model_hub_service", None)
-        reconcile_model_hub = getattr(
+        recover_model_hub = getattr(
             model_hub_service,
-            "reconcile_runtime_installation",
+            "recover_runtime_intent",
             None,
         )
-        if callable(reconcile_model_hub):
+        if callable(recover_model_hub):
             try:
-                await reconcile_model_hub()
+                await recover_model_hub()
             except Exception:
                 logger.exception(
                     "Model Hub runtime recovery failed; continuing without it"

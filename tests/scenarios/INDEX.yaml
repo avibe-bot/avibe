@@ -8,6 +8,19 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: memory_runtime_install
+    name: Memory Runtime artifact installation
+    status: active
+    catalog: tests/scenarios/memory_runtime_install/catalog.yaml
+    observations: tests/scenarios/memory_runtime_install/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
+    unit_or_contract_tests:
+      - tests/test_memory_artifact_contract.py
+      - tests/test_managed_runtime.py
+      - tests/test_memory_runtime_release.py
+      - tests/test_ui_server_install.py
+      - ui/src/components/settings/SettingsDependenciesPage.test.tsx
   - id: memory_delete_data
     name: Explicit confirmed deletion of confined Memory data
     status: active
@@ -77,6 +90,7 @@ capabilities:
       - tests/scenario_harness/memory_im_attachments.py
     unit_or_contract_tests:
       - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
+      - tests/test_vibe_cli.py
       - tests/test_memory_admission.py
       - tests/test_memory_im_attachments.py
       - tests/test_inbound_attachments.py
@@ -93,6 +107,7 @@ capabilities:
     scenario_tests:
       - tests/test_ui_memory_routes.py
     unit_or_contract_tests:
+      - tests/test_vibe_cli.py
       - tests/test_memory_wake.py
       - tests/test_memory_supervisor.py
       - tests/test_memory_confined_filesystem.py
@@ -124,8 +139,10 @@ capabilities:
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_usage.py
       - tests/test_opencode_server.py
+      - tests/test_runtime_activation.py
       - ui/src/components/settings/models/UsageTab.test.tsx
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+      - ui/src/components/settings/models/RouteChainDialog.test.tsx
       - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

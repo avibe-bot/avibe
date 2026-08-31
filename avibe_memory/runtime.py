@@ -91,6 +91,7 @@ from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.memory_adapter import DisabledMemoryAdapter, MemoryCaptureAdapter
 from avibe_memory.capture_adapter import EnabledMemoryAdapter
 from avibe_memory.types import (
+    MAX_MEMORY_LIST_PAGE_SIZE,
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
@@ -1428,10 +1429,14 @@ class MemoryRuntime:
         # Derived from this request's own result. Reading it off the shared
         # provider let a concurrent read for another principal decide what this
         # caller was told.
-        empty = isinstance(result, MemoryItems) and not result.items
+        confirmed_empty = (
+            isinstance(result, MemoryItems)
+            and not result.items
+            and not result.warnings
+        )
         return {
             **_result_payload(result),
-            "profile_warning": "empty" if empty else None,
+            "profile_warning": "empty" if confirmed_empty else None,
         }
 
     async def list_episodes_payload(
@@ -1476,7 +1481,7 @@ class MemoryRuntime:
             not is_principal_id(principal_id)
             or isinstance(limit, bool)
             or not isinstance(limit, int)
-            or not 1 <= limit <= _MEMORY_LIST_PROVIDER_PAGE_SIZE
+            or not 1 <= limit <= MAX_MEMORY_LIST_PAGE_SIZE
             or origin not in ("user", "agent")
         ):
             return {"status": "failed", "error": "memory_invalid_input"}

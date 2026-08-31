@@ -356,7 +356,7 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "MemoryAccounting=yes" in data
     assert "/opt/avibe/source" in data
     assert "/home/avibe/.vibe_remote" in data
-    assert "libreoffice-nogui" in data
+    assert "libreoffice-nogui" not in data
 
 
 def test_project_config_marks_regression_target() -> None:
@@ -747,11 +747,7 @@ def test_existing_instance_is_not_reinitialised() -> None:
 
     rendered = [" ".join(command) for command, _ in commands]
     assert not any(" init " in f" {command} " for command in rendered)
-    assert any(
-        "PATH=/usr/bin:/bin command -v soffice" in command
-        and "apt-get install -y --no-install-recommends libreoffice-nogui" in command
-        for command in rendered
-    )
+    assert not any("soffice" in command or "libreoffice" in command for command in rendered)
 
 
 def test_build_base_uses_publishable_temp_instance() -> None:

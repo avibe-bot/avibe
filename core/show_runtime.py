@@ -10,7 +10,6 @@ import importlib.resources as package_resources
 import json
 import logging
 import os
-import platform
 import random
 import re
 import shlex
@@ -27,7 +26,6 @@ import urllib.request
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from sysconfig import get_platform
 from typing import Any, Iterable, Iterator, Mapping
 
 import httpx
@@ -42,7 +40,18 @@ from storage.lock import (
 )
 
 from config import paths
-from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
+from core.dependency_network import dependency_error_details, fetch_to_path, probe_url, redact_url
+from core.managed_runtime import (
+    ManagedRuntimeArchive,
+    ManagedRuntimeManager,
+    ManagedRuntimeManifest,
+    ManagedRuntimeSpec,
+    env_flag_enabled,
+    file_sha256,
+    runtime_platform_tag,
+    safe_extract_tar,
+    safe_path_part,
+)
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
 from core.show_runtime_failures import (
     ShowRuntimeFailureClass,
@@ -66,8 +75,6 @@ _RUNTIME_SOURCE_NPM = "npm"
 _WARNED_RETIRED_RUNTIME_SOURCES: set[str] = set()
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
-_CUSTOM_MANIFEST_LINEAGE = "*custom*"
-_MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
 _CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
 _ABANDONED_ARCHIVE_CLAIM_RE = re.compile(r"^[0-9a-f]{64}\.tgz\.avibe-removing$")
 # Cross-process safety window: between a download finalizing ``<sha256>.tgz``
@@ -119,7 +126,8 @@ SHOW_RUNTIME_CONTEXT_HEADER = "X-Avibe-Show-Context"
 SHOW_RUNTIME_BASE_HEADER = "x-vibe-show-base"
 SHOW_RUNTIME_TARGET_HEADER = "x-vibe-show-target"
 SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
-SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY = "render_markdown"
+SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY = "render_markdown_ssr"
+# Phase 2.1 measured ~2 s cold against a 10 s Runtime module-load budget; this margin has no browser-install allowance.
 SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS = 30.0
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
@@ -249,25 +257,6 @@ class _ManagedInstallAttempt:
             raise ValueError("successful install attempt cannot carry an operation failure")
         if not self.command and not self.operation_reason:
             raise ValueError("failed install attempt requires an operation reason")
-
-
-@dataclass(frozen=True)
-class ShowRuntimeArchive:
-    platform: str
-    name: str
-    url: str
-    sha256: str
-    size: int | None = None
-
-
-@dataclass(frozen=True)
-class ShowRuntimeManifest:
-    schema_version: int
-    runtime_version: str
-    minimum_node: str | None
-    archives: dict[str, ShowRuntimeArchive]
-    digest: str
-    source: str
 
 
 @dataclass(frozen=True)
@@ -433,6 +422,313 @@ class ShowRuntimeAvailability:
         }
 
 
+_SHOW_MANAGED_RUNTIME_SPEC = ManagedRuntimeSpec(
+    runtime_id="runtime",
+    manifest_resource=_RUNTIME_MANIFEST_RESOURCE,
+    version_field="runtime_version",
+    default_bin_path="node_modules/@avibe/show-runtime/dist/cli.js",
+    binary_artifact=False,
+    record_provider=_RUNTIME_SOURCE_MANIFEST,
+    metadata_filename_override=".vibe-show-runtime.json",
+    allow_legacy_missing_runtime_id=True,
+    staging_prefixes=("install-", "manifest-"),
+    replace_target_on_force=True,
+)
+
+
+class _ShowManifestRuntimeManager(ManagedRuntimeManager):
+    """Show policy and released-record declarations over the shared installer."""
+
+    def __init__(self, owner: "ShowRuntimeManager", *, offline: bool) -> None:
+        self.owner = owner
+        super().__init__(
+            spec=_SHOW_MANAGED_RUNTIME_SPEC,
+            runtime_dir=owner.runtime_dir,
+            manifest_path=owner.manifest_path,
+            manifest_url=owner.manifest_url,
+            offline=offline,
+        )
+
+    def load_manifest(self, *, allow_network: bool) -> ManagedRuntimeManifest | None:
+        return self._load_manifest(allow_network=allow_network)
+
+    def archive_for_platform(
+        self,
+        manifest: ManagedRuntimeManifest,
+    ) -> ManagedRuntimeArchive | None:
+        return self._manifest_archive_for_platform(manifest)
+
+    def verified_entrypoint(
+        self,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> Path | None:
+        admitted = self._verified_manifest_binary(install_dir, manifest, archive)
+        return self._project_entrypoint(install_dir) if admitted is not None else None
+
+    def installed_result_entrypoint(self, result: Mapping[str, Any]) -> Path | None:
+        if not result.get("ok") or not isinstance(result.get("path"), str):
+            return None
+        install_dir = result.get("install_dir")
+        if not isinstance(install_dir, str):
+            return None
+        entrypoint = self._project_entrypoint(Path(install_dir))
+        return entrypoint if entrypoint.is_file() else None
+
+    def resolve_selected_entrypoint(self) -> Path | None:
+        manifest = self._load_manifest(allow_network=False)
+        if manifest is None or not self._manifest_installable(manifest):
+            return None
+        archive = self._manifest_archive_for_platform(manifest)
+        if archive is None:
+            return None
+        for install_dir in self._manifest_install_candidates(manifest, archive):
+            entrypoint = self._verified_manifest_binary(install_dir, manifest, archive)
+            if entrypoint is not None:
+                return self._project_entrypoint(install_dir)
+        return None
+
+    def _project_entrypoint(self, install_dir: Path) -> Path:
+        return install_dir / self.spec.default_bin_path
+
+    def install_candidates(
+        self,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> Iterator[Path]:
+        return self._manifest_install_candidates(manifest, archive)
+
+    def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
+        node = _resolve_node_command()
+        if node is None:
+            self._install_reason = "runtime_node_missing"
+            return False
+        minimum_node = self._minimum_node(manifest)
+        if minimum_node and not _node_satisfies_requirement(_node_version(node), minimum_node):
+            self._install_reason = "runtime_node_unsupported"
+            return False
+        return True
+
+    def _parse_manifest(
+        self,
+        payload: bytes,
+        *,
+        loaded_from: str,
+    ) -> ManagedRuntimeManifest | None:
+        manifest = super()._parse_manifest(payload, loaded_from=loaded_from)
+        if manifest is None:
+            return None
+        if "minimum_node" in manifest.payload and not isinstance(
+            manifest.payload["minimum_node"],
+            str,
+        ):
+            self._install_reason = "runtime_manifest_invalid"
+            return None
+        return manifest
+
+    def _manifest_archive_for_platform(
+        self,
+        manifest: ManagedRuntimeManifest,
+    ) -> ManagedRuntimeArchive | None:
+        archive = super()._manifest_archive_for_platform(manifest)
+        if archive is not None and archive.bin_path != self.spec.default_bin_path:
+            self._install_reason = "runtime_manifest_invalid"
+            return None
+        return archive
+
+    def _binary_matches_manifest(
+        self,
+        binary: Path,
+        manifest: ManagedRuntimeManifest,
+    ) -> bool:
+        del binary, manifest
+        return True
+
+    def _manifest_identity_fields(self, manifest: ManagedRuntimeManifest) -> dict[str, str]:
+        minimum_node = self._minimum_node(manifest)
+        return {"minimum_node": minimum_node} if minimum_node else {}
+
+    def _metadata_matches_install_target(
+        self,
+        metadata: Mapping[str, Any],
+        target: Mapping[str, str],
+    ) -> bool:
+        if metadata.get("runtime_id") is None:
+            target = {key: value for key, value in target.items() if key != "minimum_node"}
+        return super()._metadata_matches_install_target(metadata, target)
+
+    def _manifest_install_candidates(
+        self,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> Iterator[Path]:
+        install_dir = self._manifest_install_dir(manifest, archive)
+        legacy_parent = install_dir.parent
+        yield install_dir
+        yield legacy_parent
+
+        try:
+            candidates = sorted(legacy_parent.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return
+        for candidate in candidates:
+            if candidate == install_dir:
+                continue
+            try:
+                metadata = json.loads(
+                    (candidate / self.spec.metadata_filename).read_text(encoding="utf-8")
+                )
+            except Exception:
+                continue
+            manifest_sha256 = metadata.get("manifest_sha256")
+            if not isinstance(manifest_sha256, str) or not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
+                f"{manifest_sha256}.tgz"
+            ):
+                continue
+            previous_fingerprint = hashlib.sha256(
+                f"{manifest_sha256}:{archive.sha256}".encode("utf-8")
+            ).hexdigest()[:16]
+            if candidate.name == previous_fingerprint:
+                yield candidate
+
+    def _archive_cache_name(self, archive: ManagedRuntimeArchive) -> str:
+        return f"{archive.sha256}.tgz"
+
+    def _install_record_archive_name(
+        self,
+        metadata: Mapping[str, Any],
+        archive_name: str,
+        archive_sha256: str,
+    ) -> str:
+        del metadata, archive_name
+        return f"{archive_sha256}.tgz"
+
+    def _read_archive_provenance(self) -> set[tuple[str, str]]:
+        provenance = super()._read_archive_provenance()
+        downloads_dir = self.runtime_dir / "downloads"
+        try:
+            downloads_info = downloads_dir.lstat()
+        except FileNotFoundError:
+            return provenance
+        except OSError as exc:
+            raise OSError("downloads directory cannot be inspected") from exc
+        if _is_reparse_point(downloads_info) or not stat.S_ISDIR(downloads_info.st_mode):
+            raise OSError("downloads directory is not a confined directory")
+        try:
+            with os.scandir(downloads_dir) as entries:
+                for entry in entries:
+                    match = _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(entry.name)
+                    claim = _ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(entry.name)
+                    if match is None and claim is None:
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    if not _is_exclusive_regular_file(info):
+                        continue
+                    provenance.add((entry.name, entry.name[:64]))
+        except OSError as exc:
+            raise OSError("downloads directory cannot be inspected") from exc
+        return provenance
+
+    def _archive_candidate_sha256(self, name: str, fd: int) -> str:
+        if _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(name) or _ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(name):
+            return name[:64]
+        return super()._archive_candidate_sha256(name, fd)
+
+    def _clean_downloaded_archives(
+        self,
+        *,
+        archive_provenance: set[tuple[str, str]],
+        protected_sha256s: set[str],
+        dry_run: bool,
+    ) -> tuple[dict[str, Any], set[str]]:
+        report, terminal_names = super()._clean_downloaded_archives(
+            archive_provenance=archive_provenance,
+            protected_sha256s=protected_sha256s,
+            dry_run=dry_run,
+        )
+        report["protected_count"] = len(protected_sha256s)
+        return report, terminal_names
+
+    def _record_matches_configured_source(self, metadata: Mapping[str, Any]) -> bool:
+        source = metadata.get("manifest_source")
+        configured_source = self.owner._configured_manifest_source()
+        return source == configured_source or (
+            isinstance(source, str)
+            and self.owner.manifest_url is not None
+            and source == f"cache:{self.owner.manifest_url}"
+        )
+
+    def _record_install_dir_matches(
+        self,
+        install_dir: Path,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        runtime_version = metadata.get("runtime_version")
+        platform_tag = metadata.get("platform")
+        archive_sha256 = metadata.get("archive_sha256")
+        manifest_sha256 = metadata.get("manifest_sha256")
+        if not all(
+            isinstance(value, str) and value
+            for value in (runtime_version, platform_tag, archive_sha256, manifest_sha256)
+        ):
+            return False
+        if not all(
+            _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{value}.tgz")
+            for value in (archive_sha256, manifest_sha256)
+        ):
+            return False
+        try:
+            parts = install_dir.relative_to((self.runtime_dir / "versions").resolve()).parts
+        except (OSError, ValueError):
+            return False
+        expected_prefix = (safe_path_part(runtime_version), safe_path_part(platform_tag))
+        if parts[:2] != expected_prefix:
+            return False
+        if len(parts) == 2:
+            return True
+        if len(parts) != 3:
+            return False
+        current_fingerprint = hashlib.sha256(
+            f"{runtime_version}:{platform_tag}:{archive_sha256}".encode("utf-8")
+        ).hexdigest()[:16]
+        previous_fingerprint = hashlib.sha256(
+            f"{manifest_sha256}:{archive_sha256}".encode("utf-8")
+        ).hexdigest()[:16]
+        return parts[2] in {current_fingerprint, previous_fingerprint}
+
+    def _retention_ranked_installs(self, installs, protected):
+        resolved_by_path = {install.path: install.path.resolve() for install in installs}
+        return [
+            install
+            for install in installs
+            if not any(
+                resolved_by_path[install.path] in other.parents
+                for other in resolved_by_path.values()
+                if other != resolved_by_path[install.path]
+            )
+            and not self._install_dir_is_protected(
+                resolved_by_path[install.path],
+                protected,
+            )
+        ]
+
+    def _manifest_path_read_error_reason(self) -> str:
+        return "runtime_manifest_invalid"
+
+    def _reason(self, suffix: str) -> str:
+        aliases = {
+            "install_lock_failed": "runtime_install_guard_unavailable",
+            "install_missing_binary": "runtime_install_missing_bin",
+        }
+        return aliases.get(suffix, f"runtime_{suffix}")
+
+    @staticmethod
+    def _minimum_node(manifest: ManagedRuntimeManifest) -> str | None:
+        value = manifest.payload.get("minimum_node")
+        return value if isinstance(value, str) and value else None
+
+
 class ShowRuntimeManager:
     def __init__(
         self,
@@ -470,7 +766,7 @@ class ShowRuntimeManager:
         configured_archive_url = archive_url if archive_url is not None else archive_url_env
         self.archive_url = configured_archive_url if configured_archive_url is not None else _default_runtime_archive_url()
         self._archive_url_provenance = "configured" if configured_archive_url is not None else "packaged"
-        self.offline = _env_flag_enabled("VIBE_SHOW_RUNTIME_OFFLINE", default=False) if offline is None else offline
+        self.offline = env_flag_enabled("VIBE_SHOW_RUNTIME_OFFLINE", default=False) if offline is None else offline
         self.force_install = force_install
         self.stdout_path = self.runtime_dir / "stdout.log"
         self.stderr_path = self.runtime_dir / "stderr.log"
@@ -1096,12 +1392,10 @@ class ShowRuntimeManager:
 
         protocol = payload.get("protocol", _MISSING)
         capability = payload.get(SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY, _MISSING)
-        if protocol is not _MISSING and (isinstance(protocol, bool) or not isinstance(protocol, int)):
-            return None
-        if capability is not _MISSING and not isinstance(capability, bool):
-            return None
-        return bool(
-            protocol == SHOW_RUNTIME_PROTOCOL_VERSION
+        return (
+            isinstance(protocol, int)
+            and not isinstance(protocol, bool)
+            and protocol == SHOW_RUNTIME_PROTOCOL_VERSION
             and capability is True
         )
 
@@ -1253,7 +1547,12 @@ class ShowRuntimeManager:
             if preflight is not None:
                 admission, operation = preflight
             else:
-                acquired, guard_reason = stack.enter_context(self._install_guard_locked())
+                guard = (
+                    contextlib.nullcontext((True, None))
+                    if self.runtime_source == _RUNTIME_SOURCE_MANIFEST
+                    else self._install_guard_locked()
+                )
+                acquired, guard_reason = stack.enter_context(guard)
                 if not acquired:
                     command = None if force else self._safe_installed_managed_runtime_command(offline=offline)
                     if command:
@@ -1306,7 +1605,15 @@ class ShowRuntimeManager:
                                 else self._publish_install_availability(install_reason=reason)
                             )
                             operation = _ShowRuntimeOperationOutcome(
-                                _ShowRuntimeOperationState.FAILED,
+                                (
+                                    _ShowRuntimeOperationState.NOT_APPLICABLE
+                                    if reason
+                                    in {
+                                        "runtime_install_already_running",
+                                        "runtime_install_guard_unavailable",
+                                    }
+                                    else _ShowRuntimeOperationState.FAILED
+                                ),
                                 reason,
                             )
         except OSError:
@@ -1378,7 +1685,7 @@ class ShowRuntimeManager:
         return None
 
     def _managed_install_opt_out_reason(self, *, automatic: bool) -> str | None:
-        if automatic and _env_flag_enabled(
+        if automatic and env_flag_enabled(
             "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
             default=False,
         ):
@@ -1419,7 +1726,8 @@ class ShowRuntimeManager:
         if self._managed_command:
             return self._publish_install_availability(command=self._managed_command, policy_reason=reason)
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-            disk_install = self._persisted_manifest_disk_install()
+            manager = self._shared_manifest_manager(offline=True)
+            disk_install = self._shared_manifest_disk_install(manager)
             return self._publish_install_availability(
                 command=disk_install.command if disk_install else None,
                 install_state=(ShowRuntimeInstallState.INSTALLED if disk_install else ShowRuntimeInstallState.ABSENT),
@@ -1512,15 +1820,7 @@ class ShowRuntimeManager:
 
     def _remove_managed_runtime_tree_for_replacement(self, path: Path, *, label: str) -> bool:
         """Invalidate cached install facts before removing managed runtime bytes."""
-        self._managed_command = None
-        self._availability = replace(
-            self._availability,
-            install=ShowRuntimeInstallState.ABSENT,
-            command=None,
-            install_reason=None,
-            install_failure_class=None,
-            install_recovery_action=None,
-        )
+        self._invalidate_managed_runtime_projection()
         try:
             if os.path.lexists(path):
                 shutil.rmtree(path)
@@ -1532,6 +1832,17 @@ class ShowRuntimeManager:
             self._install_reason = "runtime_install_failed"
             return False
         return True
+
+    def _invalidate_managed_runtime_projection(self) -> None:
+        self._managed_command = None
+        self._availability = replace(
+            self._availability,
+            install=ShowRuntimeInstallState.ABSENT,
+            command=None,
+            install_reason=None,
+            install_failure_class=None,
+            install_recovery_action=None,
+        )
 
     def _install_managed_runtime_locked(
         self,
@@ -1551,7 +1862,6 @@ class ShowRuntimeManager:
             return _ManagedInstallAttempt(None, self._install_reason)
         if command:
             self._download_error = None
-            self._clean_after_managed_install(command)
             return _ManagedInstallAttempt(command)
         return _ManagedInstallAttempt(None, self._install_reason or "runtime_install_failed")
 
@@ -1576,29 +1886,6 @@ class ShowRuntimeManager:
             self._install_evidence = evidence
             self._download_error = download_error
 
-    def _clean_after_managed_install(self, command: list[str]) -> None:
-        try:
-            if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-                protected_install_dirs = self._manifest_install_dirs_for_command(command)
-                packaged = self.manifest_path is None and self.manifest_url is None
-                removed = self._clean_manifest_install_dirs(
-                    keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
-                    manifest_source=(_PACKAGED_RUNTIME_MANIFEST_SOURCE if packaged else _CUSTOM_MANIFEST_LINEAGE),
-                    protected_install_dirs=protected_install_dirs,
-                )
-                if removed:
-                    logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
-            archives = self._clean_downloaded_archives()
-            if archives.get("removed_count"):
-                logger.info(
-                    "Removed %d stale Show Runtime archive(s), reclaimed %d byte(s)",
-                    archives["removed_count"],
-                    archives["removed_bytes"],
-                )
-        except Exception:
-            # Cache cleanup must never turn a usable runtime install into a failed prepare.
-            logger.warning("Failed to clean stale managed Show Runtime installs", exc_info=True)
-
     def status(self, *, offline: bool | None = None) -> dict[str, Any]:
         explicit_availability = (
             self._resolve_explicit_command_availability()
@@ -1606,23 +1893,40 @@ class ShowRuntimeManager:
             else None
         )
         configured_command = explicit_availability.command if explicit_availability else None
-        disk_install = (
-            self._persisted_manifest_disk_install()
+        effective_offline = self.offline if offline is None else offline
+        manifest_manager = (
+            self._shared_manifest_manager(offline=effective_offline)
             if explicit_availability is None and self.runtime_source == _RUNTIME_SOURCE_MANIFEST
             else None
         )
         manifest = (
-            self._load_runtime_manifest(offline=offline)
-            if explicit_availability is None and self.runtime_source == _RUNTIME_SOURCE_MANIFEST
+            manifest_manager.load_manifest(allow_network=not effective_offline)
+            if manifest_manager is not None
             else None
         )
-        platform_tag = _runtime_platform_tag()
+        archive: ManagedRuntimeArchive | None = (
+            manifest_manager.archive_for_platform(manifest)
+            if manifest_manager is not None and manifest is not None
+            else None
+        )
+        manifest_reason = manifest_manager._install_reason if manifest_manager is not None else None
+        manifest_download_error = (
+            manifest_manager._download_error if manifest_manager is not None else None
+        )
+        disk_install = (
+            self._shared_manifest_disk_install(manifest_manager, adopt_evidence=False)
+            if manifest_manager is not None
+            else None
+        )
+        platform_tag = runtime_platform_tag()
         node = _resolve_node_command()
         node_version = _node_version(node) if node else None
-        node_supported = _node_satisfies_requirement(node_version, manifest.minimum_node) if manifest else None
+        minimum_node = (
+            _ShowManifestRuntimeManager._minimum_node(manifest) if manifest else None
+        )
+        node_supported = _node_satisfies_requirement(node_version, minimum_node) if manifest else None
         installed_command: list[str] | None = configured_command
         installed_dir: Path | None = None
-        archive: ShowRuntimeArchive | None = None
         archive_status: dict[str, Any] | None = None
         installed_runtime_version: str | None = None
         installed_matches: bool | None = None
@@ -1640,18 +1944,17 @@ class ShowRuntimeManager:
                 if manifest_status is None:
                     manifest_status = _persisted_manifest_status_payload(disk_install.metadata)
                     archive_status = _persisted_archive_status_payload(disk_install.metadata)
-            if manifest:
-                archive = manifest.archives.get(platform_tag)
             if archive:
-                for candidate in self._manifest_install_candidates(manifest, archive):
-                    if not self._manifest_install_matches(candidate, manifest, archive):
+                for candidate in manifest_manager.install_candidates(manifest, archive):
+                    entrypoint = manifest_manager.verified_entrypoint(candidate, manifest, archive)
+                    if entrypoint is None:
                         continue
                     installed = True
                     installed_dir = candidate
                     installed_runtime_version = manifest.runtime_version
                     installed_matches = True
                     if node and node_supported is not False:
-                        installed_command = self._manifest_runtime_command(candidate, node)
+                        installed_command = [*node, str(entrypoint)]
                         if installed_command:
                             break
         elif explicit_availability is None and self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
@@ -1697,24 +2000,39 @@ class ShowRuntimeManager:
             "install": install_payload,
             "runtime": runtime_payload,
             "command": installed_command,
-            "reason": explicit_availability.reason if explicit_availability else self._install_reason,
-            "download_error": None if explicit_availability else self._download_error,
+            "reason": (
+                explicit_availability.reason
+                if explicit_availability
+                else manifest_reason or self._install_reason
+                if manifest_manager is not None
+                else self._install_reason
+            ),
+            "download_error": (
+                None
+                if explicit_availability
+                else manifest_download_error or self._download_error
+                if manifest_manager is not None
+                else self._download_error
+            ),
         }
 
     def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
         """Check the selected archive without downloading its body or mutating the cache."""
         archive_url: str | None = None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-            manifest = self._load_runtime_manifest()
+            manager = self._shared_manifest_manager(offline=self.offline)
+            manifest = manager.load_manifest_for_diagnostics()
             if not manifest:
+                self._adopt_shared_manifest_evidence(manager)
                 return {
                     "ok": False,
                     "checked": False,
                     "reason": self._install_reason or "runtime_manifest_missing",
                     "download_error": self._download_error,
                 }
-            archive = self._manifest_archive_for_platform(manifest)
+            archive = manager.archive_for_platform(manifest)
             if not archive:
+                self._adopt_shared_manifest_evidence(manager)
                 return {
                     "ok": False,
                     "checked": False,
@@ -1946,6 +2264,20 @@ class ShowRuntimeManager:
         return not self._preview_lock_missing()
 
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
+        if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            result = self._shared_manifest_manager(offline=True).clean(
+                keep_previous=keep_previous,
+                dry_run=dry_run,
+            )
+            if "archives" not in result:
+                reason = result.get("reason")
+                skipped_reason = (
+                    _SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING
+                    if reason == "runtime_install_already_running"
+                    else _SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED
+                )
+                result["archives"] = self._skipped_archive_report(skipped_reason)
+            return {"dry_run": dry_run, **result}
         removed: list[str] = []
         try:
             return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
@@ -1995,22 +2327,7 @@ class ShowRuntimeManager:
                         if not dry_run:
                             shutil.rmtree(path, ignore_errors=True)
                         removed.append(str(path))
-            self._clean_manifest_install_dirs(
-                keep_previous=keep_previous,
-                dry_run=dry_run,
-                removed=removed,
-            )
-            # A dry run leaves stale install dirs in place, so their metadata
-            # would still read as "protected" below. Skip metadata under the
-            # dirs a real run would remove, so the archive preview matches
-            # the real outcome. Hold the preview guard through this phase so
-            # an install starting after staging enumeration cannot expose an
-            # in-flight archive as reclaimable.
-            skip_metadata_under = {Path(path) for path in removed} if dry_run else None
-            archives = self._clean_downloaded_archives(
-                dry_run=dry_run,
-                skip_metadata_under=skip_metadata_under,
-            )
+            archives = self._clean_downloaded_archives(dry_run=dry_run)
             if dry_run and self._preview_raced_busy():
                 return {
                     "ok": False,
@@ -2418,152 +2735,6 @@ class ShowRuntimeManager:
             "skipped_reason": reason,
         }
 
-    def _clean_manifest_install_dirs(
-        self,
-        *,
-        keep_previous: int,
-        manifest_source: str | None = None,
-        protected_install_dirs: set[Path] | None = None,
-        dry_run: bool = False,
-        removed: list[str] | None = None,
-    ) -> list[str]:
-        if removed is None:
-            removed = []
-        versions_dir = self.runtime_dir / "versions"
-        if not versions_dir.is_dir():
-            return removed
-        protected = set(protected_install_dirs or ())
-        current_install_dir = self._current_manifest_install_dir(versions_dir)
-        if current_install_dir is not None:
-            protected.add(current_install_dir)
-        install_dirs = self._manifest_install_dirs(versions_dir, manifest_source=manifest_source)
-        all_manifest_install_dirs = self._manifest_install_dirs(versions_dir)
-        sorted_install_dirs = sorted(install_dirs, key=lambda path: path.stat().st_mtime, reverse=True)
-        resolved_install_dirs = {path: path.resolve() for path in install_dirs}
-        all_resolved_install_dirs = {path: path.resolve() for path in all_manifest_install_dirs}
-        rollback_candidates = [
-            path
-            for path in sorted_install_dirs
-            if not any(
-                resolved_install_dirs[path] in other_resolved.parents
-                for other, other_resolved in resolved_install_dirs.items()
-                if other != path
-            )
-        ]
-        kept_previous = 0
-        for path in rollback_candidates:
-            path_resolved = resolved_install_dirs[path]
-            if self._install_dir_overlaps_protected(path_resolved, protected):
-                continue
-            if kept_previous < keep_previous:
-                kept_previous += 1
-                protected.add(path_resolved)
-        removable_install_dirs = [
-            path
-            for path, path_resolved in resolved_install_dirs.items()
-            if not self._install_dir_overlaps_protected(path_resolved, protected)
-        ]
-        removable_resolved_install_dirs = {resolved_install_dirs[path] for path in removable_install_dirs}
-        safe_removable_install_dirs = [
-            path
-            for path in removable_install_dirs
-            if not any(
-                resolved_install_dirs[path] in other_resolved.parents
-                and other_resolved not in removable_resolved_install_dirs
-                for other_resolved in all_resolved_install_dirs.values()
-            )
-        ]
-        for path in sorted(safe_removable_install_dirs, key=lambda item: len(resolved_install_dirs[item].parts), reverse=True):
-            if not path.is_dir():
-                continue
-            if not dry_run:
-                shutil.rmtree(path, ignore_errors=True)
-            removed.append(str(path))
-        if not dry_run:
-            self._prune_empty_manifest_version_dirs(versions_dir)
-        return removed
-
-    @staticmethod
-    def _install_dir_overlaps_protected(path_resolved: Path, protected: set[Path]) -> bool:
-        return any(
-            path_resolved == item or path_resolved in item.parents or item in path_resolved.parents
-            for item in protected
-        )
-
-    def _manifest_install_dirs(self, versions_dir: Path, *, manifest_source: str | None = None) -> set[Path]:
-        install_dirs: set[Path] = set()
-        for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
-            for metadata_path in versions_dir.glob(pattern):
-                if not metadata_path.parent.is_dir():
-                    continue
-                if manifest_source is not None:
-                    try:
-                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
-                    if metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST:
-                        continue
-                    source = metadata.get("manifest_source")
-                    if manifest_source == _CUSTOM_MANIFEST_LINEAGE:
-                        if source == _PACKAGED_RUNTIME_MANIFEST_SOURCE:
-                            continue
-                    elif source != manifest_source:
-                        continue
-                install_dirs.add(metadata_path.parent)
-        return install_dirs
-
-    def _current_manifest_install_dir(self, versions_dir: Path) -> Path | None:
-        try:
-            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-            pointer_install_dir = Path(str(pointer.get("install_dir") or "")).resolve()
-            if versions_dir.resolve() in pointer_install_dir.parents:
-                return pointer_install_dir
-        except Exception:
-            pass
-        return None
-
-    def _manifest_source_for_install_dirs(self, install_dirs: set[Path]) -> str | None:
-        for install_dir in install_dirs:
-            try:
-                metadata = json.loads(self._manifest_metadata_path(install_dir).read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            source = metadata.get("manifest_source")
-            if isinstance(source, str) and source:
-                return source
-        if self.manifest_path is None and self.manifest_url is None:
-            return _PACKAGED_RUNTIME_MANIFEST_SOURCE
-        return None
-
-    def _manifest_install_dirs_for_command(self, command: list[str]) -> set[Path]:
-        versions_dir = self.runtime_dir / "versions"
-        if not versions_dir.is_dir():
-            return set()
-        install_dirs = self._manifest_install_dirs(versions_dir)
-        matching_install_dirs: set[Path] = set()
-        for command_part in command:
-            try:
-                command_path = Path(command_part).resolve()
-            except (OSError, RuntimeError):
-                continue
-            for install_dir in install_dirs:
-                install_dir_resolved = install_dir.resolve()
-                if install_dir_resolved == command_path or install_dir_resolved in command_path.parents:
-                    matching_install_dirs.add(install_dir_resolved)
-        return {
-            path
-            for path in matching_install_dirs
-            if not any(path in other.parents for other in matching_install_dirs if other != path)
-        }
-
-    def _prune_empty_manifest_version_dirs(self, versions_dir: Path) -> None:
-        for path in sorted(versions_dir.glob("*/*"), reverse=True):
-            if path.is_dir() and not any(path.iterdir()):
-                path.rmdir()
-        for path in sorted(versions_dir.iterdir(), reverse=True):
-            if path.is_dir() and not any(path.iterdir()):
-                path.rmdir()
-
     def prepare(
         self,
         *,
@@ -2586,7 +2757,7 @@ class ShowRuntimeManager:
         payload.update(
             {
                 "provider": self.runtime_source,
-                "platform": _runtime_platform_tag(),
+                "platform": runtime_platform_tag(),
                 "status": self.status(offline=status_offline),
             }
         )
@@ -2599,115 +2770,92 @@ class ShowRuntimeManager:
             return self.manifest_url
         return _PACKAGED_RUNTIME_MANIFEST_SOURCE
 
-    def _persisted_manifest_disk_install(self) -> _ShowRuntimeDiskInstall | None:
-        """Resolve the current manifest install without consulting the manifest source."""
-        try:
-            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-            if not isinstance(pointer, dict) or pointer.get("provider") != _RUNTIME_SOURCE_MANIFEST:
-                return None
-
-            versions_dir = self.runtime_dir / "versions"
-            versions_stat = versions_dir.lstat()
-            if _is_reparse_point(versions_stat) or not stat.S_ISDIR(versions_stat.st_mode):
-                return None
-            versions_resolved = versions_dir.resolve(strict=True)
-
-            pointer_install_dir = pointer.get("install_dir")
-            if not isinstance(pointer_install_dir, str) or not pointer_install_dir:
-                return None
-            install_dir = Path(pointer_install_dir).resolve(strict=True)
-            if versions_resolved not in install_dir.parents:
-                return None
-            install_stat = install_dir.lstat()
-            if _is_reparse_point(install_stat) or not stat.S_ISDIR(install_stat.st_mode):
-                return None
-
-            metadata_path = self._manifest_metadata_path(install_dir)
-            metadata_stat = metadata_path.lstat()
-            if _is_reparse_point(metadata_stat) or not stat.S_ISREG(metadata_stat.st_mode):
-                return None
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if not isinstance(metadata, dict) or metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST:
-                return None
-
-            runtime_version = metadata.get("runtime_version")
-            platform_tag = metadata.get("platform")
-            manifest_sha256 = metadata.get("manifest_sha256")
-            archive_sha256 = metadata.get("archive_sha256")
-            archive_name = metadata.get("archive_name")
-            if not all(
-                isinstance(value, str) and value
-                for value in (runtime_version, platform_tag, manifest_sha256, archive_sha256, archive_name)
-            ):
-                return None
-            if platform_tag != _runtime_platform_tag():
-                return None
-            if metadata.get("manifest_source") != self._configured_manifest_source():
-                return None
-            if not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{manifest_sha256}.tgz"):
-                return None
-            if not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{archive_sha256}.tgz"):
-                return None
-            pointer_manifest_sha256 = pointer.get("manifest_sha256")
-            if not isinstance(pointer_manifest_sha256, str) or not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
-                f"{pointer_manifest_sha256}.tgz"
-            ):
-                return None
-            # The pointer may name a newer manifest that adopted an old-layout
-            # install after only another platform changed. The serving identity
-            # deliberately excludes the whole-manifest digest, so agreement is
-            # required only for the fields that identify this platform's bytes.
-            for field in ("runtime_version", "platform", "archive_sha256"):
-                if pointer.get(field) != metadata.get(field):
-                    return None
-
-            relative_parts = install_dir.relative_to(versions_resolved).parts
-            expected_prefix = (_safe_path_part(runtime_version), _safe_path_part(platform_tag))
-            if relative_parts[:2] != expected_prefix:
-                return None
-            if len(relative_parts) == 2:
-                pass
-            elif len(relative_parts) == 3:
-                current_fingerprint = hashlib.sha256(
-                    f"{runtime_version}:{platform_tag}:{archive_sha256}".encode("utf-8")
-                ).hexdigest()[:16]
-                previous_fingerprint = hashlib.sha256(
-                    f"{manifest_sha256}:{archive_sha256}".encode("utf-8")
-                ).hexdigest()[:16]
-                if relative_parts[2] not in {current_fingerprint, previous_fingerprint}:
-                    return None
-            else:
-                return None
-
-            cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
-            cli_stat = cli_path.lstat()
-            if _is_reparse_point(cli_stat) or not stat.S_ISREG(cli_stat.st_mode):
-                return None
-            cli_resolved = cli_path.resolve(strict=True)
-            if install_dir not in cli_resolved.parents:
-                return None
-            node = _resolve_node_command()
-            command = [*node, str(cli_resolved)] if node else None
-            status_metadata = dict(metadata)
-            status_metadata["manifest_sha256"] = pointer_manifest_sha256
-            return _ShowRuntimeDiskInstall(install_dir=install_dir, command=command, metadata=status_metadata)
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return None
-
     def _installed_manifest_runtime_command(self, *, offline: bool | None = None) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             return None
-        disk_install = self._persisted_manifest_disk_install()
-        manifest = self._load_runtime_manifest(offline=offline)
-        if not manifest:
-            return disk_install.command if disk_install else None
-        if not self._manifest_node_supported(node, manifest):
+        manager = self._shared_manifest_manager(offline=self.offline if offline is None else offline)
+        entrypoint = manager.resolve_selected_entrypoint()
+        if entrypoint is not None:
+            self._adopt_shared_manifest_evidence(manager)
+            return [*node, str(entrypoint)]
+
+        source_reason = manager._install_reason
+        source_download_error = manager._download_error
+        if source_reason not in {
+            "runtime_manifest_download_failed",
+            "runtime_manifest_invalid",
+            "runtime_manifest_missing",
+            "runtime_manifest_unavailable_offline",
+        }:
+            self._adopt_shared_manifest_evidence(manager)
             return None
-        archive = self._manifest_archive_for_platform(manifest)
-        if not archive:
+
+        disk_install = self._shared_manifest_disk_install(manager, adopt_evidence=False)
+        manager._install_reason = source_reason
+        manager._download_error = source_download_error
+        self._adopt_shared_manifest_evidence(manager)
+        return disk_install.command if disk_install else None
+
+    def _shared_manifest_disk_install(
+        self,
+        manager: _ShowManifestRuntimeManager,
+        *,
+        adopt_evidence: bool = True,
+    ) -> _ShowRuntimeDiskInstall | None:
+        admitted_entrypoint = manager.resolve_binary()
+        if adopt_evidence:
+            self._adopt_shared_manifest_evidence(manager)
+        if admitted_entrypoint is None:
             return None
-        return self._verified_manifest_runtime_command_for_manifest(manifest, archive, node)
+        try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+            install_dir = Path(pointer["install_dir"]).resolve(strict=True)
+            metadata = json.loads(
+                (install_dir / manager.spec.metadata_filename).read_text(encoding="utf-8")
+            )
+            status_metadata = dict(metadata)
+            status_metadata["manifest_sha256"] = pointer["manifest_sha256"]
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return None
+        entrypoint = manager._project_entrypoint(install_dir)
+        if not entrypoint.is_file():
+            return None
+        node = _resolve_node_command()
+        command = [*node, str(entrypoint)] if node else None
+        return _ShowRuntimeDiskInstall(
+            install_dir=install_dir,
+            command=command,
+            metadata=status_metadata,
+        )
+
+    def _shared_manifest_manager(self, *, offline: bool) -> _ShowManifestRuntimeManager:
+        return _ShowManifestRuntimeManager(self, offline=offline)
+
+    def _adopt_shared_manifest_evidence(
+        self,
+        manager: _ShowManifestRuntimeManager,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
+        reason = result.get("reason") if result is not None else manager._install_reason
+        download_error = (
+            result.get("download_error") if result is not None else manager._download_error
+        )
+        self._download_error = download_error if isinstance(download_error, dict) else None
+        if reason:
+            provenance = "configured" if self.manifest_path or self.manifest_url else "packaged"
+            retryable = (
+                self._download_error.get("retryable")
+                if self._download_error is not None
+                else None
+            )
+            self._record_install_failure(
+                str(reason),
+                provenance=provenance,
+                retryable=retryable if isinstance(retryable, bool) else None,
+            )
+        else:
+            self._install_reason = None
 
     @contextlib.contextmanager
     def _install_guard_locked(self, *, timeout_seconds: float = 0.0):
@@ -2843,361 +2991,23 @@ class ShowRuntimeManager:
         if not node:
             self._install_reason = "runtime_node_missing"
             return None
-        manifest = self._load_runtime_manifest(offline=offline)
-        if not manifest:
-            return None
-        if not self._manifest_node_supported(node, manifest):
-            return None
-        archive = self._manifest_archive_for_platform(manifest)
-        if not archive:
-            return None
-        install_dir = self._manifest_install_dir(manifest, archive)
-        verified_existing_command = self._verified_manifest_runtime_command_for_manifest(
-            manifest,
-            archive,
-            node,
+        if force:
+            self._invalidate_managed_runtime_projection()
+        manager = self._shared_manifest_manager(offline=offline)
+        result = manager.ensure(force=force)
+        self._adopt_shared_manifest_evidence(manager, result)
+        entrypoint = manager.installed_result_entrypoint(result)
+        if (
+            not force
+            and result.get("reason") == "runtime_install_guard_unavailable"
+        ):
+            entrypoint = manager.resolve_selected_entrypoint()
+        command = [*node, str(entrypoint)] if entrypoint is not None else None
+        return self._managed_install_operation_command(
+            command,
+            replacement_required=force,
+            replacement_completed=bool(force and result.get("changed")),
         )
-        if verified_existing_command and not force:
-            install_dirs = self._manifest_install_dirs_for_command(verified_existing_command)
-            verified_install_dir = min(install_dirs, key=lambda path: str(path)) if install_dirs else None
-            if verified_install_dir is None:
-                logger.warning(
-                    "Verified Show Runtime command has no discoverable install directory; skipping current pointer update"
-                )
-            else:
-                self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
-            return self._managed_install_operation_command(
-                verified_existing_command,
-                replacement_required=False,
-            )
-        archive_path = self._resolve_manifest_archive(
-            archive,
-            offline=offline,
-            provenance=("packaged" if manifest.source == _PACKAGED_RUNTIME_MANIFEST_SOURCE else "configured"),
-        )
-        if not archive_path:
-            return self._managed_install_operation_command(
-                verified_existing_command,
-                replacement_required=force,
-            )
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        tmp_dir = Path(tempfile.mkdtemp(prefix="manifest-", dir=self.runtime_dir))
-        try:
-            with tarfile.open(archive_path, "r:gz") as tar:
-                _safe_extract_tar(tar, tmp_dir)
-            command = self._manifest_runtime_command(tmp_dir, node)
-            if not command:
-                self._install_reason = "runtime_install_missing_bin"
-                return self._managed_install_operation_command(
-                    verified_existing_command,
-                    replacement_required=force,
-                )
-            if os.path.lexists(install_dir):
-                if not self._remove_managed_runtime_tree_for_replacement(install_dir, label="manifest"):
-                    return self._managed_install_operation_command(
-                        None,
-                        replacement_required=force,
-                    )
-                verified_existing_command = None
-            install_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(tmp_dir), str(install_dir))
-            self._write_manifest_install_metadata(install_dir, manifest, archive)
-            self._write_current_manifest_pointer(manifest, archive, install_dir)
-            installed_command = self._manifest_runtime_command(install_dir, node)
-            if not installed_command:
-                self._install_reason = "runtime_install_missing_bin"
-            # The staged tree was moved onto the managed identity before this command resolved.
-            return self._managed_install_operation_command(
-                installed_command,
-                replacement_required=force,
-                replacement_completed=force and installed_command is not None,
-            )
-        except Exception:
-            logger.exception("Failed to install manifest Show Runtime")
-            self._install_reason = "runtime_install_failed"
-            return self._managed_install_operation_command(
-                verified_existing_command,
-                replacement_required=force,
-            )
-        finally:
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    def _load_runtime_manifest(self, *, offline: bool | None = None) -> ShowRuntimeManifest | None:
-        payload: bytes | None = None
-        source = ""
-        provenance = "configured" if self.manifest_path or self.manifest_url else "packaged"
-        if self.manifest_path:
-            try:
-                exists = self.manifest_path.exists()
-                payload = self.manifest_path.read_bytes() if exists else None
-            except OSError:
-                self._record_install_failure("runtime_manifest_invalid", provenance=provenance)
-                return None
-            if payload is None:
-                self._record_install_failure("runtime_manifest_missing", provenance=provenance)
-                return None
-            source = str(self.manifest_path)
-        elif self.manifest_url:
-            if self.offline if offline is None else offline:
-                self._install_reason = "runtime_manifest_unavailable_offline"
-                return None
-            try:
-                payload = fetch_bytes(
-                    self.manifest_url,
-                    timeout=30,
-                    opener=urllib.request.urlopen,
-                )
-                source = self.manifest_url
-            except Exception as exc:
-                logger.exception("Failed to download Show Runtime manifest from %s", self.manifest_url)
-                self._record_download_failure(
-                    "runtime_manifest_download_failed",
-                    exc,
-                    self.manifest_url,
-                    provenance="configured",
-                )
-                return None
-        else:
-            try:
-                resource = package_resources.files("vibe").joinpath(_RUNTIME_MANIFEST_RESOURCE)
-            except Exception:
-                resource = None
-            try:
-                payload = resource.read_bytes() if resource is not None and resource.is_file() else None
-            except OSError:
-                payload = None
-            if payload is None:
-                self._record_install_failure("runtime_manifest_missing", provenance=provenance)
-                return None
-            source = _PACKAGED_RUNTIME_MANIFEST_SOURCE
-        digest = hashlib.sha256(payload).hexdigest()
-        try:
-            data = json.loads(payload.decode("utf-8"))
-            archives = {
-                platform_tag: ShowRuntimeArchive(
-                    platform=platform_tag,
-                    name=str(item["name"]),
-                    url=str(item["url"]),
-                    sha256=str(item["sha256"]),
-                    size=int(item["size"]) if item.get("size") is not None else None,
-                )
-                for platform_tag, item in (data.get("archives") or {}).items()
-                if isinstance(item, dict)
-            }
-            manifest = ShowRuntimeManifest(
-                schema_version=int(data.get("schema_version")),
-                runtime_version=str(data.get("runtime_version") or ""),
-                minimum_node=str(data.get("minimum_node") or "") or None,
-                archives=archives,
-                digest=digest,
-                source=source,
-            )
-        except Exception:
-            self._record_install_failure("runtime_manifest_invalid", provenance=provenance)
-            return None
-        if manifest.schema_version != 1 or not manifest.runtime_version or not manifest.archives:
-            self._record_install_failure("runtime_manifest_invalid", provenance=provenance)
-            return None
-        return manifest
-
-    def _manifest_node_supported(self, node: list[str], manifest: ShowRuntimeManifest) -> bool:
-        if not manifest.minimum_node:
-            return True
-        version = _node_version(node)
-        if _node_satisfies_requirement(version, manifest.minimum_node):
-            return True
-        self._install_reason = "runtime_node_unsupported"
-        return False
-
-    def _manifest_archive_for_platform(self, manifest: ShowRuntimeManifest) -> ShowRuntimeArchive | None:
-        platform_tag = _runtime_platform_tag()
-        archive = manifest.archives.get(platform_tag)
-        if not archive:
-            self._install_reason = "runtime_platform_unsupported"
-            return None
-        return archive
-
-    def _resolve_manifest_archive(
-        self,
-        archive: ShowRuntimeArchive,
-        *,
-        offline: bool | None = None,
-        provenance: str,
-    ) -> Path | None:
-        cached = self.runtime_dir / "downloads" / f"{archive.sha256}.tgz"
-        if cached.exists() and self._downloaded_archive_matches(cached, archive):
-            self._download_error = None
-            return cached
-        if self.offline if offline is None else offline:
-            self._install_reason = "runtime_archive_unavailable_offline"
-            return None
-        parsed = urllib.parse.urlparse(archive.url)
-        if parsed.scheme not in {"https", "file"}:
-            self._install_reason = "runtime_archive_url_unsupported"
-            return None
-        tmp_path = cached.with_suffix(".tmp")
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fetch_to_path(
-                archive.url,
-                tmp_path,
-                timeout=60,
-                opener=urllib.request.urlopen,
-            )
-            if not self._downloaded_archive_matches(tmp_path, archive):
-                tmp_path.unlink(missing_ok=True)
-                return None
-            tmp_path.replace(cached)
-            self._download_error = None
-            return cached
-        except Exception as exc:
-            logger.exception("Failed to download Show Runtime archive from %s", archive.url)
-            tmp_path.unlink(missing_ok=True)
-            self._record_download_failure(
-                "runtime_archive_download_failed",
-                exc,
-                archive.url,
-                provenance=provenance,
-            )
-            return None
-
-    def _downloaded_archive_matches(self, path: Path, archive: ShowRuntimeArchive) -> bool:
-        if archive.size is not None and path.stat().st_size != archive.size:
-            self._install_reason = "runtime_archive_size_mismatch"
-            return False
-        if _file_sha256(path) != archive.sha256:
-            self._install_reason = "runtime_archive_checksum_mismatch"
-            return False
-        return True
-
-    def _manifest_install_dir(self, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> Path:
-        fingerprint = hashlib.sha256(
-            f"{manifest.runtime_version}:{archive.platform}:{archive.sha256}".encode("utf-8")
-        ).hexdigest()[:16]
-        return (
-            self.runtime_dir
-            / "versions"
-            / _safe_path_part(manifest.runtime_version)
-            / _safe_path_part(archive.platform)
-            / fingerprint
-        )
-
-    def _legacy_manifest_install_dir(self, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> Path:
-        return self.runtime_dir / "versions" / _safe_path_part(manifest.runtime_version) / _safe_path_part(archive.platform)
-
-    def _manifest_install_candidates(
-        self,
-        manifest: ShowRuntimeManifest,
-        archive: ShowRuntimeArchive,
-    ) -> Iterator[Path]:
-        install_dir = self._manifest_install_dir(manifest, archive)
-        legacy_install_dir = self._legacy_manifest_install_dir(manifest, archive)
-        yield install_dir
-        yield legacy_install_dir
-
-        # Releases before the platform-scoped identity used the manifest digest
-        # in this child directory's fingerprint. Metadata proves that layout.
-        try:
-            candidates = sorted(legacy_install_dir.iterdir(), key=lambda path: path.name)
-        except OSError:
-            return
-        for candidate in candidates:
-            if candidate == install_dir:
-                continue
-            try:
-                payload = json.loads(self._manifest_metadata_path(candidate).read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            previous_manifest_sha256 = payload.get("manifest_sha256")
-            if not isinstance(previous_manifest_sha256, str) or not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
-                f"{previous_manifest_sha256}.tgz"
-            ):
-                continue
-            previous_fingerprint = hashlib.sha256(
-                f"{previous_manifest_sha256}:{archive.sha256}".encode("utf-8")
-            ).hexdigest()[:16]
-            if candidate.name == previous_fingerprint:
-                yield candidate
-
-    def _manifest_metadata_path(self, install_dir: Path) -> Path:
-        return install_dir / ".vibe-show-runtime.json"
-
-    def _verified_manifest_runtime_command(
-        self,
-        install_dir: Path,
-        manifest: ShowRuntimeManifest,
-        archive: ShowRuntimeArchive,
-        node: list[str],
-    ) -> list[str] | None:
-        command = self._manifest_runtime_command(install_dir, node)
-        if command and self._manifest_install_matches(install_dir, manifest, archive):
-            return command
-        return None
-
-    def _verified_manifest_runtime_command_for_manifest(
-        self,
-        manifest: ShowRuntimeManifest,
-        archive: ShowRuntimeArchive,
-        node: list[str],
-    ) -> list[str] | None:
-        for install_dir in self._manifest_install_candidates(manifest, archive):
-            command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
-            if command:
-                return command
-        return None
-
-    def _manifest_install_matches(self, install_dir: Path, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> bool:
-        try:
-            payload = json.loads(self._manifest_metadata_path(install_dir).read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return (
-            payload.get("provider") == _RUNTIME_SOURCE_MANIFEST
-            and payload.get("runtime_version") == manifest.runtime_version
-            and payload.get("platform") == archive.platform
-            and payload.get("archive_sha256") == archive.sha256
-        )
-
-    def _write_manifest_install_metadata(self, install_dir: Path, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> None:
-        self._manifest_metadata_path(install_dir).write_text(
-            json.dumps(
-                {
-                    "provider": _RUNTIME_SOURCE_MANIFEST,
-                    "manifest_sha256": manifest.digest,
-                    "runtime_version": manifest.runtime_version,
-                    "platform": archive.platform,
-                    "archive_name": archive.name,
-                    "archive_sha256": archive.sha256,
-                    "manifest_source": manifest.source,
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-    def _write_current_manifest_pointer(self, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive, install_dir: Path) -> None:
-        pointer = self.runtime_dir / "current.json"
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.write_text(
-            json.dumps(
-                {
-                    "provider": _RUNTIME_SOURCE_MANIFEST,
-                    "runtime_version": manifest.runtime_version,
-                    "platform": archive.platform,
-                    "install_dir": str(install_dir),
-                    "manifest_sha256": manifest.digest,
-                    "archive_sha256": archive.sha256,
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-    def _manifest_runtime_command(self, install_dir: Path, node: list[str]) -> list[str] | None:
-        return self._archive_runtime_command(install_dir, node)
 
     def _installed_archive_runtime_command(self) -> list[str] | None:
         node = _resolve_node_command()
@@ -3219,7 +3029,7 @@ class ShowRuntimeManager:
                 existing_command,
                 replacement_required=force,
             )
-        archive_digest = _file_sha256(archive)
+        archive_digest = file_sha256(archive)
         if not force and existing_command and self._archive_manifest_matches(archive_digest):
             return self._managed_install_operation_command(
                 existing_command,
@@ -3228,7 +3038,7 @@ class ShowRuntimeManager:
         tmp_dir = Path(tempfile.mkdtemp(prefix="prebuilt-", dir=self.runtime_dir))
         try:
             with tarfile.open(archive, "r:gz") as tar:
-                _safe_extract_tar(tar, tmp_dir)
+                safe_extract_tar(tar, tmp_dir)
             command = self._archive_runtime_command(tmp_dir, node)
             if not command:
                 self._install_reason = "runtime_install_missing_bin"
@@ -3653,13 +3463,6 @@ def _auto_install_enabled() -> bool:
     return value is None or value.strip().lower() not in _FALSE_VALUES
 
 
-def _env_flag_enabled(name: str, *, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in _FALSE_VALUES
-
-
 def _packaged_runtime_manifest_exists() -> bool:
     try:
         resource = package_resources.files("vibe").joinpath(_RUNTIME_MANIFEST_RESOURCE)
@@ -3690,15 +3493,15 @@ def _normalize_runtime_source(value: str | None) -> str:
     return aliases.get(normalized, normalized or _RUNTIME_SOURCE_MANIFEST)
 
 
-def _manifest_status_payload(manifest: ShowRuntimeManifest | None) -> dict[str, Any] | None:
+def _manifest_status_payload(manifest: ManagedRuntimeManifest | None) -> dict[str, Any] | None:
     if manifest is None:
         return None
     return {
         "schema_version": manifest.schema_version,
         "runtime_version": manifest.runtime_version,
-        "minimum_node": manifest.minimum_node,
+        "minimum_node": _ShowManifestRuntimeManager._minimum_node(manifest),
         "sha256": manifest.digest,
-        "source": manifest.source,
+        "source": manifest.loaded_from,
         "platforms": sorted(manifest.archives),
     }
 
@@ -3737,7 +3540,7 @@ def _runtime_download_error(exc: BaseException, url: str) -> dict[str, Any]:
     return dependency_error_details(exc, url)
 
 
-def _archive_status_payload(archive: ShowRuntimeArchive | None) -> dict[str, Any] | None:
+def _archive_status_payload(archive: ManagedRuntimeArchive | None) -> dict[str, Any] | None:
     if archive is None:
         return None
     return {
@@ -3750,70 +3553,11 @@ def _archive_status_payload(archive: ShowRuntimeArchive | None) -> dict[str, Any
 
 
 def _runtime_archive_name() -> str:
-    return f"{_RUNTIME_ARCHIVE_PREFIX}-{_runtime_platform_tag()}.tgz"
+    return f"{_RUNTIME_ARCHIVE_PREFIX}-{runtime_platform_tag()}.tgz"
 
 
 def _default_runtime_archive_url() -> str:
     return f"{_RUNTIME_ARCHIVE_RELEASE_BASE_URL}/{_runtime_archive_name()}"
-
-
-def _runtime_platform_tag() -> str:
-    raw = get_platform().lower()
-    machine = raw.rsplit("-", 1)[-1]
-    if machine == "universal2":
-        machine = platform.machine().lower()
-    if machine in {"amd64", "x86_64"}:
-        arch = "x64"
-    elif machine in {"arm64", "aarch64"}:
-        arch = "arm64"
-    else:
-        arch = machine
-    if raw.startswith("macosx"):
-        os_name = "darwin"
-    elif raw.startswith("linux"):
-        os_name = "linux"
-    elif raw.startswith("win"):
-        os_name = "win32"
-    else:
-        os_name = os.name
-    return f"{os_name}-{arch}"
-
-
-def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
-    destination_resolved = destination.resolve()
-    for member in tar.getmembers():
-        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-            raise ValueError(f"Unsafe archive member type: {member.name}")
-        target = (destination / member.name).resolve()
-        if target != destination_resolved and destination_resolved not in target.parents:
-            raise ValueError(f"Unsafe archive member path: {member.name}")
-        if member.issym():
-            link_target = (destination / member.name).parent / member.linkname
-            link_target_resolved = link_target.resolve()
-            if link_target_resolved != destination_resolved and destination_resolved not in link_target_resolved.parents:
-                raise ValueError(f"Unsafe archive link target: {member.name}")
-        elif member.islnk():
-            link_target = destination / member.linkname
-            link_target_resolved = link_target.resolve()
-            if link_target_resolved != destination_resolved and destination_resolved not in link_target_resolved.parents:
-                raise ValueError(f"Unsafe archive link target: {member.name}")
-    try:
-        tar.extractall(destination, filter="data")
-    except TypeError:
-        tar.extractall(destination)
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _safe_path_part(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip())
-    return cleaned or "main"
 
 
 def _node_version(node: list[str]) -> tuple[int, int, int] | None:

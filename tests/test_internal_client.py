@@ -258,6 +258,26 @@ def test_reconcile_platforms_missing_socket_raises_unavailable(tmp_path):
         asyncio.run(internal_client.reconcile_platforms(socket_path=sock))
 
 
+def test_invalidate_activity_streaming_round_trip(socket_path):
+    app = FastAPI()
+    calls: list[bool] = []
+
+    @app.post("/internal/invalidate-activity-streaming")
+    async def _invalidate():
+        calls.append(True)
+        return {"ok": True}
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.invalidate_activity_streaming(socket_path=socket_path)
+
+    result = asyncio.run(_go())
+
+    assert calls == [True]
+    assert result == {"status_code": 200, "body": {"ok": True}}
+
+
 def test_reconcile_agent_backends_round_trip(tmp_path, socket_path):
     app = FastAPI()
     captured: dict = {}

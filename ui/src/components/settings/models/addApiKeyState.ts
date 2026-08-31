@@ -1,8 +1,4 @@
-import {
-  SOURCE_PROTOCOLS,
-  type SourceObservation,
-  type SourceProtocol,
-} from './types';
+import type { SourceObservation, SourceProtocol } from './types';
 
 export type AddApiKeyOrigin = 'add' | 'pull';
 export type AddApiKeyFailure = 'auth' | 'network' | 'interface' | 'unclassified' | 'engineDown';
@@ -18,11 +14,6 @@ export const PROTOCOL_COPY_KEYS: Record<SourceProtocol, string> = {
   openai_responses: 'settings.models.addKey.protocol.openaiResponses',
   openai_chat: 'settings.models.addKey.protocol.openaiChatCompletions',
 };
-
-export function protocolOrderWithHint(hint: SourceProtocol | null): SourceProtocol[] | undefined {
-  if (!hint) return undefined;
-  return [hint, ...SOURCE_PROTOCOLS.filter((protocol) => protocol !== hint)];
-}
 
 export function classifyObservation(observation: SourceObservation): ObservationVerdict {
   switch (observation.outcome) {

@@ -61,3 +61,9 @@ scenarios:
     kind: authorization
     layer: scenario
     test: tests/scenarios/memory_list/test_memory_list_scenarios.py::test_settings_can_browse_agent_episodes_without_crossing_owner_scopes
+  - id: MEMORY-LIST-009
+    name: Episode pages use the pinned EverOS size contract without an Avibe byte cap
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_memory_module.py::test_list_page_accepts_payloads_larger_than_legacy_aggregate_cap

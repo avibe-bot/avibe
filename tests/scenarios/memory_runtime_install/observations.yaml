@@ -1,0 +1,12 @@
+version: 1
+capability: memory_runtime_install
+observations:
+  - id: MEMORY-RUNTIME-INSTALL-OBS-001
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-001
+      - MEMORY-RUNTIME-INSTALL-002
+    observation: Final archive extraction and install staging execute the same bounded full import gate without suppressing bytecode, so release verification measures the path that warms first sidecar startup. The Web-job scenario uses a hermetic manifest-shaped fixture; a normal wheel consuming the real published linux-arm64 manifest and archive remains an explicit Incus check.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-002
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-003
+    observation: Failed staging is always reclaimed while a bounded status/reason record survives process replacement; malformed, oversized, or linked state grants no status authority and a successful install or reuse clears the record.

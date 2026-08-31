@@ -354,6 +354,27 @@ async def reconcile_platforms(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def invalidate_activity_streaming(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Make the controller re-read the persisted Agent Activity display flag."""
+
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            resp = await client.post("/internal/invalidate-activity-streaming")
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def reconcile_agent_backends(
     backends: list[str],
     *,

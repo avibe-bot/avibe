@@ -278,22 +278,6 @@ def test_session_claims_reject_missing_or_unknown_instance_role() -> None:
     assert claims["vibe_instance_role"] == "member"
 
 
-@pytest.mark.parametrize("instance_role", ["editor", "member", "owner"])
-def test_session_claims_reject_elevated_show_page_email_roles(instance_role: str) -> None:
-    config = _config()
-
-    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_instance_role"):
-        remote_access.session_claims_from_oidc(
-            config,
-            {
-                "vibe_instance_id": "inst_123",
-                "vibe_instance_role": instance_role,
-                "vibe_instance_access_source": "show_page_email",
-                "vibe_show_page_id": "session-one",
-            },
-        )
-
-
 def test_session_cookie_persists_validated_organization_claims() -> None:
     config = _config()
     cookie = remote_session_cookie(
@@ -965,6 +949,7 @@ def test_pair_rejects_custom_proxy_only_dns_backend(monkeypatch) -> None:
 
 def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
     class FakeResponse:
         status = 200
@@ -1018,6 +1003,7 @@ def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(mo
 
 def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> None:
     attempts: list[str] = []
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
     class FakeResponse:
         status = 200

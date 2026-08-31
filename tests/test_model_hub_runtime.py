@@ -34,11 +34,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import (
-    SSE_MAX_FRAME_BYTES,
-    SSE_MAX_LINE_BYTES,
-    ProtocolUsageReport,
-)
+from core.handlers.model_hub.stream_wire import ProtocolUsageReport
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
@@ -129,9 +125,9 @@ def test_released_install_claim_is_read_without_rewrite_and_resumed_as_current_s
     }
 
 
-def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
-    keepalive = b": " + b"k" * (SSE_MAX_LINE_BYTES - 4) + b"\n\n"
-    first = keepalive * (SSE_MAX_FRAME_BYTES // len(keepalive) + 1)
+def test_stream_prelude_replays_large_keepalive_history_before_output() -> None:
+    keepalive = b": " + b"k" * (64 * 1024) + b"\n\n"
+    first = keepalive * 5
     output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
 
     class Content:
@@ -176,7 +172,7 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
 def test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review 4960016618: usage reported before model output survives the failure.
+    """MH-USAGE-005: usage reported before model output survives the failure.
 
     Anthropic bills input tokens on `message_start`, which arrives while the
     prelude is still buffering. A read that then times out never hands a body
@@ -238,147 +234,299 @@ def test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
     asyncio.run(run())
 
 
-def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
+def test_stream_prelude_has_no_total_ceiling_and_cleans_spill() -> None:
+    async def run() -> bytes:
+        prelude = client_module._StreamPrelude(memory_limit=64)
+        payload = b"x" * (2 * 1024 * 1024)
+        prelude.write(payload)
+
+        assert prelude.spilled is True
+        assert prelude.stored_bytes == len(payload)
+        replayed = b"".join([chunk async for chunk in prelude.chunks()])
+        prelude.close()
+        assert prelude.closed is True
+        return replayed
+
+    assert asyncio.run(run()) == b"x" * (2 * 1024 * 1024)
+
+
+def test_engine_json_responses_are_read_in_bounded_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def run() -> None:
-        budget = 512 * 1024
-        keepalive = b": " + b"k" * (32 * 1024 - 4) + b"\n\n"
-        preludes: list[TrackingPrelude] = []
+    reads: list[int] = []
 
-        class TrackingPrelude(client_module._StreamPrelude):
-            def __init__(self) -> None:
-                super().__init__(memory_limit=64, total_limit=budget)
-                self.physical_close_calls = 0
-                self.spill_observed = False
-                preludes.append(self)
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = io.BytesIO(body)
 
-            def write(self, data: bytes) -> bool:
-                stored = super().write(data)
-                self.spill_observed = self.spill_observed or self.spilled
-                return stored
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return self.body.read(min(size, 31))
 
-            def close(self) -> None:
-                if not self.closed:
-                    self.physical_close_calls += 1
-                super().close()
+        def __enter__(self):
+            return self
 
-        class Content:
-            async def read(self, _size: int) -> bytes:
-                return keepalive
+        def __exit__(self, *_args: object) -> None:
+            return None
 
-        class Response:
-            status = 200
-            headers = {"Content-Type": "text/event-stream"}
-            content = Content()
+    payload = {
+        "state": "ok",
+        "large_integer": 123456789012345678901234567890,
+        "ratio": 1.25,
+        "metadata": "x" * (2 * 1024 * 1024),
+    }
+    response = Response(json.dumps(payload).encode())
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: response),
+    )
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
 
-            def close(self) -> None:
-                return None
-
-        class Session:
-            async def post(self, *_args, **_kwargs):
-                return Response()
-
-            async def close(self) -> None:
-                return None
-
-        source = SourceRecord(
-            source_id="src_budget001",
-            vendor="custom",
-            protocol="openai_responses",
-            base_url="https://budget.example.test/v1",
-            credential_ref="cred_budget001",
-            allowed_origins=("codex",),
-            model_ids=("model-a",),
-            prefix="budget",
-        )
-        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
-        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
-        client = EngineClient(
-            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
-        )
-
-        handle = await client.invoke(source, "model-a", {}, stream=True)
-        outcome = await handle.outcome()
-
-        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
-        assert outcome.stream_started is False
-        assert preludes[0].spill_observed is True
-        assert preludes[0].stored_bytes <= budget
-        assert preludes[0].closed is True
-        assert preludes[0].physical_close_calls == 1
-
-    asyncio.run(run())
+    assert client.management_request("GET", "/fixture") == payload
+    assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
 
 
-def test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered(
+def test_deadline_reader_falls_back_when_reader_has_no_readinto() -> None:
+    class Reader:
+        def __init__(self) -> None:
+            self.body = io.BytesIO(b"fixture")
+
+        def read(self, size: int = -1) -> bytes:
+            return self.body.read(size)
+
+    buffer = bytearray(4)
+    reader = client_module._DeadlineReader(Reader(), time.monotonic() + 1)
+
+    assert reader.readinto(buffer) == 4
+    assert bytes(buffer) == b"fixt"
+
+
+def test_engine_json_response_spooling_uses_one_absolute_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MH-USAGE-005, review 4965677908: the vendor billed the frame that broke the buffer.
+    reads = 0
+    socket_timeouts: list[float] = []
 
-    Every earlier round of this class was a reader that could not reach an
-    observed fact. This one is the producer: the socket delivered a complete
-    usage report, and the only reason it would go unrecorded is that the prelude
-    had no room left to keep a replay of the bytes carrying it. Whether we can
-    store a copy is not a question about what the upstream said.
-    """
+    class ResponseSocket:
+        def settimeout(self, timeout: float) -> None:
+            socket_timeouts.append(timeout)
 
+    class Response:
+        fp = SimpleNamespace(raw=SimpleNamespace(_sock=ResponseSocket()))
+
+        def read(self, size: int = -1) -> bytes:
+            nonlocal reads
+            assert size == client_module._STREAM_CHUNK_BYTES
+            reads += 1
+            return b" "
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    ticks = iter((10.0, 10.1, 10.6, 11.1))
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: Response()),
+    )
+    client = EngineClient(
+        EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+        timeout=1.0,
+    )
+
+    with pytest.raises(EngineClientError) as caught:
+        client.management_request("GET", "/fixture")
+
+    assert caught.value.error_type == "TimeoutError"
+    assert reads == 2
+    assert socket_timeouts == pytest.approx([0.9, 0.4])
+
+
+def test_engine_json_projection_uses_the_request_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self) -> None:
+            self.body = io.BytesIO(b"{}")
+
+        def read(self, size: int = -1) -> bytes:
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return self.body.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    ticks = iter((10.0, 10.1, 10.2, 10.3, 10.4, 11.1))
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: Response()),
+    )
+    client = EngineClient(
+        EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+        timeout=1.0,
+    )
+
+    def projector(reader) -> bool:
+        assert reader.read(1) == b"{"
+        reader.read(1)
+        return True
+
+    with pytest.raises(EngineClientError) as caught:
+        client._request_json_projection("GET", "/fixture", projector)
+
+    assert caught.value.error_type == "TimeoutError"
+
+
+def test_engine_health_projects_only_required_facts_from_large_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = io.BytesIO(body)
+
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return self.body.read(min(size, 37))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def open_response(request, **_kwargs):
+        if request.full_url.endswith("/v1/models"):
+            return Response(
+                json.dumps(
+                    {
+                        "object": "list",
+                        "data": [{"id": "model", "metadata": "x" * (2 * 1024 * 1024)}],
+                    }
+                ).encode()
+            )
+        return Response(json.dumps({"sources": ["x" * (2 * 1024 * 1024)]}).encode())
+
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=open_response),
+    )
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+
+    assert client.health() is True
+    assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
+
+
+def test_engine_error_projection_does_not_materialize_unrelated_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class ErrorBody(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            assert size == client_module._STREAM_CHUNK_BYTES
+            return super().read(min(size, 41))
+
+    body = ErrorBody(
+        json.dumps(
+            {
+                "error": {"type": "permission_error", "code": "permission_error"},
+                "metadata": "x" * (2 * 1024 * 1024),
+            }
+        ).encode()
+    )
+    error = client_module.urllib.error.HTTPError(
+        "http://127.0.0.1:15220/v0/management/fixture",
+        403,
+        "Forbidden",
+        {},
+        body,
+    )
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "build_opener",
+        lambda *_args: SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(error)),
+    )
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+
+    with pytest.raises(EngineClientError) as caught:
+        client.management_request("GET", "/fixture")
+
+    assert caught.value.status_code == 403
+    assert caught.value.error_type == "permission_error"
+    assert caught.value.error_code == "permission_error"
+    assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
+
+
+def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
     async def run() -> None:
-        message_start = (
-            b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
-            b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
-        )
-        filler = b": " + b"k" * 4090 + b"\n\n"
-        budget = len(filler) + len(message_start) - 1
-        reads = iter([filler, message_start])
-
-        class TrackingPrelude(client_module._StreamPrelude):
-            def __init__(self) -> None:
-                super().__init__(memory_limit=budget, total_limit=budget)
-
         class Content:
             async def read(self, _size: int) -> bytes:
-                return next(reads)
+                await asyncio.sleep(0.02)
+                return b": keepalive\n\n"
 
-        class Response:
-            status = 200
-            headers = {"Content-Type": "text/event-stream"}
-            content = Content()
-
-            def close(self) -> None:
-                return None
-
-        class Session:
-            async def post(self, *_args, **_kwargs):
-                return Response()
-
-            async def close(self) -> None:
-                return None
-
+        response = SimpleNamespace(content=Content(), status=200)
         source = SourceRecord(
-            source_id="src_overflowbill",
+            source_id="src_deadline1",
             vendor="anthropic",
             protocol="anthropic",
-            base_url="https://overflow.example.test",
-            credential_ref="cred_overflowbill",
+            base_url="https://example.test",
+            credential_ref="cred_deadline1",
             allowed_origins=("codex",),
             model_ids=("claude-sonnet-4-5",),
-            prefix="overflow",
+            prefix="deadline",
         )
-        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
-        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
-        client = EngineClient(
-            EngineConnection("http://127.0.0.1:15222", "management", "gateway")
-        )
+        prelude = client_module._StreamPrelude(memory_limit=64)
+        state = client_module.ProtocolSSEState("anthropic")
 
-        handle = await client.invoke(source, "claude-sonnet-4-5", {}, stream=True)
-        outcome = await handle.outcome()
-
-        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
-        assert outcome.stream_started is False
-        assert outcome.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
+        with pytest.raises(asyncio.TimeoutError):
+            await client_module._read_stream_prelude(
+                response=response,
+                first=b": first\n\n",
+                prelude=prelude,
+                wire_state=state,
+                source=source,
+                model_id="claude-sonnet-4-5",
+                timeout=0.01,
+            )
+        prelude.close()
 
     asyncio.run(run())
+
+
+def test_usage_is_observed_and_replayed_after_prelude_spill() -> None:
+    message_start = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+        b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+    )
+    filler = b": " + b"k" * 4090 + b"\n\n"
+    prelude = client_module._StreamPrelude(memory_limit=64)
+    state = client_module.ProtocolSSEState("anthropic")
+
+    async def replay() -> bytes:
+        await client_module._received(filler, prelude=prelude, wire_state=state)
+        await client_module._received(message_start, prelude=prelude, wire_state=state)
+        return b"".join([chunk async for chunk in prelude.chunks()])
+
+    assert asyncio.run(replay()) == filler + message_start
+    assert prelude.spilled is True
+    assert state.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
+    prelude.close()
 
 
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
@@ -1471,6 +1619,54 @@ def _models_endpoint():
         thread.join(timeout=2)
 
 
+def test_model_inventory_duplicate_top_level_members_replace_earlier_values() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":[{"id":"stale-data"}],'
+            b'"data":[{"id":"live-data"}],'
+            b'"models":[{"id":"stale-models"}],'
+            b'"models":[{"id":"live-models"}]}'
+        )
+    )
+
+    assert projected == (
+        True,
+        True,
+        ["live-data"],
+        True,
+        True,
+        ["live-models"],
+    )
+
+
+def test_model_inventory_duplicate_item_id_keeps_the_final_member() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":[{"id":"stale","id":"live"},'
+            b'{"id":"other"}]}'
+        )
+    )
+
+    assert projected == (
+        True,
+        True,
+        ["live", "other"],
+        False,
+        False,
+        [],
+    )
+
+
+def test_model_inventory_rejects_an_elided_model_identifier() -> None:
+    oversized = b"x" * (16 * 1024 + 1)
+
+    projected = client_module._project_model_inventory(
+        io.BytesIO(b'{"data":[{"id":"valid"},{"id":"' + oversized + b'"}]}')
+    )
+
+    assert projected is None
+
+
 def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self, store: EngineStateStore) -> None:
@@ -1635,7 +1831,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload['model'].endswith('/oversized-non-stream'):
-            body = b'{{"payload":"too-large"}}'
+            body = b'{{"payload":"' + b'x' * (17 * 1024 * 1024) + b'"}}'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
@@ -3172,6 +3368,146 @@ def test_runtime_start_consults_install_owner_before_starting(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("stop_wins", [False, True])
+def test_runtime_start_after_install_obeys_latest_explicit_lifecycle_action(
+    tmp_path: Path,
+    stop_wins: bool,
+) -> None:
+    class BlockingInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.release = threading.Event()
+            self.started = threading.Event()
+            self.binary = runtime_dir / "installed-engine"
+
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
+            del force
+            assert expected_target is None
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
+            self.started.set()
+            assert self.release.wait(timeout=2)
+            self.binary.parent.mkdir(parents=True, exist_ok=True)
+            self.binary.write_bytes(b"verified fixture")
+            return {
+                "ok": True,
+                "changed": True,
+                "path": str(self.binary),
+                "install_dir": str(self.binary.parent),
+                "version": "v7.2.95",
+            }
+
+        def resolve_engine_path(self):
+            return self.binary if self.binary.is_file() else None
+
+        def status(self):
+            installed = self.resolve_engine_path() is not None
+            return {
+                "installed": installed,
+                "version": "v7.2.95" if installed else None,
+                "install_dir": str(self.binary.parent),
+                "platform": self.host_platform(),
+                "reason": None,
+            }
+
+    class Supervisor:
+        def __init__(self, installer: BlockingInstaller) -> None:
+            self.installer = installer
+            self.state_store = EngineStateStore(tmp_path / "state")
+            self.start_calls = 0
+            self.disable_calls = 0
+
+        def status(self):
+            installed = self.installer.resolve_engine_path() is not None
+            return {
+                "host_platform": self.installer.host_platform(),
+                "status": {
+                    "health": "ok" if self.start_calls else (
+                        "not_started" if installed else "not_installed"
+                    ),
+                    "installed_version": "v7.2.95" if installed else None,
+                    "verified": installed,
+                    "listening": {"host": "127.0.0.1", "port": 15220}
+                    if self.start_calls
+                    else None,
+                    "last_check": None,
+                    "error_key": None,
+                },
+            }
+
+        def restart_if_running(self) -> None:
+            return None
+
+        def note_installation_settled(self) -> None:
+            return None
+
+        def ensure_running(self) -> None:
+            self.start_calls += 1
+
+        def disable(self) -> None:
+            self.disable_calls += 1
+
+    async def run() -> None:
+        installer = BlockingInstaller(tmp_path / "runtime")
+        supervisor = Supervisor(installer)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=supervisor,  # type: ignore[arg-type]
+            state_store=supervisor.state_store,
+        )
+        continuation_ready = asyncio.Event()
+        allow_continuation = asyncio.Event()
+        if stop_wins:
+            start_after_install = adapter._start_after_install
+
+            async def gated_start_after_install(
+                install_task: asyncio.Task[None],
+            ) -> None:
+                await asyncio.shield(install_task)
+                continuation_ready.set()
+                await allow_continuation.wait()
+                await start_after_install(install_task)
+
+            adapter._start_after_install = gated_start_after_install  # type: ignore[method-assign]
+
+        installing = await adapter.install()
+        assert installing.health is EngineHealth.INSTALLING
+        assert await asyncio.to_thread(installer.started.wait, 2)
+
+        deferred = await adapter.start()
+        assert deferred.health is EngineHealth.INSTALLING
+        assert supervisor.start_calls == 0
+
+        installer.release.set()
+        if stop_wins:
+            await asyncio.wait_for(continuation_ready.wait(), timeout=2)
+            stopped = await adapter.stop_runtime()
+            allow_continuation.set()
+            await asyncio.sleep(0)
+
+            assert stopped.health is EngineHealth.NOT_STARTED
+            assert supervisor.start_calls == 0
+            assert supervisor.disable_calls == 1
+            return
+
+        for _ in range(100):
+            settled = await adapter.status()
+            if settled.health is EngineHealth.OK:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("runtime did not start after installation")
+
+        assert supervisor.start_calls == 1
+
+    asyncio.run(run())
+
+
 def test_runtime_install_failure_persists_closed_error_key(tmp_path: Path) -> None:
     class FailedInstaller(EngineRuntimeManager):
         def __init__(self, runtime_dir: Path) -> None:
@@ -4332,6 +4668,213 @@ def test_engine_client_cancellation_closes_pre_handle_resources(
     asyncio.run(run())
 
 
+def test_buffered_projection_drains_before_its_spool_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        projection_started = threading.Event()
+        release_projection = threading.Event()
+        preludes: list[TrackingPrelude] = []
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=1)
+                preludes.append(self)
+
+        def project(_protocol, reader, **_kwargs):
+            projection_started.set()
+            assert release_projection.wait(timeout=1)
+            assert not reader.closed
+            return client_module.ProtocolObservation(outcome="served")
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return b'{"output":[]}' if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module, "observe_buffered_protocol_response", project)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        )
+
+        task = asyncio.create_task(client.invoke(source, "model-a", {}, stream=False))
+        assert await asyncio.to_thread(projection_started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert preludes and not preludes[0].closed
+        release_projection.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert preludes[0].closed
+
+    asyncio.run(run())
+
+
+def test_closing_an_unstarted_stream_publishes_an_observed_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        first = (
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+            b'"delta":"ok"}\n\nevent: response.completed\ndata: {"type":"response.completed",'
+            b'"response":{"usage":{"input_tokens":12,"output_tokens":3}}}\n\n'
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is not None
+        assert handle.outcome_available is False
+        await handle.close_stream()
+        assert handle.outcome_available is True
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.usage == ProtocolUsageReport.of(
+            input_tokens=12,
+            cached_input_tokens=0,
+            output_tokens=3,
+        )
+
+    asyncio.run(run())
+
+
+def test_stream_replay_failure_preserves_observed_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class FailingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=1)
+
+            def write(self, data: bytes) -> None:
+                raise OSError("temporary storage unavailable")
+
+        first = (
+            b'event: message_start\ndata: {"type":"message_start","message":'
+            b'{"usage":{"input_tokens":77,"output_tokens":1}}}\n\n'
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module, "_StreamPrelude", FailingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="anthropic",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(
+            source,
+            "model-a",
+            {},
+            stream=True,
+            request_protocol="anthropic",
+        )
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.error_code == "engine_down"
+        assert outcome.usage == ProtocolUsageReport.of(
+            input_tokens=77,
+            cached_input_tokens=0,
+            output_tokens=1,
+        )
+
+    asyncio.run(run())
+
+
 def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4598,14 +5141,12 @@ def test_engine_client_times_out_before_completion(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "response_limit"),
-    [("invalid-json", 1024), ("oversized-non-stream", 8)],
+    "model_id",
+    ["invalid-json", "oversized-non-stream"],
 )
-def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
+def test_engine_client_non_stream_response_size_does_not_change_protocol_outcome(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     model_id: str,
-    response_limit: int,
 ) -> None:
     async def run() -> None:
         supervisor, store = _fixture_supervisor(tmp_path / model_id)
@@ -4617,7 +5158,6 @@ def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
         source = store.get_source("src_fixture123")
         assert source is not None
         connection = supervisor.ensure_running()
-        monkeypatch.setattr(client_module, "_MAX_RESPONSE_BYTES", response_limit)
 
         handle = await EngineClient(connection).invoke(
             source,
@@ -4626,30 +5166,34 @@ def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
             stream=False,
         )
 
-        assert (handle.stream is not None) is (model_id == "invalid-json")
-        if handle.stream is not None:
-            assert b"".join([chunk async for chunk in handle.stream])
+        assert handle.stream is not None
+        assert b"".join([chunk async for chunk in handle.stream])
         outcome = await handle.outcome()
-        assert outcome.kind is (
-            RawOutcomeKind.SUCCESS if model_id == "invalid-json" else RawOutcomeKind.PROTOCOL_ERROR
-        )
+        assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.http_status == 200
-        assert outcome.stream_started is (model_id == "invalid-json")
+        assert outcome.stream_started is True
         supervisor.stop()
 
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("case", STREAM_TRANSPORT_BOUNDARIES, ids=lambda case: case["name"])
-def test_engine_client_applies_sse_limits_only_to_streams(
+def test_engine_client_preserves_large_valid_responses(
     monkeypatch: pytest.MonkeyPatch,
     case: dict[str, object],
 ) -> None:
     async def run() -> None:
+        large_value = b"x" * (2 * 1024 * 1024)
         payload = (
-            b'{"payload":"' + b"x" * (SSE_MAX_LINE_BYTES + 1) + b'"}'
+            b'{"output":[{"content":"' + large_value + b'"}]}'
             if not case["stream"]
-            else b"data: " + b"x" * (SSE_MAX_LINE_BYTES + 1)
+            else (
+                b"event: response.image_generation_call.partial_image\n"
+                b'data: {"type":"response.image_generation_call.partial_image",'
+                b'"partial_image_b64":"'
+                + large_value
+                + b'"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n'
+            )
         )
 
         class Content:
@@ -4682,7 +5226,7 @@ def test_engine_client_applies_sse_limits_only_to_streams(
         source = SourceRecord(
             source_id="src_fixture123",
             vendor="custom",
-            protocol="openai_chat",
+            protocol="openai_responses",
             base_url="https://api.example.test/v1",
             credential_ref="cred_fixture123",
             allowed_origins=(),
@@ -4693,15 +5237,320 @@ def test_engine_client_applies_sse_limits_only_to_streams(
             source, "model-a", {}, stream=bool(case["stream"])
         )
 
-        if case["stream"]:
-            assert handle.stream is None
-            chunks = []
-        else:
-            assert handle.stream is not None
-            chunks = [chunk async for chunk in handle.stream]
+        assert handle.stream is not None
+        chunks = [chunk async for chunk in handle.stream]
         outcome = await handle.outcome()
         assert outcome.kind.value == case["expected_outcome"]
-        assert chunks == ([payload] if outcome.kind is RawOutcomeKind.SUCCESS else [])
+        assert b"".join(chunks) == payload
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", (200, 503))
+def test_engine_client_projects_machine_errors_from_large_buffered_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    async def run() -> None:
+        payload = json.dumps(
+            {
+                "error": {
+                    "diagnostic": "x" * (2 * 1024 * 1024),
+                    "type": "permission_error",
+                }
+            },
+            separators=(",", ":"),
+        ).encode()
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self) -> None:
+                self.status = status
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=False)
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.error_type == "permission_error"
+        assert outcome.error_candidates == ("permission_error",)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_kind"),
+    ((200, RawOutcomeKind.TIMEOUT), (503, RawOutcomeKind.HTTP_ERROR)),
+)
+def test_buffered_response_projection_uses_the_response_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected_kind: RawOutcomeKind,
+) -> None:
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return b"{}" if self.reads == 1 else b""
+
+        class Response:
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self) -> None:
+                self.status = status
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        projection_deadlines: list[float] = []
+
+        def project_before_deadline(_reader, _projector, *, deadline):
+            projection_deadlines.append(deadline)
+            raise asyncio.TimeoutError("buffered response exceeded its request deadline")
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(
+            client_module,
+            "_project_before_deadline",
+            project_before_deadline,
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        started = time.monotonic()
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+            timeout=1.0,
+        ).invoke(source, "model-a", {}, stream=False)
+
+        assert (await handle.outcome()).kind is expected_kind
+        assert projection_deadlines == pytest.approx([started + 1.0], abs=0.1)
+
+    asyncio.run(run())
+
+
+def test_model_discovery_accepts_large_valid_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        payload = json.dumps(
+            {"data": [{"id": "model-a", "metadata": "x" * (5 * 1024 * 1024)}]},
+            separators=(",", ":"),
+        ).encode()
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                if _size == 0:
+                    return b""
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+
+        assert await client_module.probe_models(
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            secret="secret",
+        ) == ("model-a",)
+
+    asyncio.run(run())
+
+
+def test_model_discovery_projection_uses_the_request_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return b"{}" if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        projection_deadlines: list[float] = []
+
+        def project_before_deadline(_reader, _projector, *, deadline):
+            projection_deadlines.append(deadline)
+            raise asyncio.TimeoutError("model discovery exceeded its request deadline")
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(
+            client_module,
+            "_project_before_deadline",
+            project_before_deadline,
+        )
+        started = time.monotonic()
+
+        with pytest.raises(EngineClientError) as caught:
+            await client_module.probe_models(
+                vendor="custom",
+                protocol="openai_responses",
+                base_url="https://api.example.test/v1",
+                secret="secret",
+                timeout=1.0,
+            )
+
+        assert caught.value.error_type == "timeout"
+        assert projection_deadlines == pytest.approx([started + 1.0], abs=0.1)
+
+    asyncio.run(run())
+
+
+def test_model_discovery_translates_local_spool_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        payload = b"x" * (client_module._PRELUDE_MEMORY_BYTES + 1)
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        class UnavailableSpool:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def write(self, data: bytes) -> None:
+                assert len(data) > client_module._PRELUDE_MEMORY_BYTES
+                raise OSError("temporary storage unavailable")
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(
+            client_module.tempfile,
+            "SpooledTemporaryFile",
+            lambda **_: UnavailableSpool(),
+        )
+
+        with pytest.raises(EngineClientError) as caught:
+            await client_module.probe_models(
+                vendor="custom",
+                protocol="openai_responses",
+                base_url="https://api.example.test/v1",
+                secret="secret",
+            )
+
+        assert str(caught.value) == "model discovery failed"
+        assert caught.value.error_type == "OSError"
 
     asyncio.run(run())
 

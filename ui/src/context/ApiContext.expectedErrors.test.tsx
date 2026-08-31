@@ -69,6 +69,28 @@ const mountApi = async () => {
 const apiContextSource = () => readFileSync(join(__dirname, 'ApiContext.tsx'), 'utf8');
 
 describe('ApiProvider expected error codes', () => {
+  it('suppresses only the expected refusal for the OpenCode picker POST', async () => {
+    const api = await mountApi();
+
+    apiFetch.mockResolvedValue(codedError('instance_access_forbidden', 403));
+    await expect(api.readOpencodeOptionsForModelPicker()).rejects.toMatchObject({
+      code: 'instance_access_forbidden',
+    });
+    expect(showToast).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(apiFetch).toHaveBeenLastCalledWith('/api/opencode/options', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ cwd: '~' }),
+    }));
+
+    apiFetch.mockResolvedValue(codedError('opencode_runtime_failed', 500));
+    await expect(api.readOpencodeOptionsForModelPicker()).rejects.toMatchObject({
+      code: 'opencode_runtime_failed',
+    });
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
   it('answers an absent Show Page silently on every read that shares the owner', async () => {
     // The members are DERIVED from the product source rather than restated here, so a read
     // added to `readShowPageJson` later is covered without editing this test — the panel

@@ -25,7 +25,7 @@ compatibility path.
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
-| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. Omitted `protocol` auto-detects; a supplied value restricts observation to that one interface and still requires matching response proof. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated, protocol-proven observation whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
@@ -35,12 +35,13 @@ compatibility path.
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list on either model origin without changing identity, origin, or Routes. |
 | DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
-| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. |
+| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. The default read returns the current presence snapshot; `?refresh_cli_presence=1` first refreshes deep npm-only discovery and returns the resulting snapshot. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. This route never touches a Route chain and has no guarded `409` branch. |
-| POST `/api/models/agents/<backend>/chains/reorder` | → `{agent: AgentSupply}` | Idempotently reorders every stored Route by the current Source order without adding, removing, remapping, matching, or guarding. The total order is defined below. |
+| POST `/api/models/agents/<backend>/chains/reorder` | `{order?: string[]}` → `{agent: AgentSupply}` | With `order`, atomically stores the complete Source order and idempotently reorders every stored Route by it; with no body, applies the already stored order. In either form it adds, removes, remaps, matches, and guards nothing. The total order is defined below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
-| PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
+| PUT `/api/models/agents/opencode/menu` | `{baseline: AgentMenu, menu: AgentMenu}` → `{agent: AgentSupply}` | Atomically applies the additions, removals, and optional view change between `baseline` and `menu` to the latest stored OpenCode menu. Concurrent unrelated selections survive. A newly added identifier must still be supplied by current OpenCode-eligible inventory at commit time; this includes a dormant Route alias whose saved Route retains an exact eligible inventory hop. Already checked route aliases may be preserved or removed without same-name inventory. |
+| GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; the handler never reads `sources.order`, and the submitted `hops` carry no Source-order semantics. It is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
@@ -53,14 +54,15 @@ compatibility path.
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
-| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
-| POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
+| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
+| POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
 
-The removed global route `PUT /api/models/priority` has no replacement. Backend Source
-order is explicit configuration through the sources route; exact per-model order is
-explicit configuration through the chain route.
+The removed product-global route `PUT /api/models/priority` has no replacement. Backend
+Source order has two explicit operations: the sources route stores it without touching
+Routes, while `chains/reorder` can store the same order and apply it to existing Routes
+atomically. Exact per-model order is explicit configuration through the chain route.
 
 ## Unsaved Source observation
 
@@ -72,22 +74,26 @@ create request:
   "vendor": "custom",
   "base_url": "https://relay.example/v1",
   "key": "<transient plaintext key>",
-  "protocol_order": ["openai_chat", "openai_responses", "anthropic"]
+  "protocol": "openai_chat"
 }
 ```
 
-`base_url` may be null for an official vendor endpoint. `protocol_order`, when
-present, contains each protocol exactly once and is only probe ordering; omitting it
-uses the authoritative three-value order. The endpoint provisions an unbound engine
-credential only for this operation, returns `observation-result.schema.json`, then
-revokes the transient reference before settling. A revoke failure remains in the
-existing pending-revocation journal. The response never contains that reference or
-any persisted Source.
+`base_url` may be null for an official vendor endpoint. `protocol`, when present,
+restricts observation to exactly that interface; omitting it probes the authoritative
+three-value order. The selected value is a constraint, not evidence: the endpoint still
+requires a matching protocol-shaped upstream response. The protocol probe is deliberately
+schema-invalid and names no synthetic model, so a relay can authenticate and classify it
+without selecting or invoking an upstream model. A bare-origin Base URL uses the
+standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
+root. The endpoint provisions an unbound engine credential only for this operation,
+returns `observation-result.schema.json`, then revokes the transient reference before
+settling. A revoke failure remains in the existing pending-revocation journal. The
+response never contains that reference or any persisted Source.
 
 For an API-key `POST /api/models/sources`, the server performs the same
 response-backed observation internally before its independent committed credential
-provisioning. It accepts the create fields and optional `protocol_order`, but never
-accepts a protocol conclusion or inventory result from the caller. A null protocol
+provisioning. It accepts the create fields and optional protocol constraint, but never
+accepts protocol proof or inventory results from the caller. A null protocol
 produces no Source. A proven protocol with failed inventory discovery produces no Source
 unless this request explicitly carries `accept_unavailable_inventory: true`; the accepted
 Source has `models: []` and the existing uncertain health projection. Subscription OAuth
@@ -103,11 +109,11 @@ authoritative; no Source response field may be inferred backwards into the reque
 | `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical vendor label; it never carries credential material. |
 | `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
-| `protocol_order` | no | Add Source client → observation adapter | Contains all three protocols exactly once and only orders probes. |
+| `protocol` | no | Add Source client → observation adapter | One supported interface. It restricts the probe to that type; omission auto-detects. Persistence still requires matching response proof. |
 | `client_nonce` | no | Add Source client → process-local create reservation and persisted Source read projection | Client-generated before send and atomically reserved in the live process before observation or credential work; only the successful commit persists and echoes it unchanged so an ordinary list read can reconcile a lost response. |
 | `accept_unavailable_inventory` | no | Add Source state ⑤ client → Source-create commit gate | Boolean; omission is `false`. It consents only to the server's repeated observation returning a proven protocol with `discovery: failed`; it never supplies or overrides observation evidence. |
 
-The request has no `id`, `created_at`, `state`, `usage`, `protocol`, discovered-model,
+The request has no `id`, `created_at`, `state`, `usage`, protocol evidence, discovered-model,
 credential-ref, billing, or supply-channel field. The server assigns or observes all of
 them. A successfully observed empty inventory is represented by the returned
 `source.models: []`; the client never submits a discovered inventory as authority.
@@ -178,8 +184,8 @@ failure may use the same outcome with `reachable: null`. A bare HTTP status prov
 reachability, but proves neither protocol nor authentication. Consequently,
 `ambiguous` always has `reachable: true` and `protocol: null`.
 `authentication_failed` also has `protocol: null`, because a rejected credential
-does not establish a persistable protocol. `ambiguous` is the sole outcome that asks
-for the one-time probe-order hint. Only `observed` attempts inventory discovery and
+does not establish a persistable protocol. After ambiguous Auto detection, the client
+must select one concrete protocol before retrying. Only `observed` attempts inventory discovery and
 therefore reports `succeeded` or `failed`; every other terminal reports
 `not_attempted` with an empty model list.
 
@@ -211,9 +217,10 @@ every other existing field and enum meaning remains unchanged.
 | --- | --- | --- | --- |
 | `Source.client_nonce` | Source create commit | lost-create reconciliation | Exact optional echo of `SourceCreate.client_nonce`, written only at commit; unique across live Sources and live-process reservations, and never used for routing. |
 | `Source.models[].retired` | discovered-model DELETE | Source detail inventory | Omission means false; only a discovered row may be true; true rows remain readable and never supply. |
-| `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection sorted by backend then menu model; clients do not derive it from `hops`. |
+| `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection for backends currently in Hub mode, sorted by backend then menu model; clients do not derive it from `hops`. Routes retained by Direct-mode backends are excluded because they bypass the gateway. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
 | `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom rather than inferring liveness from configured membership. `chain_length: 0` forces false; a nonzero length may carry either value. |
+| `RuntimeDependency.enabled` | explicit runtime start/stop mutation | Gateway switch and service-start recovery | Persisted user intent, independent of observed process health. Missing in older config defaults to false; an older response without the field falls back to observed health in the UI. |
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
@@ -268,12 +275,14 @@ Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
     {
       "name": "pm",
       "effective_model_id": "claude-opus-4-6",
-      "supply_status": "degraded"
+      "supply_status": "degraded",
+      "route_reason": null
     },
     {
       "name": "reviewer",
       "effective_model_id": "claude-haiku-4-5",
-      "supply_status": "interrupted"
+      "supply_status": "interrupted",
+      "route_reason": "route_unconfigured"
     }
   ]
 }
@@ -281,7 +290,8 @@ Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
 
 `named_agents` lists every enabled named Vibe Agent whose backend matches this
 record. `effective_model_id` is the Agent's explicit model. `supply_status` is
-derived independently for that effective model. The
+derived independently for that effective model. `route_reason` distinguishes a
+missing route from a configured route whose Sources are unavailable. The
 list name and object shape are intentionally distinct from `SupplyGap.agents`,
 which is a list of bare names inside a mutation result.
 
@@ -347,7 +357,8 @@ its process availability but carries `in_current_model_chain: null`.
 
 ## Per-backend source order
 
-The request is total:
+The storage-only PUT requires, and the atomic reorder POST may accept, the same total
+order body:
 
 ```json
 {"order": ["src_anthkey01", "src_relay9c1x"]}
@@ -359,13 +370,16 @@ The request is total:
 - Add Source and native import invoke `placement-v1` once and persist its chosen
   position. Refresh, restart, health changes, and turns never recompute this order.
 
-The whole-order PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
+The storage-only PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
 It stores only `sources.order`, never reads or writes a Route chain, and therefore never
-returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply an
-order save is allowed to mutate supply, which violates S-1.
+returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply
+that this storage-only route can remove supply, which violates S-1.
 
 `POST /api/models/agents/<backend>/chains/reorder` is the only server-side post-creation
 operation that implicitly reads and applies the stored Source order to existing Routes.
+When the optional `order` body is present, storing that complete order and applying it
+to existing Routes happen under the same mutation lock and persistence boundary; an
+omitted body preserves the stored-order-only form for internal callers.
 For each Route, give every hop its original zero-based index `i` and sort by this total key:
 
 ```text
@@ -1140,7 +1154,7 @@ contract harness and API-boundary tests enforce:
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
+| API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents[].route_reason`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | Hub OAuth and native CLI `POST /sources/<id>/reauth` requests with missing or false `acknowledge_irreversible` return `reauth_confirmation_required` before the OAuth adapter is called; true acknowledgement is the only start path, while transactional API-key PUT is unaffected | API route negative/positive fixtures |
 | OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start; pending-start failure/task cancellation releases after cleanup; success atomically exposes one echoed-nonce flow; explicit cancellation retains that nonce-bearing flow as `cancelled` so a same-tuple retry starts no provider, while existing expiry releases it for exactly one fresh start; no-nonce cancellation forgets | OAuth registry totality, clocked expiry, API payload, and auth-setup closed-loop tests |

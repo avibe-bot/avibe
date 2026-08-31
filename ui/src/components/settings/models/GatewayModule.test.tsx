@@ -40,6 +40,7 @@ describe('GatewayModule region failure treatment', () => {
           connectingBackend={null}
           onConnectHub={vi.fn()}
           onSwitchDirect={vi.fn()}
+          onOpenModels={vi.fn()}
           onOpenOrder={vi.fn()}
           onOpenRoute={vi.fn()}
           onProbeSettled={vi.fn()}
@@ -47,9 +48,11 @@ describe('GatewayModule region failure treatment', () => {
       </I18nextProvider>,
     );
 
-    const panel = screen.getByRole('heading', { name: /Gateway|网关/i }).closest('section');
+    const panel = screen.getByRole('heading', { name: /Gateway routes|路由/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
+    expect(panel?.className).not.toContain('max-h-full');
+    expect(panel?.children.item(1)?.className).not.toContain('overflow-y-auto');
   });
 
   it('keeps the last good Agent rows visible with an F2 retry after a later read fails', async () => {
@@ -68,6 +71,7 @@ describe('GatewayModule region failure treatment', () => {
           connectingBackend={null}
           onConnectHub={vi.fn()}
           onSwitchDirect={vi.fn()}
+          onOpenModels={vi.fn()}
           onOpenOrder={vi.fn()}
           onOpenRoute={vi.fn()}
           onProbeSettled={vi.fn()}

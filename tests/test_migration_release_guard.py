@@ -1,10 +1,10 @@
-"""Cover the migration release guard's detection and the properties it asserts.
+"""Cover the migration release guard's graph and attestation properties.
 
-Two layers. The synthetic tests pin the detection itself, so the guard cannot decay into
-something that passes because it stopped looking. The repository tests are the guard
-running for real: three of them state the invariant the working tree must hold, and one
-runs the guard against the release that preceded the v3.0.11 splice, which is the known
-positive that keeps the other three honest.
+The synthetic tests pin the detection itself, so the guard cannot decay into something
+that passes because it stopped looking. The repository tests run the guard for real and
+exercise the release-history invariants it owns. Migration safety is intentionally an
+explicit, finite attestation contract; these tests do not infer data guarantees from
+Python or SQL source.
 
 Anything reading release history needs tags, which a shallow CI checkout does not have.
 Those tests skip there and the ``migration-release-guard`` workflow runs the same
@@ -534,6 +534,137 @@ def test_the_command_line_refuses_rather_than_passing_without_history(monkeypatc
 
     assert guard.main([]) == 2
     assert "could not run" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('MIGRATION_SAFETY = "copy"\n', "copy"),
+        ('MIGRATION_SAFETY: str = "additive"\n', "additive"),
+        ('MIGRATION_SAFETY = ("copy",)\n', guard.COMPUTED),
+        ('MIGRATION_SAFETY = ["copy"]\n', guard.COMPUTED),
+        ('MIGRATION_SAFETY = make_safety()\n', guard.COMPUTED),
+        ('MIGRATION_SAFETY = "copy"\nMIGRATION_SAFETY = "backfill"\n', guard.COMPUTED),
+        ('if enabled:\n    MIGRATION_SAFETY = "copy"\n', None),
+        ("", None),
+    ],
+    ids=["string", "annotated-string", "tuple", "list", "computed", "duplicate", "nested", "absent"],
+)
+def test_migration_safety_declaration_is_one_top_level_literal(source, expected):
+    """The declaration reader never executes migration code or evaluates SQL."""
+    actual = guard.declared_migration_safety(source)
+    if expected is guard.COMPUTED:
+        assert actual is guard.COMPUTED
+    else:
+        assert actual == expected
+
+
+@pytest.mark.parametrize("kind", sorted(guard.MIGRATION_SAFETY_KINDS))
+def test_each_safety_kind_is_an_accepted_attestation(kind):
+    assert guard._migration_safety_declaration_error("r", kind) is None
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected_fragment"),
+    [
+        (None, "no MIGRATION_SAFETY"),
+        (guard.COMPUTED, "computed or malformed"),
+        ("future", "unsupported kind"),
+        ("copy", None),
+    ],
+    ids=["missing", "computed", "unsupported", "accepted"],
+)
+def test_safety_attestation_shape_fails_closed(declaration, expected_fragment):
+    error = guard._migration_safety_declaration_error("r", declaration)
+    if expected_fragment is None:
+        assert error is None
+    else:
+        assert expected_fragment in error
+
+
+def test_attestation_is_metadata_only_and_does_not_execute_alembic(monkeypatch):
+    """The graph supplies every subject without a second migration executor."""
+    revision = "20260105_0005"
+    shipped = dict(SHIPPED_GRAPH)
+    current = dict(shipped)
+    current[f"{revision}_new.py"] = _revision_file(revision, '"20260104_0004"') + 'MIGRATION_SAFETY = "additive"\n'
+    _graphs(monkeypatch, shipped, current)
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.0")
+    monkeypatch.setattr(guard, "released_graphs", lambda: pytest.fail("attestation must not enumerate upgrade graphs"))
+    monkeypatch.setattr(guard.command, "upgrade", lambda *args, **kwargs: pytest.fail("attestation must not execute Alembic"))
+
+    assert guard.migration_safety_problems() == []
+
+
+def test_attestation_boundary_uses_latest_release_not_comparison_baseline(monkeypatch):
+    """An older metadata comparison cannot re-enroll revisions already released later."""
+    released_revision = "20260105_0005"
+    latest = dict(SHIPPED_GRAPH)
+    latest[f"{released_revision}_released.py"] = _revision_file(released_revision, '"20260104_0004"')
+    current = dict(latest)
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.1")
+    monkeypatch.setattr(guard, "released_sources", lambda tag: SHIPPED_GRAPH if tag == "v0.0.0" else latest)
+    monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
+    monkeypatch.setattr(guard, "releases_with_state_but_no_graph", lambda: [])
+    monkeypatch.setattr(guard, "fresh_install_tables", lambda: guard.HEAD_TABLES)
+    monkeypatch.setattr(guard, "new_slot_collisions", lambda baseline: {})
+    monkeypatch.setattr(guard, "rechained_revisions", lambda baseline: [])
+    monkeypatch.setattr(guard, "edited_released_bodies", lambda baseline: [])
+    monkeypatch.setattr(guard, "spent_body_edit_declarations", lambda baseline: [])
+    monkeypatch.setattr(guard, "unrepairable_releases", lambda: pytest.fail("--skip-upgrade must skip runtime upgrades"))
+
+    _, problems, refused = guard.collect_problems("v0.0.0", include_upgrade=False)
+
+    assert problems == []
+    assert refused == {}
+
+
+def test_only_revisions_after_latest_release_require_attestation(monkeypatch):
+    """A missing declaration is reported for a new revision, never for grandfathered history."""
+    released_revision = "20260105_0005"
+    new_revision = "20260106_0006"
+    latest = dict(SHIPPED_GRAPH)
+    latest[f"{released_revision}_released.py"] = _revision_file(released_revision, '"20260104_0004"')
+    current = dict(latest)
+    current[f"{new_revision}_new.py"] = _revision_file(new_revision, f'"{released_revision}"')
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.1")
+    monkeypatch.setattr(guard, "released_sources", lambda tag: latest)
+    monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
+
+    problems = guard.migration_safety_problems()
+
+    assert problems == [f"{new_revision} has no MIGRATION_SAFETY declaration"]
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected_fragment"),
+    [
+        ("", "no MIGRATION_SAFETY"),
+        ('MIGRATION_SAFETY = "additive"\n', None),
+        ('MIGRATION_SAFETY = "future"\n', "unsupported kind"),
+        ('MIGRATION_SAFETY = ("copy",)\n', "computed or malformed"),
+    ],
+    ids=["missing", "accepted", "unknown", "non-string"],
+)
+def test_new_revision_requires_exact_attestation(monkeypatch, declaration, expected_fragment):
+    revision = "20260105_0005"
+    shipped = dict(SHIPPED_GRAPH)
+    current = dict(shipped)
+    current[f"{revision}_new.py"] = _revision_file(revision, '"20260104_0004"') + declaration
+    _graphs(monkeypatch, shipped, current)
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.0")
+
+    problems = guard.migration_safety_problems()
+    if expected_fragment is None:
+        assert problems == []
+    else:
+        assert any(expected_fragment in problem and revision in problem for problem in problems)
+
+
+@requires_release_history
+def test_real_release_baseline_has_no_new_migration_safety_obligations():
+    """A current graph with no post-release revisions needs no new attestation run."""
+    assert guard.migration_safety_problems() == []
 
 
 def test_head_tables_is_what_a_fresh_install_has():

@@ -19,6 +19,7 @@ import {
   Sparkles,
   Terminal,
   Wrench,
+  X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
@@ -27,8 +28,8 @@ import { Markdown } from '../ui/markdown';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { copyTextToClipboard } from '../../lib/utils';
 import {
-  activityDurationParts,
   filterActivityRows,
+  formatActivityElapsedClock,
   genericChips,
   parseToolCall,
   parseToolName,
@@ -396,7 +397,16 @@ export const ActivityCard: React.FC<{
   onToggleExpanded: () => void;
   showToolCalls: boolean;
   onToggleTools: () => void;
-}> = ({ rows, startedAtMs, expanded, onToggleExpanded, showToolCalls, onToggleTools }) => {
+  onDisableActivity?: () => void;
+}> = ({
+  rows,
+  startedAtMs,
+  expanded,
+  onToggleExpanded,
+  showToolCalls,
+  onToggleTools,
+  onDisableActivity,
+}) => {
   const { t } = useTranslation();
   const [nowMs, setNowMs] = useState(() => Date.now());
   // Fallback start if the turn's start time is unknown (defensive — the card only
@@ -441,9 +451,7 @@ export const ActivityCard: React.FC<{
   }, [expanded]);
 
   const elapsedMs = Math.max(0, nowMs - (startedAtMs ?? mountedAt));
-  const mm = Math.floor(elapsedMs / 60000);
-  const ss = Math.floor((elapsedMs % 60000) / 1000);
-  const clock = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  const clock = formatActivityElapsedClock(elapsedMs, t('chat.agentActivity.dayShort'));
 
   return (
     <div className="flex w-full justify-start">
@@ -463,6 +471,17 @@ export const ActivityCard: React.FC<{
             <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{clock}</span>
           </button>
           <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
+          {onDisableActivity && (
+            <button
+              type="button"
+              onClick={onDisableActivity}
+              aria-label={t('chat.agentActivity.disable')}
+              title={t('chat.agentActivity.disable')}
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-foreground/[0.04] text-foreground/80 transition-colors hover:bg-foreground/[0.08]"
+            >
+              <X className="size-3.5" aria-hidden="true" />
+            </button>
+          )}
           <button type="button" onClick={onToggleExpanded} aria-label={t('chat.agentActivity.collapse')}>
             <ChevronDown
               className={clsx('size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')}
@@ -542,11 +561,8 @@ export const ActivityChip: React.FC<{
   } else if (group.status === 'interrupted') {
     label = t('chat.agentActivity.interrupted', { count: group.steps });
   } else {
-    const parts = activityDurationParts(group.durationMs);
-    const duration = parts
-      ? parts.minutes > 0
-        ? t('chat.agentActivity.durationMin', { minutes: parts.minutes, seconds: parts.seconds })
-        : t('chat.agentActivity.durationSec', { seconds: parts.seconds })
+    const duration = group.durationMs != null && Number.isFinite(group.durationMs) && group.durationMs >= 0
+      ? formatActivityElapsedClock(group.durationMs, t('chat.agentActivity.dayShort'))
       : '';
     label = `${t('chat.agentActivity.label')} · ${stepLabel(t, group.steps)}${duration ? ` · ${duration}` : ''}`;
   }

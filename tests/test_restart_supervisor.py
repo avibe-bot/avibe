@@ -39,13 +39,23 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
     calls = {}
+    events: list[str] = []
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock-enter")
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
 
     monkeypatch.setattr(restart_supervisor, "get_restart_invocation_command", lambda vibe_path=None: ["/bin/vibe", "restart"])
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "atomic_upgrade_lock", Lock)
 
     def fake_popen(command, **kwargs):
+        events.append("spawn")
         calls["command"] = command
         calls["kwargs"] = kwargs
 
@@ -67,6 +77,72 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     assert calls["kwargs"]["start_new_session"] is True
     assert calls["kwargs"]["env"] == {"PATH": "/bin"}
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
+    assert events == ["lock-enter", "spawn", "lock-exit"]
+
+
+def test_schedule_restart_can_use_candidate_python_without_launcher_lock(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = {}
+
+    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+
+    def fake_popen(command, **kwargs):
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+
+        class Proc:
+            pid = 45679
+
+        return Proc()
+
+    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
+
+    result = restart_supervisor.schedule_restart(
+        vibe_path=str(tmp_path / "stable" / "vibe.exe"),
+        python_executable=str(tmp_path / "generation" / "python.exe"),
+        trigger="upgrade",
+    )
+
+    assert result["state"] == "scheduled"
+    assert calls["command"][:4] == [
+        str(tmp_path / "generation" / "python.exe"),
+        "-c",
+        "from vibe.cli import main; main()",
+        "__restart-supervisor",
+    ]
+
+
+def test_candidate_supervisor_drops_source_pythonpath(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", "/source/checkout")
+    monkeypatch.setenv("PYTHONHOME", "/source/python")
+    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    calls = {}
+
+    def fake_popen(command, **kwargs):
+        calls["kwargs"] = kwargs
+
+        class Proc:
+            pid = 45680
+
+        return Proc()
+
+    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    restart_supervisor.schedule_restart(
+        vibe_path=str(tmp_path / "stable" / "vibe.exe"),
+        python_executable=str(tmp_path / "generation" / "python.exe"),
+        trigger="upgrade",
+    )
+
+    assert "PYTHONPATH" not in calls["kwargs"]["env"]
+    assert "PYTHONHOME" not in calls["kwargs"]["env"]
 
 
 

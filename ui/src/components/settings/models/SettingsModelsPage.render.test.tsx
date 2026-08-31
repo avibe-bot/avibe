@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
@@ -13,7 +13,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
-import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source, UsageSummary } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type RuntimeDependency, type Source, type UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -85,6 +85,9 @@ const takeoverChain: AgentChain = {
   supply_state: 'ok',
 };
 
+const takeoverMappingTitle = /Replacement source → gpt-5\.6-sol \((?:Taken over|已自动切换)\)/i;
+const headMappingTitle = /^Paused source → gpt-5\.6-sol$/i;
+
 const usageSummary: UsageSummary = {
   window_days: 30,
   from_day: '2026-07-20',
@@ -131,6 +134,20 @@ const renderPage = (sources: Source[]) => {
   );
 };
 
+const switchFirstGatewayAgentToDirect = async () => {
+  await userEvent.click((await screen.findAllByRole('button', { name: /Runtime mode:|运行模式[:：]/i }))[0]);
+  const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
+  await userEvent.click(within(modeGroup).getByRole('button', { name: /Switch to direct|切到直连|Retry|重试/i }));
+};
+
+const closeSourceDetails = async () => {
+  await userEvent.click(screen.getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
+};
+
+beforeEach(() => {
+  vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -140,7 +157,7 @@ describe('SettingsModelsPage surface branches', () => {
   it('coalesces the OAuth success landing with its trailing stale-row notification', () => {
     const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
     const start = page.indexOf('const subscriptionAdded');
-    const callback = page.slice(start, page.indexOf('React.useEffect(() => {', start));
+    const callback = page.slice(start, page.indexOf('const closeSubscription', start));
 
     expect(callback).toMatch(/if \(!source\) \{[\s\S]*?subscriptionSuccessReconcileRef\.current/);
     expect(callback).toMatch(/sourceEntityAuthority\.landLatest\(source\)[\s\S]*?subscriptionSuccessReconcileRef\.current = true;[\s\S]*?void refresh\(\)/);
@@ -173,23 +190,69 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     const listSources = vi.mocked(modelsApi.listSources);
     const refreshesBeforeCreate = listSources.mock.calls.length;
+    listSources.mockResolvedValue([retainedSource, created]);
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
     await user.click(await screen.findByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
     await user.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
 
     await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.queryByRole('dialog', { name: 'Created subscription' })).toBeNull();
     await waitFor(() => expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1));
     await act(async () => Promise.resolve());
     expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
+    const detail = await screen.findByRole('dialog', { name: 'Created subscription' }, { timeout: 2500 });
+    await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('returns focus to Add API key after opening and closing the created provider', async () => {
+    const created: Source = {
+      ...retainedSource,
+      id: 'src_created_api_key',
+      vendor: 'custom',
+      display_name: 'Created API key',
+      protocol: 'openai_chat',
+      base_url: 'https://relay.example/v1',
+    };
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue({
+      contract_version: CONTRACT_VERSION,
+      outcome: 'observed',
+      reachable: true,
+      authenticated: 'authenticated',
+      protocol: 'openai_chat',
+      discovery: 'succeeded',
+      models: ['model-a'],
+    });
+    vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: created,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    vi.mocked(modelsApi.listSources).mockResolvedValue([retainedSource, created]);
+    const user = userEvent.setup();
+    const trigger = screen.getByRole('button', { name: /Add API key|添加 API Key/i });
+    await user.click(trigger);
+    await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
+    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    const detail = await screen.findByRole('dialog', { name: 'Created API key' });
+    await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
     renderPage([]);
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
-    expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
+    expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeTruthy();
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
     // overview leaks in beside it.
@@ -216,8 +279,80 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeNull();
     expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
+  });
+
+  it('publishes a newly discovered backend into the already-open page', async () => {
+    const unavailable = [
+      { ...directAgent('claude'), cli_present: false },
+      { ...directAgent('codex'), cli_present: false },
+      { ...directAgent('opencode'), cli_present: false },
+    ];
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    const available = [
+      unavailable[0],
+      directAgent('codex'),
+      unavailable[2],
+    ];
+    vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValue(available);
+    vi.mocked(modelsApi.refreshAgentPresence).mockResolvedValue(available);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
+    expect(screen.queryByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeNull();
+    expect(modelsApi.refreshAgentPresence).toHaveBeenCalledOnce();
+  });
+
+  it('retries deep backend detection without remounting the page', async () => {
+    const unavailable = [
+      { ...directAgent('claude'), cli_present: false },
+      { ...directAgent('codex'), cli_present: false },
+      { ...directAgent('opencode'), cli_present: false },
+    ];
+    const available = [
+      unavailable[0],
+      directAgent('codex'),
+      unavailable[2],
+    ];
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValue(available);
+    vi.mocked(modelsApi.refreshAgentPresence)
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValueOnce(available);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
+    const retry = await screen.findByRole('button', { name: /Detect Agent backends again|重新检测 Agent 后端/i });
+    await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+    const user = userEvent.setup();
+    await user.click(retry);
+
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
+    expect(modelsApi.refreshAgentPresence).toHaveBeenCalledTimes(2);
   });
 
   it('keeps an unread runtime visible on the direct-only surface', async () => {
@@ -238,7 +373,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
+    expect(await screen.findByText(/^Gateway status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
     expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
   });
 
@@ -272,6 +407,65 @@ describe('SettingsModelsPage surface branches', () => {
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(await screen.findAllByRole('tab')).toHaveLength(3);
+  });
+
+  it('keeps routing controls available while an enabled gateway process is unavailable', async () => {
+    const unavailable = {
+      ...runtime,
+      enabled: true,
+      status: { ...runtime.status, health: 'down' as const },
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(unavailable);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const toggle = await screen.findByRole('switch', { name: /Switch codex to Direct|请先将 codex 切换为直连/i });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText('Retained source')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i })).toBeTruthy();
+    expect(screen.queryAllByRole('tab')).toHaveLength(3);
+  });
+
+  it('still allows persisted enablement to be turned off on an unsupported host', async () => {
+    const unsupported = {
+      ...runtime,
+      enabled: true,
+      manifest: { ...runtime.manifest, resolution: 'unsupported' as const },
+      status: { ...runtime.status, health: 'not_installed' as const },
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      directAgent('claude'),
+      directAgent('codex'),
+      directAgent('opencode'),
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(unsupported);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    const stopped = { ...unsupported, enabled: false };
+    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(stopped);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const toggle = await screen.findByRole('switch', { name: /Turn model gateway off|关闭模型网关/i });
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.click(toggle);
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
   });
 
   it('stops an unused running gateway and hides its retained configuration', async () => {
@@ -315,7 +509,49 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getAllByRole('tab')).toHaveLength(3);
-    expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeNull();
+    expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeNull();
+  });
+
+  it('keeps tier-editor Escape local to the provider dialog', async () => {
+    const editableSource: Source = {
+      ...retainedSource,
+      models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
+    };
+    renderPage([editableSource]);
+    const user = userEvent.setup();
+
+    const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
+    await user.click(sourceOpener);
+    const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
+    await user.click(within(sourceDialog).getByRole('button', { name: /high/i }));
+    const tierInput = within(sourceDialog).getByPlaceholderText(/Enter to add|回车添加/i);
+    await user.type(tierInput, 'draft');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
+    expect(within(sourceDialog).queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
+
+    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    let manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    const modelIdInput = within(manualDraft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i);
+    await user.type(modelIdInput, 'draft-model');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
+    expect(sourceDialog.querySelector('[data-manual-model-draft]')).toBeNull();
+
+    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    const draftTierInput = within(manualDraft as HTMLElement).getByPlaceholderText(/Enter to add|回车添加/i);
+    await user.type(draftTierInput, 'draft');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
+    expect((draftTierInput as HTMLInputElement).value).toBe('');
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Retained source' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(sourceOpener));
   });
 
   it('moves recent switches into the Logs tab and removes the Advanced placeholder', async () => {
@@ -340,8 +576,8 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
     const picker = await screen.findByRole('menu');
-    expect(within(picker).getByText(/Native recommended|原生推荐/i)).toBeTruthy();
-    expect(within(picker).getByText(/Gateway recommended|网关推荐/i)).toBeTruthy();
+    expect(within(picker).getByText(/Native recommended|推荐由 Agent 管理/i)).toBeTruthy();
+    expect(within(picker).getByText(/Gateway recommended|推荐由模型网关管理/i)).toBeTruthy();
     expect(within(picker).queryByText(/Claude Pro \/ Max|ChatGPT Plus \/ Pro/i)).toBeNull();
     await userEvent.click(within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
@@ -534,7 +770,7 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
+    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
     expect(events).not.toHaveBeenCalled();
   });
 
@@ -545,7 +781,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 
     render(
       <ToastProvider>
@@ -555,9 +791,55 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/^1 takeover active$|^1 处接管中$/i)).toBeTruthy();
-    expect(screen.getByText(/^Taken over$|^接管中$/i)).toBeTruthy();
-    expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByText(/^1 takeover active$|^1 处已自动切换$/i)).toBeTruthy();
+    expect(screen.getByText(/^Taken over$|^已自动切换$/i)).toBeTruthy();
+    expect(screen.getByTitle(takeoverMappingTitle)).toBeTruthy();
+  });
+
+  it('[MH-OVERVIEW-001] reads overview chains once per backend and keeps exact reads for the route dialog', async () => {
+    const secondModel = 'gpt-5.6-terra';
+    const agent: AgentSupply = {
+      ...takeoverAgent,
+      builtin_models: [takeoverChain.model_id, secondModel],
+      model_supply: [takeoverChain.model_id, secondModel].map((model_id) => ({
+        model_id,
+        chain_length: 2,
+        has_runnable_hop: true,
+      })),
+      routes: {
+        ...takeoverAgent.routes,
+        [secondModel]: { hops: takeoverAgent.routes![takeoverChain.model_id].hops },
+      },
+    };
+    const secondChain: AgentChain = { ...takeoverChain, model_id: secondModel };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([agent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([
+      takeoverChain,
+      secondChain,
+    ]);
+    const exactRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
+    expect(overviewRead).toHaveBeenCalledWith('codex');
+    expect(exactRead).not.toHaveBeenCalled();
+
+    await userEvent.click(await screen.findByRole('button', {
+      name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i,
+    }));
+    await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
+    expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
+    expect(screen.getByText(/Later Source order changes reorder its hops to match\.|以后调整供应商优先级时，其中的供应商会按新顺序重排。/i)).toBeTruthy();
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -616,12 +898,12 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
+    expect(await screen.findByText(/^Gateway status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
     expect(screen.queryByText(/^Gateway stopped|^网关已停止/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /Gateway stopped|网关已停止/i })).toBeNull();
   });
 
-  it('lands the overview without waiting for a per-model chain read', async () => {
+  it('lands the overview without waiting for its backend chain collection', async () => {
     const hubAgent: AgentSupply = {
       ...takeoverAgent,
       backend: 'claude',
@@ -635,7 +917,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockImplementation(() => new Promise(() => {}));
+    vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(() => new Promise(() => {}));
 
     render(
       <ToastProvider>
@@ -697,6 +979,7 @@ describe('SettingsModelsPage surface branches', () => {
       vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
       vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
       vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+      const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([affectedChain]);
       const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(affectedChain);
       if (action === 'edit') {
         vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, ...impact });
@@ -712,22 +995,24 @@ describe('SettingsModelsPage surface branches', () => {
         </ToastProvider>,
       );
       await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
-      await waitFor(() => expect(chainRead).toHaveBeenCalled());
+      const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
+      expect(within(sourceDialog).getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i })).toBeTruthy();
+      await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
 
       await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
       if (action === 'edit') {
-        await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
         const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
         await userEvent.clear(name);
         await userEvent.type(name, updatedSource.display_name);
         await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
       } else {
-        await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-        await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+        await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
       }
 
       const report = await screen.findByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       });
       expect(report.dataset.reportProjections?.split(' ')).toEqual(
         Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS),
@@ -749,7 +1034,7 @@ describe('SettingsModelsPage surface branches', () => {
         await waitFor(() => expect(document.querySelector('.model-hub-source-title')).toBeNull());
       }
       expect(screen.getByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       })).toBeTruthy();
       expect(chainRead).toHaveBeenLastCalledWith('claude', modelId);
 
@@ -758,7 +1043,7 @@ describe('SettingsModelsPage surface branches', () => {
         await chainLanding.promise;
       });
       await waitFor(() => expect(screen.queryByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       })).toBeNull());
     },
   );
@@ -767,7 +1052,7 @@ describe('SettingsModelsPage surface branches', () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
-    const pendingChain = deferred<AgentChain>();
+    const pendingChains = deferred<AgentChain[]>();
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
@@ -775,7 +1060,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'setAgentMode').mockResolvedValueOnce(direct);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockImplementation(() => pendingChain.promise);
+    const chainRead = vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(() => pendingChains.promise);
 
     render(
       <ToastProvider>
@@ -786,18 +1071,18 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     await waitFor(() => expect(chainRead).toHaveBeenCalledOnce());
-    await userEvent.click(screen.getByRole('button', { name: /^Switch to direct$|^切换到直连$/i }));
+    await switchFirstGatewayAgentToDirect();
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
 
     await act(async () => {
-      pendingChain.resolve(takeoverChain);
-      await pendingChain.promise;
+      pendingChains.resolve([takeoverChain]);
+      await pendingChains.promise;
     });
 
     expect(screen.queryByRole('button', { name: /route chain|路由链/i })).toBeNull();
-    expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByText(/^Taken over$|^已自动切换$/i)).toBeNull();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
   });
 
   it('cannot let a pre-save chain read overwrite the committed route echo', async () => {
@@ -816,9 +1101,8 @@ describe('SettingsModelsPage surface branches', () => {
       .mockReturnValueOnce(pendingReconciliation.promise);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain')
-      .mockReturnValueOnce(pendingOldChain.promise)
-      .mockResolvedValueOnce(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(() => pendingOldChain.promise.then((chain) => [chain]));
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
     vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
       chain: committedChain,
       removed_hops: [],
@@ -834,19 +1118,19 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     await userEvent.click(await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i }));
-    const removeButtons = await screen.findAllByRole('button', { name: /^Remove hop$|^移除这一跳$/i });
+    const removeButtons = await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i });
     await userEvent.click(removeButtons[1]);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
     await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
-    expect(await screen.findByText(/^Now: Paused source$|^当前 Paused source$/i)).toBeTruthy();
+    expect(await screen.findByTitle(headMappingTitle)).toBeTruthy();
 
     await act(async () => {
       pendingOldChain.resolve(takeoverChain);
       await pendingOldChain.promise;
     });
 
-    expect(screen.getByText(/^Now: Paused source$|^当前 Paused source$/i)).toBeTruthy();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.getByTitle(headMappingTitle)).toBeTruthy();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
   });
 
   it('installs a removed backend before the committed route closes and applies PF-1', async () => {
@@ -858,6 +1142,7 @@ describe('SettingsModelsPage surface branches', () => {
       .mockResolvedValueOnce([]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
     vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
     vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
       chain: { ...takeoverChain, chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0] },
@@ -874,7 +1159,7 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     await userEvent.click(await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i }));
-    await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$|^移除这一跳$/i }))[1]);
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i }))[1]);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 
     await waitFor(() =>
@@ -892,15 +1177,21 @@ describe('SettingsModelsPage surface branches', () => {
     expect(document.activeElement?.closest('[data-agent-backend="codex"]')).toBeNull();
   });
 
-  it('reconciles a lost Direct-mode response before rendering failure', async () => {
+  it('keeps the source projection intact after a lost Direct-mode response', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
+    const staleSource = {
+      ...retainedSource,
+      id: 'src_head',
+      display_name: 'Paused source',
+      adopted_by: [{ backend: 'codex' as const, menu_model: 'gpt-5.6-sol' }],
+    };
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
       .mockResolvedValueOnce([direct]);
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    const sourceRead = vi.spyOn(modelsApi, 'listSources').mockResolvedValue([staleSource]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
     const setMode = vi.spyOn(modelsApi, 'setAgentMode').mockRejectedValueOnce(new TypeError('response lost'));
 
     render(
@@ -911,12 +1202,23 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切换到直连$/i }));
+    await switchFirstGatewayAgentToDirect();
 
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
     expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
     expect(setMode).toHaveBeenCalledOnce();
     expect(agentRead).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(sourceRead).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/Could not read the source list · the gateway itself is fine|供应商列表暂时不可用 · 模型网关本身正常/i)).toBeNull();
+    expect(screen.queryByText(/Supplying Codex|正在使用 Codex/i)).toBeNull();
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未使用/i)).toBeTruthy();
+  });
+
+  it('does not compete for source inventory during Direct-mode recovery', () => {
+    const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
+    const recovery = page.slice(page.indexOf('const switchToDirect'), page.indexOf('const loadOlderEvents'));
+    expect(recovery).not.toMatch(/sourceCollectionReads\.read\(/);
+    expect(recovery).not.toMatch(/void refresh\(\)/);
   });
 
   it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
@@ -929,7 +1231,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 
     render(
       <ToastProvider>
@@ -939,14 +1241,14 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByTitle(takeoverMappingTitle)).toBeTruthy();
     await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
-    await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
+    await closeSourceDetails();
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
@@ -960,7 +1262,7 @@ describe('SettingsModelsPage surface branches', () => {
       .mockRejectedValueOnce(new TypeError('runtime unread'));
     vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 
     render(
       <ToastProvider>
@@ -970,15 +1272,15 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByTitle(takeoverMappingTitle)).toBeTruthy();
     await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(runtimeRead).toHaveBeenCalledTimes(2));
-    await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
-    expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
-    expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
+    await closeSourceDetails();
+    expect(await screen.findByText(/^Gateway status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
+    expect(screen.queryByText(/^Taken over$|^已自动切换$/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 });
@@ -1045,7 +1347,7 @@ describe('SettingsModelsPage usage region', () => {
     await openUsage();
     await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
-    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^来源与网关$/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
     await openUsage();
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });

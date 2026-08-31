@@ -7,7 +7,7 @@ never back. So editing a released revision's parentage does not change what thos
 databases have already done -- it changes what they will do next, silently, with no error
 at the moment of the edit and no error at the moment of the upgrade.
 
-Seven properties, one primitive: the graph as a released tag actually shipped it, read
+Eight properties, one primitive: the graph as a released tag actually shipped it, read
 straight out of git. Nothing here is an allowlist of known-bad cases that outlives its
 reason, and nothing needs an old Python environment -- ``env.py`` reads
 ``target_metadata`` only during autogenerate, so today's runtime can drive an older
@@ -27,6 +27,8 @@ reason, and nothing needs an old Python environment -- ``env.py`` reads
                                   upgrades it
     releases_with_state_but_no   every release that wrote a database is inside the
     _graph()                      window the property above walks
+    migration_safety_problems()   each post-latest-release revision has one finite, explicit
+                                  migration-safety attestation
 
 Readiness is not this module's opinion. ``unrepairable_releases`` drives
 ``run_migrations`` and asks ``background_tables_ready``, so it covers the repair and
@@ -338,6 +340,11 @@ GRAPH_FIELDS = {
 
 GRAPH_EDGES = tuple(field for field in GRAPH_FIELDS if field != "revision")
 
+# The guard deliberately does not infer a data-safety obligation from Python or SQL. Every
+# new migration owns one explicit attestation, and only this finite vocabulary is accepted.
+MIGRATION_SAFETY_FIELD = "MIGRATION_SAFETY"
+MIGRATION_SAFETY_KINDS = frozenset({"additive", "deduplicate", "backfill", "copy"})
+
 
 def declared_graph_fields(source: str) -> dict[str, object]:
     """The graph declarations a migration module makes, in either form Python allows.
@@ -367,6 +374,33 @@ def declared_graph_fields(source: str) -> dict[str, object]:
             continue
         declared[target.id] = literal if target.id == "revision" else to_tuple(literal, default=())
     return declared
+
+
+def declared_migration_safety(source: str) -> str | _ComputedMetadata | None:
+    """Read exactly one top-level string literal without evaluating migration code."""
+    values: list[object] = []
+    try:
+        nodes = ast.parse(source).body
+    except SyntaxError:
+        return COMPUTED
+    for node in nodes:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id == MIGRATION_SAFETY_FIELD:
+            try:
+                values.append(ast.literal_eval(value))
+            except (ValueError, TypeError, SyntaxError):
+                return COMPUTED
+    if not values:
+        return None
+    if len(values) != 1:
+        return COMPUTED
+    literal = values[0]
+    return literal if isinstance(literal, str) else COMPUTED
 
 
 def revision_claims(sources: dict[str, str]) -> dict[str, list[tuple[str, dict[str, object]]]]:
@@ -666,6 +700,47 @@ def table_names(db_path: Path) -> set[str]:
         return {str(row[0]) for row in connection.execute("select name from sqlite_master where type = 'table'")}
     finally:
         connection.close()
+
+
+def _migration_safety_declaration_error(
+    revision: str, declaration: str | _ComputedMetadata | None
+) -> str | None:
+    if declaration is None:
+        return f"{revision} has no MIGRATION_SAFETY declaration"
+    if declaration is COMPUTED:
+        return f"{revision} MIGRATION_SAFETY is computed or malformed; only one literal string is supported"
+    if not isinstance(declaration, str):
+        return f"{revision} MIGRATION_SAFETY is malformed; only one literal string is supported"
+    if declaration not in MIGRATION_SAFETY_KINDS:
+        return f"{revision} MIGRATION_SAFETY contains unsupported kind: {declaration}"
+    return None
+
+
+def migration_safety_problems() -> list[str]:
+    """Require one explicit attestation for every revision after the latest release.
+
+    This is deliberately a metadata-only gate. ``unrepairable_releases`` owns real upgrade
+    execution and readiness evidence; duplicating that executor here would make the
+    attestation boundary both slow and a second source of migration behavior.
+    """
+    latest_release = latest_released_tag()
+    baseline_graph = revision_graph(released_sources(latest_release))
+    current_sources = working_tree_sources()
+    current_graph = revision_graph(current_sources)
+    new_revisions = set(current_graph) - set(baseline_graph)
+    if not new_revisions:
+        return []
+
+    problems = [
+        error
+        for revision in sorted(new_revisions)
+        if (error := _migration_safety_declaration_error(
+            revision,
+            declared_migration_safety(current_sources[current_graph[revision][0]]),
+        ))
+    ]
+
+    return problems
 
 
 def fresh_install_tables() -> set[str]:
@@ -1508,6 +1583,8 @@ def collect_problems(
     problems.extend(edited_released_bodies(baseline))
     problems.extend(spent_body_edit_declarations(baseline))
 
+    problems.extend(migration_safety_problems())
+
     if include_upgrade:
         failures, refused = unrepairable_releases()
         for tag, reasons in sorted(failures.items(), key=lambda item: version_key(item[0])):
@@ -1525,7 +1602,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-upgrade",
         action="store_true",
-        help="check only the metadata properties, skipping the per-release upgrade",
+        help="skip per-release upgrade evidence while retaining metadata and attestation checks",
     )
     return parser
 

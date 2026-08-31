@@ -49,4 +49,16 @@ describe("route chain interaction owner", () => {
     expect(appended.focusIndex).toBe(2);
     expect(appended.draft).toEqual([hops[0], hops[2], hops[1]]);
   });
+
+  it("replaces one hop without changing its position", () => {
+    const replacement = { source_id: "src_d", model_id: "model_d" };
+    const replaced = advanceRouteChainInteraction(
+      createRouteChainInteraction(hops),
+      { type: "replace", index: 1, hop: replacement },
+    );
+
+    expect(replaced.focusIndex).toBe(1);
+    expect(replaced.grab).toBeNull();
+    expect(replaced.draft).toEqual([hops[0], replacement, hops[2]]);
+  });
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Avibe Installation Script
-# Usage: curl -fsSL https://avibe.bot/install.sh | bash
+# Usage: bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 
@@ -19,7 +19,23 @@ PACKAGE_NAME="avibe-os"
 NODE_MINIMUM_REQUIREMENT="20.19+ or 22.12+"
 VIBE_BIN_PATH=""
 VIBE_TOOL_BIN_DIR=""
+VIBE_CANDIDATE_BIN_PATH=""
+LAUNCH_AFTER_INSTALL=""
+AVIBE_LAUNCHED=""
 ORIGINAL_PATH="$PATH"
+if [ -n "${AVIBE_HOME:-}" ]; then
+    AVIBE_RUNTIME_HOME="${AVIBE_HOME/#\~/$HOME}"
+    case "$AVIBE_RUNTIME_HOME" in
+        /*) ;;
+        *) AVIBE_RUNTIME_HOME="$PWD/$AVIBE_RUNTIME_HOME" ;;
+    esac
+elif [ -e "$HOME/.avibe" ] || [ -L "$HOME/.avibe" ]; then
+    AVIBE_RUNTIME_HOME="$HOME/.avibe"
+elif [ -e "$HOME/.vibe_remote" ] || [ -L "$HOME/.vibe_remote" ]; then
+    AVIBE_RUNTIME_HOME="$HOME/.vibe_remote"
+else
+    AVIBE_RUNTIME_HOME="$HOME/.avibe"
+fi
 REMOTE_ACCESS_PAIRING_KEY=""
 REMOTE_ACCESS_PAIRED=""
 
@@ -376,17 +392,6 @@ install_node() {
     return 1
 }
 
-warn_if_libreoffice_missing() {
-    if PATH="/usr/bin:/bin" command -v soffice >/dev/null 2>&1 || [ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]; then
-        success "LibreOffice is available for Memory Office attachment capture"
-        return 0
-    fi
-
-    warn "LibreOffice is not available, so Memory will skip Word, Excel, PowerPoint, and other Office attachments."
-    warn "Install it to enable that path: macOS \"brew install --cask libreoffice\", Debian/Ubuntu \"apt-get install -y libreoffice-nogui\"."
-    return 0
-}
-
 install_node_optional() {
     set +e
     install_node
@@ -403,11 +408,113 @@ install_node_optional() {
 }
 
 uv_tool_install() {
-    if [ -n "$VIBE_TOOL_BIN_DIR" ]; then
-        UV_TOOL_BIN_DIR="$VIBE_TOOL_BIN_DIR" uv tool install "$@"
-    else
-        uv tool install "$@"
+    # uv writes a tool environment in place.  Give every attempt its own
+    # durable generation and activate its launcher only after uv exits
+    # successfully, so an interrupted copy cannot damage the active install.
+    local generation_root="$AVIBE_RUNTIME_HOME/runtime/install-generations/$(date +%s)-$$-${RANDOM}"
+    # 3.0.13 identifies uv-managed installs from the executable's /uv/tools/
+    # path. Keep that released contract in every generation so the old binary
+    # can hand the first upgrade to uv instead of falling through to pip.
+    local generation_tools="$generation_root/uv/tools"
+    local generation_bin="$generation_root/bin"
+    local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
+    local previous_target=""
+    local source_snapshot=""
+    mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
+    if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
+        previous_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
+        local current_protocol=""
+        current_protocol="$(
+            cd "$AVIBE_RUNTIME_HOME" || exit 1
+            env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$stable_bin_dir/vibe" \
+                __activate-install --protocol-version 2>/dev/null || true
+        )"
+        if [ "${current_protocol:-0}" -ge 2 ] 2>/dev/null; then
+            source_snapshot="$(
+                cd "$AVIBE_RUNTIME_HOME" || exit 1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$stable_bin_dir/vibe" \
+                    __activate-install --snapshot --launcher "$stable_bin_dir/vibe" 2>/dev/null || true
+            )"
+        else
+            source_snapshot="$previous_target"
+        fi
     fi
+
+    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@"; then
+        VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
+        if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
+            warn "uv completed but the candidate vibe launcher was not created"
+            rm -rf -- "$generation_root"
+            return 1
+        fi
+        # The candidate's shared Python activation owner canonicalizes this
+        # snapshot against the generation root. Keep path identity out of the
+        # bootstrap script so aliases cannot produce a second interpretation.
+        local activation_args=(
+            __activate-install
+            --launcher "$stable_bin_dir/vibe"
+            --candidate "$VIBE_CANDIDATE_BIN_PATH"
+        )
+        if [ -n "$source_snapshot" ]; then
+            activation_args+=(--source-generation "$source_snapshot")
+        fi
+        local activation_owner=""
+        local owner=""
+        local owner_protocol=""
+        for owner in "$VIBE_CANDIDATE_BIN_PATH" "$previous_target"; do
+            if [ -z "$owner" ] || [ ! -x "$owner" ]; then
+                continue
+            fi
+            owner_protocol="$(
+                cd "$AVIBE_RUNTIME_HOME" || exit 1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$owner" \
+                    __activate-install --protocol-version 2>/dev/null || true
+            )"
+            if [ "${owner_protocol:-0}" -ge 1 ] 2>/dev/null; then
+                activation_owner="$owner"
+                break
+            fi
+        done
+        if [ -n "$activation_owner" ]; then
+            if ! (
+                cd "$AVIBE_RUNTIME_HOME" || exit 1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$activation_owner" \
+                    "${activation_args[@]}"
+            ); then
+                warn "candidate Avibe environment could not be activated"
+                rm -rf -- "$generation_root"
+                return 1
+            fi
+        else
+            # A legacy wheel can bootstrap a fresh machine, but replacing an
+            # existing launcher requires a current wheel to own the shared
+            # lock and source-snapshot checks above.
+            if ! (
+                cd "$AVIBE_RUNTIME_HOME" || exit 1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" \
+                    "$VIBE_CANDIDATE_BIN_PATH" --help >/dev/null 2>&1
+            ); then
+                warn "candidate vibe launcher failed its startup probe"
+                rm -rf -- "$generation_root"
+                return 1
+            fi
+            if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
+                warn "legacy candidate cannot safely replace an existing Avibe installation"
+                rm -rf -- "$generation_root"
+                return 1
+            fi
+            if ! ln -s "$VIBE_CANDIDATE_BIN_PATH" "$stable_bin_dir/vibe"; then
+                warn "legacy candidate Avibe launcher could not be activated"
+                rm -rf -- "$generation_root"
+                return 1
+            fi
+        fi
+        VIBE_TOOL_BIN_DIR="$stable_bin_dir"
+        VIBE_BIN_PATH="$stable_bin_dir/vibe"
+        return 0
+    fi
+    rm -rf -- "$generation_root"
+    return 1
 }
 
 install_package_candidate() {
@@ -615,6 +722,33 @@ pair_remote_access() {
     success "Avibe service started"
 }
 
+launch_vibe() {
+    if [ "${LAUNCH_AFTER_INSTALL:-}" != "1" ] || [ "${REMOTE_ACCESS_PAIRED:-}" = "1" ]; then
+        return 0
+    fi
+
+    local vibe_cmd="${VIBE_BIN_PATH:-}"
+    if [ -z "$vibe_cmd" ] || [ ! -x "$vibe_cmd" ]; then
+        error "Cannot launch Avibe because the verified vibe command is not available."
+    fi
+
+    info "Launching Avibe with $vibe_cmd..."
+    "$vibe_cmd"
+    AVIBE_LAUNCHED="1"
+    success "Avibe launched"
+}
+
+print_uninstall_commands() {
+    echo "  avibe_home=\"\${AVIBE_HOME:-\$HOME/.avibe}\""
+    echo '  avibe_home="${avibe_home/#\~/$HOME}"'
+    echo "  uv tool uninstall avibe-os       # current uv install"
+    echo "  uv tool uninstall vibe-remote    # legacy uv install"
+    echo "  pip uninstall avibe-os vibe-remote"
+    echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
+    echo '  rm -rf "$avibe_home/runtime/install-generations"'
+    echo '  rm -rf "$avibe_home" ~/.vibe_remote   # remove config and data'
+}
+
 # Print next steps
 print_next_steps() {
     local vibe_dir
@@ -644,10 +778,7 @@ print_next_steps() {
         echo "  vibe doctor   - Run diagnostics"
         echo ""
         echo -e "${BLUE}Uninstall:${NC}"
-        echo "  uv tool uninstall avibe-os       # current uv install"
-        echo "  uv tool uninstall vibe-remote    # legacy uv install"
-        echo "  pip uninstall avibe-os vibe-remote"
-        echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
+        print_uninstall_commands
         if ! is_vibe_immediately_available; then
             echo ""
             echo -e "${BLUE}If 'vibe' is not found in a new shell:${NC}"
@@ -660,7 +791,20 @@ print_next_steps() {
         return
     fi
 
-    if is_vibe_immediately_available; then
+    if [ "${AVIBE_LAUNCHED:-}" = "1" ]; then
+        if is_vibe_immediately_available; then
+            echo "  1. Finish setup in the browser"
+            echo "  2. Choose your chat platform and agent backend"
+            echo "  3. Enable a channel or DM and send your first task"
+            echo "  4. Optional: run 'vibe remote' to open the Web UI from another device"
+        else
+            echo "  1. Finish setup in the browser"
+            echo "  2. Run 'export PATH=\"${vibe_dir}:\$PATH\"' for future terminal commands"
+            echo "  3. Choose your chat platform and agent backend"
+            echo "  4. Enable a channel or DM and send your first task"
+            echo "  5. Optional: run 'vibe remote' to open the Web UI from another device"
+        fi
+    elif is_vibe_immediately_available; then
         echo "  1. Run 'vibe' to open the setup wizard"
         echo "  2. Choose your chat platform and agent backend"
         echo "  3. Enable a channel or DM and send your first task"
@@ -681,10 +825,7 @@ print_next_steps() {
     echo "  vibe doctor   - Run diagnostics"
     echo ""
     echo -e "${BLUE}Uninstall:${NC}"
-    echo "  uv tool uninstall avibe-os       # current uv install"
-    echo "  uv tool uninstall vibe-remote    # legacy uv install"
-    echo "  pip uninstall avibe-os vibe-remote"
-    echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
+    print_uninstall_commands
     echo ""
     echo -e "${BLUE}If 'vibe' is still not found:${NC}"
     echo "  ${VIBE_BIN_PATH:-$HOME/.local/bin/vibe}"
@@ -699,6 +840,14 @@ main() {
     print_banner
     REMOTE_ACCESS_PAIRING_KEY="${AVIBE_PAIRING_KEY:-}"
     unset AVIBE_PAIRING_KEY
+
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --launch) LAUNCH_AFTER_INSTALL="1" ;;
+            *) error "Unsupported installer option: $arg" ;;
+        esac
+    done
     
     local os
     os=$(detect_os)
@@ -718,10 +867,6 @@ main() {
     # block installation of the main avibe CLI/service.
     install_node_optional
 
-    # LibreOffice only powers Memory Office capture. Warn when it is missing;
-    # never block the main avibe CLI/service or download a host package here.
-    warn_if_libreoffice_missing
-    
     # Install avibe-os
     install_vibe
     
@@ -736,6 +881,10 @@ main() {
     # verified absolute vibe path, not PATH, so it works even when the installer
     # put the command into a fallback tool bin directory.
     pair_remote_access
+
+    # The public pipe-to-shell flow cannot update its parent shell's PATH.
+    # Launch through the verified absolute path while this process still owns it.
+    launch_vibe
     
     # Done
     print_next_steps

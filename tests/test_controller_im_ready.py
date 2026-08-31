@@ -12,7 +12,10 @@ from core.controller import Controller
 def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller = Controller.__new__(Controller)
     opencode_agent = SimpleNamespace(restore_active_polls=AsyncMock(return_value=0))
-    controller.agent_service = SimpleNamespace(agents={"opencode": opencode_agent})
+    codex_agent = SimpleNamespace(prepare_model_hub_runtime=AsyncMock())
+    controller.agent_service = SimpleNamespace(
+        agents={"opencode": opencode_agent, "codex": codex_agent}
+    )
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
         check_and_send_post_update_notification=AsyncMock(side_effect=ConnectionError("transport unavailable")),
@@ -31,7 +34,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     )
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
     controller.model_hub_service = SimpleNamespace(
-        reconcile_runtime_installation=AsyncMock()
+        recover_runtime_intent=AsyncMock()
     )
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
     controller.cleanup_task = None
@@ -46,6 +49,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     asyncio.run(controller._on_runtime_ready())
 
     opencode_agent.restore_active_polls.assert_awaited_once_with({"avibe"})
+    codex_agent.prepare_model_hub_runtime.assert_awaited_once_with()
     controller.update_checker.check_and_send_post_update_notification.assert_awaited_once_with(
         ready_platform="avibe"
     )
@@ -59,7 +63,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller.session_turns.recover_persisted_agent_run_queue.assert_awaited_once_with()
     controller.scheduled_task_service.recover_processing_requests.assert_called_once_with()
     controller.runtime_work_supervisor.activate.assert_awaited_once_with()
-    controller.model_hub_service.reconcile_runtime_installation.assert_awaited_once_with()
+    controller.model_hub_service.recover_runtime_intent.assert_awaited_once_with()
     assert controller._delivery_recovery_complete.is_set()
 
 
@@ -180,7 +184,7 @@ def test_runtime_owner_recovery_isolates_optional_model_hub_failure(
 ) -> None:
     controller = Controller.__new__(Controller)
     controller.model_hub_service = SimpleNamespace(
-        reconcile_runtime_installation=AsyncMock(
+        recover_runtime_intent=AsyncMock(
             side_effect=OSError("runtime directory is unwritable")
         )
     )
@@ -197,7 +201,7 @@ def test_runtime_owner_recovery_isolates_optional_model_hub_failure(
     with caplog.at_level("ERROR"):
         asyncio.run(controller._recover_runtime_owners())
 
-    controller.model_hub_service.reconcile_runtime_installation.assert_awaited_once_with()
+    controller.model_hub_service.recover_runtime_intent.assert_awaited_once_with()
     controller.session_turns.recover_durable_delivery_state.assert_awaited_once_with(
         service_restart=True
     )

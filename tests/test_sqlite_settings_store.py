@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,12 @@ from sqlalchemy.exc import OperationalError
 
 from config import paths
 from config import v2_settings
+from config.v2_sessions import SessionsStore
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore, UserSettings
+from core import chat_discovery
 from core.vibe_agents import VibeAgentStore
-from storage import projects_service
+from storage import agent_events_service, messages_service, projects_service
+from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
 from storage.models import scope_settings, scopes
@@ -352,6 +356,204 @@ def test_settings_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
         assert user.is_admin is True
     finally:
         external.close()
+        store.close()
+
+
+def test_runtime_settings_ignore_agent_harness_and_project_writes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    db_path = tmp_path / "vibe.sqlite"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    SettingsStore.reset_instance()
+    run_migrations(db_path)
+    sessions = SessionsStore(tmp_path / "sessions.json")
+    seed = SQLiteSettingsService(db_path)
+    seed.save_state(
+        SettingsState(channels={"slack::C1": ChannelSettings(enabled=True)})
+    )
+    seed.close()
+    manager = SettingsManager(
+        settings_file=str(settings_path),
+        platform="slack",
+        sessions_store=sessions,
+    )
+    engine = create_sqlite_engine(db_path)
+    harness = SQLiteBackgroundTaskStore(db_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    try:
+        initial = manager.runtime_settings_diagnostics()
+        with engine.begin() as conn:
+            agent_events_service.append(
+                conn,
+                scope_id=None,
+                session_id=None,
+                platform="slack",
+                event_type="tool_call",
+                text="bounded test event",
+            )
+            messages_service.append(
+                conn,
+                scope_id=None,
+                session_id=None,
+                platform="slack",
+                author="agent",
+                message_type="assistant",
+                text="bounded test message",
+                source="agent",
+            )
+            projects_service.create_project(conn, str(project_dir), display_name="Project")
+        assert harness.upsert_watch(
+            {
+                "id": "watch-settings-invalidation",
+                "name": "settings invalidation",
+                "shell_command": "true",
+                "enabled": True,
+                "created_at": "2026-08-29T00:00:00Z",
+                "updated_at": "2026-08-29T00:00:00Z",
+            }
+        )
+
+        assert manager.get_user_settings("C1").enabled is True
+        assert manager.runtime_settings_diagnostics() == initial
+    finally:
+        harness.close()
+        engine.dispose()
+        sessions.close()
+        SettingsStore.reset_instance()
+
+
+def test_legitimate_settings_changes_coalesce_under_concurrent_reads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    db_path = tmp_path / "vibe.sqlite"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    SettingsStore.reset_instance()
+    sessions = SessionsStore(tmp_path / "sessions.json")
+    external = SQLiteSettingsService(db_path)
+    external.save_state(
+        SettingsState(
+            channels={
+                "slack::C1": ChannelSettings(enabled=True, custom_cwd="/initial"),
+                "slack::C2": ChannelSettings(enabled=True, custom_cwd="/steady"),
+            },
+            users={
+                "slack::U1": UserSettings(
+                    display_name="Alex", enabled=True, custom_cwd="/dm-initial"
+                )
+            },
+            guild_scope_platforms={"slack"},
+            guild_default_enabled={"slack": False},
+        )
+    )
+    manager = SettingsManager(
+        settings_file=str(settings_path),
+        platform="slack",
+        sessions_store=sessions,
+    )
+    try:
+        unchanged_channel = manager.channel_settings["C2"]
+        for custom_cwd in ("/first", "/second", "/final"):
+            external.save_state(
+                SettingsState(
+                    channels={
+                        "slack::C1": ChannelSettings(enabled=True, custom_cwd=custom_cwd),
+                        "slack::C2": ChannelSettings(enabled=True, custom_cwd="/steady"),
+                    },
+                    users={
+                        "slack::U1": UserSettings(
+                            display_name="Alex", enabled=True, custom_cwd="/dm"
+                        )
+                    },
+                    guild_scope_platforms={"slack"},
+                    guild_default_enabled={"slack": True},
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _: manager.get_user_settings("C1"), range(16)))
+
+        assert {settings.custom_cwd for settings in results} == {"/final"}
+        assert manager.get_user_settings("U1").custom_cwd == "/dm"
+        assert manager.store.get_guild_default_enabled_for_platform("slack") is True
+        assert manager.channel_settings["C2"] is unchanged_channel
+        assert manager.runtime_settings_diagnostics() == {
+            "store_reload_count": 1,
+            "rebuild_count": 2,
+            "changed_channels": 1,
+            "changed_dm_users": 1,
+            "channels": 2,
+            "dm_users": 1,
+        }
+    finally:
+        external.close()
+        sessions.close()
+        SettingsStore.reset_instance()
+
+
+def test_settings_save_does_not_absorb_a_newer_external_revision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    external = SQLiteSettingsService(tmp_path / "vibe.sqlite")
+    original_save = store._service.save_state
+
+    def save_then_race(state: SettingsState) -> str:
+        committed_revision = original_save(state)
+        external.save_state(
+            SettingsState(
+                channels={
+                    "slack::C1": ChannelSettings(enabled=True, custom_cwd="/external")
+                }
+            )
+        )
+        return committed_revision
+
+    monkeypatch.setattr(store._service, "save_state", save_then_race)
+    try:
+        store.settings.channels = {
+            "slack::C1": ChannelSettings(enabled=True, custom_cwd="/local")
+        }
+        store.save()
+
+        assert store.maybe_reload() is True
+        assert store.find_channel("C1", platform="slack").custom_cwd == "/external"
+        assert store.reload_count == 1
+    finally:
+        external.close()
+        store.close()
+
+
+def test_scope_delete_and_agent_rename_publish_settings_revisions(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agents_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    try:
+        agents_store.create(name="reviewer", backend="codex")
+        store.update_channel(
+            "C1",
+            ChannelSettings(
+                enabled=True,
+                routing=RoutingSettings(agent_name="reviewer"),
+            ),
+            platform="slack",
+        )
+
+        agents_store.rename("reviewer", "renamed")
+        assert store.maybe_reload() is True
+        assert store.find_channel("C1", platform="slack").routing.agent_name == "renamed"
+
+        assert chat_discovery.delete_scope("slack", "C1", db_path=store.db_path) == {
+            "removed": True,
+            "dismissed": False,
+        }
+        assert store.maybe_reload() is True
+        assert store.find_channel("C1", platform="slack") is None
+    finally:
+        agents_store.close()
         store.close()
 
 

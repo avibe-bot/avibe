@@ -6,7 +6,7 @@ Shared by OpenCode, Claude, and Codex integrations for reasoning-effort option b
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 _REASONING_FALLBACK_OPTIONS = [
@@ -59,6 +59,87 @@ def _opencode_model_entry_id(model_entry: Any) -> str:
         return ""
     model_id = model_entry.get("id") or model_entry.get("modelID") or model_entry.get("model_id") or ""
     return model_id if isinstance(model_id, str) else ""
+
+
+def _opencode_model_hub_model_ids(provider: dict) -> set[str]:
+    """Return models projected from Model Hub for one public provider."""
+
+    projected: set[str] = set()
+    models = provider.get("models") if isinstance(provider, dict) else None
+    if isinstance(models, dict):
+        entries = models.items()
+    elif isinstance(models, list):
+        entries = ((_opencode_model_entry_id(entry), entry) for entry in models)
+    else:
+        return projected
+
+    for model_id, model_info in entries:
+        if not isinstance(model_id, str) or not isinstance(model_info, dict):
+            continue
+        metadata = model_info.get("vibe_remote")
+        if isinstance(metadata, dict) and metadata.get("model_hub_projected") is True:
+            projected.add(model_id)
+    return projected
+
+
+def filter_opencode_models_to_allowed_providers(
+    opencode_models: dict,
+    allowed_providers: Iterable[str],
+) -> dict:
+    """Keep allowed providers plus exact public models projected by Model Hub."""
+
+    if not isinstance(opencode_models, dict):
+        return opencode_models
+    allowed = {
+        provider_id
+        for provider_id in allowed_providers
+        if isinstance(provider_id, str) and provider_id
+    }
+    providers = []
+    projected_by_provider: dict[str, set[str]] = {}
+    for provider in opencode_models.get("providers", []) or []:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = get_opencode_provider_id(provider)
+        if not provider_id:
+            continue
+        projected_model_ids = _opencode_model_hub_model_ids(provider)
+        if projected_model_ids:
+            projected_by_provider[provider_id] = projected_model_ids
+        if provider_id in allowed:
+            providers.append(provider)
+            continue
+        if not projected_model_ids:
+            continue
+
+        raw_models = provider.get("models")
+        if isinstance(raw_models, dict):
+            models = {
+                model_id: model_info
+                for model_id, model_info in raw_models.items()
+                if model_id in projected_model_ids
+            }
+        elif isinstance(raw_models, list):
+            models = [
+                model_info
+                for model_info in raw_models
+                if _opencode_model_entry_id(model_info) in projected_model_ids
+            ]
+        else:
+            models = {}
+        providers.append({**provider, "models": models})
+
+    defaults = opencode_models.get("default")
+    if isinstance(defaults, dict):
+        defaults = {
+            provider_id: model_id
+            for provider_id, model_id in defaults.items()
+            if provider_id in allowed
+            or model_id in projected_by_provider.get(provider_id, set())
+        }
+    else:
+        defaults = {}
+    return {**opencode_models, "providers": providers, "default": defaults}
 
 
 def find_opencode_model_info(
@@ -357,9 +438,17 @@ def build_opencode_model_option_items(
         providers.append((provider_id, provider))
 
     if allowed_providers:
-        allowed_set = {p for p in allowed_providers if isinstance(p, str) and p}
-        if allowed_set:
-            providers = [entry for entry in providers if entry[0] in allowed_set]
+        visible_models = filter_opencode_models_to_allowed_providers(
+            opencode_models,
+            allowed_providers,
+        )
+        providers_data = visible_models.get("providers", [])
+        defaults = visible_models.get("default", {})
+        providers = []
+        for provider in providers_data:
+            provider_id = get_opencode_provider_id(provider)
+            if provider_id:
+                providers.append((provider_id, provider))
 
     if preferred_providers:
         preferred_set = {p for p in preferred_providers if isinstance(p, str) and p}

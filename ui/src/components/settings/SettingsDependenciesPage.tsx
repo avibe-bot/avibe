@@ -87,12 +87,18 @@ export const SettingsDependenciesPage: React.FC = () => {
   // `memory_runtime_unpublished`) rather than human copy. Localize any
   // token-shaped string through the shared errors namespace so the user never
   // sees a raw identifier; fall back to a human message or the generic failure.
-  const localizedFailure = (res: InstallResult): string => {
-    const token = res.reason || res.message;
+  const localizedReason = (token: string | null | undefined, fallback: string): string => {
     if (typeof token === 'string' && /^[a-z][a-z0-9_]*$/.test(token)) {
       return t(`errors.${token}`, { defaultValue: t('settings.dependencies.installFailed') });
     }
-    return res.message || t('settings.dependencies.installFailed');
+    return fallback;
+  };
+
+  const localizedFailure = (res: InstallResult): string => {
+    return localizedReason(
+      res.reason || res.message,
+      res.message || t('settings.dependencies.installFailed')
+    );
   };
 
   const install = async (dep: DependencyItem) => {
@@ -162,6 +168,9 @@ export const SettingsDependenciesPage: React.FC = () => {
             const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
             const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
             const dependencyOperationBusy = busy !== null;
+            const persistedFailure = isMemoryRuntime && d.status === 'error' && d.reason
+              ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
+              : null;
             return (
               <SettingsResourceRow
                 key={d.id}
@@ -218,6 +227,13 @@ export const SettingsDependenciesPage: React.FC = () => {
                 footer={isMemoryRuntime && sidecarRunning ? (
                   <div className="border-t border-border pt-3 text-[11px] leading-snug text-muted">
                     {t('settings.dependencies.memoryRuntimeDisableBeforeRepair')}
+                  </div>
+                ) : persistedFailure ? (
+                  <div
+                    role="alert"
+                    className="border-t border-destructive/30 pt-3 text-[11px] leading-snug text-destructive-ink"
+                  >
+                    {persistedFailure}
                   </div>
                 ) : undefined}
               />

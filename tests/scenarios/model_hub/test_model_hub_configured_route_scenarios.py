@@ -398,11 +398,6 @@ def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state
                 "vendor": "custom",
                 "base_url": "https://upstream.example/v1",
                 "key": "sk-scenario-observe-key",
-                "protocol_order": [
-                    "openai_chat",
-                    "openai_responses",
-                    "anthropic",
-                ],
             }
         )
     )
@@ -455,6 +450,108 @@ def test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transport
     schema_protocols = tuple(schema["properties"]["protocol"]["enum"])
     assert schema_protocols == SOURCE_PROTOCOLS
     assert len(schema_protocols) == len(set(schema_protocols))
+
+
+def test_mh_protocol_003_manual_selection_requires_matching_response_proof(
+    tmp_path: Path,
+) -> None:
+    """MH-PROTOCOL-003: manual selection probes one type and never overrides evidence."""
+
+    store = MemoryModelHubStore(config_with_sources([]))
+    adapter = ModelHubScenarioAdapter(
+        observation=SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol="openai_responses",
+            discovery=ObservationDiscovery.SUCCEEDED,
+            model_ids=("selected-model",),
+        )
+    )
+    service = service_for(tmp_path, store, adapter)
+
+    created = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-scenario-manual-protocol",
+                "protocol": "openai_responses",
+            }
+        )
+    )
+
+    assert created["source"]["protocol"] == "openai_responses"
+    assert adapter.observation_calls == [
+        ("custom", "https://relay.example/v1", ("openai_responses",))
+    ]
+    assert adapter.revoked == adapter.provisioned_transient
+
+    mismatch_store = MemoryModelHubStore(config_with_sources([]))
+    mismatch_adapter = ModelHubScenarioAdapter(
+        observation=SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol="openai_chat",
+            discovery=ObservationDiscovery.SUCCEEDED,
+            model_ids=("wrong-protocol-model",),
+        )
+    )
+    mismatch_service = service_for(
+        tmp_path / "mismatch",
+        mismatch_store,
+        mismatch_adapter,
+    )
+    with pytest.raises(ModelHubError) as mismatch:
+        asyncio.run(
+            mismatch_service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "custom",
+                    "base_url": "https://relay.example/v1",
+                    "key": "sk-scenario-mismatched-protocol",
+                    "protocol": "openai_responses",
+                }
+            )
+        )
+    assert mismatch.value.status == 502
+    assert mismatch_store.load().sources == []
+    assert mismatch_adapter.revoked == mismatch_adapter.provisioned_transient
+
+    ambiguous_store = MemoryModelHubStore(config_with_sources([]))
+    ambiguous_adapter = ModelHubScenarioAdapter(
+        observation=SourceObservation(
+            outcome=ObservationOutcome.AMBIGUOUS,
+            reachable=True,
+            authenticated=True,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            model_ids=(),
+        )
+    )
+    ambiguous_service = service_for(
+        tmp_path / "manual-ambiguous",
+        ambiguous_store,
+        ambiguous_adapter,
+    )
+    with pytest.raises(ModelHubError) as ambiguous:
+        asyncio.run(
+            ambiguous_service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "custom",
+                    "display_name": "still-unproven",
+                    "base_url": "https://relay.example/v1",
+                    "key": "sk-scenario-unproven-manual",
+                    "protocol": "openai_responses",
+                }
+            )
+        )
+    assert ambiguous.value.code == "discovery_failed"
+    assert ambiguous_store.load().sources == []
+    assert ambiguous_adapter.revoked == ambiguous_adapter.provisioned_transient
 
 
 def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_validator(

@@ -2017,6 +2017,37 @@ def test_config_post_hot_reconciles_platform_runtime_credential_change(monkeypat
     assert reconcile_calls == [True]
 
 
+def test_config_post_invalidates_controller_activity_flag_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    api.save_config(_full_config_payload())
+    invalidate_calls: list[bool] = []
+
+    async def _invalidate_activity_streaming():
+        invalidate_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(
+        internal_client,
+        "invalidate_activity_streaming",
+        _invalidate_activity_streaming,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"ui": {"show_agent_activity": True}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime = response.get_json()["activity_streaming_runtime"]
+    assert runtime == {"ok": True, "hot_reconciled": True, "body": {"ok": True}}
+    assert invalidate_calls == [True]
+
+
 def test_platform_runtime_fields_changed_detects_primary_only_change():
     from config.v2_config import V2Config
 
@@ -2257,8 +2288,16 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
     async def _reconcile_agent_backends(_backends):
         raise AssertionError("Agent backend reconcile should not run")
 
+    async def _invalidate_activity_streaming():
+        raise AssertionError("Agent Activity cache invalidation should not run")
+
     monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
     monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
+    monkeypatch.setattr(
+        internal_client,
+        "invalidate_activity_streaming",
+        _invalidate_activity_streaming,
+    )
 
     client = app.test_client()
     response = client.post("/api/config", json={"show_duration": False}, headers=csrf_headers(client))
@@ -2266,6 +2305,7 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
     assert response.status_code == 200
     assert "platform_runtime" not in response.get_json()
     assert "agent_backend_runtime" not in response.get_json()
+    assert "activity_streaming_runtime" not in response.get_json()
 
 
 def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):

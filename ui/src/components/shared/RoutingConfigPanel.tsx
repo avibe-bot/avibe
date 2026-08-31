@@ -50,16 +50,6 @@ export interface RoutingConfigPanelProps {
   vibeAgents?: VibeAgentBrief[];
   defaultAgentName?: string | null;
   availableMessageTypes?: string[];
-  // Legacy backend-model props: no longer read here (AgentRoutePicker self-loads
-  // models + effort options). Kept on the interface so existing callers still
-  // type-check; a follow-up can drop them and the parents' model preloading.
-  opencodeOptions?: any;
-  claudeAgents?: { id: string; name: string }[];
-  claudeModels?: string[];
-  claudeModelLabels?: Record<string, string>;
-  claudeReasoningOptions?: Record<string, { value: string; label: string }[]>;
-  codexAgents?: { id: string; name: string }[];
-  codexModels?: string[];
   /** Custom footer slot — e.g., admin/remove actions on the users page. */
   footerActions?: React.ReactNode;
   /** Wrapper class — controls outer padding/border. Default: 'border-t border-border/60 px-5 py-4'. */

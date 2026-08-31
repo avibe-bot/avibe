@@ -64,6 +64,118 @@ const dispatchParentKeydown = (target: EventTarget, key = 'Escape', preventDefau
   act(() => target.dispatchEvent(event));
 };
 
+const dispatchAnnotationShortcut = (target: EventTarget) => {
+  const event = new KeyboardEvent('keydown', {
+    code: 'KeyX',
+    altKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  act(() => target.dispatchEvent(event));
+  return event;
+};
+
+describe('useShowPageAnnotation shortcut', () => {
+  it('leaves the shortcut to the parent surface outside the Show Page frame', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const event = dispatchAnnotationShortcut(document.body);
+    expect(event.defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('enters annotation from the owning parent surface', () => {
+    const { iframe, result } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    reportState(iframe, false);
+    postMessage.mockClear();
+    const nativeEvent = new KeyboardEvent('keydown', {
+      code: 'KeyX',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => result.current.handleShortcutKeyDown({
+      defaultPrevented: false,
+      repeat: false,
+      target: document.body,
+      nativeEvent,
+      preventDefault: () => nativeEvent.preventDefault(),
+    } as React.KeyboardEvent<HTMLElement>));
+
+    expect(nativeEvent.defaultPrevented).toBe(true);
+    expect(postMessage).toHaveBeenLastCalledWith(
+      { type: 'avibe:annotation:control', action: 'enable' },
+      window.location.origin,
+    );
+  });
+
+  it('binds the same shortcut inside the focused Show Page iframe', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    dispatchAnnotationShortcut(iframe.contentWindow!);
+    expect(postMessage).toHaveBeenLastCalledWith(
+      { type: 'avibe:annotation:control', action: 'enable' },
+      window.location.origin,
+    );
+  });
+
+  it('leaves the iframe shortcut with its active dialog or menu overlay', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const frameDocument = iframe.contentDocument!;
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const dialog = frameDocument.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const dialogButton = frameDocument.createElement('button');
+    dialog.append(dialogButton);
+    frameDocument.body.append(dialog);
+    dialogButton.focus();
+    expect(dispatchAnnotationShortcut(iframe.contentWindow!).defaultPrevented).toBe(false);
+
+    dialog.remove();
+    const menu = frameDocument.createElement('div');
+    menu.setAttribute('role', 'menu');
+    menu.dataset.state = 'open';
+    const menuItem = frameDocument.createElement('button');
+    menu.append(menuItem);
+    frameDocument.body.append(menu);
+    menuItem.focus();
+    expect(dispatchAnnotationShortcut(iframe.contentWindow!).defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake persistent iframe navigation for an open overlay', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const frameDocument = iframe.contentDocument!;
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const navigation = frameDocument.createElement('div');
+    navigation.setAttribute('role', 'menu');
+    const pageButton = frameDocument.createElement('button');
+    frameDocument.body.append(navigation, pageButton);
+    pageButton.focus();
+
+    expect(dispatchAnnotationShortcut(iframe.contentWindow!).defaultPrevented).toBe(true);
+    expect(postMessage).toHaveBeenLastCalledWith(
+      { type: 'avibe:annotation:control', action: 'enable' },
+      window.location.origin,
+    );
+  });
+
+});
+
 describe('useShowPageAnnotation host Escape forwarding', () => {
   it('forwards parent Escape to the iframe document while annotation is enabled', () => {
     const { iframe } = mountBridge();

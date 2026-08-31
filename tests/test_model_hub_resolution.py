@@ -29,6 +29,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceObservation,
 )
+from core.handlers.model_hub.async_owner import await_owned_task
 from core.handlers.model_hub.classification import (
     SOURCE_SETTLEMENT_AUTHORITY,
     classify_outcome,
@@ -52,7 +53,6 @@ from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
-    _await_owned_task_before_settling,
     _matching_v1_model_id,
 )
 
@@ -138,6 +138,10 @@ class FakeInvokeHandle:
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self.stream = None
+
+    @property
+    def observed(self):
+        return None
 
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
@@ -865,7 +869,7 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
     )
     service, _store, _ = _service(tmp_path, config, adapter)
     request = ModelHubRequest(
-        {"reasoning": {"effort": "high"}},
+        {"reasoning": {"effort": "high", "summary": "auto"}},
         protocol="openai_responses",
         headers={"x-test": "preserved"},
     )
@@ -879,10 +883,94 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
     )
 
     assert resolved.source_id == second.id
-    assert adapter.invocation_requests[0]["reasoning"] == {"effort": "high"}
-    assert adapter.invocation_requests[1]["reasoning"] == {"effort": None}
+    assert adapter.invocation_requests[0]["reasoning"] == {
+        "effort": "high",
+        "summary": "auto",
+    }
+    assert adapter.invocation_requests[1]["reasoning"] == {"summary": "auto"}
     assert adapter.invocation_requests[1].protocol == "openai_responses"
     assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
+
+
+def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
+    source = _source("src_effort003", ("upstream-model",))
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="upstream-model",
+            source_id=source.id,
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+    request = ModelHubRequest(
+        {"reasoning_effort": "high"},
+        protocol="openai_chat",
+        headers={"x-test": "preserved"},
+    )
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request=request,
+        )
+    )
+
+    assert resolved.source_id == source.id
+    assert "reasoning_effort" not in adapter.invocation_requests[0]
+    assert adapter.invocation_requests[0].protocol == "openai_chat"
+    assert adapter.invocation_requests[0].headers == {"x-test": "preserved"}
+
+
+def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
+    source = _source("src_effort004", ("upstream-model",))
+    source.models[0].reasoning_efforts = ["high"]
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="upstream-model",
+            source_id=source.id,
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+    request = ModelHubRequest(
+        {
+            "reasoning_effort": "high",
+            "reasoning": {"effort": "ultra", "summary": "auto"},
+        },
+        protocol="openai_responses",
+        headers={},
+    )
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request=request,
+        )
+    )
+
+    assert resolved.source_id == source.id
+    assert adapter.invocation_requests[0]["reasoning_effort"] == "high"
+    assert adapter.invocation_requests[0]["reasoning"] == {"summary": "auto"}
 
 
 def test_runtime_does_not_alias_unpersisted_claude_request():
@@ -971,6 +1059,7 @@ def test_opencode_menu_validation_rejects_noncanonical_identifier(tmp_path):
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(
             service.set_opencode_menu(
+                {"view": "featured", "checked": []},
                 {"view": "featured", "checked": ["gpt-5"]}
             )
         )
@@ -984,6 +1073,7 @@ def test_opencode_menu_validation_rejects_credential_material(tmp_path):
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(
             service.set_opencode_menu(
+                {"view": "featured", "checked": []},
                 {
                     "view": "featured",
                     "checked": ["custom/sk-test-credential-material"],
@@ -993,6 +1083,159 @@ def test_opencode_menu_validation_rejects_credential_material(tmp_path):
 
     assert exc.value.code == "mapping_target_unavailable"
     assert store.load().agents["opencode"].menu.checked == []
+
+
+def test_opencode_menu_rejects_a_new_model_absent_from_current_inventory(tmp_path):
+    source = _source("src_opencode01", (), vendor="openai")
+    service, store, _ = _service(tmp_path, _config([source]))
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_opencode_menu(
+                {"view": "featured", "checked": []},
+                {"view": "featured", "checked": ["openai/removed-model"]}
+            )
+        )
+
+    assert exc.value.code == "mapping_target_unavailable"
+    assert exc.value.status == 409
+    assert store.load().agents["opencode"].menu.checked == []
+    assert "openai/removed-model" not in store.load().agents["opencode"].routes
+
+
+def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(tmp_path):
+    source = _source(
+        "src_opencode02",
+        ("upstream-model", "new-model"),
+        vendor="openai",
+    )
+    config = _config([source])
+    opencode = config.agents["opencode"]
+    opencode.menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["openai/menu-model"],
+    )
+    opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/menu-model"]},
+            {
+                "view": "featured",
+                "checked": ["openai/menu-model", "openai/new-model"],
+            }
+        )
+    )
+
+    saved = store.load().agents["opencode"]
+    assert saved.menu.checked == ["openai/menu-model", "openai/new-model"]
+    assert saved.routes["openai/menu-model"].hops == (
+        ModelHubRouteHopConfig(source.id, "upstream-model"),
+    )
+
+
+def test_opencode_menu_reselects_a_dormant_route_alias_with_an_eligible_exact_hop(tmp_path):
+    source = _source("src_opencode05", ("upstream-model",), vendor="openai")
+    config = _config([source])
+    opencode = config.agents["opencode"]
+    opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": []},
+            {"view": "featured", "checked": ["openai/menu-model"]},
+        )
+    )
+
+    saved = store.load().agents["opencode"]
+    assert saved.menu.checked == ["openai/menu-model"]
+    assert saved.routes["openai/menu-model"].hops == (
+        ModelHubRouteHopConfig(source.id, "upstream-model"),
+    )
+
+
+def test_opencode_menu_rejects_a_dormant_route_alias_with_a_stale_exact_hop(tmp_path):
+    source = _source("src_opencode06", (), vendor="openai")
+    config = _config([source])
+    config.agents["opencode"].routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_opencode_menu(
+                {"view": "featured", "checked": []},
+                {"view": "featured", "checked": ["openai/menu-model"]},
+            )
+        )
+
+    assert exc.value.code == "mapping_target_unavailable"
+    assert exc.value.status == 409
+    assert store.load().agents["opencode"].menu.checked == []
+
+
+def test_opencode_menu_applies_local_intent_to_the_latest_saved_menu(tmp_path):
+    source = _source(
+        "src_opencode03",
+        ("model-a", "model-b", "model-c"),
+        vendor="openai",
+    )
+    config = _config([source])
+    config.agents["opencode"].menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["openai/model-a", "openai/model-b"],
+    )
+    config.agents["opencode"].routes.update(
+        {
+            "openai/model-a": ModelHubRouteConfig(),
+            "openai/model-b": ModelHubRouteConfig(),
+        }
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/model-a"]},
+            {
+                "view": "featured",
+                "checked": ["openai/model-a", "openai/model-c"],
+            },
+        )
+    )
+
+    assert store.load().agents["opencode"].menu.checked == [
+        "openai/model-a",
+        "openai/model-b",
+        "openai/model-c",
+    ]
+
+
+def test_opencode_menu_does_not_restore_a_concurrently_removed_model(tmp_path):
+    source = _source(
+        "src_opencode04",
+        ("model-a", "model-c"),
+        vendor="openai",
+    )
+    service, store, _ = _service(tmp_path, _config([source]))
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/model-a"]},
+            {
+                "view": "featured",
+                "checked": ["openai/model-a", "openai/model-c"],
+            },
+        )
+    )
+
+    assert store.load().agents["opencode"].menu.checked == ["openai/model-c"]
 
 
 def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
@@ -1019,6 +1262,7 @@ def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
             "name": "researcher",
             "effective_model_id": "custom/hidden-model",
             "supply_status": "interrupted",
+            "route_reason": "route_unconfigured",
         }
     ]
     assert resolution.requested_model == "custom/hidden-model"
@@ -1430,7 +1674,7 @@ def test_cancelled_owned_task_is_terminal_without_settlement_retry() -> None:
         assert task.cancelled()
         with patch("core.handlers.model_hub.service.asyncio.shield") as shield:
             with pytest.raises(asyncio.CancelledError):
-                await _await_owned_task_before_settling(task)
+                await await_owned_task(task)
         shield.assert_not_called()
 
     asyncio.run(scenario())
@@ -1475,18 +1719,12 @@ def test_create_source_persists_only_the_response_proven_protocol(tmp_path):
                 "vendor": "openai",
                 "display_name": "Observed key",
                 "key": "sk-test-response-proof",
-                "protocol_order": [
-                    "openai_responses",
-                    "anthropic",
-                    "openai_chat",
-                ],
+                "protocol": "openai_responses",
             }
         )
     )
 
-    assert adapter.observed_protocol_orders == [
-        ("openai_responses", "anthropic", "openai_chat")
-    ]
+    assert adapter.observed_protocol_orders == [("openai_responses",)]
     assert result["source"]["protocol"] == "openai_responses"
     assert store.load().sources[0].protocol == "openai_responses"
     assert adapter.revoked == ["cred_00000001"]
@@ -1509,11 +1747,7 @@ def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
                 "vendor": "OpenAI",
                 "display_name": "Observed key",
                 "key": "sk-test-vendor-normalization",
-                "protocol_order": [
-                    "openai_responses",
-                    "openai_chat",
-                    "anthropic",
-                ],
+                "protocol": "openai_responses",
             }
         )
     )

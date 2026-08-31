@@ -17,6 +17,12 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
+  actionShortcutMatches,
+  isPlainEscape,
+  useActionShortcutLabel,
+  useActionShortcuts,
+} from '../../lib/actionShortcuts';
+import {
   applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
   type VoiceInsertionSnapshot,
@@ -50,6 +56,7 @@ import {
   workbenchUploadErrorTranslationKey,
 } from '../../lib/workbenchUpload';
 import { Button } from '../ui/button';
+import { inForegroundSurface } from './chatShortcuts';
 import {
   MentionEditor,
   type AgentSearchResult,
@@ -360,6 +367,9 @@ export interface ComposerHandle {
    *  with a separating space when the composer is non-empty. No-op when the
    *  mention editor isn't active (the plain-textarea home composer). */
   appendText: (text: string) => void;
+  /** Handle the Chat page's configured voice chord. Starting may be gated by
+   *  the page, while an active recording can always be completed. */
+  handleVoiceShortcut: (event: KeyboardEvent, allowStart: boolean) => boolean;
 }
 
 // The chat-style input row: an auto-growing textarea + a Send/Stop icon button,
@@ -382,6 +392,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onSearchSessions,
 }, ref) {
   const { t } = useTranslation();
+  const { voiceInput: voiceInputShortcut } = useActionShortcuts();
+  const voiceShortcutLabel = useActionShortcutLabel(voiceInputShortcut);
+  const voiceShortcutHint = t('chat.compose.voiceShortcutHint', { shortcut: voiceShortcutLabel });
   const { showToast } = useToast();
   const [value, setValue] = useState('');
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
@@ -392,6 +405,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // box is non-empty (``hasText``) for the Send button; ``value`` still backs the
   // plain-textarea (home) path. See onChange below.
   const [hasText, setHasText] = useState(false);
+  const composerRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const valueRef = useRef('');
   // Seed once from a saved draft, but only while the box is untouched so a
@@ -418,6 +432,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
+  const focusNextVoiceControlRef = useRef(false);
+  const voiceEditorFocusReturnRef = useRef<HTMLElement | null>(null);
+  const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
   const disabledRef = useRef(disabled);
@@ -642,19 +659,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
     )
   );
-  useImperativeHandle(ref, () => ({
-    addFiles: (files: File[]) => void uploadFiles(files),
-    insertSessionReference: (refSessionId: string, title?: string | null) => {
-      if (voiceDraftLocked()) return;
-      // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
-      // carries the stable sessionId → serializes to `#<id>` + a session ref.
-      mentionRef.current?.insertMention('#', title?.trim() || refSessionId, { sessionId: refSessionId });
-    },
-    appendText: (text: string) => {
-      if (!voiceDraftLocked()) mentionRef.current?.append(text);
-    },
-  }));
-
   const captureVoiceInsertion = useCallback((): VoiceInsertionSnapshot => {
     if (useMentions) {
       return mentionRef.current?.captureSelection()
@@ -1146,7 +1150,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     if (!recording) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (isPlainEscape(e)) {
         e.preventDefault();
         abortRecording();
       }
@@ -1202,7 +1206,99 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const voiceCaptureActive = recording || voiceProcessing;
   const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
+  const voiceShortcutAvailable = (
+    (voiceControlMode === 'record' || voiceControlMode === 'finish')
+    && !isVoiceControlDisabled(
+      disabled,
+      recording,
+      voiceProcessing,
+      Boolean(voiceRetainedSession),
+    )
+  );
   const [stopArmed, setStopArmed] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!focusNextVoiceControlRef.current) return;
+    if (voiceControlMode === 'finish') {
+      finishVoiceControlRef.current?.focus({ preventScroll: true });
+      focusNextVoiceControlRef.current = false;
+    } else if (voiceControlMode !== 'loading') {
+      focusNextVoiceControlRef.current = false;
+    }
+  }, [voiceControlMode]);
+
+  useLayoutEffect(() => {
+    if (voiceDraftReadOnly || voiceEditorFocusReturnRef.current === null) return;
+    const target = voiceEditorFocusReturnRef.current;
+    voiceEditorFocusReturnRef.current = null;
+    const activeElement = document.activeElement;
+    if (
+      target.isConnected
+      && (activeElement === null || activeElement === document.body || !activeElement.isConnected)
+    ) {
+      target.focus({ preventScroll: true });
+    }
+  }, [voiceDraftReadOnly]);
+
+  const handleVoiceShortcut = useCallback((event: KeyboardEvent, allowStart: boolean): boolean => {
+    if (
+      !voiceShortcutAvailable
+      || event.defaultPrevented
+      || event.repeat
+      || Boolean(composerRootRef.current?.querySelector('[data-mention-picker]'))
+      || !actionShortcutMatches(event, voiceInputShortcut)
+    ) {
+      return false;
+    }
+    if (
+      voiceControlMode === 'record'
+      && (!allowStart || inForegroundSurface(event.target as Element | null))
+    ) return false;
+
+    event.preventDefault();
+    if (voiceControlMode === 'finish') stopRecording();
+    else {
+      const activeElement = document.activeElement;
+      const editorFocus = (
+        activeElement === textareaRef.current
+        || (
+          activeElement instanceof HTMLElement
+          && activeElement.getAttribute('contenteditable') === 'true'
+          && composerRootRef.current?.contains(activeElement)
+        )
+      ) ? activeElement as HTMLElement : null;
+      voiceEditorFocusReturnRef.current = editorFocus;
+      // Keep the page's current focus when the shortcut started outside the
+      // editor. Editor starts still move to Finish, then restore the caret.
+      focusNextVoiceControlRef.current = editorFocus !== null;
+      void startRecording(captureVoiceInsertion());
+    }
+    return true;
+  }, [
+    captureVoiceInsertion,
+    startRecording,
+    stopRecording,
+    voiceControlMode,
+    voiceInputShortcut,
+    voiceShortcutAvailable,
+  ]);
+
+  // ChatPage owns the window listener because the shortcut applies across that
+  // page, while the composer remains the sole owner of voice state and actions.
+  // No deps array keeps every exposed operation on the latest render state.
+  useImperativeHandle(ref, () => ({
+    addFiles: (files: File[]) => void uploadFiles(files),
+    insertSessionReference: (refSessionId: string, title?: string | null) => {
+      if (voiceDraftLocked()) return;
+      // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
+      // carries the stable sessionId → serializes to `#<id>` + a session ref.
+      mentionRef.current?.insertMention('#', title?.trim() || refSessionId, { sessionId: refSessionId });
+    },
+    appendText: (text: string) => {
+      if (!voiceDraftLocked()) mentionRef.current?.append(text);
+    },
+    handleVoiceShortcut,
+  }));
 
   useEffect(() => {
     if (!busyControls) {
@@ -1271,7 +1367,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   return (
-    <div className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}>
+    <div
+      ref={composerRootRef}
+      className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
+    >
       {mediaEnabled && attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {attachments.map((att) => (
@@ -1376,7 +1475,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onContextMenu={() => {
                   pendingVoiceInsertionRef.current = null;
                 }}
-                onClick={(event) => toggleRecording(event.detail > 0)}
+                onClick={(event) => {
+                  focusNextVoiceControlRef.current = true;
+                  toggleRecording(event.detail > 0);
+                }}
                 disabled={isVoiceControlDisabled(
                   disabled,
                   recording,
@@ -1384,6 +1486,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   Boolean(voiceRetainedSession),
                 )}
                 aria-label={t('chat.compose.voice')}
+                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
                 className="size-9 shrink-0"
               >
                 <Mic className="size-4" />
@@ -1391,11 +1494,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
             {voiceControlMode === 'finish' && (
               <Button
+                ref={finishVoiceControlRef}
                 type="button"
                 variant="default"
                 size="icon"
                 onClick={stopRecording}
                 aria-label={t('chat.compose.stopRecording')}
+                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.stopRecording')}
                 className="h-9 w-12 shrink-0"
               >
                 <Check className="size-[18px]" strokeWidth={2.5} />

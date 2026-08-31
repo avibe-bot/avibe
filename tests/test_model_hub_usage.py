@@ -13,6 +13,7 @@ settlement scaffolding it depends on.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
     extract_protocol_usage,
+    observe_buffered_protocol_response,
     observe_protocol_response,
 )
 from core.handlers.model_hub.usage import (
@@ -87,6 +89,55 @@ def test_every_observed_protocol_declares_a_usage_location() -> None:
         assert usage.input_paths, protocol
         assert usage.output_paths, protocol
         assert usage.cached_input_paths, protocol
+
+
+@pytest.mark.parametrize(
+    ("protocol", "usage", "expected"),
+    (
+        (
+            "anthropic",
+            {
+                "input_tokens": 12,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "output_tokens": 7,
+            },
+            ProtocolUsageReport(input_tokens=17, cached_input_tokens=3, output_tokens=7),
+        ),
+        (
+            "openai_responses",
+            {
+                "input_tokens": 12,
+                "input_tokens_details": {"cached_tokens": 3},
+                "output_tokens": 7,
+            },
+            ProtocolUsageReport(input_tokens=12, cached_input_tokens=3, output_tokens=7),
+        ),
+        (
+            "openai_chat",
+            {
+                "prompt_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 3},
+                "completion_tokens": 7,
+            },
+            ProtocolUsageReport(input_tokens=12, cached_input_tokens=3, output_tokens=7),
+        ),
+    ),
+)
+def test_buffered_projection_reads_usage_after_a_large_ignored_value(
+    protocol: str,
+    usage: dict[str, object],
+    expected: ProtocolUsageReport,
+) -> None:
+    body = json.dumps(
+        {"ignored": "x" * (2 * 1024 * 1024), "usage": usage},
+        separators=(",", ":"),
+    ).encode()
+
+    observation = observe_buffered_protocol_response(protocol, io.BytesIO(body))
+
+    assert observation.outcome == "served"
+    assert observation.usage == expected
 
 
 def test_anthropic_input_total_sums_the_cache_members() -> None:

@@ -38,6 +38,7 @@ from vibe.model_hub_runtime.client import (
     EngineInvokeHandle,
     completed_handle,
     probe_models,
+    upstream_api_url,
 )
 from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
@@ -78,10 +79,19 @@ class _AuthenticationEvidence(Enum):
     UNKNOWN = "unknown"
 
 
+class _ProtocolObservationShape(Enum):
+    NONE = "none"
+    GENERIC_REQUEST_ERROR = "generic_request_error"
+    HTTP_404 = "http_404"
+    NON_JSON = "non_json"
+    UNSTRUCTURED = "unstructured"
+
+
 @dataclass(frozen=True)
 class _ProtocolEvidence:
     protocol: _ProtocolProof
     authentication: _AuthenticationEvidence
+    shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,7 @@ class _ProtocolEvidenceRule:
     statuses: frozenset[int]
     protocol: _ProtocolProof
     authentication: _AuthenticationEvidence
+    shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
     top_level_field: str | None = None
     top_level_values: frozenset[str] = frozenset()
     error_identifiers: frozenset[str] = frozenset()
@@ -173,6 +184,35 @@ _OPENAI_CHAT_PARAMS = frozenset(
         "top_p",
     }
 )
+_OPENAI_FAMILY_PROTOCOLS = frozenset({"openai_responses", "openai_chat"})
+_OPENAI_FAMILY_PARAMS = _OPENAI_RESPONSES_PARAMS | _OPENAI_CHAT_PARAMS
+_CREDENTIAL_ERROR_PARAMS = frozenset(
+    {
+        "api_key",
+        "api-key",
+        "access_token",
+        "access-token",
+        "authorization",
+        "auth",
+        "auth_token",
+        "auth-token",
+        "bearer_token",
+        "bearer-token",
+        "token",
+        "x-api-key",
+        "x_api_key",
+        "x-auth-token",
+        "x_auth_token",
+        "x-token",
+    }
+)
+_PAIRWISE_EXCLUSION_SHAPES = frozenset(
+    {
+        _ProtocolObservationShape.HTTP_404,
+        _ProtocolObservationShape.NON_JSON,
+        _ProtocolObservationShape.UNSTRUCTURED,
+    }
+)
 
 
 def _openai_evidence_rules(
@@ -195,10 +235,11 @@ def _openai_evidence_rules(
             authentication=_AuthenticationEvidence.ACCEPTED,
         ),
         _ProtocolEvidenceRule(
-            statuses=frozenset({404}),
+            statuses=_REQUEST_ERROR_STATUSES,
             error_identifiers=_MODEL_ERROR_IDENTIFIERS,
-            protocol=_ProtocolProof.PROVEN,
+            protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.ACCEPTED,
+            shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
         ),
         _ProtocolEvidenceRule(
             statuses=_AUTHENTICATION_ERROR_STATUSES,
@@ -231,9 +272,11 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     "anthropic": _ProtocolObservationTaxonomy(
         request_path="/v1/messages",
         request_body={
-            "model": "__avibe_model_hub_probe__",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "ping"}],
+            # Fail schema validation before a relay selects a model. A synthetic
+            # model can otherwise surface as an availability failure even when
+            # the credential and interface are valid.
+            "max_tokens": 0,
+            "messages": [],
         },
         oauth_path="/v1/messages?beta=true",
         evidence_rules=(
@@ -299,6 +342,84 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
 }
 
 
+def _error_identifiers(error: Mapping[str, Any]) -> frozenset[str]:
+    return frozenset(
+        value.strip().lower()
+        for value in (error.get("type"), error.get("code"))
+        if isinstance(value, str)
+    )
+
+
+def _error_param_name(error: Mapping[str, Any]) -> str | None:
+    value = error.get("param")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _request_error_rejects_credential(
+    status: int,
+    error: Mapping[str, Any] | None,
+) -> bool:
+    return (
+        status in _REQUEST_ERROR_STATUSES
+        and isinstance(error, dict)
+        and _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+    )
+
+
+def _payload_is_structured(payload: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(payload.get("error"), dict)
+        or isinstance(payload.get("type"), str)
+        or isinstance(payload.get("code"), str)
+        or isinstance(payload.get("object"), str)
+    )
+
+
+def _anthropic_wrapperless_error_kind(
+    status: int,
+    payload: Mapping[str, Any],
+) -> str | None:
+    if "type" in payload:
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    if _request_error_rejects_credential(status, error):
+        return "rejected"
+    identifiers = _error_identifiers(error)
+    if status in _REQUEST_ERROR_STATUSES and not (
+        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
+    ).isdisjoint(identifiers):
+        return "accepted"
+    if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "rejected"
+    if status in _SERVER_ERROR_STATUSES and not _SERVER_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    if status in _RATE_LIMIT_STATUSES and not _RATE_LIMIT_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    return None
+
+
+def _default_unproven_shape(
+    *,
+    status: int,
+    payload: Mapping[str, Any] | None = None,
+    non_json: bool = False,
+) -> _ProtocolObservationShape:
+    if status == 404:
+        return _ProtocolObservationShape.HTTP_404
+    if status not in _REQUEST_ERROR_STATUSES:
+        return _ProtocolObservationShape.NONE
+    if non_json:
+        return _ProtocolObservationShape.NON_JSON
+    if payload is None or not _payload_is_structured(payload):
+        return _ProtocolObservationShape.UNSTRUCTURED
+    return _ProtocolObservationShape.NONE
+
+
 def _parse_protocol_authenticated_evidence(
     protocol: str,
     status: int,
@@ -324,12 +445,53 @@ def _parse_protocol_authenticated_evidence(
         return _ProtocolEvidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
+            shape=_default_unproven_shape(status=status, non_json=True),
         )
     if not isinstance(payload, dict):
         return _ProtocolEvidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
+            shape=_default_unproven_shape(status=status),
         )
+
+    top_level_identifiers = {
+        value.strip().lower()
+        for value in (payload.get("type"), payload.get("code"))
+        if isinstance(value, str)
+    }
+    if (
+        status in _AUTHENTICATION_ERROR_STATUSES
+        and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
+    ):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
+    error = payload.get("error")
+    if _request_error_rejects_credential(status, error):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
+
+    if protocol == "anthropic":
+        wrapperless = _anthropic_wrapperless_error_kind(status, payload)
+        if wrapperless == "accepted":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+                shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+            )
+        if wrapperless == "rejected":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.REJECTED,
+            )
+        if wrapperless == "unknown":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            )
 
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
@@ -337,12 +499,30 @@ def _parse_protocol_authenticated_evidence(
             return _ProtocolEvidence(
                 protocol=rule.protocol,
                 authentication=rule.authentication,
+                shape=rule.shape,
             )
+    if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
+        if isinstance(error, dict):
+            identifiers = _error_identifiers(error)
+            if (
+                not _REQUEST_ERROR_IDENTIFIERS.isdisjoint(identifiers)
+                and _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers)
+                and _error_param_name(error) not in _OPENAI_FAMILY_PARAMS
+            ):
+                return _ProtocolEvidence(
+                    protocol=_ProtocolProof.UNPROVEN,
+                    authentication=_AuthenticationEvidence.ACCEPTED,
+                    shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+                )
+    if _response_shape_proves_protocol(protocol, payload):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
     return _ProtocolEvidence(
-        protocol=(
-            _ProtocolProof.PROVEN if _response_shape_proves_protocol(protocol, payload) else _ProtocolProof.UNPROVEN
-        ),
+        protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_default_unproven_shape(status=status, payload=payload),
     )
 
 
@@ -362,9 +542,8 @@ async def _probe_protocol_response(
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     if taxonomy is None:
         raise EngineClientError("unsupported source protocol")
-    endpoint = taxonomy.request_path.removeprefix("/v1")
     try:
-        url = normalize_model_hub_base_url(root, append_path=endpoint)
+        url = upstream_api_url(root, taxonomy.request_path)
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
@@ -421,7 +600,9 @@ def _response_shape_proves_protocol(
     if protocol == "anthropic":
         error = body.get("error")
         return body.get("type") == "message" or (
-            body.get("type") == "error" and isinstance(error, dict) and isinstance(error.get("type"), str)
+            body.get("type") == "error"
+            and isinstance(error, dict)
+            and isinstance(error.get("type"), str)
         )
     error = body.get("error")
     if protocol == "openai_responses":
@@ -433,6 +614,96 @@ def _response_shape_proves_protocol(
             isinstance(error, dict) and error.get("param") in _OPENAI_CHAT_PARAMS
         )
     return False
+
+
+def _openai_family_elimination_proof(
+    responses: Mapping[str, _ProtocolEvidence],
+    *,
+    considered_protocols: frozenset[str],
+    ruled_out_protocols: frozenset[str],
+) -> str | None:
+    """Prove one OpenAI-family protocol from the pair of responses, not from the URL.
+
+    A request-error row with matched identifiers but no family-distinctive
+    ``param`` proves only that one endpoint parsed the synthetic request with
+    authentication accepted. The sibling protocol becomes excluded only when its
+    own endpoint answers the same source with an unproven shape, so the proof is
+    carried by the response pair rather than by either request path alone. That
+    pairwise proof is valid only when every other probed protocol was already
+    ruled out for this source. A competing protocol can be ruled out by an
+    explicit authentication rejection or by a definitive request-error-shaped
+    exclusion. Transient upstream failures do not qualify.
+    """
+
+    if not {
+        protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS
+    }.issubset(ruled_out_protocols):
+        return None
+
+    candidate = responses.get("openai_responses")
+    sibling = responses.get("openai_chat")
+    if (
+        candidate is not None
+        and sibling is not None
+        and candidate.protocol is _ProtocolProof.UNPROVEN
+        and candidate.authentication is _AuthenticationEvidence.ACCEPTED
+        and candidate.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+        and sibling.protocol is _ProtocolProof.UNPROVEN
+        and sibling.authentication is _AuthenticationEvidence.UNKNOWN
+        and sibling.shape in _PAIRWISE_EXCLUSION_SHAPES
+    ):
+        return "openai_responses"
+    if (
+        candidate is not None
+        and sibling is not None
+        and sibling.protocol is _ProtocolProof.UNPROVEN
+        and sibling.authentication is _AuthenticationEvidence.ACCEPTED
+        and sibling.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+        and candidate.protocol is _ProtocolProof.UNPROVEN
+        and candidate.authentication is _AuthenticationEvidence.UNKNOWN
+        and candidate.shape in _PAIRWISE_EXCLUSION_SHAPES
+    ):
+        return "openai_chat"
+    return None
+
+
+def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
+    return (
+        evidence.protocol is _ProtocolProof.UNPROVEN
+        and evidence.authentication is _AuthenticationEvidence.UNKNOWN
+        and evidence.shape in _PAIRWISE_EXCLUSION_SHAPES
+    )
+
+
+def _anthropic_wrapperless_elimination_proof(
+    responses: Mapping[str, _ProtocolEvidence],
+    *,
+    considered_protocols: frozenset[str],
+    ruled_out_protocols: frozenset[str],
+) -> str | None:
+    """Prove wrapperless Anthropic only from the complete response set.
+
+    A wrapperless ``{"error": {"type": ...}}`` request error still proves only
+    that the endpoint accepted the credential and parsed the synthetic request.
+    It becomes Anthropic evidence only when both OpenAI-family sibling probes
+    were actually part of this observation round and their own responses ruled
+    them out. The proof is therefore carried by the response set, not by the
+    ``/v1/messages`` path alone.
+    """
+
+    if not _OPENAI_FAMILY_PROTOCOLS.issubset(considered_protocols):
+        return None
+    if not _OPENAI_FAMILY_PROTOCOLS.issubset(ruled_out_protocols):
+        return None
+    candidate = responses.get("anthropic")
+    if (
+        candidate is not None
+        and candidate.protocol is _ProtocolProof.UNPROVEN
+        and candidate.authentication is _AuthenticationEvidence.ACCEPTED
+        and candidate.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+    ):
+        return "anthropic"
+    return None
 
 
 def _probe_oauth_protocol_response(
@@ -554,6 +825,7 @@ class CLIProxyEngineAdapter:
         self._install_task: asyncio.Task[None] | None = None
         self._install_admission: asyncio.Future[EngineStatus] | None = None
         self._install_owner_active = False
+        self._start_after_install_task: asyncio.Task[None] | None = None
         self._installation_stopping = False
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
@@ -657,6 +929,29 @@ class CLIProxyEngineAdapter:
             return
         except Exception:  # noqa: BLE001
             logger.exception("Model Hub runtime install task failed")
+
+    def _start_after_install_done(self, task: asyncio.Task[None]) -> None:
+        if self._start_after_install_task is task:
+            self._start_after_install_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("Model Hub runtime start after installation failed")
+
+    async def _start_after_install(self, install_task: asyncio.Task[None]) -> None:
+        await asyncio.shield(install_task)
+        async with self._installation_lock:
+            if self._installation_stopping:
+                return
+            status = await self.status()
+            if status.health in {
+                EngineHealth.INSTALLING,
+                EngineHealth.NOT_INSTALLED,
+            }:
+                return
+            await asyncio.to_thread(self.supervisor.ensure_running)
 
     async def _run_installation(
         self,
@@ -857,6 +1152,16 @@ class CLIProxyEngineAdapter:
         async with self._installation_lock:
             status = await self.status()
             if status.health is EngineHealth.INSTALLING:
+                install_task = self._install_task
+                if install_task is not None and not install_task.done():
+                    start_task = self._start_after_install_task
+                    if start_task is None or start_task.done():
+                        start_task = asyncio.create_task(
+                            self._start_after_install(install_task),
+                            name="model-hub-runtime-start-after-install",
+                        )
+                        self._start_after_install_task = start_task
+                        start_task.add_done_callback(self._start_after_install_done)
                 return status
             await asyncio.to_thread(self.supervisor.ensure_running)
             return await self.status()
@@ -866,6 +1171,12 @@ class CLIProxyEngineAdapter:
             status = await self.status()
             if status.health is EngineHealth.INSTALLING:
                 return status
+            start_after_install_task = self._start_after_install_task
+            if (
+                start_after_install_task is not None
+                and not start_after_install_task.done()
+            ):
+                start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
             return await self.status()
 
@@ -873,11 +1184,20 @@ class CLIProxyEngineAdapter:
         async with self._installation_lock:
             self._installation_stopping = True
             install_task = self._install_task
+            start_after_install_task = self._start_after_install_task
         if install_task is not None:
             try:
                 await asyncio.shield(install_task)
             except asyncio.CancelledError:
                 if not install_task.cancelled():
+                    raise
+            except Exception:  # noqa: BLE001
+                pass
+        if start_after_install_task is not None:
+            try:
+                await asyncio.shield(start_after_install_task)
+            except asyncio.CancelledError:
+                if not start_after_install_task.cancelled():
                     raise
             except Exception:  # noqa: BLE001
                 pass
@@ -1152,6 +1472,9 @@ class CLIProxyEngineAdapter:
         received_rejection = False
         received_proven_unknown = False
         received_unproven_response = False
+        received_accepted_unproven_response = False
+        response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
+        ruled_out_protocols: set[str] = set()
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
@@ -1177,26 +1500,34 @@ class CLIProxyEngineAdapter:
                 continue
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
+                ruled_out_protocols.add(protocol)
                 continue
+            proved_protocol: str | None = None
             if evidence.protocol is _ProtocolProof.PROVEN:
                 if evidence.authentication is _AuthenticationEvidence.UNKNOWN:
                     received_proven_unknown = True
                     continue
+                proved_protocol = protocol
             else:
                 received_unproven_response = True
+                if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
+                    received_accepted_unproven_response = True
+                if _pairwise_positive_exclusion(evidence):
+                    ruled_out_protocols.add(protocol)
+                response_evidence_by_protocol[protocol] = evidence
                 continue
             try:
                 if credential_kind == "api_key":
                     models = await probe_models(
                         vendor=normalized_vendor,
-                        protocol=protocol,
+                        protocol=proved_protocol,
                         base_url=base_url,
                         secret=secret or "",
                     )
                 else:
                     models = await self.discover_models(
                         normalized_vendor,
-                        protocol,
+                        proved_protocol,
                         None,
                         credential_ref,
                     )
@@ -1209,11 +1540,63 @@ class CLIProxyEngineAdapter:
                 outcome=ObservationOutcome.OBSERVED,
                 reachable=True,
                 authenticated=True,
-                protocol=protocol,
+                protocol=proved_protocol,
                 discovery=discovery,
                 model_ids=tuple(models),
             )
 
+        considered_protocols = frozenset(protocol_order)
+        proved_protocol = _openai_family_elimination_proof(
+            response_evidence_by_protocol,
+            considered_protocols=considered_protocols,
+            ruled_out_protocols=frozenset(ruled_out_protocols),
+        ) or _anthropic_wrapperless_elimination_proof(
+            response_evidence_by_protocol,
+            considered_protocols=considered_protocols,
+            ruled_out_protocols=frozenset(ruled_out_protocols),
+        )
+        if proved_protocol is not None:
+            try:
+                if credential_kind == "api_key":
+                    models = await probe_models(
+                        vendor=normalized_vendor,
+                        protocol=proved_protocol,
+                        base_url=base_url,
+                        secret=secret or "",
+                    )
+                else:
+                    models = await self.discover_models(
+                        normalized_vendor,
+                        proved_protocol,
+                        None,
+                        credential_ref,
+                    )
+            except (EngineClientError, ModelDiscoveryError):
+                discovery = ObservationDiscovery.FAILED
+                models = ()
+            else:
+                discovery = ObservationDiscovery.SUCCEEDED
+            return make_source_observation(
+                outcome=ObservationOutcome.OBSERVED,
+                reachable=True,
+                authenticated=True,
+                protocol=proved_protocol,
+                discovery=discovery,
+                model_ids=tuple(models),
+            )
+
+        if received_accepted_unproven_response:
+            # A shaped request error already proved the credential was accepted
+            # even when the response family never narrowed to one persisted
+            # protocol.
+            return make_source_observation(
+                outcome=ObservationOutcome.AMBIGUOUS,
+                reachable=True,
+                authenticated=True,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
         if received_rejection:
             return make_source_observation(
                 outcome=ObservationOutcome.AUTHENTICATION_FAILED,

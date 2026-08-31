@@ -1457,7 +1457,8 @@ def test_config_reload_migrates_v3_model_hub_shape_and_persists_backup(monkeypat
         ModelHubConfig().agents["claude"].routes
     )
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
+    assert persisted["model_hub"]["enabled"] is False
     assert persisted["migration_sentinel"] == {"keep": True}
     backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
     assert backups
@@ -2180,7 +2181,8 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["show_duration"] is True
-    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
+    assert persisted["model_hub"]["enabled"] is False
     assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
 
 
@@ -2212,7 +2214,8 @@ def test_config_reload_does_not_overwrite_config_changed_before_replace(
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["show_duration"] is True
-    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
+    assert persisted["model_hub"]["enabled"] is False
     assert loaded.load_warnings and "before replacement" in " ".join(loaded.load_warnings)
     backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
     assert backups and any(backup.read_text(encoding="utf-8") == original for backup in backups)
@@ -2590,6 +2593,25 @@ def test_final_config_rejects_retired_global_priority_key():
     payload["priority_order"] = {"legacy": "shape-does-not-matter"}
 
     with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
+
+
+def test_model_hub_enabled_defaults_off_for_older_configs():
+    payload = ModelHubConfig().to_payload()
+    payload.pop("enabled")
+
+    loaded = ModelHubConfig.from_payload(payload)
+
+    assert loaded.enabled is False
+    assert loaded.to_payload()["enabled"] is False
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "false"])
+def test_model_hub_enabled_requires_a_boolean(value):
+    payload = ModelHubConfig().to_payload()
+    payload["enabled"] = value
+
+    with pytest.raises(ValueError, match="model_hub.enabled.*boolean"):
         ModelHubConfig.from_payload(payload)
 
 

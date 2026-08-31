@@ -53,17 +53,9 @@ def _release_path(repo: str, tag: str) -> str:
     return f"repos/{repo}/releases/tags/{quote(tag, safe='')}"
 
 
-def get_release(repo: str, tag: str) -> ReleaseState | None:
-    completed = _run_gh(["api", _release_path(repo, tag)], check=False)
-    if completed.returncode != 0:
-        if "HTTP 404" in completed.stderr:
-            return None
-        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
-        raise ReleaseError(f"Could not inspect GitHub Release {tag}: {detail}")
-
+def _release_state(payload: Any, *, tag: str) -> ReleaseState:
     try:
-        payload = json.loads(completed.stdout)
-        return ReleaseState(
+        state = ReleaseState(
             tag=str(payload["tag_name"]),
             draft=bool(payload["draft"]),
             prerelease=bool(payload["prerelease"]),
@@ -72,6 +64,54 @@ def get_release(repo: str, tag: str) -> ReleaseState | None:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ReleaseError(f"Invalid GitHub Release payload for {tag}") from exc
+    if state.tag != tag:
+        raise ReleaseError(f"GitHub Release payload did not match tag {tag}")
+    return state
+
+
+def _get_release_from_list(repo: str, tag: str) -> ReleaseState | None:
+    completed = _run_gh(
+        [
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{repo}/releases?per_page=100",
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise ReleaseError(f"Could not inspect GitHub Release {tag}: {detail}")
+
+    try:
+        pages = json.loads(completed.stdout)
+        matches = [
+            release
+            for page in pages
+            for release in page
+            if release.get("tag_name") == tag
+        ]
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ReleaseError(f"Invalid GitHub Release list payload for {tag}") from exc
+    if len(matches) > 1:
+        raise ReleaseError(f"Multiple GitHub Releases found for tag {tag}")
+    return _release_state(matches[0], tag=tag) if matches else None
+
+
+def get_release(repo: str, tag: str) -> ReleaseState | None:
+    completed = _run_gh(["api", _release_path(repo, tag)], check=False)
+    if completed.returncode != 0:
+        if "HTTP 404" in completed.stderr:
+            # GitHub's get-by-tag endpoint intentionally omits draft releases.
+            return _get_release_from_list(repo, tag)
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise ReleaseError(f"Could not inspect GitHub Release {tag}: {detail}")
+
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise ReleaseError(f"Invalid GitHub Release payload for {tag}") from exc
+    return _release_state(payload, tag=tag)
 
 
 def _notes_arguments(*, notes: str | None, notes_file: Path | None) -> list[str]:

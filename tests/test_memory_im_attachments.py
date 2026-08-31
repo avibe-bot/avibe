@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import io
 import os
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -42,14 +40,6 @@ async def _materialize(
         ),
         _Client(payloads),
     )
-
-
-def _xlsx_bytes() -> bytes:
-    payload = io.BytesIO()
-    with zipfile.ZipFile(payload, "w") as archive:
-        archive.writestr("[Content_Types].xml", b"content types")
-        archive.writestr("xl/workbook.xml", b"workbook")
-    return payload.getvalue()
 
 
 @pytest.mark.asyncio
@@ -160,11 +150,9 @@ async def test_memory_selection_counts_only_supported_survivors(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_memory_selection_skips_office_without_soffice(
+async def test_memory_selection_skips_external_conversion_formats(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: False)
     batch = await _materialize(
         tmp_path / "avibe-home",
         [
@@ -172,7 +160,7 @@ async def test_memory_selection_skips_office_without_soffice(
             (
                 "report.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                _xlsx_bytes(),
+                b"external conversion input",
                 None,
             ),
         ],
@@ -182,33 +170,6 @@ async def test_memory_selection_skips_office_without_soffice(
 
     assert [item.name for item in selected.attachments] == ["valid.pdf"]
     assert selected.skipped == ("unsupported_type",)
-    batch.lease.release()
-
-
-@pytest.mark.asyncio
-async def test_memory_selection_admits_office_when_soffice_is_present(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
-    batch = await _materialize(
-        tmp_path / "avibe-home",
-        [
-            (
-                "report.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                _xlsx_bytes(),
-                None,
-            ),
-            ("valid.pdf", "application/pdf", b"%PDF-1.7\n", 9),
-        ],
-    )
-
-    selected = select_memory_attachments(batch.lease)
-
-    assert [item.name for item in selected.attachments] == ["report.xlsx", "valid.pdf"]
-    assert [item.kind for item in selected.attachments] == ["doc", "pdf"]
-    assert selected.skipped == ()
     batch.lease.release()
 
 

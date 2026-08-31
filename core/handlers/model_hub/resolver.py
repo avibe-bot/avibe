@@ -100,6 +100,25 @@ def source_eligible_for_backend(source: ModelHubSourceConfig, backend: str) -> b
     return ModelHubConfig.source_eligible_for_backend(source, backend)
 
 
+def opencode_inventory_menu_ids(config: ModelHubConfig) -> frozenset[str]:
+    """Return OpenCode identities backed by current eligible inventory."""
+
+    identities = {
+        opencode_model_id(source.vendor, model.id)
+        for source in config.sources
+        if source_eligible_for_backend(source, "opencode")
+        for model in source.models
+        if not model.retired
+    }
+    for menu_model, route in config.agents["opencode"].routes.items():
+        if any(
+            inspect_exact_hop(config, "opencode", menu_model, hop).supply_eligible
+            for hop in route.hops
+        ):
+            identities.add(menu_model)
+    return frozenset(identities)
+
+
 def source_retry_ready(source: ModelHubSourceConfig, now: datetime | None) -> bool:
     if source.state.status != "cooldown" or now is None:
         return False

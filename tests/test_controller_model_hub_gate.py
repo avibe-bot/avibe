@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
+    from vibe import api
 
     service = object()
     calls = []
@@ -63,6 +65,29 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
+    presence_probes = []
+    probe_failure = [False]
+    block_full_probe = [False]
+    opencode_present = [False]
+    full_probe_started = threading.Event()
+    full_probe_release = threading.Event()
+
+    def resolve_cli_paths(binaries, *, include_npm_global=True):
+        presence_probes.append((binaries, include_npm_global))
+        if probe_failure[0]:
+            raise OSError("CLI inventory unavailable")
+        result = {
+            binary: f"/usr/bin/{binary}" if binary == "codex" else None
+            for binary in binaries
+        }
+        if "opencode" in result and opencode_present[0]:
+            result["opencode"] = "/usr/bin/opencode"
+        if block_full_probe[0] and len(binaries) > 1:
+            full_probe_started.set()
+            full_probe_release.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(api, "resolve_cli_paths", resolve_cli_paths)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(language="zh")
     controller.vibe_agent_store = SimpleNamespace(
@@ -80,6 +105,28 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert controller.model_hub_runtime.turn_gateway is controller.model_hub_turn_gateway
     assert captured["requested_model_override"]("codex") == "agent-model"
     assert captured["requested_model_override"]("claude") is None
+    assert captured["cli_present_override"]("codex") is True
+    assert captured["cli_present_override"]("claude") is False
+    assert presence_probes == [(["claude", "codex", "opencode"], False)]
+    probe_failure[0] = True
+    captured["cli_presence_refresh"](True, ("opencode",))
+    assert captured["cli_present_override"]("codex") is True
+    assert presence_probes[-1] == (["opencode"], True)
+
+    probe_failure[0] = False
+    block_full_probe[0] = True
+    full_refresh = threading.Thread(
+        target=captured["cli_presence_refresh"],
+        args=(True, None),
+    )
+    full_refresh.start()
+    assert full_probe_started.wait(timeout=0.5)
+    opencode_present[0] = True
+    captured["cli_presence_refresh"](True, ("opencode",))
+    full_probe_release.set()
+    full_refresh.join(timeout=0.5)
+    assert not full_refresh.is_alive()
+    assert captured["cli_present_override"]("opencode") is True
     assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),

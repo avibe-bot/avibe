@@ -9,6 +9,8 @@ from typing import Any, Literal, TypeAlias
 from vibe.memory_contract import (
     CLOSED_MEMORY_ERROR_CODES,
     MAX_AGENTIC_TIMEOUT_SECONDS as MAX_AGENTIC_TIMEOUT_SECONDS,
+    MAX_MEMORY_LIST_PAGE_SIZE as MAX_MEMORY_LIST_PAGE_SIZE,
+    MAX_MEMORY_SEARCH_RESULTS as MAX_MEMORY_SEARCH_RESULTS,
     MemoryErrorCode,
     RecallPolicy,
     is_memory_error_code,

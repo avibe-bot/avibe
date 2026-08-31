@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
+import { useLatestRef } from '../../lib/useLatestRef';
+import { bindFrameChord } from '../apps/windowChords';
+
 // postMessage bridge between the chat host and the annotation overlay running
 // inside the chat's Show Page iframe (plan show-page-annotation-phase1 §3).
 //
@@ -24,6 +28,8 @@ export interface AnnotationBridge {
   setIframe: React.RefCallback<HTMLIFrameElement>;
   /** Attach to the iframe `onLoad` to re-sync after a (re)load / re-point. */
   handleIframeLoad: () => void;
+  /** Attach to the owning Show Page surface for parent-document keystrokes. */
+  handleShortcutKeyDown: React.KeyboardEventHandler<HTMLElement>;
   /** `enable` without a mode uses the overlay's remembered mode (§3). */
   enable: (mode?: AnnotationMode) => void;
   disable: () => void;
@@ -38,6 +44,19 @@ type ControlMessage =
 const PARENT_ESCAPE_CLAIM_SELECTOR =
   'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
 
+const ANNOTATION_SHORTCUT_BLOCKING_SELECTOR = [
+  '[aria-expanded="true"][aria-haspopup]',
+  '[role="menu"][data-state="open"]',
+  '[role="listbox"][data-state="open"]',
+  '[role="dialog"]:not([data-window-id])',
+  '[role="alertdialog"]',
+  'dialog[open]',
+].join(', ');
+
+function annotationShortcutBlocked(target: Element | null): boolean {
+  return Boolean(target?.closest?.(ANNOTATION_SHORTCUT_BLOCKING_SELECTOR));
+}
+
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public
  * re-point, or a session switch that clears it) drops the derived state back to
@@ -46,8 +65,12 @@ const PARENT_ESCAPE_CLAIM_SELECTOR =
  */
 export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const frameShortcutCleanupRef = useRef<() => void>(() => undefined);
   const [state, setState] = useState<AnnotationState | null>(null);
   const [lastSrc, setLastSrc] = useState(src);
+  const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
+  const stateRef = useLatestRef(state);
+  const shortcutRef = useLatestRef(annotationShortcut);
 
   // The loaded page changed — the new overlay hasn't reported yet, so drop back
   // to "unknown" until it does (and so one session's state never briefly shows
@@ -98,11 +121,9 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   }, [startListening, stopListening]);
 
   const onParentKeyDown = useCallback((event: KeyboardEvent) => {
-    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    if (!isPlainEscape(event) || event.defaultPrevented) return;
     const target = event.target;
     if (target instanceof Element && target.closest(PARENT_ESCAPE_CLAIM_SELECTOR)) return;
-    // Custom menus render role=menu only while open, so its presence is an
-    // open-state fact even when focus remains on the invoking element.
     if (document.querySelector('[role="menu"]')) return;
 
     try {
@@ -110,7 +131,12 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
       if (!frameDocument) return;
       const FrameKeyboardEvent = frameDocument.defaultView?.KeyboardEvent ?? KeyboardEvent;
       frameDocument.dispatchEvent(
-        new FrameKeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+        new FrameKeyboardEvent('keydown', {
+          code: 'Escape',
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
       );
     } catch {
       // The frame may be sandboxed, navigating, or already torn down.
@@ -140,18 +166,6 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     if (win) win.postMessage(message, window.location.origin);
   }, []);
 
-  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
-    (iframe) => {
-      if (iframeRef.current !== iframe) stopEscapeListening();
-      iframeRef.current = iframe;
-      if (iframe) {
-        startListening();
-        if (state?.enabled === true) startEscapeListening();
-      }
-    },
-    [startEscapeListening, startListening, state?.enabled, stopEscapeListening],
-  );
-
   const enable = useCallback(
     (mode?: AnnotationMode) =>
       post(
@@ -166,9 +180,76 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     (mode: AnnotationMode) => post({ type: 'avibe:annotation:control', action: 'set-mode', mode }),
     [post],
   );
+  const enableFromShortcut = useCallback(() => {
+    const current = stateRef.current;
+    if (current?.available !== true || current.enabled) return;
+    post({ type: 'avibe:annotation:control', action: 'enable' });
+  }, [post, stateRef]);
+
+  const handleShortcutKeyDown = useCallback<React.KeyboardEventHandler<HTMLElement>>((event) => {
+    if (
+      event.defaultPrevented
+      || event.repeat
+      || stateRef.current?.available !== true
+      || stateRef.current.enabled
+      || !actionShortcutMatches(event.nativeEvent, shortcutRef.current)
+      || annotationShortcutBlocked(event.target as Element | null)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    enableFromShortcut();
+  }, [enableFromShortcut, shortcutRef, stateRef]);
+
+  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
+    (iframe) => {
+      if (iframeRef.current !== iframe) {
+        stopEscapeListening();
+      }
+      frameShortcutCleanupRef.current();
+      frameShortcutCleanupRef.current = () => undefined;
+      iframeRef.current = iframe;
+      if (!iframe) return;
+      startListening();
+      if (stateRef.current?.enabled === true) startEscapeListening();
+      frameShortcutCleanupRef.current = bindFrameChord(
+        iframe,
+        (event, activeInFrame) => {
+          return (
+            !event.defaultPrevented
+            && !event.repeat
+            && stateRef.current?.available === true
+            && stateRef.current.enabled !== true
+            && actionShortcutMatches(event, shortcutRef.current)
+            && !annotationShortcutBlocked(activeInFrame)
+          );
+        },
+        enableFromShortcut,
+      );
+    },
+    [
+      enableFromShortcut,
+      shortcutRef,
+      startEscapeListening,
+      startListening,
+      stateRef,
+      stopEscapeListening,
+    ],
+  );
+
+  useEffect(() => () => frameShortcutCleanupRef.current(), []);
+
   // On (re)load the overlay broadcasts its state on mount, but the parent
   // listener is already attached, so we also query as a backstop (§3).
   const handleIframeLoad = useCallback(() => post({ type: 'avibe:annotation:query' }), [post]);
 
-  return { state, setIframe, handleIframeLoad, enable, disable, setMode };
+  return {
+    state,
+    setIframe,
+    handleIframeLoad,
+    handleShortcutKeyDown,
+    enable,
+    disable,
+    setMode,
+  };
 }

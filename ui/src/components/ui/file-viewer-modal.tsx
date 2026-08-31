@@ -94,7 +94,11 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
           header leaves room for that close X. */}
       {/* Definite height (not just max-h): the FilePreview kernel scrolls internally via h-full, which
           needs a resolved parent height — a content-driven box would collapse it. */}
-      <DialogContent aria-describedby={undefined} className="flex h-[80vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0 max-md:h-[82dvh]">
+      <DialogContent
+        aria-describedby={undefined}
+        mobileSheetHeight="tall"
+        className="flex h-[80vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0"
+      >
         <div className="flex items-center gap-2 border-b border-border px-4 py-3 pr-12">
           <FileText className="size-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">

@@ -1,0 +1,51 @@
+version: 1
+capability:
+  id: memory_runtime_install
+  name: Memory Runtime artifact installation
+  canonical_tests:
+    - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
+    - tests/test_memory_artifact_contract.py
+    - tests/test_managed_runtime.py
+    - tests/test_memory_runtime_release.py
+status_legend:
+  covered: executable evidence exists at the declared layer
+  partial: hermetic contract evidence exists and released-archive regression remains manual
+scenarios:
+  - id: MEMORY-RUNTIME-INSTALL-001
+    name: Disabled Memory installs a manifest-shaped linux-arm64 fixture through the Web job
+    status: partial
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py::test_disabled_memory_installs_manifest_shaped_linux_arm64_artifact_through_web_job
+    actor: Fresh Avibe user
+    trigger: The user installs memory-runtime from Settings Dependencies
+    conditions:
+      - Memory is disabled with no model credentials or recovery intent
+      - The selected manifest and linux-arm64 archive are hermetic test fixtures
+    given: A fresh runtime directory and a manifest-valid local linux-arm64 archive
+    when: The Web install job is started and polled to completion
+    then: Cold staging is admitted, the pointer is published, and dependency status becomes ready
+    expected_outputs:
+      - A succeeded install job
+      - A ready optional memory-runtime dependency at the selected version
+  - id: MEMORY-RUNTIME-INSTALL-002
+    name: Final release bytes and install staging share one bounded cold-admission command
+    status: covered
+    kind: release_contract
+    layer: contract
+    test: tests/test_memory_runtime_release.py::test_final_archive_verification_uses_shared_cold_admission
+    related_tests:
+      - tests/test_memory_artifact_contract.py::test_cold_artifact_admission_is_bounded_and_warms_the_runtime
+      - tests/test_memory_artifact_contract.py::test_cold_artifact_admission_classifies_timeout
+  - id: MEMORY-RUNTIME-INSTALL-003
+    name: Failed preparation remains actionable across processes without retaining staging
+    status: covered
+    kind: degradation
+    layer: contract
+    test: tests/test_managed_runtime.py::test_memory_preparation_timeout_reclaims_staging_and_persists_latest_failure
+    related_tests:
+      - tests/test_managed_runtime.py::test_memory_latest_install_failure_safely_ignores_malformed_or_older_state
+      - tests/test_managed_runtime.py::test_memory_latest_install_failure_rejects_symlink_state
+      - tests/test_managed_runtime.py::test_memory_reuse_clears_latest_install_failure
+manual_evidence:
+  - Install a normal wheel in a clean linux-arm64 Incus guest and consume the real published manifest and archive; verify the first Web install succeeds with Memory disabled, no model credentials, and no recovery intent.

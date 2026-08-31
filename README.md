@@ -41,7 +41,7 @@ Claude Code, Codex, OpenCode are incredible. But:
 **One command turns your own machine into the home your AI partner lives in.** You drive the *official* Claude Code, Codex, and OpenCode — from a browser or any chat app — while your code and keys stay on your machine, and avibe.bot never sees your data.
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash && vibe
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
 The browser opens, you follow a short wizard, and your machine becomes an Agent OS you can reach from anywhere.
@@ -324,9 +324,13 @@ npm install -g @openai/codex
 
 ```bash
 vibe stop
+avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
+avibe_home="${avibe_home/#\~/$HOME}"
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # legacy installs
-rm -rf ~/.avibe ~/.vibe_remote
+vibe_bin="$(command -v vibe)" && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+rm -rf "$avibe_home/runtime/install-generations"
+rm -rf "$avibe_home" ~/.vibe_remote
 ```
 
 ---

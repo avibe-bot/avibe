@@ -1,33 +1,26 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.resources as package_resources
 import json
 import logging
 import os
-import platform
 import shutil
-import stat
 import subprocess
 import sys
-import tarfile
-import tempfile
-import threading
-import urllib.parse
-import urllib.request
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from sysconfig import get_platform
+from collections.abc import Iterator, Mapping
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from config import paths
-from core.dependency_network import (
-    dependency_error_details,
-    dependency_error_message,
-    fetch_bytes,
-    fetch_to_path,
-    probe_url,
-    redact_url,
+from core.managed_runtime import (
+    ManagedRuntimeArchive,
+    ManagedRuntimeManager,
+    ManagedRuntimeManifest,
+    ManagedRuntimeSpec,
+    env_flag_enabled,
+    runtime_platform_tag,
+    safe_path_part,
 )
 from core.process_isolation import isolated_subprocess_kwargs
 
@@ -35,34 +28,37 @@ from core.process_isolation import isolated_subprocess_kwargs
 logger = logging.getLogger(__name__)
 
 _TMUX_MANIFEST_RESOURCE = "tmux_runtime_manifest.json"
-_TMUX_RUNTIME_SOURCE_MANIFEST = "manifest"
-_TMUX_INSTALL_LOCK = threading.Lock()
+_RELEASED_PACKAGED_MANIFEST_SHA256 = "ee2826f881c236718ff18b2d1f939afb9417c584df5f29b796129c80691d2e63"
+_RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256 = {
+    "88323402bd28d21103239caf009b130086ebf334807de485d4a1e1c7188ee810": (
+        "5f8b6a7eda2ccd5bc283368e93e0e5c45b78071b5f90df7e394cf9a7f7ed6373"
+    ),
+    "073f6e2c2baa7eb5d643563600ee6052ca8619f3ec5a0cfdf99c56397fb72c94": (
+        "9adf4f75e12bce1e1a3b53696e38b60854761bb7945a7c09a806999f1995b870"
+    ),
+    "fd4a2206c5e468dd2ee4e9a65f2d40e0762551965d7fdbe849c494ab14f513e9": (
+        "6d1796de251b47b183af1b3eb6e229161e31560e89b9a8a1159533071eae2970"
+    ),
+    "002a6f4fd52212600fa0d72d865dcf328e5b8b6e83c179788144d8587b75677a": (
+        "5a06c01c36998aaf1726ccaaeae01dded2b5bf82dbd22a01889f0d05b4d11c80"
+    ),
+}
+_TMUX_SPEC = ManagedRuntimeSpec(
+    runtime_id="tmux",
+    manifest_resource=_TMUX_MANIFEST_RESOURCE,
+    version_field="tmux_version",
+    default_bin_path="tmux",
+    allow_missing_binary_sha256=True,
+    allow_legacy_missing_runtime_id=True,
+    staging_prefixes=("install-", "manifest-"),
+    replace_target_on_force=True,
+    replace_invalid_target_on_repair=True,
+    include_manifest_digest_in_install_fingerprint=True,
+)
+TMUX_BINARY_PREPARATION_FAILURE_REASONS = frozenset({"xattr_failed"})
 
 
-@dataclass(frozen=True)
-class TmuxArchive:
-    platform: str
-    name: str
-    url: str
-    sha256: str
-    size: int | None = None
-    bin_path: str = "tmux"
-
-
-@dataclass(frozen=True)
-class TmuxManifest:
-    schema_version: int
-    tmux_version: str
-    source: str
-    source_url: str | None
-    requires_utf8proc: bool
-    terminfo: str | None
-    archives: dict[str, TmuxArchive]
-    digest: str
-    loaded_from: str
-
-
-class TmuxRuntimeManager:
+class TmuxRuntimeManager(ManagedRuntimeManager):
     """Install and resolve Avibe's vendored tmux binary.
 
     The future Web Terminal will prefer this deterministic tmux over any system
@@ -80,410 +76,228 @@ class TmuxRuntimeManager:
         manifest_url: str | None = None,
         offline: bool | None = None,
     ) -> None:
-        self.runtime_dir = runtime_dir or paths.get_runtime_dir() / "tmux"
         manifest_path_value = manifest_path or os.environ.get("VIBE_TMUX_MANIFEST_PATH")
-        self.manifest_path = Path(manifest_path_value).expanduser() if manifest_path_value else None
-        self.manifest_url = manifest_url if manifest_url is not None else os.environ.get("VIBE_TMUX_MANIFEST_URL")
-        self.offline = _env_flag_enabled("VIBE_TMUX_OFFLINE", default=False) if offline is None else offline
-        self._install_reason: str | None = None
-        self._download_error: dict[str, Any] | None = None
+        super().__init__(
+            spec=_TMUX_SPEC,
+            runtime_dir=runtime_dir or paths.get_runtime_dir() / "tmux",
+            manifest_path=manifest_path_value,
+            manifest_url=manifest_url if manifest_url is not None else os.environ.get("VIBE_TMUX_MANIFEST_URL"),
+            offline=env_flag_enabled("VIBE_TMUX_OFFLINE") if offline is None else offline,
+        )
 
-    def ensure(self, *, force: bool = False) -> dict[str, Any]:
-        if not _TMUX_INSTALL_LOCK.acquire(blocking=False):
-            return {
-                "ok": False,
-                "skipped": True,
-                "reason": "tmux_install_already_running",
-                "message": "tmux install or repair is already running; try again shortly.",
-            }
+    def install_failure_reasons(self) -> frozenset[str]:
+        """Return every failure identity emitted by the tmux installer."""
+
+        return self._base_install_failure_reasons() | TMUX_BINARY_PREPARATION_FAILURE_REASONS
+
+    def _parse_manifest(self, payload: bytes, *, loaded_from: str) -> ManagedRuntimeManifest | None:
+        """Read released schema-1 manifests that predate binary digests."""
+
+        compatible_payload = payload
+        original_data: dict[str, Any] | None = None
+        enriched = False
         try:
-            manifest = self._load_manifest()
-            if not manifest:
-                return self._failure(self._install_reason or "tmux_manifest_missing")
-            archive = self._manifest_archive_for_platform(manifest)
-            if not archive:
-                return self._failure(self._install_reason or "tmux_platform_unsupported", manifest=manifest)
-            install_dir = self._manifest_install_dir(manifest, archive)
-            existing = self._verified_manifest_binary(install_dir, manifest, archive)
-            if existing and not force:
-                return {
-                    "ok": True,
-                    "installed": True,
-                    "changed": False,
-                    "path": str(existing),
-                    "version": manifest.tmux_version,
-                    "platform": archive.platform,
-                    "install_dir": str(install_dir),
-                }
-            archive_path = self._resolve_manifest_archive(archive)
-            if not archive_path:
-                if existing:
-                    return {
-                        "ok": True,
-                        "installed": True,
-                        "changed": False,
-                        "path": str(existing),
-                        "version": manifest.tmux_version,
-                        "platform": archive.platform,
-                        "install_dir": str(install_dir),
-                        "reason": self._install_reason,
-                    }
-                return self._failure(self._install_reason or "tmux_archive_unavailable", manifest=manifest, archive=archive)
-            self.runtime_dir.mkdir(parents=True, exist_ok=True)
-            tmp_dir = Path(tempfile.mkdtemp(prefix="manifest-", dir=self.runtime_dir))
-            try:
-                with tarfile.open(archive_path, "r:gz") as tar:
-                    _safe_extract_tar(tar, tmp_dir)
-                binary = tmp_dir / archive.bin_path
-                if not binary.is_file():
-                    return self._failure("tmux_install_missing_bin", manifest=manifest, archive=archive)
-                _make_executable(binary)
-                signing = self._prepare_macos_binary(binary)
-                if not signing.get("ok"):
-                    return {
-                        **self._failure(str(signing.get("reason") or "tmux_codesign_failed"), manifest=manifest, archive=archive),
-                        "signing": signing,
-                    }
-                if not _tmux_binary_runnable(binary):
-                    return self._failure("tmux_binary_not_runnable", manifest=manifest, archive=archive)
-                if install_dir.exists():
-                    shutil.rmtree(install_dir)
-                install_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(tmp_dir), str(install_dir))
-                binary = install_dir / archive.bin_path
-                self._write_manifest_install_metadata(install_dir, manifest, archive)
-                self._write_current_pointer(manifest, archive, install_dir)
-                self._install_reason = None
-                return {
-                    "ok": True,
-                    "installed": True,
-                    "changed": True,
-                    "path": str(binary),
-                    "version": manifest.tmux_version,
-                    "platform": archive.platform,
-                    "install_dir": str(install_dir),
-                    "signing": signing,
-                }
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Failed to install tmux runtime")
-                return self._failure("tmux_install_failed", manifest=manifest, archive=archive, message=str(exc))
-            finally:
-                if tmp_dir.exists():
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-        finally:
-            _TMUX_INSTALL_LOCK.release()
+            data = json.loads(payload.decode("utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("archives"), dict):
+                original_data = data
+                archives: dict[str, Any] = {}
+                for platform_tag, raw_archive in data["archives"].items():
+                    if not isinstance(raw_archive, dict):
+                        archives[platform_tag] = raw_archive
+                        continue
+                    archive = dict(raw_archive)
+                    if archive.get("binary_sha256") is None:
+                        archive_sha256 = str(archive.get("sha256") or "").lower()
+                        binary_sha256 = _RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256.get(archive_sha256)
+                        if binary_sha256 is not None:
+                            archive["binary_sha256"] = binary_sha256
+                            enriched = True
+                    archives[platform_tag] = archive
+                if enriched:
+                    compatible_payload = json.dumps(
+                        {**data, "archives": archives},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+        except (UnicodeError, ValueError, TypeError):
+            pass
+
+        manifest = super()._parse_manifest(compatible_payload, loaded_from=loaded_from)
+        if manifest is None or not enriched or original_data is None:
+            return manifest
+        return replace(
+            manifest,
+            digest=hashlib.sha256(payload).hexdigest(),
+            payload=original_data,
+        )
+
+    def _manifest_install_candidates(
+        self,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> Iterator[Path]:
+        """Include the two install layouts written by released tmux managers."""
+
+        version_dir = (
+            self.runtime_dir
+            / "versions"
+            / safe_path_part(manifest.runtime_version)
+            / safe_path_part(archive.platform)
+        )
+        released_manifest_digests = [manifest.digest]
+        if archive.sha256 in _RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256:
+            released_manifest_digests.append(_RELEASED_PACKAGED_MANIFEST_SHA256)
+        released_fingerprints = (
+            hashlib.sha256(f"{manifest_sha256}:{archive.sha256}".encode("utf-8")).hexdigest()[:16]
+            for manifest_sha256 in dict.fromkeys(released_manifest_digests)
+        )
+        candidates = (
+            *super()._manifest_install_candidates(manifest, archive),
+            *(version_dir / fingerprint for fingerprint in released_fingerprints),
+            version_dir,
+        )
+        yield from dict.fromkeys(candidates)
+
+    def _manifest_identity_fields(self, manifest: ManagedRuntimeManifest) -> dict[str, str]:
+        return {"manifest_sha256": manifest.digest}
+
+    def _metadata_matches_install_target(
+        self,
+        metadata: Mapping[str, Any],
+        target: Mapping[str, str],
+    ) -> bool:
+        if super()._metadata_matches_install_target(metadata, target):
+            return True
+        archive_sha256 = target.get("archive_sha256")
+        exact_legacy_manifest = metadata.get("manifest_sha256") == target.get(
+            "manifest_sha256"
+        )
+        released_legacy_manifest = (
+            metadata.get("manifest_sha256") == _RELEASED_PACKAGED_MANIFEST_SHA256
+            and archive_sha256 in _RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256
+            and target.get("binary_sha256")
+            == _RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256.get(archive_sha256)
+        )
+        return (
+            metadata.get("runtime_id") is None
+            and metadata.get("provider") == self.spec.record_provider
+            and metadata.get("tmux_version") == target.get("runtime_version")
+            and metadata.get("archive_sha256") == archive_sha256
+            and (exact_legacy_manifest or released_legacy_manifest)
+        )
 
     def resolve_binary(self) -> Path | None:
-        manifest = self._load_manifest()
-        if not manifest:
+        binary = super().resolve_binary()
+        if binary is not None and _tmux_binary_runnable(binary):
+            return binary
+        non_runnable = binary is not None
+        manifest = self._load_manifest(allow_network=False)
+        if manifest is None:
+            if non_runnable:
+                self._install_reason = self._reason("binary_not_runnable")
             return None
         archive = self._manifest_archive_for_platform(manifest)
-        if not archive:
+        if archive is None:
+            if non_runnable:
+                self._install_reason = self._reason("binary_not_runnable")
             return None
-        binary = self._verified_manifest_binary(self._manifest_install_dir(manifest, archive), manifest, archive)
-        if binary:
-            return binary
-        return self._verified_manifest_binary(self._legacy_manifest_install_dir(manifest, archive), manifest, archive)
+        for install_dir in self._manifest_install_candidates(manifest, archive):
+            binary = self._verified_manifest_binary(install_dir, manifest, archive)
+            if binary is not None and _tmux_binary_runnable(binary):
+                self._install_reason = None
+                return binary
+            non_runnable = non_runnable or binary is not None
+        if non_runnable:
+            self._install_reason = self._reason("binary_not_runnable")
+        return None
 
     def status(self) -> dict[str, Any]:
-        manifest = self._load_manifest()
-        platform_tag = _runtime_platform_tag()
-        archive = manifest.archives.get(platform_tag) if manifest else None
-        install_dir = self._manifest_install_dir(manifest, archive) if manifest and archive else None
-        binary = self.resolve_binary() if manifest and archive else None
-        version = _tmux_binary_version(binary) if binary else None
+        manifest = self.load_manifest_for_diagnostics()
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        binary: Path | None = None
+        version: str | None = None
+        install_dir: str | None = None
+        if manifest is None:
+            try:
+                before = self._current_install_dir(self.runtime_dir / "versions")
+                admitted = super().resolve_binary()
+                after = self._current_install_dir(self.runtime_dir / "versions")
+            except OSError:
+                before = after = admitted = None
+                self._install_reason = self._reason("install_inspection_failed")
+            admitted_version = _tmux_binary_version(admitted) if admitted is not None else None
+            if before is not None and before == after and admitted_version is not None:
+                binary = admitted
+                version = admitted_version
+                install_dir = str(before)
+                self._install_reason = None
+            elif before != after:
+                self._install_reason = self._reason("install_inspection_failed")
+            elif admitted is not None and admitted_version is None:
+                self._install_reason = self._reason("binary_not_runnable")
+        elif archive is not None:
+            candidates: list[Path] = []
+            try:
+                current = self._current_install_dir(self.runtime_dir / "versions")
+            except OSError:
+                current = None
+                self._install_reason = self._reason("install_inspection_failed")
+            if current is not None:
+                candidates.append(current)
+            candidates.extend(self._manifest_install_candidates(manifest, archive))
+            for candidate in dict.fromkeys(candidates):
+                admitted = self._verified_manifest_binary(candidate, manifest, archive)
+                if admitted is None:
+                    continue
+                admitted_version = _tmux_binary_version(admitted)
+                if admitted_version is None:
+                    self._install_reason = self._reason("binary_not_runnable")
+                    continue
+                binary = admitted
+                version = admitted_version
+                install_dir = str(candidate)
+                self._install_reason = None
+                break
         return {
-            "id": "tmux",
-            "provider": _TMUX_RUNTIME_SOURCE_MANIFEST,
-            "platform": platform_tag,
+            "id": self.spec.runtime_id,
+            "provider": self.spec.record_provider,
+            "platform": runtime_platform_tag(),
             "installed": binary is not None,
-            "version": version or (manifest.tmux_version if manifest else None),
+            "version": version or (manifest.runtime_version if manifest else None),
             "status": "ready" if binary else "missing",
             "path": str(binary) if binary else None,
-            "install_dir": str(install_dir) if install_dir else None,
-            "manifest": _manifest_status_payload(manifest),
-            "archive": _archive_status_payload(archive),
-            "reason": self._install_reason,
+            "install_dir": install_dir if binary else None,
+            "manifest": self._manifest_status_payload(manifest),
+            "archive": self._archive_status_payload(archive),
+            "reason": self._install_reason if binary is None else None,
             "download_error": self._download_error,
         }
 
-    def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
-        manifest = self._load_manifest()
-        if manifest is None:
-            return {
-                "ok": False,
-                "checked": bool(self._download_error),
-                "reason": self._install_reason or "tmux_manifest_missing",
-                "download_error": self._download_error,
-            }
-        archive = self._manifest_archive_for_platform(manifest)
-        if archive is None:
-            return {"ok": False, "checked": False, "reason": self._install_reason}
-        parsed = urllib.parse.urlparse(archive.url)
-        if parsed.scheme not in {"https", "file"}:
-            return {
-                "ok": False,
-                "checked": False,
-                "reason": "tmux_archive_url_unsupported",
-                "url": redact_url(archive.url),
-            }
-        return probe_url(
-            archive.url,
-            timeout=timeout,
-            opener=urllib.request.urlopen,
-            user_agent="avibe-tmux-doctor",
-        )
-
-    def _load_manifest(self) -> TmuxManifest | None:
-        payload: bytes | None = None
-        loaded_from = ""
-        if self.manifest_path:
-            if not self.manifest_path.exists():
-                self._install_reason = "tmux_manifest_missing"
-                return None
-            payload = self.manifest_path.read_bytes()
-            loaded_from = str(self.manifest_path)
-        elif self.manifest_url:
-            if self.offline:
-                self._install_reason = "tmux_manifest_unavailable_offline"
-                return None
-            try:
-                payload = fetch_bytes(
-                    self.manifest_url,
-                    timeout=30,
-                    opener=urllib.request.urlopen,
-                )
-                loaded_from = self.manifest_url
-            except Exception as exc:
-                logger.exception("Failed to download tmux manifest from %s", self.manifest_url)
-                self._install_reason = "tmux_manifest_download_failed"
-                self._download_error = dependency_error_details(exc, self.manifest_url)
-                return None
-        else:
-            try:
-                resource = package_resources.files("vibe").joinpath(_TMUX_MANIFEST_RESOURCE)
-            except Exception:
-                resource = None
-            if resource is None or not resource.is_file():
-                self._install_reason = "tmux_manifest_missing"
-                return None
-            payload = resource.read_bytes()
-            loaded_from = f"package:{_TMUX_MANIFEST_RESOURCE}"
-        digest = hashlib.sha256(payload).hexdigest()
-        try:
-            data = json.loads(payload.decode("utf-8"))
-            archives = {
-                platform_tag: TmuxArchive(
-                    platform=platform_tag,
-                    name=str(item["name"]),
-                    url=str(item["url"]),
-                    sha256=str(item["sha256"]),
-                    size=int(item["size"]) if item.get("size") is not None else None,
-                    bin_path=str(item.get("bin_path") or "tmux"),
-                )
-                for platform_tag, item in (data.get("archives") or {}).items()
-                if isinstance(item, dict)
-            }
-            manifest = TmuxManifest(
-                schema_version=int(data.get("schema_version")),
-                tmux_version=str(data.get("tmux_version") or ""),
-                source=str(data.get("source") or ""),
-                source_url=str(data.get("source_url") or "") or None,
-                requires_utf8proc=bool(data.get("requires_utf8proc")),
-                terminfo=str(data.get("terminfo") or "") or None,
-                archives=archives,
-                digest=digest,
-                loaded_from=loaded_from,
-            )
-        except Exception:
-            self._install_reason = "tmux_manifest_invalid"
-            return None
-        if manifest.schema_version != 1 or not manifest.tmux_version or not manifest.archives:
-            self._install_reason = "tmux_manifest_invalid"
-            return None
-        return manifest
-
-    def _manifest_archive_for_platform(self, manifest: TmuxManifest) -> TmuxArchive | None:
-        platform_tag = _runtime_platform_tag()
-        archive = manifest.archives.get(platform_tag)
-        if not archive:
-            self._install_reason = "tmux_platform_unsupported"
-            return None
-        return archive
-
-    def _resolve_manifest_archive(self, archive: TmuxArchive) -> Path | None:
-        cached = self.runtime_dir / "downloads" / archive.name
-        if cached.exists() and self._downloaded_archive_matches(cached, archive):
-            return cached
-        if self.offline:
-            self._install_reason = "tmux_archive_unavailable_offline"
-            return None
-        parsed = urllib.parse.urlparse(archive.url)
-        if parsed.scheme not in {"https", "file"}:
-            self._install_reason = "tmux_archive_url_unsupported"
-            return None
-        tmp_path = cached.with_suffix(cached.suffix + ".tmp")
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fetch_to_path(
-                archive.url,
-                tmp_path,
-                timeout=60,
-                opener=urllib.request.urlopen,
-            )
-            self._download_error = None
-            if not self._downloaded_archive_matches(tmp_path, archive):
-                tmp_path.unlink(missing_ok=True)
-                return None
-            tmp_path.replace(cached)
-            return cached
-        except Exception as exc:
-            logger.exception("Failed to download tmux archive from %s", archive.url)
-            tmp_path.unlink(missing_ok=True)
-            self._install_reason = "tmux_archive_download_failed"
-            self._download_error = dependency_error_details(exc, archive.url)
-            return None
-
-    def _downloaded_archive_matches(self, path: Path, archive: TmuxArchive) -> bool:
-        if archive.size is not None and path.stat().st_size != archive.size:
-            self._install_reason = "tmux_archive_size_mismatch"
-            return False
-        if _file_sha256(path) != archive.sha256:
-            self._install_reason = "tmux_archive_checksum_mismatch"
-            return False
-        return True
-
-    def _manifest_install_dir(self, manifest: TmuxManifest, archive: TmuxArchive) -> Path:
-        fingerprint = hashlib.sha256(f"{manifest.digest}:{archive.sha256}".encode("utf-8")).hexdigest()[:16]
-        return (
-            self.runtime_dir
-            / "versions"
-            / _safe_path_part(manifest.tmux_version)
-            / _safe_path_part(archive.platform)
-            / fingerprint
-        )
-
-    def _legacy_manifest_install_dir(self, manifest: TmuxManifest, archive: TmuxArchive) -> Path:
-        return self.runtime_dir / "versions" / _safe_path_part(manifest.tmux_version) / _safe_path_part(archive.platform)
-
-    def _manifest_metadata_path(self, install_dir: Path) -> Path:
-        return install_dir / ".avibe-tmux-runtime.json"
-
-    def _verified_manifest_binary(self, install_dir: Path, manifest: TmuxManifest, archive: TmuxArchive) -> Path | None:
-        binary = install_dir / archive.bin_path
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            return None
-        if self._manifest_install_matches(install_dir, manifest, archive) and _tmux_binary_runnable(binary):
-            return binary
-        return None
-
-    def _manifest_install_matches(self, install_dir: Path, manifest: TmuxManifest, archive: TmuxArchive) -> bool:
-        try:
-            payload = json.loads(self._manifest_metadata_path(install_dir).read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return (
-            payload.get("provider") == _TMUX_RUNTIME_SOURCE_MANIFEST
-            and payload.get("manifest_sha256") == manifest.digest
-            and payload.get("tmux_version") == manifest.tmux_version
-            and payload.get("platform") == archive.platform
-            and payload.get("archive_sha256") == archive.sha256
-            and payload.get("bin_path") == archive.bin_path
-        )
-
-    def _write_manifest_install_metadata(self, install_dir: Path, manifest: TmuxManifest, archive: TmuxArchive) -> None:
-        self._manifest_metadata_path(install_dir).write_text(
-            json.dumps(
+    def _manifest_status_payload(self, manifest: ManagedRuntimeManifest | None) -> dict[str, Any] | None:
+        payload = super()._manifest_status_payload(manifest)
+        if payload is not None and manifest is not None:
+            payload.update(
                 {
-                    "provider": _TMUX_RUNTIME_SOURCE_MANIFEST,
-                    "manifest_sha256": manifest.digest,
-                    "tmux_version": manifest.tmux_version,
-                    "platform": archive.platform,
-                    "archive_name": archive.name,
-                    "archive_sha256": archive.sha256,
-                    "bin_path": archive.bin_path,
-                    "manifest_source": manifest.loaded_from,
-                    "source": manifest.source,
-                    "requires_utf8proc": manifest.requires_utf8proc,
-                    "terminfo": manifest.terminfo,
-                },
-                sort_keys=True,
+                    "requires_utf8proc": bool(manifest.payload.get("requires_utf8proc")),
+                    "terminfo": str(manifest.payload.get("terminfo") or "") or None,
+                }
             )
-            + "\n",
-            encoding="utf-8",
-        )
+        return payload
 
-    def _write_current_pointer(self, manifest: TmuxManifest, archive: TmuxArchive, install_dir: Path) -> None:
-        pointer = self.runtime_dir / "current.json"
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.write_text(
-            json.dumps(
-                {
-                    "provider": _TMUX_RUNTIME_SOURCE_MANIFEST,
-                    "tmux_version": manifest.tmux_version,
-                    "platform": archive.platform,
-                    "install_dir": str(install_dir),
-                    "manifest_sha256": manifest.digest,
-                    "archive_sha256": archive.sha256,
-                    "bin_path": archive.bin_path,
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+    def _prepare_binary(self, binary: Path) -> dict[str, Any]:
+        return self._prepare_macos_binary(binary)
 
     def _prepare_macos_binary(self, binary: Path) -> dict[str, Any]:
         if sys_platform() != "darwin":
             return {"ok": True, "skipped": True, "reason": "not_macos"}
-        quarantine = _strip_quarantine(binary)
-        if _codesign_valid(binary):
-            return {"ok": True, "changed": False, "quarantine": quarantine}
-        codesign = shutil.which("codesign")
-        if not codesign:
-            return {"ok": False, "reason": "codesign_missing", "quarantine": quarantine}
-        proc = subprocess.run(
-            [codesign, "-f", "-s", "-", str(binary)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            **isolated_subprocess_kwargs(),
-        )
-        verified = proc.returncode == 0 and _codesign_valid(binary)
-        return {
-            "ok": verified,
-            "changed": proc.returncode == 0,
-            "reason": None if verified else ("codesign_failed" if proc.returncode != 0 else "codesign_verify_failed"),
-            "output": _truncate((proc.stdout or "") + (proc.stderr or "")),
-            "quarantine": quarantine,
-        }
+        return _strip_quarantine(binary)
 
-    def _failure(
-        self,
-        reason: str,
-        *,
-        manifest: TmuxManifest | None = None,
-        archive: TmuxArchive | None = None,
-        message: str | None = None,
-    ) -> dict[str, Any]:
-        self._install_reason = reason
-        return {
-            "ok": False,
-            "installed": False,
-            "changed": False,
-            "reason": reason,
-            "message": message
-            or (
-                dependency_error_message(self._download_error, label="tmux dependency download")
-                if self._download_error
-                else _reason_message(reason)
-            ),
-            "version": manifest.tmux_version if manifest else None,
-            "platform": archive.platform if archive else _runtime_platform_tag(),
-            "path": None,
-            "output": None,
-            "download_error": self._download_error,
-        }
+    def _binary_version(self, binary: Path | None) -> str | None:
+        return _tmux_binary_version(binary)
+
+    def _binary_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
+        del manifest
+        return _tmux_binary_runnable(binary)
 
 
 def get_tmux_runtime_manager(**kwargs: Any) -> TmuxRuntimeManager:
@@ -491,7 +305,15 @@ def get_tmux_runtime_manager(**kwargs: Any) -> TmuxRuntimeManager:
 
 
 def ensure_tmux_installed(force: bool = False) -> dict[str, Any]:
-    return get_tmux_runtime_manager().ensure(force=force)
+    result = get_tmux_runtime_manager().ensure(force=force)
+    if (
+        not result.get("ok")
+        and not result.get("download_error")
+        and result.get("message") == result.get("reason")
+    ):
+        reason = str(result.get("reason") or "tmux_install_failed")
+        result["message"] = _tmux_failure_message(reason)
+    return result
 
 
 def resolve_tmux_binary() -> Path | None:
@@ -502,47 +324,8 @@ def tmux_status() -> dict[str, Any]:
     return get_tmux_runtime_manager().status()
 
 
-def _runtime_platform_tag() -> str:
-    raw = get_platform().lower()
-    machine = raw.rsplit("-", 1)[-1]
-    if machine == "universal2":
-        machine = platform.machine().lower()
-    if machine in {"amd64", "x86_64"}:
-        arch = "x64"
-    elif machine in {"arm64", "aarch64"}:
-        arch = "arm64"
-    else:
-        arch = machine
-    if raw.startswith("macosx"):
-        os_name = "darwin"
-    elif raw.startswith("linux"):
-        os_name = "linux"
-    elif raw.startswith("win"):
-        os_name = "win32"
-    else:
-        os_name = os.name
-    return f"{os_name}-{arch}"
-
-
 def sys_platform() -> str:
     return sys.platform
-
-
-def _codesign_valid(binary: Path) -> bool:
-    codesign = shutil.which("codesign")
-    if not codesign:
-        return False
-    try:
-        proc = subprocess.run(
-            [codesign, "-v", str(binary)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **isolated_subprocess_kwargs(),
-        )
-    except Exception:  # noqa: BLE001
-        return False
-    return proc.returncode == 0
 
 
 def _strip_quarantine(binary: Path) -> dict[str, Any]:
@@ -561,7 +344,12 @@ def _strip_quarantine(binary: Path) -> dict[str, Any]:
     text = (proc.stderr or proc.stdout or "").lower()
     if "no such xattr" in text or "no such file" in text:
         return {"ok": True, "changed": False}
-    return {"ok": False, "changed": False, "reason": "xattr_failed", "output": _truncate(proc.stderr or proc.stdout or "")}
+    return {
+        "ok": False,
+        "changed": False,
+        "reason": "xattr_failed",
+        "output": _truncate(proc.stderr or proc.stdout or ""),
+    }
 
 
 def _tmux_binary_runnable(binary: Path) -> bool:
@@ -590,101 +378,7 @@ def _tmux_binary_version(binary: Path | None) -> str | None:
     return parts[-1] if parts else text
 
 
-def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
-    supports_data_filter = hasattr(tarfile, "data_filter")
-    destination_resolved = destination.resolve()
-    for member in tar.getmembers():
-        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-            raise ValueError(f"Unsupported tmux archive member type: {member.name}")
-        if _tar_archive_path_is_unsafe(member.name):
-            raise ValueError(f"Unsafe tmux archive member path: {member.name}")
-        if (member.issym() or member.islnk()) and _tar_archive_path_is_unsafe(member.linkname):
-            raise ValueError(f"Unsafe tmux archive link target: {member.name}")
-        target = (destination / member.name).resolve()
-        if target != destination_resolved and destination_resolved not in target.parents:
-            raise ValueError(f"Unsafe tmux archive member path: {member.name}")
-        if member.issym():
-            link_target = Path(member.linkname)
-            resolved_link = (target.parent / link_target).resolve() if not link_target.is_absolute() else link_target.resolve()
-            if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
-                raise ValueError(f"Unsafe tmux archive link target: {member.name}")
-        if member.islnk():
-            link_target = Path(member.linkname)
-            resolved_link = (destination / link_target).resolve()
-            if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
-                raise ValueError(f"Unsafe tmux archive link target: {member.name}")
-    if supports_data_filter:
-        tar.extractall(destination, filter="data")
-    else:
-        tar.extractall(destination)
-
-
-def _tar_archive_path_is_unsafe(value: str) -> bool:
-    if not value:
-        return True
-    posix_path = PurePosixPath(value)
-    windows_path = PureWindowsPath(value)
-    if posix_path.is_absolute() or windows_path.is_absolute():
-        return True
-    if windows_path.drive or windows_path.root:
-        return True
-    return ".." in posix_path.parts or ".." in windows_path.parts
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _make_executable(path: Path) -> None:
-    mode = path.stat().st_mode
-    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-def _safe_path_part(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in value.strip())
-    return cleaned.strip(".-") or "unknown"
-
-
-def _env_flag_enabled(name: str, *, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _manifest_status_payload(manifest: TmuxManifest | None) -> dict[str, Any] | None:
-    if manifest is None:
-        return None
-    return {
-        "schema_version": manifest.schema_version,
-        "tmux_version": manifest.tmux_version,
-        "source": manifest.source,
-        "source_url": manifest.source_url,
-        "requires_utf8proc": manifest.requires_utf8proc,
-        "terminfo": manifest.terminfo,
-        "sha256": manifest.digest,
-        "loaded_from": manifest.loaded_from,
-    }
-
-
-def _archive_status_payload(archive: TmuxArchive | None) -> dict[str, Any] | None:
-    if archive is None:
-        return None
-    return {
-        "platform": archive.platform,
-        "name": archive.name,
-        "url": redact_url(archive.url),
-        "sha256": archive.sha256,
-        "size": archive.size,
-        "bin_path": archive.bin_path,
-    }
-
-
-def _reason_message(reason: str) -> str:
+def _tmux_failure_message(reason: str) -> str:
     messages = {
         "tmux_archive_checksum_mismatch": "tmux archive checksum did not match the pinned manifest.",
         "tmux_archive_size_mismatch": "tmux archive size did not match the pinned manifest.",

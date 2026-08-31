@@ -5,7 +5,11 @@ import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal } from 
 import clsx from 'clsx';
 import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
-import { badgeVariants } from './ui/badge-variants';
+import {
+  badgeVariants,
+  interactiveBadgeTriggerClassName,
+  mobileHeaderPopoverClassName,
+} from './ui/badge-variants';
 import { cn } from '@/lib/utils';
 import { setConfigField } from '@/lib/configMutations';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
@@ -128,7 +132,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         onClick={() => setIsPopupOpen(!isPopupOpen)}
         className={cn(
           badgeVariants({ variant: hasUpdate ? 'warning' : 'secondary' }),
-          'relative cursor-pointer rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+          interactiveBadgeTriggerClassName,
+          'relative rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         )}
         title={badgeTitle}
       >
@@ -145,7 +150,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           className={clsx(
             'z-50 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl',
             // Mobile: full-width fixed below sticky header, with scroll
-            'fixed inset-x-3 top-[4.5rem] max-h-[calc(100dvh-5.5rem)] overflow-auto',
+            mobileHeaderPopoverClassName,
             // Desktop: anchor to trigger, fixed width
             'md:absolute md:inset-x-auto md:max-h-none md:w-72 md:overflow-visible',
             openUpward

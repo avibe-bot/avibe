@@ -281,14 +281,69 @@
       "platforms": "Platforms",
       "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
+      "shortcuts": "Shortcuts",
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
       "access": "Access"
     },
     "navigationLabel": "Settings sections",
+    "backToWorkbench": "Back to Workbench",
     "backToSections": "All settings",
+    "backToSection": "Back to {{section}}",
     "close": "Close Settings",
+    "shortcuts": {
+      "title": "Shortcuts",
+      "subtitle": "Choose the keyboard commands you use most often in Chat and Show Pages.",
+      "panelTitle": "Action shortcuts",
+      "panelDescription": "Changes apply immediately in this browser.",
+      "voiceInput": {
+        "title": "Chat voice input",
+        "description": "Start dictation in the chat composer, then finish it with the same shortcut."
+      },
+      "showPageAnnotation": {
+        "title": "Show Page annotation mode",
+        "description": "Enter annotation mode on the Show Page in front."
+      },
+      "change": "Change {{action}} shortcut",
+      "pressKeys": "Press shortcut",
+      "escapeToCancel": "Esc cancels",
+      "modifierRequired": "Include Option, Alt, Command, or Control.",
+      "reserved": "This shortcut is already used by Avibe.",
+      "conflict": "Already used by {{action}}.",
+      "saveFailed": "Couldn't save the shortcut in this browser.",
+      "modifierLabels": {
+        "control": "Control",
+        "option": "Option",
+        "command": "Command",
+        "ctrl": "Ctrl",
+        "alt": "Alt",
+        "shift": "Shift",
+        "meta": "Meta"
+      },
+      "keyLabels": {
+        "backspace": "Backspace",
+        "capsLock": "Caps Lock",
+        "contextMenu": "Context Menu",
+        "delete": "Delete",
+        "end": "End",
+        "enter": "Enter",
+        "escape": "Esc",
+        "home": "Home",
+        "insert": "Insert",
+        "numLock": "Num Lock",
+        "numpad": "Numpad {{key}}",
+        "numpadEnter": "Numpad Enter",
+        "pageDown": "Page Down",
+        "pageUp": "Page Up",
+        "pause": "Pause",
+        "printScreen": "Print Screen",
+        "scrollLock": "Scroll Lock",
+        "space": "Space",
+        "tab": "Tab"
+      },
+      "reset": "Restore defaults"
+    },
     "diagnosticsTab": "Diagnostics",
     "logsTab": "Logs",
     "diagnosticsNavigationLabel": "Diagnostics and logs",
@@ -672,6 +727,7 @@
         "title": "Models",
         "running": "Gateway running",
         "stopped": "Gateway off",
+        "unavailable": "Gateway enabled, currently unavailable",
         "degraded": "Gateway running degraded",
         "unread": "Gateway status unavailable",
         "notStarted": "Gateway off",
@@ -695,6 +751,10 @@
           "down": {
             "title": "Model gateway is off",
             "body": "The previous start did not become ready. Turn it on to try again."
+          },
+          "enabledDown": {
+            "title": "Model gateway is enabled but unavailable",
+            "body": "The enabled setting is saved. Turn it off and back on to retry now."
           },
           "notInstalled": {
             "title": "Model gateway is not installed",
@@ -721,9 +781,9 @@
             "body": "Configuration stays hidden until the runtime state can be confirmed."
           }
         },
-        "gatewayInfo": {
-          "label": "What the gateway is",
-          "body": "The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure."
+        "modelsInfo": {
+          "label": "What a model is",
+          "body": "A model is what an Agent uses to generate a response. You can see whether each model can run, which source supplies it, and set a route for one when needed."
         },
         "tab": {
           "hub": "Sources & gateway",
@@ -751,7 +811,8 @@
           }
         },
         "action": {
-          "switchToGateway": "Switch to gateway"
+          "switchToGateway": "Switch to gateway",
+          "refreshAgents": "Detect Agent backends again"
         },
         "benefits": {
           "title": "Switch to the gateway and you gain three things",
@@ -832,15 +893,26 @@
         "retry": "Try again"
       },
       "gateway": {
-        "heading": "Gateway",
-        "sourceOrder": "Source order",
+        "heading": "Gateway routes",
+        "infoLabel": "What gateway routes are",
+        "info": "Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
+        "sourceOrder": "Adjust priority",
+        "manageModels": "Manage models",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
+        "modeMenu": {
+          "title": "Runtime mode",
+          "gatewayCurrent": "Gateway (current)",
+          "gatewayDescription": "Assign requests to model providers by route and priority",
+          "directDescription": "Use {{backend}}'s own models and credentials; gateway routes and priority no longer apply"
+        },
         "fail": {
           "switchToDirect": "The switch back to direct did not go through"
         },
         "modelCount_one": "{{count}} model",
         "modelCount_other": "{{count}} models",
+        "selectedModelCount_one": "{{count}} selected",
+        "selectedModelCount_other": "{{count}} selected",
         "moreModels_one": "{{count}} more model",
         "moreModels_other": "{{count}} more models",
         "collapse": "Collapse",
@@ -850,8 +922,8 @@
           "unread": "Could not read this backend's supply · the gateway itself is fine"
         },
         "row": {
-          "current": "Now: {{source}}",
-          "currentTakeover": "Now: {{source}} (takeover)"
+          "current": "{{source}} → {{model}}",
+          "currentTakeover": "{{source}} → {{model}} (Taken over)"
         },
         "group": {
           "subtitle": {
@@ -867,9 +939,25 @@
             "degraded": "Degraded",
             "waiting": "Supply unavailable for now",
             "interrupted": "No source is available",
-            "noSelection": "No model selected"
+            "unconfigured": "No model route configured",
+            "unused": "No Agent uses this backend"
           },
+          "emptySelection": "No models selected",
           "emptyModels": "This backend has no models"
+        },
+        "menu": {
+          "title": "OpenCode model menu",
+          "description": "Choose which models OpenCode can use through the gateway, then configure each selected model's route from its row.",
+          "search": "Search models or sources",
+          "selected": "{{selected}} of {{total}} selected",
+          "empty": "No eligible source models are available",
+          "configured": "Existing configured model",
+          "baselineUnavailable": "Model menu data is not current. Wait for refresh, or retry the failed section before editing.",
+          "noMatch": "No models match this search",
+          "save": "Save selection",
+          "saving": "Saving…",
+          "cancel": "Cancel",
+          "saveFailed": "The model selection was not saved"
         }
       },
       "takeover": {
@@ -906,17 +994,23 @@
         "andMore_other": "{{count}} more"
       },
       "upstream": {
-        "heading": "Sources",
+        "heading": "Upstream sources",
+        "infoLabel": "What upstream sources are",
+        "info": "An upstream source is an account or API key. The gateway gets models from it and supplies them to Agents through routes.",
         "count_one": "{{count}} source",
         "count_other": "{{count}} sources",
         "group": {
           "native": "Native · on this machine",
-          "hub": "Held by the gateway"
+          "hub": "Connected to gateway"
         },
         "kind": {
           "nativeCredential": "Native · local credential",
           "subscription": "Subscription",
           "apiKey": "API key"
+        },
+        "vendor": {
+          "anthropic": "Anthropic",
+          "openai": "OpenAI"
         },
         "empty": "No sources yet. Add a subscription or an API key first.",
         "unread": "Could not read the source list · the gateway itself is fine",
@@ -926,7 +1020,7 @@
         "state": {
           "supplyingNative": "Supplying {{backend}} (native)",
           "supplying": "Supplying {{backends}}",
-          "standby": "Standby",
+          "standby": "Available · not currently supplying",
           "unavailableRetry": "Unavailable · retrying automatically after {{delay}}",
           "unavailableDue": "Unavailable · the retry is due"
         }
@@ -948,7 +1042,7 @@
         "count_other": "{{count}} sources",
         "group": {
           "native": "Native · on this machine",
-          "hub": "Held by the gateway"
+          "hub": "Connected to gateway"
         },
         "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
         "modelCount_one": "{{count}} model",
@@ -969,13 +1063,15 @@
         "oauthSignedOut": "CLI subscription is signed out"
       },
       "order": {
-        "title": "{{backend}} · Source order",
-        "subtitle": "The Source order this backend stores. Changing it changes no configured Route chain.",
+        "title": "{{backend}} · Global route priority",
+        "subtitle": "Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
+        "infoLabel": "What global route priority is",
         "reorder": "Reorder source",
         "section": {
           "ordered": "In this order",
           "ordered.note": "Drag to reorder",
-          "heldOut": "Not in this order"
+          "heldOut": "Not in this order",
+          "heldOut.note": "These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route."
         },
         "action": {
           "include": "Add to order",
@@ -1125,9 +1221,11 @@
       "routeDialog": {
         "title": "{{menuModel}} · Route chain",
         "open": "Open {{model}} route chain",
+        "openWithMapping": "Open {{model}} route chain · {{mapping}}",
         "label": "Route chain for this model",
         "section": "Route chain for this model",
         "removeHop": "Remove hop",
+        "editHop": "Edit hop",
         "addHop": "Add a hop",
         "add": {
           "source": "Source",
@@ -1137,8 +1235,12 @@
           "noMatch": "No source or model matches that",
           "none": "No source/model pair is available to add"
         },
+        "edit": {
+          "confirm": "Replace",
+          "replaced": "Hop {{position}} replaced."
+        },
         "sourceMissing": "Source missing",
-        "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Remove it before saving.",
+        "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Replace or remove it before saving.",
         "reorder": {
           "label": "Reorder by Source order",
           "grabbed": "Hop {{position}} grabbed. Use arrow keys to move.",
@@ -1158,7 +1260,7 @@
         "retry": "Retry",
         "empty": "This route chain is empty. Add a hop, or leave it unconfigured.",
         "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
-        "hint": "This chain is stored configuration. Later source-order changes do not change it."
+        "hint": "This chain is stored configuration. Later Source order changes reorder its hops to match."
       },
       "recent": {
         "title": "Recent switches",
@@ -1176,8 +1278,10 @@
         "subtitle": "Add connects once: it identifies the interface and fetches the model list",
         "field": {
           "name": "Name (optional)",
+          "protocol": "Interface type",
+          "protocol.hint": "Use Auto detect when unsure; choose a type to validate only that interface",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "Paste any relay, aggregator or self-hosted address — Avibe identifies the interface itself",
+          "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
           "apiKey": "API key",
           "apiKey.reveal": "Show API key",
           "apiKey.conceal": "Hide API key"
@@ -1191,11 +1295,11 @@
         },
         "submit": "Add",
         "adding": "Connecting…",
-        "adding.detail": "Connect, identify the interface, fetch the model list · usually 1–3s",
+        "adding.detail": "Connect, validate the interface, fetch the model list · usually 1–3s",
         "fail": {
           "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
-          "auth": "Authentication failed: 401 Unauthorized",
-          "auth.detail": "Check whether the API key is valid",
+          "auth": "The upstream rejected this credential",
+          "auth.detail": "Check the API key, interface type, and the Base URL's API root path",
           "address": "Wrong address: 404 Not Found",
           "network": "Could not connect to this address (unreachable or timed out)",
           "undetermined": "Connected, but we could not identify the model interface",
@@ -1207,11 +1311,10 @@
         "retry": "Retry",
         "undetermined": {
           "title": "Connected and authenticated — but we cannot tell which interface it speaks",
-          "detail": "The response shape matches no interface we know",
-          "label": "Interface type · you hint it this once",
-          "hint": "The hint only reorders the probe · it still has to really connect before anything is saved, and it cannot be changed afterwards"
+          "detail": "This response shape matches no interface we know; choosing one only narrows the retry probe, and the endpoint still has to prove the interface in its response"
         },
         "protocol": {
+          "auto": "Auto detect",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions"
@@ -1383,6 +1486,19 @@
       },
       "sourceDetail": {
         "back": "Back to sources",
+        "close": "Close provider details",
+        "modelsHeading": "Models",
+        "usageSummary_one": "{{count}} model · used by {{backends}}",
+        "usageSummary_other": "{{count}} models · used by {{backends}}",
+        "metadata": {
+          "endpoint": "Endpoint",
+          "apiKey": "API key",
+          "account": "Account",
+          "type": "Provider type",
+          "lastFetched": "Last fetched",
+          "officialEndpoint": "Provider default endpoint",
+          "neverFetched": "Not fetched yet"
+        },
         "status": {
           "inUse": "In use",
           "needsAction": {
@@ -1392,6 +1508,8 @@
             "accountBanned": "Account restricted"
           },
           "error": "Error",
+          "standbyHintLabel": "What this status means",
+          "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",
@@ -1450,7 +1568,8 @@
           "unchangedOnly": "Nothing changed in this fetch"
         },
         "row": {
-          "remove": "Remove"
+          "remove": "Remove",
+          "edit": "Edit reasoning tiers for {{model}}"
         },
         "fail": {
           "refetch": "The fetch did not come back. The list below is the last one this page actually read",
@@ -1463,6 +1582,7 @@
         "retry": "Try again",
         "dismissUnverified": "Dismiss unverified result",
         "search": "Search model IDs",
+        "searchEmpty": "No models match this search",
         "col": {
           "id": "Model ID",
           "entry": "Entry",
@@ -1477,14 +1597,16 @@
           "addFirst": "+ Add tier",
           "add": "+ Tier",
           "inputHint": "Enter to add · any text",
-          "remove": "Remove {{tier}}"
+          "remove": "Remove {{tier}}",
+          "suggest": "Add {{tier}}",
+          "note": "Tiers are sent exactly as typed. A model with no tiers is still routable — its requests are sent without the effort parameter."
         },
         "addRow": {
           "hint": "Use this when a model is not discoverable, or when you only want one of them"
         },
         "empty": "This source returned no models. Add one by hand, or refetch.",
         "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
-        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and fixed there — it is neither shown on this page nor editable."
+        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is confirmed when the source is added, shown here, and not editable."
       },
       "guard": {
         "label": "Hops that will be removed",
@@ -1792,6 +1914,12 @@
     "memory_runtime_missing": "The memory-runtime dependency isn't installed yet.",
     "memory_runtime_unsupported": "The memory-runtime dependency isn't supported on this platform.",
     "memory_runtime_install_failed": "The memory-runtime dependency failed to install.",
+    "memory_runtime_preparation_failed": "The memory runtime failed its local compatibility checks. Retry the install.",
+    "memory_runtime_preparation_import_timeout": "The memory runtime's first import check timed out. Retry after checking available CPU and disk I/O.",
+    "memory_runtime_preparation_import_failed": "The memory runtime failed its import compatibility check. Retry the install.",
+    "memory_runtime_preparation_scrubber_timeout": "The memory runtime's diagnostic safety check timed out. Retry after checking system load.",
+    "memory_runtime_preparation_scrubber_failed": "The memory runtime failed its diagnostic safety check. Retry the install.",
+    "memory_runtime_preparation_sync_contract_failed": "The memory runtime does not match this Avibe version's sync contract. Reinstall the runtime.",
     "memory_runtime_install_requires_disabled_memory": "Turn Memory off in Settings \u2192 Memory before repairing a running Memory runtime.",
     "memory_reconcile_failed": "Avibe couldn't apply the Memory settings. Check the runtime logs for the failing step.",
     "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
@@ -3683,6 +3811,7 @@
         "closeAnnotation": "Turn off annotation",
         "modeTitle": "Annotation mode",
         "rememberHint": "Remembers last choice",
+        "shortcutHint": "Press {{shortcut}} to enter annotation mode; press Esc to exit",
         "unavailable": "Annotation not available yet"
       },
       "title": "Show Page",
@@ -3821,6 +3950,7 @@
       "stop": "Stop",
       "attach": "Attach files",
       "voice": "Voice input",
+      "voiceShortcutHint": "Press {{shortcut}} for voice input, press it again to finish, or press Esc to cancel",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
       "voicePreview": "Live transcription preview",
@@ -3885,13 +4015,14 @@
       "interrupted": "Interrupted · stopped at step {{count}}",
       "expand": "Show activity",
       "collapse": "Hide activity",
+      "enable": "Turn on Agent activity",
+      "disable": "Turn off Agent activity",
       "showCall": "Show details",
       "hideCall": "Hide details",
       "jumpToLatest": "Jump to latest",
       "loadFailed": "Couldn't load activity detail.",
       "retry": "Retry",
-      "durationMin": "{{minutes}}m {{seconds}}s",
-      "durationSec": "{{seconds}}s",
+      "dayShort": "d",
       "empty": "No activity recorded for this turn.",
       "tools": "Tools",
       "showTools": "Show tool calls",
@@ -4508,8 +4639,8 @@
       "loading": "Loading profile…",
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
-      "partial": "One profile source could not be loaded. The profile shown here may be incomplete.",
-      "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
+      "partial": "Some profile information could not be loaded. Refresh to try again.",
+      "warningEmpty": "Your profile hasn't been generated yet. Keep chatting with your Agent; once there's more content, Avibe will try to generate it. You can also search your existing memories.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
       "summary": "Summary",
@@ -4598,7 +4729,7 @@
         "dashscope": "DashScope"
       },
       "multimodalTitle": "IM attachment processing model (optional)",
-      "multimodalHelp": "When fully configured, eligible attachments from bound direct messages are sent to this OpenAI-compatible vision endpoint for Memory capture. Office documents also require LibreOffice on this machine and are unavailable on native Windows. SVG and video stay excluded.",
+      "multimodalHelp": "When fully configured, eligible attachments from bound direct messages are sent to this OpenAI-compatible vision endpoint for Memory capture. Formats that require external conversion, including Office documents, stay excluded alongside SVG and video.",
       "multimodalHelpLabel": "About IM attachment processing",
       "multimodalClearLabel": "Disable IM attachment capture",
       "baseUrl": "Base URL",

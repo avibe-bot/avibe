@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  agentGroupStatus,
   attribution,
   hasAttribution,
   healthyButUnrunnable,
@@ -84,6 +85,59 @@ const cannotLaunch = (...ids: string[]) =>
     eligible: true,
     process_availability_reason: 'native_cli_unavailable' as const,
   }));
+
+describe('agentGroupStatus', () => {
+  const statuses = (...values: Array<'ok' | 'degraded' | 'waiting' | 'interrupted' | null>) =>
+    values.map((supplyStatus, index) => ({
+      name: `agent-${index}`,
+      effective_model_id: supplyStatus === null ? null : `model-${index}`,
+      supply_status: supplyStatus,
+    }));
+
+  it('reports an unused backend only when no enabled Agent uses it', () => {
+    expect(agentGroupStatus([])).toBe('unused');
+  });
+
+  it('reports a configuration gap separately from unavailable configured sources', () => {
+    expect(agentGroupStatus([
+      {
+        name: 'opencode',
+        effective_model_id: 'openai/gpt-5.6-terra',
+        supply_status: 'interrupted',
+        route_reason: 'route_unconfigured',
+      },
+    ])).toBe('unconfigured');
+    expect(agentGroupStatus([
+      {
+        name: 'opencode',
+        effective_model_id: 'openai/gpt-5.6-terra',
+        supply_status: 'interrupted',
+        route_reason: null,
+      },
+    ])).toBe('interrupted');
+  });
+
+  it('reports an Agent without a model as unconfigured', () => {
+    expect(agentGroupStatus(statuses(null))).toBe('unconfigured');
+  });
+
+  it('reports healthy only when every enabled Agent is healthy', () => {
+    expect(agentGroupStatus(statuses('ok', 'ok'))).toBe('ok');
+  });
+
+  it('reports degraded while at least one Agent remains usable but the group is not fully healthy', () => {
+    expect(agentGroupStatus(statuses('ok', 'interrupted'))).toBe('degraded');
+    expect(agentGroupStatus(statuses('degraded', 'waiting'))).toBe('degraded');
+  });
+
+  it('reports waiting when no Agent is usable and at least one can recover without action', () => {
+    expect(agentGroupStatus(statuses('waiting', 'interrupted'))).toBe('waiting');
+  });
+
+  it('reports interrupted when no Agent is usable or self-healing', () => {
+    expect(agentGroupStatus(statuses('interrupted', null))).toBe('interrupted');
+  });
+});
 
 const cannotLaunchOffRoute = (...ids: string[]) =>
   cannotLaunch(...ids).map((eligibility) => ({ ...eligibility, in_current_model_chain: false }));

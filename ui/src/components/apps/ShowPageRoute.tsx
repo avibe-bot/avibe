@@ -101,13 +101,17 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
     state: annotationState,
     setIframe,
     handleIframeLoad,
+    handleShortcutKeyDown,
     enable: enableAnnotation,
     disable: disableAnnotation,
     setMode: setAnnotationMode,
   } = useShowPageAnnotation(src);
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-background pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+    <div
+      className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-background pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]"
+      onKeyDown={handleShortcutKeyDown}
+    >
       <header className="flex shrink-0 items-center gap-3 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur">
         <Button
           type="button"

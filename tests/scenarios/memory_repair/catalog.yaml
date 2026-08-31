@@ -3,6 +3,7 @@ capability:
   id: memory_repair
   name: Unified non-destructive Wake and destructive Memory Repair
   canonical_tests:
+    - tests/test_vibe_cli.py
     - tests/test_ui_memory_routes.py
     - tests/test_memory_wake.py
     - tests/test_memory_supervisor.py
@@ -204,3 +205,25 @@ scenarios:
     then: Scope identity, provider-root identity, and project rows survive
     expected_outputs:
       - Stable identities and projects with a new data epoch
+  - id: MEMORY-RUNTIME-001
+    name: Doctor projects managed runtime truth and repairs through the controller
+    status: covered
+    kind: observability
+    layer: contract
+    test: tests/test_vibe_cli.py::test_managed_dependencies_doctor_reports_memory_runtime_states
+    related_tests:
+      - tests/test_vibe_cli.py::test_memory_runtime_doctor_repair_uses_controller_ipc
+      - tests/test_vibe_cli.py::test_memory_runtime_doctor_repair_preserves_controller_failure
+      - tests/test_vibe_cli.py::test_doctor_localizes_bounded_memory_runtime_preparation_reasons
+    actor: Avibe operator
+    trigger: Doctor inspects or repairs Memory Runtime
+    conditions:
+      - Runtime status is read from the shared disk-truthful dependency owner
+      - Artifact mutation remains owned by the running controller lifecycle
+    given: Memory Runtime is ready, missing, failed, or unsupported
+    when: Doctor reports readiness or runs the explicit runtime repair target
+    then: Severity follows required state and supported repair crosses internal IPC
+    expected_outputs:
+      - Ready, missing, error, or unsupported status with the retained reason
+      - No repair offer for an unsupported platform
+      - Controller-owned artifact installation for supported repair

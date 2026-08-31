@@ -1,4 +1,5 @@
 import logging
+import threading
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
@@ -114,7 +115,11 @@ class SettingsManager:
         if sessions_store is None:
             self.sessions_store.load()
         self.sessions = sessions_facade or SessionsFacade(self.sessions_store)
-        self._last_seen_store_mtime: Optional[float] = None
+        self._runtime_settings_lock = threading.RLock()
+        self._last_seen_store_generation: Optional[int] = None
+        self._runtime_rebuild_count = 0
+        self._last_changed_channel_count = 0
+        self._last_changed_dm_user_count = 0
         self._load_settings()
 
     # ---------------------------------------------
@@ -202,34 +207,80 @@ class SettingsManager:
         bound.routing = _clone_routing(settings.channel_routing)
 
     def _load_settings(self):
-        """Load settings from JSON file"""
+        """Load runtime settings from the shared settings store."""
         self.store = SettingsStore.get_instance(self.settings_file)
-        self._rebuild_runtime_settings()
-        self._last_seen_store_mtime = self.store._file_mtime
+        self._rebuild_runtime_settings(reason="initial_load")
+        self._last_seen_store_generation = self.store.generation
 
     def _reload_if_changed(self) -> None:
-        """Reload runtime settings if the underlying store has changed on disk.
+        """Reload runtime settings after a committed settings-domain change.
 
-        Uses a locally tracked mtime so that same-process writes (e.g. from
+        Uses a locally tracked generation so that same-process writes (e.g. from
         the UI API hitting the singleton store) are detected correctly.
         """
-        self.store.maybe_reload()
-        if self.store._file_mtime != self._last_seen_store_mtime:
-            logger.info("Settings file changed on disk, rebuilding runtime settings")
-            self._rebuild_runtime_settings()
-            self._last_seen_store_mtime = self.store._file_mtime
+        with self._runtime_settings_lock:
+            self.store.maybe_reload()
+            if self.store.generation != self._last_seen_store_generation:
+                self._rebuild_runtime_settings(reason="settings_revision_changed")
+                self._last_seen_store_generation = self.store.generation
 
-    def _rebuild_runtime_settings(self) -> None:
-        """Rebuild the in-memory settings dicts from the store."""
-        self.channel_settings = {}
-        self.dm_user_settings = {}
-        for cid, cs in self.store.get_channels_for_platform(self.platform).items():
-            self.channel_settings[str(cid)] = self._from_channel_settings(cs)
-        for uid, us in self.store.get_users_for_platform(self.platform).items():
-            self.dm_user_settings[str(uid)] = self._from_bound_user_settings(us)
-        logger.info(
-            f"Rebuilt runtime settings for {len(self.channel_settings)} channels, {len(self.dm_user_settings)} DM users"
+    def _rebuild_runtime_settings(self, *, reason: str = "manual") -> None:
+        """Synchronize only runtime entries whose persisted settings changed."""
+        channels = {
+            str(cid): self._from_channel_settings(settings)
+            for cid, settings in self.store.get_channels_for_platform(self.platform).items()
+        }
+        dm_users = {
+            str(uid): self._from_bound_user_settings(settings)
+            for uid, settings in self.store.get_users_for_platform(self.platform).items()
+        }
+        changed_channels = set(self.channel_settings) ^ set(channels)
+        changed_channels.update(
+            key
+            for key in self.channel_settings.keys() & channels.keys()
+            if self.channel_settings[key] != channels[key]
         )
+        changed_dm_users = set(self.dm_user_settings) ^ set(dm_users)
+        changed_dm_users.update(
+            key
+            for key in self.dm_user_settings.keys() & dm_users.keys()
+            if self.dm_user_settings[key] != dm_users[key]
+        )
+        for key in changed_channels:
+            if key in channels:
+                self.channel_settings[key] = channels[key]
+            else:
+                self.channel_settings.pop(key, None)
+        for key in changed_dm_users:
+            if key in dm_users:
+                self.dm_user_settings[key] = dm_users[key]
+            else:
+                self.dm_user_settings.pop(key, None)
+        self._runtime_rebuild_count += 1
+        self._last_changed_channel_count = len(changed_channels)
+        self._last_changed_dm_user_count = len(changed_dm_users)
+        logger.info(
+            "Runtime settings synchronized reason=%s sync_count=%d "
+            "changed_channels=%d changed_dm_users=%d total_channels=%d total_dm_users=%d",
+            reason,
+            self._runtime_rebuild_count,
+            self._last_changed_channel_count,
+            self._last_changed_dm_user_count,
+            len(self.channel_settings),
+            len(self.dm_user_settings),
+        )
+
+    def runtime_settings_diagnostics(self) -> dict[str, int]:
+        """Return bounded counters for reload-frequency diagnostics."""
+        with self._runtime_settings_lock:
+            return {
+                "store_reload_count": self.store.reload_count,
+                "rebuild_count": self._runtime_rebuild_count,
+                "changed_channels": self._last_changed_channel_count,
+                "changed_dm_users": self._last_changed_dm_user_count,
+                "channels": len(self.channel_settings),
+                "dm_users": len(self.dm_user_settings),
+            }
 
     def _save_settings(self):
         """Save settings to JSON file.
@@ -253,9 +304,9 @@ class SettingsManager:
             for uid, s in self.dm_user_settings.items():
                 self._sync_to_bound_user(uid, s)
             self.store.save()
-            # Keep local mtime in sync so _reload_if_changed doesn't
+            # Keep the local generation in sync so _reload_if_changed doesn't
             # trigger an unnecessary rebuild right after our own save.
-            self._last_seen_store_mtime = self.store._file_mtime
+            self._last_seen_store_generation = self.store.generation
             logger.info("Settings saved successfully")
         except Exception as e:
             logger.error(f"Error saving settings: {e}")
@@ -322,7 +373,7 @@ class SettingsManager:
             if existing_thread is None and updated.require_mention is None:
                 updated.require_mention = bool(self.require_mention_default())
             self.store.update_thread(channel_id, thread_id, updated, platform=self.platform)
-            self._last_seen_store_mtime = self.store._file_mtime
+            self._last_seen_store_generation = self.store.generation
             return
 
         if normalized_id in self.dm_user_settings:
@@ -543,7 +594,7 @@ class SettingsManager:
                     )
             channel_settings.require_mention = value
             self.store.update_thread(parent_id, thread_id, channel_settings, platform=self.platform)
-            self._last_seen_store_mtime = self.store._file_mtime
+            self._last_seen_store_generation = self.store.generation
             logger.info("Updated require_mention for thread %s/%s: %s", parent_id, thread_id, value)
             return
         channel_settings = self.store.get_channel(key, platform=self.platform)

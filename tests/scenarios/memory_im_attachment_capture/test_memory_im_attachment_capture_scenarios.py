@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import threading
-import zipfile
 from types import SimpleNamespace
 
 import pytest
@@ -30,14 +28,6 @@ from tests.scenario_harness.memory_im_attachments import (
     MemoryIMAttachmentScenarioHarness,
 )
 from vibe import cli, internal_client
-
-
-def _xlsx_bytes() -> bytes:
-    payload = io.BytesIO()
-    with zipfile.ZipFile(payload, "w") as archive:
-        archive.writestr("[Content_Types].xml", b"content types")
-        archive.writestr("xl/workbook.xml", b"workbook")
-    return payload.getvalue()
 
 
 def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
@@ -363,90 +353,31 @@ def test_provider_attachment_rejection_retries_caption_as_text_only(
     assert harness.memory_bundle_entries == ()
 
 
-def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
+def test_external_conversion_attachment_preserves_valid_siblings(
     tmp_path,
     monkeypatch,
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-012."""
 
-    monkeypatch.setattr(
-        "avibe_memory.modality.office_document_conversion_succeeds",
-        lambda _path, **_kwargs: True,
-    )
-    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: False)
-    without_home = tmp_path / "without-soffice"
-    monkeypatch.setenv("AVIBE_HOME", str(without_home / "avibe-home"))
-    without_soffice = MemoryIMAttachmentScenarioHarness(without_home)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    harness = MemoryIMAttachmentScenarioHarness(tmp_path)
     asyncio.run(
-        without_soffice.capture(
-            text="Keep the image when Office conversion is missing",
+        harness.capture(
+            text="Keep the image and skip external conversion formats",
             payloads={
                 "valid.png": ("image/png", PNG_BYTES),
                 "report.xlsx": (
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    _xlsx_bytes(),
+                    b"external conversion input",
                 ),
             },
         )
     )
 
-    assert [item.name for item in without_soffice.provider.captures[0].attachments] == [
+    assert [item.name for item in harness.provider.captures[0].attachments] == [
         "valid.png"
     ]
-
-    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
-    with_home = tmp_path / "with-soffice"
-    monkeypatch.setenv("AVIBE_HOME", str(with_home / "avibe-home"))
-    with_soffice = MemoryIMAttachmentScenarioHarness(with_home)
-    asyncio.run(
-        with_soffice.capture(
-            text="Capture the spreadsheet when Office conversion is present",
-            payloads={
-                "valid.png": ("image/png", PNG_BYTES),
-                "report.xlsx": (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    _xlsx_bytes(),
-                ),
-            },
-        )
-    )
-
-    assert [item.name for item in with_soffice.provider.captures[0].attachments] == [
-        "valid.png",
-        "report.xlsx",
-    ]
-    assert [item.kind for item in with_soffice.provider.captures[0].attachments] == [
-        "image",
-        "doc",
-    ]
-    assert with_soffice.memory_bundle_entries == ()
-
-    availability = [True, False]
-    monkeypatch.setattr(
-        "avibe_memory.modality.office_conversion_available",
-        lambda: availability.pop(0),
-    )
-    stale_home = tmp_path / "soffice-removed-before-delivery"
-    monkeypatch.setenv("AVIBE_HOME", str(stale_home / "avibe-home"))
-    stale_soffice = MemoryIMAttachmentScenarioHarness(stale_home)
-    asyncio.run(
-        stale_soffice.capture(
-            text="Keep the image after Office conversion disappears",
-            payloads={
-                "valid.png": ("image/png", PNG_BYTES),
-                "report.xlsx": (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    _xlsx_bytes(),
-                ),
-            },
-        )
-    )
-
-    assert availability == []
-    assert [item.name for item in stale_soffice.provider.captures[0].attachments] == [
-        "valid.png"
-    ]
-    assert stale_soffice.memory_bundle_entries == ()
+    assert harness.memory_bundle_entries == ()
 
 
 class _ScenarioPrincipals:

@@ -14,6 +14,8 @@ from config import paths
 
 from vibe import runtime
 from vibe.upgrade import (
+    RestartState,
+    atomic_upgrade_lock,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
@@ -173,7 +175,7 @@ def _fail(payload: dict, error: str, log, return_code: int, *, started_at: float
         durations = dict(payload.get("stage_durations") or {})
         durations["restart_total_seconds"] = _rounded_seconds(time.monotonic() - started_at)
         payload["stage_durations"] = durations
-    payload.update(ok=False, state="failed", error=error)
+    payload.update(ok=False, state=RestartState.FAILED.value, error=error)
     _write_status(payload)
     log.write(f"{_now_iso()} {error}\n")
     log.flush()
@@ -334,7 +336,7 @@ def _run_restart_job(
             # seeds with the spawned subprocess pid (this process is that pid).
             "supervisor_pid": os.getpid(),
             "supervisor_started_at": runtime.process_create_time(os.getpid()),
-            "state": "scheduled" if delay_seconds > 0 else "running",
+            "state": RestartState.SCHEDULED.value if delay_seconds > 0 else RestartState.RUNNING.value,
             "trigger": trigger,
             "delay_seconds": delay_seconds,
             "scope": scope,
@@ -353,7 +355,7 @@ def _run_restart_job(
             delay_started_at = time.monotonic()
             time.sleep(delay_seconds)
             mark_duration("delay_seconds_actual", delay_started_at)
-            payload["state"] = "running"
+            payload["state"] = RestartState.RUNNING.value
             _write_status(payload)
             write("restart job started after delay")
             restart_started_at = time.monotonic()
@@ -428,7 +430,7 @@ def _run_restart_job(
         runtime.write_status("running", f"pid={new_pid}", new_pid, _live_ui_pid(recorded_ui_pid))
 
         mark_duration("restart_total_seconds", restart_started_at)
-        payload.update(ok=True, state="succeeded", new_pid=new_pid, error=None)
+        payload.update(ok=True, state=RestartState.SUCCEEDED.value, new_pid=new_pid, error=None)
         _write_status(payload)
         write(f"restart job succeeded new_pid={new_pid}")
 
@@ -493,15 +495,44 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
+    python_executable: str | None = None,
 ) -> dict:
-    """Spawn the detached restart job."""
-    from vibe.memory_ui_access import process_ui_read_secret
+    """Serialize restart seeding with staged install activation."""
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
+    with atomic_upgrade_lock():
+        return _schedule_restart_locked(
+            delay_seconds=delay_seconds,
+            vibe_path=vibe_path,
+            trigger=trigger,
+            scope=scope,
+            prepare_show_runtime=prepare_show_runtime,
+            memory_ui_secret=memory_ui_secret,
+            python_executable=python_executable,
+        )
+
+
+def _schedule_restart_locked(
+    *,
+    delay_seconds: float,
+    vibe_path: str | None,
+    trigger: str,
+    scope: str,
+    prepare_show_runtime: bool,
+    memory_ui_secret: str | None,
+    python_executable: str | None,
+) -> dict:
+    """Spawn the detached restart job while the caller owns activation."""
+    from vibe.memory_ui_access import process_ui_read_secret
+
+    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     job_id = uuid.uuid4().hex[:12]
-    invocation = get_restart_invocation_command(vibe_path=vibe_path)
+    invocation = (
+        [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
+        if python_executable
+        else get_restart_invocation_command(vibe_path=vibe_path)
+    )
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
         *(invocation or ["vibe"]),
         "__restart-supervisor",
@@ -514,6 +545,10 @@ def schedule_restart(
     if prepare_show_runtime:
         command.append("--prepare-show-runtime")
     env = get_restart_environment(vibe_path=vibe_path)
+    if python_executable:
+        env = dict(os.environ if env is None else env)
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Seed the status BEFORE spawning the job so the child's own writes (which set
@@ -525,7 +560,7 @@ def schedule_restart(
     payload = {
         "ok": None,
         "job_id": job_id,
-        "state": "scheduled",
+        "state": RestartState.SCHEDULED.value,
         "trigger": trigger,
         "scope": scope,
         "delay_seconds": delay_seconds,
@@ -560,7 +595,11 @@ def schedule_restart(
         # (bad cached vibe path, missing executable, permission/log-open error) no
         # child will ever overwrite it, leaving a permanently pending restart in
         # `vibe status`. Mark it failed before propagating.
-        payload.update(ok=False, state="failed", error=f"failed to spawn restart supervisor: {exc}")
+        payload.update(
+            ok=False,
+            state=RestartState.FAILED.value,
+            error=f"failed to spawn restart supervisor: {exc}",
+        )
         _write_status(payload)
         _prune_restart_logs()
         raise

@@ -959,6 +959,18 @@ def create_app(
             logger.exception("internal platform reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/invalidate-activity-streaming")
+    async def _invalidate_activity_streaming() -> Any:
+        """Drop the controller process's cached Agent Activity display flag."""
+        try:
+            from core.message_mirror import reset_activity_flag_cache
+
+            reset_activity_flag_cache()
+            return JSONResponse(status_code=200, content={"ok": True})
+        except Exception as exc:
+            logger.exception("internal Agent Activity cache invalidation failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
     @app.post("/internal/reconcile-agent-backends")
     async def _reconcile_agent_backends(request: Request) -> Any:
         """Hot-apply persisted Agent backend config on the controller loop."""
@@ -1685,6 +1697,8 @@ def create_app(
             parse_agent_search_project,
             parse_ui_search_project,
         )
+        from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+        from vibe.memory_contract import MAX_MEMORY_LIST_PAGE_SIZE
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
         origin = payload.get("origin", "user")
@@ -1703,7 +1717,7 @@ def create_app(
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
-            or not 1 <= limit <= 20
+            or not 1 <= limit <= MAX_MEMORY_LIST_PAGE_SIZE
             or origin not in ("user", "agent")
             or ("origin" in payload and not is_ui)
         ):
@@ -1807,7 +1821,6 @@ def create_app(
             or set(payload) - {"text", "project"}
             or not isinstance(payload.get("text"), str)
             or not payload["text"].strip()
-            or len(payload["text"]) > 4_000
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         from vibe.memory_project_ids import omitted_project_to_default, parse_writable_memory_project

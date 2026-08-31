@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import socket
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, AsyncIterator, BinaryIO, Mapping
+from decimal import Decimal
+from typing import Any, AsyncIterator, BinaryIO, Mapping, TypeVar, cast
 
 import aiohttp
+import ijson
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
@@ -20,24 +24,29 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
+from core.handlers.model_hub.json_wire import (
+    JSONEvent,
+    JSONPath,
+    JSONScope,
+    project_json_reader,
+)
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
     ProtocolSSEState,
     ProtocolUsageReport,
-    SSE_MAX_FRAME_BYTES,
-    SSE_MAX_PRELUDE_BYTES,
-    SSEFrameLimitError,
-    observe_protocol_response,
+    observe_buffered_protocol_response,
 )
 from vibe.model_hub_runtime.state import SourceRecord
 
 
-_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 64 * 1024
-_MODEL_PROBE_BYTES = 4 * 1024 * 1024
-_PRELUDE_MEMORY_BYTES = SSE_MAX_FRAME_BYTES
+# This threshold only selects memory or a temporary file; it never rejects or
+# truncates upstream response bytes.
+_PRELUDE_MEMORY_BYTES = 256 * 1024
+_ERROR_OBSERVATION_BYTES = 256 * 1024
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
@@ -45,6 +54,19 @@ _OFFICIAL_BASE_URLS = {
 }
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
+_ProjectedJSON = TypeVar("_ProjectedJSON")
+
+
+def upstream_api_url(root: str, path: str) -> str:
+    """Resolve a standard v1 endpoint from either an origin or an API root."""
+
+    normalized = normalize_model_hub_base_url(root)
+    assert normalized is not None
+    root_path = urllib.parse.urlsplit(normalized).path.rstrip("/")
+    append_path = path if not root_path else path.removeprefix("/v1")
+    resolved = normalize_model_hub_base_url(normalized, append_path=append_path)
+    assert resolved is not None
+    return resolved
 
 
 class EngineClientError(RuntimeError):
@@ -64,10 +86,6 @@ class EngineClientError(RuntimeError):
         self.error_candidates = error_candidates
 
 
-class _ResponseTooLargeError(RuntimeError):
-    pass
-
-
 class _StreamPrelude:
     """Per-invocation byte owner that spills pre-output data out of memory."""
 
@@ -75,10 +93,8 @@ class _StreamPrelude:
         self,
         *,
         memory_limit: int | None = None,
-        total_limit: int | None = None,
     ) -> None:
         self._memory_limit = _PRELUDE_MEMORY_BYTES if memory_limit is None else memory_limit
-        self._total_limit = SSE_MAX_PRELUDE_BYTES if total_limit is None else total_limit
         self._memory = bytearray()
         self._file: BinaryIO | None = None
         self._stored_bytes = 0
@@ -100,22 +116,25 @@ class _StreamPrelude:
     def closed(self) -> bool:
         return self._closed
 
-    def write(self, data: bytes) -> bool:
+    def write(self, data: bytes) -> None:
         if self._closed:
             raise RuntimeError("stream prelude is closed")
-        if self._stored_bytes + len(data) > self._total_limit:
-            return False
         if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
             self._memory.extend(data)
             self._stored_bytes += len(data)
-            return True
+            return
         if self._file is None:
             self._file = tempfile.TemporaryFile()
             self._file.write(self._memory)
             self._memory.clear()
         self._file.write(data)
         self._stored_bytes += len(data)
-        return True
+
+    async def write_async(self, data: bytes) -> None:
+        if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
+            self.write(data)
+            return
+        await run_owned_in_thread(self.write, data)
 
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._closed:
@@ -124,8 +143,8 @@ class _StreamPrelude:
             if self._memory:
                 yield bytes(self._memory)
             return
-        self._file.seek(0)
-        while chunk := self._file.read(_STREAM_CHUNK_BYTES):
+        await run_owned_in_thread(self._file.seek, 0)
+        while chunk := await run_owned_in_thread(self._file.read, _STREAM_CHUNK_BYTES):
             yield chunk
 
     def close(self) -> None:
@@ -136,6 +155,73 @@ class _StreamPrelude:
         if self._file is not None:
             self._file.close()
             self._file = None
+
+    def reader(self) -> BinaryIO:
+        """Return the body from its beginning without copying spilled bytes."""
+
+        if self._closed:
+            raise RuntimeError("stream prelude is closed")
+        if self._file is None:
+            return io.BytesIO(self._memory)
+        self._file.seek(0)
+        return self._file
+
+    def prefix(self, limit: int) -> bytes:
+        """Return bounded diagnostic bytes without changing response ownership."""
+
+        if self._closed:
+            return b""
+        if self._file is None:
+            return bytes(self._memory[:limit])
+        self._file.seek(0)
+        return self._file.read(limit)
+
+    async def prefix_async(self, limit: int) -> bytes:
+        if self._file is None:
+            return self.prefix(limit)
+        return await run_owned_in_thread(self.prefix, limit)
+
+
+class _DeadlineReader:
+    """Keep local response projection inside the request's absolute deadline."""
+
+    def __init__(self, reader: BinaryIO, deadline: float) -> None:
+        self._reader = reader
+        self._deadline = deadline
+
+    def _check_deadline(self) -> None:
+        if time.monotonic() >= self._deadline:
+            raise asyncio.TimeoutError("engine API response exceeded its request deadline")
+
+    def read(self, size: int = -1) -> bytes:
+        self._check_deadline()
+        payload = self._reader.read(size)
+        self._check_deadline()
+        return payload
+
+    def readinto(self, buffer: bytearray) -> int | None:
+        self._check_deadline()
+        readinto = getattr(self._reader, "readinto", None)
+        if readinto is None:
+            payload = self._reader.read(len(buffer))
+            count = len(payload)
+            buffer[:count] = payload
+        else:
+            count = readinto(buffer)
+        self._check_deadline()
+        return count
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._reader.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._reader.tell()
+
+    def readable(self) -> bool:
+        return self._reader.readable()
+
+    def seekable(self) -> bool:
+        return self._reader.seekable()
 
 
 @dataclass(frozen=True)
@@ -209,16 +295,23 @@ class EngineClient:
 
     def health(self) -> bool:
         try:
-            models = self._request_json(
+            models_ok = self._request_json_projection(
                 "GET",
                 "/v1/models",
+                _project_models_health,
                 headers={"Authorization": f"Bearer {self.connection.gateway_token}"},
                 timeout=min(self.timeout, 1.0),
             )
-            config = self.management_request("GET", "/config", timeout=min(self.timeout, 1.0))
+            config_ok = self._request_json_projection(
+                "GET",
+                "/v0/management/config",
+                _project_root_map,
+                headers={"X-Management-Key": self.connection.management_key},
+                timeout=min(self.timeout, 1.0),
+            )
         except EngineClientError:
             return False
-        return models.get("object") == "list" and isinstance(config, dict)
+        return models_ok and config_ok
 
     def management_request(
         self,
@@ -309,25 +402,32 @@ class EngineClient:
                 timeout=self.timeout,
             )
             if response.status >= 300:
+                error_body = _StreamPrelude()
+                response_deadline = time.monotonic() + self.timeout
                 try:
-                    payload = await asyncio.wait_for(
-                        _read_limited(response.content, _MAX_RESPONSE_BYTES),
+                    await asyncio.wait_for(
+                        _read_response_into(response.content, error_body),
                         timeout=self.timeout,
                     )
-                except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
+                    observed_payload = await _observe_buffered_protocol_response_async(
+                        observe_buffered_protocol_response,
+                        request_protocol,
+                        error_body,
+                        machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                        deadline=response_deadline,
+                    )
+                    payload = await error_body.prefix_async(_ERROR_OBSERVATION_BYTES)
+                except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
-                observed_payload = observe_protocol_response(
-                    request_protocol,
-                    streamed=False,
-                    data=payload,
-                )
+                    observed_payload = ProtocolObservation()
+                finally:
+                    error_body.close()
                 outcome = _reduce_protocol_observation(
-                    ProtocolObservation(
+                    replace(
+                        observed_payload,
                         outcome="failed_terminal",
                         error_payload=payload,
-                        error_envelope_paths=observed_payload.error_envelope_paths,
                         message=f"upstream returned HTTP {response.status}",
-                        usage=observed_payload.usage,
                     ),
                     source=source,
                     model_id=model_id,
@@ -357,34 +457,20 @@ class EngineClient:
                 )
             first_received = True
             if not stream:
-                try:
-                    first = await asyncio.wait_for(
-                        _read_limited(
-                            response.content,
-                            _MAX_RESPONSE_BYTES,
-                            initial=first,
-                        ),
-                        timeout=self.timeout,
-                    )
-                except _ResponseTooLargeError:
-                    response.close()
-                    await session.close()
-                    return ended(
-                        _protocol_error_outcome(
-                            ProtocolObservation(
-                                outcome="protocol_error",
-                                message="upstream response exceeded the local limit",
-                            ),
-                            source,
-                            model_id,
-                            response.status,
-                            False,
-                        )
-                    )
-                observation = observe_protocol_response(
+                buffered_body = _StreamPrelude()
+                prelude = buffered_body
+                response_deadline = time.monotonic() + self.timeout
+                await buffered_body.write_async(first)
+                await asyncio.wait_for(
+                    _read_response_into(response.content, buffered_body),
+                    timeout=self.timeout,
+                )
+                observation = await _observe_buffered_protocol_response_async(
+                    observe_buffered_protocol_response,
                     request_protocol,
-                    streamed=False,
-                    data=first,
+                    buffered_body,
+                    machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                    deadline=response_deadline,
                 )
                 outcome = _reduce_protocol_observation(
                     observation,
@@ -397,10 +483,13 @@ class EngineClient:
                 response.close()
                 await session.close()
                 ownership_transferred = True
-                return (
-                    buffered_handle(first, outcome)
-                    if outcome.kind == RawOutcomeKind.SUCCESS
-                    else ended(outcome)
+                if outcome.kind != RawOutcomeKind.SUCCESS:
+                    buffered_body.close()
+                    return ended(outcome)
+                return buffered_prelude_handle(
+                    buffered_body,
+                    outcome,
+                    None,
                 )
 
             prelude = _StreamPrelude()
@@ -442,6 +531,14 @@ class EngineClient:
                 prelude.close()
                 response.close()
                 await session.close()
+                outcome = _observed_stream_terminal_outcome(
+                    wire_state,
+                    source,
+                    model_id,
+                    response.status,
+                )
+                if outcome is not None and not outcome_future.done():
+                    outcome_future.set_result(outcome)
 
             handle = EngineInvokeHandle(
                 stream=response_stream,
@@ -462,23 +559,14 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request timed out",
-                    stream_started=model_output_started if stream else False,
+                    stream_started=(
+                        wire_state.model_output_started
+                        if stream and wire_state is not None
+                        else model_output_started if stream else False
+                    ),
                 )
             )
-        except SSEFrameLimitError as exc:
-            if response is not None:
-                response.close()
-            await session.close()
-            return ended(
-                _protocol_error_outcome(
-                    ProtocolObservation(outcome="protocol_error", message=str(exc)),
-                    source,
-                    model_id,
-                    response.status if response is not None else None,
-                    model_output_started if stream else False,
-                )
-            )
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, OSError) as exc:
             if response is not None:
                 response.close()
             await session.close()
@@ -489,8 +577,16 @@ class EngineClient:
                     model_id=model_id,
                     error_code="engine_down",
                     http_status=response.status if response is not None and first_received else None,
-                    message="upstream request failed",
-                    stream_started=model_output_started if stream else False,
+                    message=(
+                        "local response replay failed"
+                        if isinstance(exc, OSError)
+                        else "upstream request failed"
+                    ),
+                    stream_started=(
+                        wire_state.model_output_started
+                        if stream and wire_state is not None
+                        else model_output_started if stream else False
+                    ),
                 )
             )
         finally:
@@ -511,7 +607,30 @@ class EngineClient:
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        return self._request_json_projection(
+            method,
+            path,
+            _load_json_object,
+            query=query,
+            payload=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+
+    def _request_json_projection(
+        self,
+        method: str,
+        path: str,
+        projector: Callable[[BinaryIO], _ProjectedJSON],
+        *,
+        query: Mapping[str, str] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> _ProjectedJSON:
         url = self._url(path, query=query)
+        request_timeout = timeout or self.timeout
+        deadline = time.monotonic() + request_timeout
         data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
         request_headers = dict(headers or {})
         if data is not None:
@@ -522,11 +641,36 @@ class EngineClient:
                 urllib.request.ProxyHandler({}),
                 _NoRedirectHandler(),
             )
-            with opener.open(request, timeout=timeout or self.timeout) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
+            with opener.open(request, timeout=request_timeout) as response:
+                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
+                    _copy_sync_response(response, response_body, deadline=deadline)
+                    response_body.seek(0)
+                    try:
+                        return _project_before_deadline(
+                            response_body,
+                            projector,
+                            deadline=deadline,
+                        )
+                    except (ijson.JSONError, UnicodeDecodeError, ValueError, OverflowError):
+                        raise EngineClientError(
+                            "engine API returned an invalid payload",
+                            error_type="invalid_json",
+                        ) from None
         except urllib.error.HTTPError as exc:
-            raw = exc.read(_MAX_RESPONSE_BYTES)
-            error_type, error_code, error_candidates = _raw_error_fields(raw)
+            try:
+                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as response_body:
+                    _copy_sync_response(exc, response_body, deadline=deadline)
+                    response_body.seek(0)
+                    error_type, error_code, error_candidates = _project_before_deadline(
+                        response_body,
+                        _project_raw_error_fields,
+                        deadline=deadline,
+                    )
+            except (asyncio.TimeoutError, TimeoutError, socket.timeout, OSError) as read_error:
+                raise EngineClientError(
+                    "engine API is unavailable",
+                    error_type=type(read_error).__name__,
+                ) from None
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
                 status_code=exc.code,
@@ -534,17 +678,14 @@ class EngineClient:
                 error_code=error_code,
                 error_candidates=error_candidates,
             ) from None
-        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            asyncio.TimeoutError,
+            TimeoutError,
+            socket.timeout,
+            OSError,
+        ) as exc:
             raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
-        if len(raw) > _MAX_RESPONSE_BYTES:
-            raise EngineClientError("engine API response is too large", error_type="response_too_large")
-        try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json") from None
-        if not isinstance(decoded, dict):
-            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json")
-        return decoded
 
     def _url(self, path: str, *, query: Mapping[str, str] | None = None) -> str:
         url = f"{self.connection.base_url.rstrip('/')}{path}"
@@ -567,7 +708,7 @@ async def probe_models(
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
     try:
-        url = normalize_model_hub_base_url(root, append_path="/models")
+        url = upstream_api_url(root, "/v1/models")
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
@@ -578,6 +719,7 @@ async def probe_models(
             "anthropic-version": "2023-06-01",
             "Accept": "application/json",
         }
+    deadline = time.monotonic() + timeout
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -587,28 +729,121 @@ async def probe_models(
                         f"model discovery returned HTTP {response.status}",
                         status_code=response.status,
                     )
-                payload = await _read_limited(response.content, _MODEL_PROBE_BYTES)
-    except _ResponseTooLargeError:
-        raise EngineClientError("model discovery response is too large") from None
+                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
+                    while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
+                        await run_owned_in_thread(payload.write, chunk)
+                    projected = await run_owned_in_thread(
+                        _project_model_inventory_before_deadline,
+                        payload,
+                        deadline=deadline,
+                    )
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
         raise EngineClientError("model discovery failed", error_type="network_error") from None
-    try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise EngineClientError("model discovery returned an invalid payload") from None
-    if not isinstance(decoded, dict):
+    except OSError as exc:
+        raise EngineClientError(
+            "model discovery failed",
+            error_type=type(exc).__name__,
+        ) from None
+    if projected is None:
         raise EngineClientError("model discovery returned an invalid payload")
-    items = decoded.get("data", decoded.get("models"))
-    if not isinstance(items, list):
+    data_seen, data_is_array, data_models, fallback_seen, fallback_is_array, fallback_models = projected
+    if data_seen:
+        if not data_is_array:
+            raise EngineClientError("model discovery returned an invalid payload")
+        return tuple(data_models)
+    if not fallback_seen or not fallback_is_array:
         raise EngineClientError("model discovery returned an invalid payload")
-    model_ids: list[str] = []
-    for item in items:
-        value = item.get("id") if isinstance(item, dict) else item
-        if isinstance(value, str) and value and value not in model_ids:
-            model_ids.append(value)
-    return tuple(model_ids)
+    return tuple(fallback_models)
+
+
+def _project_model_inventory(
+    reader: BinaryIO,
+) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
+    paths = {
+        (),
+        ("data",),
+        ("data", "*"),
+        ("data", "*", "id"),
+        ("models",),
+        ("models", "*"),
+        ("models", "*", "id"),
+    }
+    root_is_map = False
+    data_seen = False
+    data_is_array = False
+    fallback_seen = False
+    fallback_is_array = False
+    data_models: dict[JSONScope, str] = {}
+    fallback_models: dict[JSONScope, str] = {}
+    invalid_data_models: set[JSONScope] = set()
+    invalid_fallback_models: set[JSONScope] = set()
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        scope: JSONScope,
+    ) -> None:
+        nonlocal root_is_map, data_seen, data_is_array, fallback_seen, fallback_is_array
+        if path == () and event == "start_map":
+            root_is_map = True
+        elif path == ("data",):
+            if event == "replace":
+                data_models.clear()
+                invalid_data_models.clear()
+            data_seen = True
+            if event != "nonempty":
+                data_is_array = event == "start_array"
+        elif path == ("models",):
+            if event == "replace":
+                fallback_models.clear()
+                invalid_fallback_models.clear()
+            fallback_seen = True
+            if event != "nonempty":
+                fallback_is_array = event == "start_array"
+        elif path in {("data", "*"), ("data", "*", "id")}:
+            if event == "replace":
+                data_models.pop(scope, None)
+                invalid_data_models.discard(scope)
+            elif event == "elided_string":
+                invalid_data_models.add(scope)
+            elif event == "scalar" and isinstance(value, str) and value:
+                data_models[scope] = value
+        elif path in {("models", "*"), ("models", "*", "id")}:
+            if event == "replace":
+                fallback_models.pop(scope, None)
+                invalid_fallback_models.discard(scope)
+            elif event == "elided_string":
+                invalid_fallback_models.add(scope)
+            elif event == "scalar" and isinstance(value, str) and value:
+                fallback_models[scope] = value
+
+    def ordered_unique(values: Mapping[JSONScope, str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for scope in sorted(values):
+            value = values[scope]
+            if value not in seen:
+                seen.add(value)
+                result.append(value)
+        return result
+
+    if not project_json_reader(reader, paths, visit) or not root_is_map:
+        return None
+    if (data_seen and invalid_data_models) or (
+        not data_seen and fallback_seen and invalid_fallback_models
+    ):
+        return None
+    return (
+        data_seen,
+        data_is_array,
+        ordered_unique(data_models),
+        fallback_seen,
+        fallback_is_array,
+        ordered_unique(fallback_models),
+    )
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -616,22 +851,224 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-async def _read_limited(
-    content: aiohttp.StreamReader,
-    limit: int,
+def _project_before_deadline(
+    reader: BinaryIO,
+    projector: Callable[[BinaryIO], _ProjectedJSON],
     *,
-    initial: bytes = b"",
-) -> bytes:
-    payload = bytearray(initial)
-    if len(payload) > limit:
-        raise _ResponseTooLargeError
+    deadline: float,
+) -> _ProjectedJSON:
+    guarded = _DeadlineReader(reader, deadline)
+    guarded._check_deadline()
+    projected = projector(cast(BinaryIO, guarded))
+    guarded._check_deadline()
+    return projected
+
+
+async def _observe_buffered_protocol_response_async(
+    projector: Callable[..., ProtocolObservation],
+    protocol: str,
+    prelude: _StreamPrelude,
+    *,
+    machine_error_codes: frozenset[str],
+    deadline: float,
+) -> ProtocolObservation:
+    """Drain the finite local projection before its reader can be closed."""
+
+    return await run_owned_in_thread(
+        _project_buffered_protocol_response,
+        projector,
+        protocol,
+        prelude,
+        machine_error_codes=machine_error_codes,
+        deadline=deadline,
+    )
+
+
+def _project_buffered_protocol_response(
+    projector: Callable[..., ProtocolObservation],
+    protocol: str,
+    prelude: _StreamPrelude,
+    *,
+    machine_error_codes: frozenset[str],
+    deadline: float,
+) -> ProtocolObservation:
+    return _project_before_deadline(
+        prelude.reader(),
+        lambda reader: projector(
+            protocol,
+            reader,
+            machine_error_codes=machine_error_codes,
+        ),
+        deadline=deadline,
+    )
+
+
+def _project_model_inventory_before_deadline(
+    payload: BinaryIO,
+    *,
+    deadline: float,
+) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
+    payload.seek(0)
+    return _project_before_deadline(
+        payload,
+        _project_model_inventory,
+        deadline=deadline,
+    )
+
+
+def _copy_sync_response(
+    source: BinaryIO,
+    target: BinaryIO,
+    *,
+    deadline: float,
+) -> None:
     while True:
-        chunk = await content.read(min(_STREAM_CHUNK_BYTES, limit + 1 - len(payload)))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("engine API response exceeded its request deadline")
+        _set_sync_response_timeout(source, remaining)
+        chunk = source.read(_STREAM_CHUNK_BYTES)
         if not chunk:
-            return bytes(payload)
-        payload.extend(chunk)
-        if len(payload) > limit:
-            raise _ResponseTooLargeError
+            return
+        target.write(chunk)
+
+
+def _set_sync_response_timeout(source: BinaryIO, timeout: float) -> None:
+    fp = getattr(source, "fp", None)
+    raw = getattr(fp, "raw", None)
+    response_socket = getattr(raw, "_sock", None)
+    if response_socket is not None:
+        response_socket.settimeout(max(timeout, 0.001))
+
+
+def _load_json_object(reader: BinaryIO) -> dict[str, Any]:
+    if reader.read(3) != b"\xef\xbb\xbf":
+        reader.seek(0)
+    items = ijson.items(reader, "")
+    try:
+        decoded = next(items)
+    except StopIteration:
+        raise ValueError("empty JSON document") from None
+    try:
+        next(items)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError("multiple JSON documents")
+    if not isinstance(decoded, dict):
+        raise ValueError("root JSON value is not an object")
+    containers: list[dict[str, Any] | list[Any]] = [decoded]
+    while containers:
+        container = containers.pop()
+        entries = container.items() if isinstance(container, dict) else enumerate(container)
+        for key, value in entries:
+            if isinstance(value, Decimal):
+                container[key] = float(value)
+            elif isinstance(value, (dict, list)):
+                containers.append(value)
+    return decoded
+
+
+def _project_models_health(reader: BinaryIO) -> bool:
+    root_is_map = False
+    object_value: object | None = None
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        nonlocal root_is_map, object_value
+        if path == () and event == "start_map":
+            root_is_map = True
+        elif path == ("object",):
+            if event == "replace":
+                object_value = None
+            elif event == "scalar":
+                object_value = value
+
+    if not project_json_reader(reader, {(), ("object",)}, visit):
+        raise ValueError("invalid models health response")
+    return root_is_map and object_value == "list"
+
+
+def _project_root_map(reader: BinaryIO) -> bool:
+    root_is_map = False
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        _value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        nonlocal root_is_map
+        if path == () and event in {"start_map", "start_array", "scalar"}:
+            root_is_map = event == "start_map"
+
+    if not project_json_reader(reader, {()}, visit):
+        raise ValueError("invalid JSON response")
+    return root_is_map
+
+
+def _project_raw_error_fields(
+    reader: BinaryIO,
+    envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    selected_paths = {
+        path
+        for envelope_path in envelope_paths
+        for path in (envelope_path, (*envelope_path, "type"), (*envelope_path, "code"))
+    }
+    maps: set[ErrorEnvelopePath] = set()
+    values: dict[JSONPath, object] = {}
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        for envelope_path in envelope_paths:
+            if path == envelope_path:
+                if event == "replace":
+                    maps.discard(envelope_path)
+                    values.pop((*envelope_path, "type"), None)
+                    values.pop((*envelope_path, "code"), None)
+                elif event == "start_map":
+                    maps.add(envelope_path)
+                elif event == "start_array":
+                    maps.discard(envelope_path)
+            elif path in {(*envelope_path, "type"), (*envelope_path, "code")}:
+                if event == "replace":
+                    values.pop(path, None)
+                elif event == "scalar":
+                    values[path] = value
+
+    if not project_json_reader(reader, selected_paths, visit):
+        return None, None, ()
+    types = [
+        code
+        for path in envelope_paths
+        if path in maps
+        if (code := _safe_error_code(values.get((*path, "type")))) is not None
+    ]
+    codes = [
+        code
+        for path in envelope_paths
+        if path in maps
+        if (code := _safe_error_code(values.get((*path, "code")))) is not None
+    ]
+    candidates = tuple(dict.fromkeys((*types, *codes)))
+    return types[0] if types else None, codes[0] if codes else None, candidates
+
+
+async def _read_response_into(
+    content: aiohttp.StreamReader,
+    target: _StreamPrelude,
+) -> None:
+    while chunk := await content.read(_STREAM_CHUNK_BYTES):
+        await target.write_async(chunk)
 
 
 async def _read_stream_prelude(
@@ -651,8 +1088,8 @@ async def _read_stream_prelude(
     raise for the call to be metered.
     """
 
-    if not _received(first, prelude=prelude, wire_state=wire_state):
-        return _prelude_ended_outcome(source, model_id, response.status)
+    await _received(first, prelude=prelude, wire_state=wire_state)
+    deadline = asyncio.get_running_loop().time() + timeout
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -662,9 +1099,12 @@ async def _read_stream_prelude(
         )
         if outcome is not None:
             return outcome
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
         chunk = await asyncio.wait_for(
             response.content.read(_STREAM_CHUNK_BYTES),
-            timeout=timeout,
+            timeout=remaining,
         )
         if not chunk:
             completion = _observed_stream_terminal_outcome(
@@ -676,35 +1116,20 @@ async def _read_stream_prelude(
             if completion is not None:
                 return completion
             return _prelude_ended_outcome(source, model_id, response.status)
-        if not _received(chunk, prelude=prelude, wire_state=wire_state):
-            return _prelude_ended_outcome(source, model_id, response.status)
+        await _received(chunk, prelude=prelude, wire_state=wire_state)
     return None
 
 
-def _received(
+async def _received(
     chunk: bytes,
     *,
     prelude: _StreamPrelude,
     wire_state: ProtocolSSEState,
-) -> bool:
-    """Take receipt of bytes the wire delivered: read them, then keep a copy.
+) -> None:
+    """Observe delivered bytes, then retain their exact replay without truncation."""
 
-    Two different questions get asked about the same bytes, and only the second
-    one can fail: what they say, and whether there is room to store a replay of
-    them. Asking the storage question first lets a full prelude erase the report
-    that arrived in the chunk that filled it — tokens the vendor billed, delivered
-    on the socket, dropped because we had nowhere to put a copy. Whether we can
-    hold a copy is not a question about what happened.
-
-    Every earlier round of this class was the reading half: a fact was observed
-    and some ending could not reach it. This is the writing half, and it has no
-    reader-side remedy at all — bytes nobody observed leave nothing behind to fall
-    back to. So this is the sole caller of ``prelude.write``, and an arrival site
-    added later cannot reorder the two questions by forgetting which comes first.
-    """
-
-    wire_state.observe(chunk)
-    return prelude.write(chunk)
+    await wire_state.observe_async(chunk)
+    await prelude.write_async(chunk)
 
 
 def _prelude_ended_outcome(
@@ -739,7 +1164,7 @@ async def _response_stream(
         prelude.close()
         async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
             if chunk:
-                wire_state.observe(chunk)
+                await wire_state.observe_async(chunk)
                 yield chunk
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -756,14 +1181,6 @@ async def _response_stream(
                 message="upstream stream ended before a protocol terminal event",
                 stream_started=wire_state.model_output_started,
             )
-    except SSEFrameLimitError as exc:
-        outcome = _protocol_error_outcome(
-            ProtocolObservation(outcome="protocol_error", message=str(exc)),
-            source,
-            model_id,
-            response.status,
-            wire_state.model_output_started,
-        )
     except asyncio.TimeoutError:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -858,10 +1275,25 @@ def _reduce_protocol_observation(
             usage=observation.usage,
         )
     if observation.outcome == "failed_terminal":
-        error_type, error_code, candidates = _raw_error_fields(
-            observation.error_payload or b"",
-            observation.error_envelope_paths,
+        projected_types = tuple(
+            code
+            for value in observation.error_type_candidates
+            if (code := _safe_error_code(value)) is not None
         )
+        projected_codes = tuple(
+            code
+            for value in observation.error_code_candidates
+            if (code := _safe_error_code(value)) is not None
+        )
+        if projected_types or projected_codes:
+            error_type = projected_types[0] if projected_types else None
+            error_code = projected_codes[0] if projected_codes else None
+            candidates = tuple(dict.fromkeys((*projected_types, *projected_codes)))
+        else:
+            error_type, error_code, candidates = _raw_error_fields(
+                observation.error_payload or b"",
+                observation.error_envelope_paths,
+            )
         return _outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
             source=source,
@@ -909,19 +1341,10 @@ def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
     return EngineInvokeHandle(stream=None, outcome=future)
 
 
-def buffered_handle(payload: bytes, outcome: RawCallOutcome) -> EngineInvokeHandle:
-    async def body() -> AsyncIterator[bytes]:
-        yield payload
-
-    future = asyncio.get_running_loop().create_future()
-    future.set_result(outcome)
-    return EngineInvokeHandle(stream=body(), outcome=future)
-
-
 def buffered_prelude_handle(
     prelude: _StreamPrelude,
     outcome: RawCallOutcome,
-    observed: ProtocolSSEState,
+    observed: ProtocolSSEState | None,
 ) -> EngineInvokeHandle:
     async def body() -> AsyncIterator[bytes]:
         try:
@@ -984,31 +1407,7 @@ def _raw_error_fields(
     payload: bytes,
     envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
-    try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None, None, ()
-    if not isinstance(decoded, dict):
-        return None, None, ()
-    types: list[str] = []
-    codes: list[str] = []
-    for path in envelope_paths:
-        envelope: object = decoded
-        for component in path:
-            if not isinstance(envelope, Mapping) or component not in envelope:
-                envelope = None
-                break
-            envelope = envelope[component]
-        if not isinstance(envelope, Mapping):
-            continue
-        error_type = _safe_error_code(envelope["type"]) if "type" in envelope else None
-        error_code = _safe_error_code(envelope["code"]) if "code" in envelope else None
-        if error_type is not None:
-            types.append(error_type)
-        if error_code is not None:
-            codes.append(error_code)
-    candidates = tuple(dict.fromkeys((*types, *codes)))
-    return (types[0] if types else None, codes[0] if codes else None, candidates)
+    return _project_raw_error_fields(io.BytesIO(payload), envelope_paths)
 
 
 def _safe_error_code(value: object) -> str | None:

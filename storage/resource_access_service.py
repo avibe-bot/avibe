@@ -282,7 +282,6 @@ def metadata_with_resource_user_context(
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
         "vibe_instance_kind": context.instance_kind,
-        "vibe_show_page_id": context.show_page_id,
         "claims_issued_at": context.claims_issued_at,
         "vibe_instance_authorization_revision": context.authorization_revision,
         "authorization_expires_at": _resource_context_expires_at(context),
@@ -1335,8 +1334,6 @@ def _policy_allows(
     if resource_kind in {"skill", "vault_secret"}:
         if context.is_remote and context.is_active_organization_member and context.has_role("editor"):
             return True
-    if context.instance_access_source == "show_page_email":
-        return False
     if not context.can_use_resource(resource_kind):
         return False
     if policy is None:

@@ -729,6 +729,7 @@ const MentionMenu = forwardRef<HTMLUListElement, BeautifulMentionsMenuProps>(
     // composer to trigger, which our 5–8 item menus effectively never hit.
     <ul
       ref={ref}
+      data-mention-picker
       className="absolute left-0 z-50 mb-4 !bottom-full !top-auto max-h-64 min-w-[15rem] list-none overflow-y-auto overflow-x-hidden rounded-md border border-border bg-panel p-1 text-text shadow-md"
       {...props}
     >

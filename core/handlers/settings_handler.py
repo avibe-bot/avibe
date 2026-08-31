@@ -459,7 +459,23 @@ class SettingsHandler(BaseHandler):
 
                     cwd = self.controller.get_cwd(context)
                     opencode_agents = await server.get_available_agents(cwd)
-                    opencode_models = await server.get_available_models(cwd)
+                    model_hub_service = getattr(
+                        self.controller,
+                        "model_hub_service",
+                        None,
+                    )
+                    public_models = (
+                        model_hub_service.opencode_public_models()
+                        if model_hub_service is not None
+                        else None
+                    )
+                    if public_models is None:
+                        opencode_models = await server.get_available_models(cwd)
+                    else:
+                        opencode_models = await server.get_available_models(
+                            cwd,
+                            model_hub_models=public_models,
+                        )
                     opencode_default_config = await server.get_default_config(cwd)
             except Exception as e:
                 logger.warning(f"Failed to fetch OpenCode data: {e}")

@@ -554,7 +554,7 @@ def test_memory_list_route_forwards_agent_origin(
         json={
             "project": "write",
             "page": 1,
-            "limit": 20,
+            "limit": 100,
             "origin": "agent",
         },
         headers=csrf_headers(client, BASE_URL),
@@ -568,7 +568,7 @@ def test_memory_list_route_forwards_agent_origin(
             "project": "write",
             "page": 1,
             "cursor": None,
-            "limit": 20,
+            "limit": 100,
             "origin": "agent",
         }
     ]
@@ -584,6 +584,13 @@ def test_memory_list_route_forwards_agent_origin(
         "status": "failed",
         "error": "memory_invalid_input",
     }
+    over_limit = client.post(
+        "/api/memory/list",
+        json={"project": "write", "page": 1, "limit": 101},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+    assert over_limit.status_code == 400
     assert len(calls) == 1
 
 

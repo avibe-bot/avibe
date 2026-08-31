@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import io
 import json
+import threading
 from dataclasses import replace
 from itertools import product
 from pathlib import Path
@@ -10,16 +13,19 @@ import pytest
 
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
-    SSE_MAX_FRAME_BYTES,
-    SSE_MAX_LINE_BYTES,
+    SSE_OBSERVATION_BYTES,
+    SSE_OBSERVATION_EVENT_BYTES,
+    SSE_OBSERVATION_STRING_BYTES,
     SSE_LINE_ENDINGS,
-    SSEFrameLimitError,
     SSEFrameTokenizer,
+    ProtocolFactProjector,
     ProtocolObservation,
     ProtocolTerminalEnvelope,
     ProtocolSSEState,
     ProtocolModelOutputEnvelope,
     ProtocolStreamTaxonomy,
+    ProtocolUsageReport,
+    observe_buffered_protocol_response,
     observe_protocol_response,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
@@ -181,6 +187,13 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
         "response.function_call_arguments.delta",
         ("type",),
         "response.function_call_arguments.delta",
+        False,
+    ),
+    (
+        "openai_responses",
+        "response.image_generation_call.partial_image",
+        ("type",),
+        "response.image_generation_call.partial_image",
         False,
     ),
     ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
@@ -523,14 +536,39 @@ def test_first_model_output_has_one_table_backed_owner() -> None:
 
 def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
     # Review 4914187655: buffered and streamed facts cannot bypass observation.
+    # The engine adapter reads buffered protocol facts once; the gateway consumes
+    # its RawCallOutcome instead of independently interpreting the same body.
     client_tree = _tree(CLIENT)
     stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
-    owners = (_functions(client_tree)["invoke"], _functions(stream_tree)["_observe_frame"])
-    calls = [node for tree in (client_tree, stream_tree) for node in ast.walk(tree) if _call_name(node) == "observe_protocol_response"]
-    assert all(any(call in set(ast.walk(owner)) for owner in owners) for call in calls)
-    assert {value for call in calls if (value := _bool_keyword(call, "streamed")) is not None} == {
-        case["stream"] for case in STREAM_TRANSPORT_FIXTURES
-    }
+    gateway_tree = _tree(TURN_GATEWAY)
+    stream_calls = [
+        node
+        for tree in (client_tree, stream_tree)
+        for node in ast.walk(tree)
+        if _call_name(node) == "observe_protocol_response"
+    ]
+    assert stream_calls == []
+    stream_source = (ROOT / "core/handlers/model_hub/stream_wire.py").read_text(
+        encoding="utf-8"
+    )
+    assert "class ProtocolFactProjector" in stream_source
+    assert "observation = frame.observation" in stream_source
+    buffered_owner = _functions(client_tree)["invoke"]
+    buffered_calls = [
+        node
+        for tree in (client_tree, gateway_tree)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and node.id == "observe_buffered_protocol_response"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    assert len(buffered_calls) == 2
+    assert all(call in set(ast.walk(buffered_owner)) for call in buffered_calls)
+    assert not any(
+        isinstance(node, ast.Name)
+        and node.id == "observe_buffered_protocol_response"
+        for node in ast.walk(gateway_tree)
+    )
     reducer = _functions(client_tree)["_reduce_protocol_observation"]
     assert all(call in set(ast.walk(reducer)) for call in _protocol_outcome_calls(client_tree))
     constructor_owner = _functions(client_tree)["_outcome"]
@@ -623,28 +661,33 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
 def test_settling_a_turn_is_what_meters_it_for_every_ending_there_will_be() -> None:
     # Review 4970...: metering was positioned relative to bookkeeping rather than to
     # the upstream call, and each ending paid for it differently — one settled first
-    # and skipped the row when settlement raised, one never metered at all. Naming
-    # the class instead of its endings: there is one function that ends a metered
-    # turn, the recorder is its first statement, and no ending can settle without
-    # going through it. An ending added later inherits the order rather than
-    # restating it, because there is nowhere else to state it.
+    # and skipped the row when settlement raised, one never metered at all. The
+    # handle settlement owner is also the sole adapter-outcome reader, so it can
+    # record the complete upstream facts immediately before service settlement.
+    # An ending added later inherits that order instead of restating it.
     gateway_tree = _tree(TURN_GATEWAY)
     functions = _functions(gateway_tree)
-    owner = functions["_settle_metered_turn"]
+    owner = functions["_settle_consumed_handle"]
     recorded = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_record_usage"]
     assert len(recorded) == 1
     assert recorded[0] in set(ast.walk(owner))
-    # The first *executable* statement, and the statement itself rather than
-    # anything nested in one: metering under a condition is what every ending that
-    # got this wrong already did.
-    body = [node for node in owner.body if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))]
-    assert isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Await)
-    assert body[0].value.value is recorded[0]
-    # And the settlement it wraps is reachable only through it, so "settled here"
-    # cannot come apart from "metered here" at a call site the next round adds.
+    outcome_reads = [node for node in ast.walk(gateway_tree) if _call_name(node) == "outcome"]
+    service_settlements = [node for node in ast.walk(gateway_tree) if _call_name(node) == "settle_handle_outcome"]
+    assert len(outcome_reads) == 1
+    assert len(service_settlements) == 1
+    assert outcome_reads[0] in set(ast.walk(owner))
+    assert service_settlements[0] in set(ast.walk(owner))
+    assert outcome_reads[0].lineno < recorded[0].lineno < service_settlements[0].lineno
+    # And every turn ending still reaches that owner through the single settlement
+    # wrapper, so "settled here" cannot come apart from "metered here".
+    settlement_wrapper = functions["_settle_metered_turn"]
+    handle_wrapper = functions["_settle_turn_handle"]
     settlements = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_turn_handle"]
     assert len(settlements) == 1
-    assert settlements[0] in set(ast.walk(owner))
+    assert settlements[0] in set(ast.walk(settlement_wrapper))
+    consumed = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_consumed_handle"]
+    assert len(consumed) == 1
+    assert consumed[0] in set(ast.walk(handle_wrapper))
     endings = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_metered_turn"]
     assert len(endings) >= 2
     assert all(
@@ -1054,11 +1097,16 @@ def test_machine_error_field_access_has_one_extractor() -> None:
 
 
 def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
-    extractor = _functions(_tree(CLIENT))["_raw_error_fields"]
-    source = ast.get_source_segment(CLIENT.read_text(encoding="utf-8"), extractor)
-    assert source is not None
-    assert "envelope_paths" in source
-    assert "for path in envelope_paths" in source
+    functions = _functions(_tree(CLIENT))
+    extractor = functions["_raw_error_fields"]
+    projector = functions["_project_raw_error_fields"]
+    client_source = CLIENT.read_text(encoding="utf-8")
+    extractor_source = ast.get_source_segment(client_source, extractor)
+    projector_source = ast.get_source_segment(client_source, projector)
+    assert extractor_source is not None
+    assert projector_source is not None
+    assert "_project_raw_error_fields" in extractor_source
+    assert "for envelope_path in envelope_paths" in projector_source
     assert not any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not extractor
         for node in ast.walk(extractor)
@@ -1277,6 +1325,181 @@ def test_chat_role_metadata_does_not_cross_the_model_output_boundary() -> None:
     assert state.model_output_started is False
 
 
+def test_chat_any_nonempty_choice_crosses_the_model_output_boundary() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(
+        b'data: {"choices":[{"delta":{"content":"hello"}},'
+        b'{"delta":{"content":null}}]}\n\n'
+    )
+
+    assert state.model_output_started is True
+
+
+def test_buffered_error_array_is_not_an_error_envelope() -> None:
+    observation = observe_buffered_protocol_response(
+        "openai_chat",
+        io.BytesIO(b'{"error":[],"choices":[{"message":{"content":"hello"}}]}'),
+    )
+
+    assert observation.outcome == "served"
+    assert observation.error_envelope_paths == ()
+
+
+def test_duplicate_buffered_member_replaces_earlier_protocol_facts() -> None:
+    observation = observe_buffered_protocol_response(
+        "openai_chat",
+        io.BytesIO(
+            b'{"error":{},"error":[],"usage":{"prompt_tokens":10},'
+            b'"usage":{"prompt_tokens":2}}'
+        ),
+    )
+
+    assert observation.outcome == "served"
+    assert observation.error_envelope_paths == ()
+    assert observation.usage == ProtocolUsageReport(input_tokens=2)
+
+
+def test_duplicate_chat_choice_member_replaces_only_its_choice() -> None:
+    def observe(payload: bytes) -> bool:
+        state = ProtocolSSEState("openai_chat")
+        state.observe(b"data: " + payload + b"\n\n")
+        return state.model_output_started
+
+    replaced_only = observe(
+        b'{"choices":[{"delta":{"content":"hello","content":null}}]}'
+    )
+    sibling_survives = observe(
+        b'{"choices":[{"delta":{"content":"hello"}},'
+        b'{"delta":{"content":"stale","content":null}}]}'
+    )
+
+    assert replaced_only is False
+    assert sibling_survives is True
+
+
+def test_chat_projection_facts_do_not_grow_with_choice_count() -> None:
+    projector = ProtocolFactProjector("openai_chat")
+    projector.feed(
+        b'{"choices":['
+        + b",".join(
+            b'{"delta":{"content":"hello"}}' for _index in range(10_000)
+        )
+        + b"]}"
+    )
+
+    assert projector.finish(streamed=True).model_output_started is True
+    assert projector._nonempty == {(), ("choices", "*", "delta", "content")}
+    assert projector._scoped_nonempty == set()
+
+
+def test_buffered_machine_codes_are_scoped_to_the_matched_error_envelope() -> None:
+    observation = observe_buffered_protocol_response(
+        "openai_responses",
+        io.BytesIO(
+            b'{"error":{"type":"server_error"},'
+            b'"response":{"error":{"type":"permission_error"}}}'
+        ),
+        machine_error_codes=frozenset({"permission_error", "server_error"}),
+    )
+
+    assert observation.outcome == "failed_terminal"
+    assert observation.error_envelope_paths == (("error",),)
+    assert observation.error_type_candidates == ("server_error",)
+
+
+def test_sse_data_json_accepts_one_leading_utf8_bom() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(
+        b"event: response.completed\ndata: \xef\xbb\xbf"
+        b'{"type":"response.completed"}\n\n'
+    )
+
+    assert state.terminal_outcome == "served"
+
+
+def test_colonless_empty_event_field_uses_default_message_event() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(b'event\ndata: {"choices":[{"delta":{"content":"hello"}}]}\n\n')
+
+    assert state.model_output_started is True
+
+
+def test_large_selected_string_preserves_its_nonempty_fact() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(
+        b'data: {"choices":[{"delta":{"content":"'
+        + (b"x" * (SSE_OBSERVATION_STRING_BYTES + 1))
+        + b'"}}]}\n\n'
+    )
+
+    assert state.model_output_started is True
+
+
+def test_large_required_error_code_preserves_its_nonempty_fact() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(
+        b'event: response.incomplete\ndata: {"type":"response.incomplete",'
+        b'"response":{"error":{"code":"'
+        + (b"x" * (SSE_OBSERVATION_STRING_BYTES + 1))
+        + b'"}}}\n\n'
+    )
+
+    assert state.terminal_outcome == "failed_terminal"
+    assert state.error_envelope_paths == (("response", "error"),)
+
+
+def test_async_sse_observation_runs_outside_the_event_loop() -> None:
+    state = ProtocolSSEState("openai_responses")
+    caller_thread = threading.get_ident()
+    observer_threads: list[int] = []
+    original_observe = state.observe
+
+    def recording_observe(chunk: bytes) -> None:
+        observer_threads.append(threading.get_ident())
+        original_observe(chunk)
+
+    state.observe = recording_observe
+    asyncio.run(
+        state.observe_async(
+            b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+        )
+    )
+
+    assert observer_threads
+    assert observer_threads[0] != caller_thread
+    assert state.terminal_outcome == "served"
+
+
+def test_cancelled_sse_observation_drains_its_worker_before_settlement() -> None:
+    async def run() -> None:
+        state = ProtocolSSEState("openai_responses")
+        entered = threading.Event()
+        release = threading.Event()
+        original_observe = state.observe
+
+        def blocked_observe(chunk: bytes) -> None:
+            entered.set()
+            assert release.wait(1)
+            original_observe(chunk)
+
+        state.observe = blocked_observe
+        observer = asyncio.create_task(
+            state.observe_async(
+                b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        observer.cancel()
+        await asyncio.sleep(0)
+        assert not observer.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        assert state.terminal_outcome == "served"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("event_name", "payload", "expected_outcome"),
     (
@@ -1305,15 +1528,102 @@ def test_responses_terminal_trust_roots_ignore_unofficial_error_locations(
     assert "permission_error" not in candidates
 
 
-def test_sse_tokenizer_bounds_lines_and_frames() -> None:
-    with pytest.raises(SSEFrameLimitError, match="line"):
-        SSEFrameTokenizer().feed(b"x" * (SSE_MAX_LINE_BYTES + 1))
+def test_exact_sse_tokenizer_accepts_large_protocol_frames() -> None:
     tokenizer = SSEFrameTokenizer()
-    line = b"x" * SSE_MAX_LINE_BYTES + b"\n"
-    for _ in range(SSE_MAX_FRAME_BYTES // SSE_MAX_LINE_BYTES):
-        tokenizer.feed(line)
-    with pytest.raises(SSEFrameLimitError, match="frame"):
-        tokenizer.feed(b"x")
+    data = b"x" * (2 * 1024 * 1024)
+
+    assert tokenizer.feed(b"data: " + data + b"\n\n") == (b"data: " + data,)
+
+
+def test_large_image_event_is_observed_without_retaining_its_base64_body() -> None:
+    state = ProtocolSSEState("openai_responses")
+    event_type = b"response.image_generation_call.partial_image"
+    state.observe(
+        b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","partial_image_b64":"'
+    )
+
+    assert state.model_output_started is False
+    for _ in range(32):
+        state.observe(b"x" * (64 * 1024))
+        assert state.tokenizer.retained_bytes < SSE_OBSERVATION_STRING_BYTES + 1024
+
+    state.observe(b'"}\n\n')
+    assert state.model_output_started is True
+    state.observe(
+        b'event: response.completed\ndata: {"type":"response.completed",'
+        b'"response":{"usage":{"input_tokens":4,"output_tokens":7}}}\n\n'
+    )
+
+    assert state.terminal_outcome == "served"
+    assert state.usage == ProtocolUsageReport(input_tokens=4, output_tokens=7)
+
+
+def test_observer_abandons_large_non_string_metadata_without_affecting_next_frame() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b"event: response.output_text.delta\ndata: [" + b"0," * SSE_OBSERVATION_BYTES)
+
+    assert state.model_output_started is False
+    assert state.tokenizer.retained_bytes < 1024
+
+    state.observe(
+        b"0]\n\nevent: response.completed\ndata: "
+        b'{"type":"response.completed"}\n\n'
+    )
+
+    assert state.model_output_started is False
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+def test_large_terminal_projects_its_discriminator_after_unrelated_structure() -> None:
+    state = ProtocolSSEState("openai_responses")
+    payload = json.dumps(
+        {
+            "output": [{"index": index} for index in range(20_000)],
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 11, "output_tokens": 7}},
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    state.observe(b"event: response.completed\ndata: " + payload + b"\n\n")
+
+    assert state.terminal_outcome == "served"
+    assert state.usage == ProtocolUsageReport(input_tokens=11, output_tokens=7)
+    assert state.tokenizer.retained_bytes == 0
+
+
+def test_observer_drops_unrecognized_oversized_event_names() -> None:
+    state = ProtocolSSEState("anthropic")
+    state.observe(b"event: " + b"x" * (SSE_OBSERVATION_EVENT_BYTES * 4))
+
+    assert state.model_output_started is False
+    assert state.tokenizer.retained_bytes <= SSE_OBSERVATION_EVENT_BYTES
+
+    state.observe(b'\ndata: {"type":"content_block_delta"}\n\n')
+
+    assert state.model_output_started is False
+
+
+@pytest.mark.parametrize(
+    "data",
+    (
+        b"[DONE]",
+        b'{"choices":[{"delta":{"content":"hello"}}]}',
+    ),
+)
+def test_oversized_chat_event_name_is_not_the_default_event(data: bytes) -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(
+        b"event: "
+        + b"x" * (SSE_OBSERVATION_EVENT_BYTES + 1)
+        + b"\ndata: "
+        + data
+        + b"\n\n"
+    )
+
+    assert state.terminal_observation() is None
+    assert state.model_output_started is False
+    assert state.tokenizer.retained_bytes == 0
 
 
 @pytest.mark.parametrize("split_at", (1, 2, 3))
@@ -1406,11 +1716,11 @@ def test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them() 
     """
 
     source = CLIENT.read_text(encoding="utf-8")
-    assert source.count("prelude.write(") == 1
+    assert source.count("prelude.write_async(") == 1
     owner = ast.get_source_segment(source, _functions(_tree(CLIENT))["_received"])
     assert owner is not None
-    assert "prelude.write(" in owner
-    assert owner.index("wire_state.observe(") < owner.index("prelude.write(")
+    assert "prelude.write_async(" in owner
+    assert owner.index("wire_state.observe_async(") < owner.index("prelude.write_async(")
 
 
 def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
@@ -1418,8 +1728,10 @@ def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
 
     Cleanup is unobservable from outside — the writers swallow ``OSError`` so a
     full disk cannot break metering — so it cannot be maintained one collection
-    at a time. A module that spells its own temporary file is a second owner of
-    the property, whether or not it remembers the cleanup.
+    at a time. A module that invokes an OS replacement primitive is a second
+    owner of the property, whether or not it remembers the cleanup. Temporary
+    files alone are not evidence of replacement: response spooling has a
+    different owner and lifetime.
 
     Stated as "nobody here re-implements it" rather than "exactly ``state_file``
     implements it": the owner has since moved out of this package entirely, into
@@ -1427,12 +1739,23 @@ def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
     change that satisfied it best.
     """
 
-    second_owners = {
-        module.name
-        for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py"))
+    second_owners: set[str] = set()
+    for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
         if any(
-            marker in module.read_text(encoding="utf-8")
-            for marker in ("tempfile", "os.replace", "os.rename")
-        )
-    }
+            (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+                and node.func.attr in {"rename", "replace"}
+            )
+            or (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "os"
+                and any(alias.name in {"rename", "replace"} for alias in node.names)
+            )
+            for node in ast.walk(tree)
+        ):
+            second_owners.add(module.name)
     assert second_owners == set()

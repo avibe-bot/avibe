@@ -1,7 +1,9 @@
 import builtins
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -62,6 +64,198 @@ def test_backend_model_entries_normalize_runtime_catalog_shape():
             "reasoning_efforts": ["low", "ultra"],
         },
     ]
+
+
+def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+
+    path = backend_model_catalog._publish_codex_hub_catalog(
+        json.dumps(
+            {
+                "client_version": "0.149.1",
+                "models": [
+                    {
+                        "slug": "gpt-5.6-luna",
+                        "display_name": "GPT-5.6 Luna",
+                        "use_responses_lite": True,
+                        "multi_agent_version": "v1",
+                        "tool_mode": "code_mode_only",
+                        "prefer_websockets": True,
+                        "model_messages": {"instructions_template": "preserved"},
+                    }
+                ],
+            }
+        ).encode()
+    )
+
+    assert path.name.startswith("standard-responses-")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["client_version"] == "0.149.1"
+    assert payload["models"][0] == {
+        "slug": "gpt-5.6-luna",
+        "display_name": "GPT-5.6 Luna",
+        "use_responses_lite": False,
+        "multi_agent_version": None,
+        "tool_mode": None,
+        "prefer_websockets": False,
+        "model_messages": {"instructions_template": "preserved"},
+    }
+
+
+def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
+    captured = {}
+
+    async def run(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            exit_code=0,
+            stdout='{"models":[{"slug":"gpt-test"}]}',
+            stderr="",
+            timed_out=False,
+            stdout_truncated=False,
+        )
+
+    monkeypatch.setattr(backend_model_catalog, "run_supervised_command", run)
+
+    exported = backend_model_catalog._export_codex_bundled_catalog(
+        "/opt/codex",
+        {"PATH": "/bin", "OPENAI_API_KEY": "secret", "CODEX_API_KEY": "secret"},
+    )
+
+    assert exported == b'{"models":[{"slug":"gpt-test"}]}'
+    assert captured["command"] == [
+        "/opt/codex",
+        "debug",
+        "models",
+        "--bundled",
+        "-c",
+        "model_catalog_json=null",
+    ]
+    assert captured["extra_env"] == {
+        "PATH": "/bin",
+        "OPENAI_API_KEY": "secret",
+        "CODEX_API_KEY": "secret",
+    }
+    assert captured["remove_env"] == (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "CODEX_API_KEY",
+        "AVIBE_MODEL_HUB_TOKEN",
+    )
+    assert captured["timeout_seconds"] == backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS
+    assert captured["max_output_bytes"] == backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES
+    assert captured["discard_stderr"] is True
+
+
+def test_codex_hub_catalog_export_survives_deleted_service_cwd(monkeypatch, tmp_path):
+    captured = {}
+
+    async def run(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            exit_code=0,
+            stdout='{"models":[{"slug":"gpt-test"}]}',
+            stderr="",
+            timed_out=False,
+            stdout_truncated=False,
+        )
+
+    monkeypatch.setattr(backend_model_catalog, "run_supervised_command", run)
+    deleted_cwd = tmp_path / "deleted-service-cwd"
+    deleted_cwd.mkdir()
+    original_cwd = Path.cwd()
+    os.chdir(deleted_cwd)
+    deleted_cwd.rmdir()
+    try:
+        exported = backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
+    finally:
+        os.chdir(original_cwd)
+
+    assert exported == b'{"models":[{"slug":"gpt-test"}]}'
+    assert Path(captured["cwd"]).is_dir()
+    assert captured["cwd"] != str(deleted_cwd)
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (SimpleNamespace(timed_out=True, stdout_truncated=False, exit_code=124), "timed out"),
+        (
+            SimpleNamespace(timed_out=False, stdout_truncated=True, exit_code=0),
+            "exceeded the safety limit",
+        ),
+        (SimpleNamespace(timed_out=False, stdout_truncated=False, exit_code=1), "could not export"),
+    ],
+)
+def test_codex_hub_catalog_export_rejects_supervised_failures(monkeypatch, result, message):
+    result.stdout = ""
+
+    async def run(**_kwargs):
+        return result
+
+    monkeypatch.setattr(backend_model_catalog, "run_supervised_command", run)
+
+    with pytest.raises(RuntimeError, match=message):
+        backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
+
+
+def test_codex_hub_catalog_preparation_exports_current_binary(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+    calls = []
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_export_codex_bundled_catalog",
+        lambda binary, base_env=None: (
+            calls.append((binary, base_env)),
+            b'{"models":[{"slug":"gpt-test","use_responses_lite":true}]}',
+        )[1],
+    )
+
+    exported = backend_model_catalog.prepare_codex_hub_catalog("codex")
+
+    assert exported.name.startswith("standard-responses-")
+    assert calls == [("codex", None)]
+    assert json.loads(exported.read_text(encoding="utf-8"))["models"][0][
+        "use_responses_lite"
+    ] is False
+
+
+def test_codex_hub_catalog_failure_cannot_select_a_previous_generation(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+    previous = backend_model_catalog._publish_codex_hub_catalog(
+        b'{"client_version":"old","models":[{"slug":"old"}]}'
+    )
+
+    def fail_export(*_args, **_kwargs):
+        raise RuntimeError("export failed")
+
+    monkeypatch.setattr(backend_model_catalog, "_export_codex_bundled_catalog", fail_export)
+
+    with pytest.raises(RuntimeError, match="export failed"):
+        backend_model_catalog.prepare_codex_hub_catalog("/opt/codex")
+
+    assert previous.exists()
+    assert list(previous.parent.glob("standard-responses-*.json")) == [previous]
+
+
+def test_codex_hub_catalog_generations_are_content_addressed(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+
+    first = backend_model_catalog._publish_codex_hub_catalog(
+        b'{"models":[{"slug":"gpt-first"}]}'
+    )
+    second = backend_model_catalog._publish_codex_hub_catalog(
+        b'{"models":[{"slug":"gpt-second"}]}'
+    )
+
+    assert first != second
+    assert json.loads(first.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-first"
+    assert json.loads(second.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-second"
 
 
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():

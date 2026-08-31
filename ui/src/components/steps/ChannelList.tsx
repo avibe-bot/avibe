@@ -126,13 +126,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const [threadConfigs, setThreadConfigs] = useState<Record<string, Record<string, ChannelConfig>>>({});
   const [config, setConfig] = useState<any>(data);
   const [pagePlatform, setPagePlatform] = useState<string>(forcedPlatform || data.platform || 'slack');
-  const [opencodeOptionsByCwd, setOpencodeOptionsByCwd] = useState<Record<string, any>>({});
-  const [claudeAgentsByCwd, setClaudeAgentsByCwd] = useState<Record<string, { id: string; name: string; path: string; source?: string }[]>>({});
-  const [codexAgentsByCwd, setCodexAgentsByCwd] = useState<Record<string, { id: string; name: string; path: string; source?: string; description?: string }[]>>({});
-  const [claudeModels, setClaudeModels] = useState<string[]>([]);
-  const [claudeModelLabels, setClaudeModelLabels] = useState<Record<string, string>>({});
-  const [claudeReasoningOptions, setClaudeReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
-  const [codexModels, setCodexModels] = useState<string[]>([]);
   const [guilds, setGuilds] = useState<any[]>([]);
   const [selectedGuildIds, setSelectedGuildIds] = useState<string[]>(getDiscordGuildAllowlist(data));
   const [selectedGuild, setSelectedGuild] = useState<string>(getDiscordGuildAllowlist(data)[0] || '');
@@ -556,63 +549,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     }
   };
 
-  const loadOpenCodeOptions = async (cwd: string) => {
-    try {
-      const result = await api.opencodeOptions(cwd);
-      if (result.ok) {
-        setOpencodeOptionsByCwd((prev) => ({ ...prev, [cwd]: result.data }));
-      }
-    } catch (e) {
-      console.error('Failed to load OpenCode options:', e);
-    }
-  };
-
-  const loadClaudeAgents = async (cwd: string) => {
-    try {
-      const result = await api.claudeAgents(cwd);
-      if (result.ok) {
-        setClaudeAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-      }
-    } catch (e) {
-      console.error('Failed to load Claude agents:', e);
-    }
-  };
-
-  const loadClaudeModels = async () => {
-    try {
-      const result = await api.claudeModels();
-      if (result.ok) {
-        setClaudeModels(result.models || []);
-        setClaudeModelLabels(result.model_labels || {});
-        setClaudeReasoningOptions(result.reasoning_options || {});
-      }
-    } catch (e) {
-      console.error('Failed to load Claude models:', e);
-    }
-  };
-
-  const loadCodexModels = async () => {
-    try {
-      const result = await api.codexModels();
-      if (result.ok) {
-        setCodexModels(result.models || []);
-      }
-    } catch (e) {
-      console.error('Failed to load Codex models:', e);
-    }
-  };
-
-  const loadCodexAgents = async (cwd: string) => {
-    try {
-      const result = await api.codexAgents(cwd);
-      if (result.ok) {
-        setCodexAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-      }
-    } catch (e) {
-      console.error('Failed to load Codex agents:', e);
-    }
-  };
-
   useEffect(() => {
     if (platform === 'lark') {
       if (larkAppId && hasChannelCredentials('lark')) {
@@ -697,71 +633,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       setRemovingChannelId(null);
     }
   };
-
-  useEffect(() => {
-    if (config.agents?.claude?.enabled) {
-      loadClaudeModels();
-    }
-  }, [config.agents?.claude?.enabled]);
-
-  useEffect(() => {
-    if (config.agents?.codex?.enabled) {
-      loadCodexModels();
-    }
-  }, [config.agents?.codex?.enabled]);
-
-  useEffect(() => {
-    if (!channels.length) return;
-    const defaultCwd = config.runtime?.default_cwd || '~/work';
-    const defaultAgent = agentByName[defaultAgentName || ''] || null;
-
-    const neededOpenCodeCwds = new Set<string>();
-    const neededClaudeCwds = new Set<string>();
-    const neededCodexCwds = new Set<string>();
-
-    const collectBackendCwd = (raw: ChannelConfig | undefined) => {
-      if (!raw || raw.enabled === false) return;
-      const effectiveCwd = (raw.custom_cwd ?? '') || defaultCwd;
-      const routing = raw.routing || {};
-      const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const backend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-
-      if (backend === 'opencode' && config.agents?.opencode?.enabled) {
-        neededOpenCodeCwds.add(effectiveCwd);
-      }
-      if (backend === 'claude' && config.agents?.claude?.enabled) {
-        neededClaudeCwds.add(effectiveCwd);
-      }
-      if (backend === 'codex' && config.agents?.codex?.enabled) {
-        neededCodexCwds.add(effectiveCwd);
-      }
-    };
-
-    channels.forEach((channel) => {
-      collectBackendCwd(configs[channel.id]);
-    });
-    Object.values(threadConfigs).forEach((topics) => {
-      Object.values(topics).forEach(collectBackendCwd);
-    });
-
-    neededOpenCodeCwds.forEach((cwd) => {
-      if (!opencodeOptionsByCwd[cwd]) {
-        void loadOpenCodeOptions(cwd);
-      }
-    });
-
-    neededClaudeCwds.forEach((cwd) => {
-      if (!claudeAgentsByCwd[cwd]) {
-        void loadClaudeAgents(cwd);
-      }
-    });
-
-    neededCodexCwds.forEach((cwd) => {
-      if (!codexAgentsByCwd[cwd]) {
-        void loadCodexAgents(cwd);
-      }
-    });
-  }, [channels, configs, threadConfigs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
 
   const isChannelEnabled = (channelId: string) => {
     const channel = configs[channelId];
@@ -1562,10 +1433,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const expanded = expandedChannelId === rowKey;
               const selectedAgent = agentByName[channelConfig.routing.agent_name || ''] || agentByName[defaultAgentName || ''];
               const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-              const effectiveCwd = channelConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
-              const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
-              const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
-              const codexAgents = codexAgentsByCwd[effectiveCwd] || [];
 
               const updateRow = (patch: Partial<ChannelConfig>) => {
                 void updateConfigForPlatform(channelPlatform, channel.id, patch);
@@ -1721,13 +1588,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         availableMessageTypes={availableMessageTypes(channelPlatform)}
                         showRequireMention={true}
                         inheritsFromKey={channelPlatform}
-                        opencodeOptions={opencodeOptions}
-                        claudeAgents={claudeAgents}
-                        claudeModels={claudeModels}
-                        claudeModelLabels={claudeModelLabels}
-                        claudeReasoningOptions={claudeReasoningOptions}
-                        codexAgents={codexAgents}
-                        codexModels={codexModels}
                       />
                       {channelPlatform === 'telegram' && channel.supports_topics && (
                         <TelegramTopicList<ChannelConfig>
@@ -1757,7 +1617,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                             if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, enabled });
                           }}
                           renderEditor={(topicId, topicConfig) => {
-                            const topicCwd = topicConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
                             return (
                               <RoutingConfigPanel
                                 value={topicConfig}
@@ -1769,13 +1628,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                                 availableMessageTypes={availableMessageTypes('telegram')}
                                 showRequireMention={true}
                                 inheritsFromKey="telegram"
-                                opencodeOptions={opencodeOptionsByCwd[topicCwd]}
-                                claudeAgents={claudeAgentsByCwd[topicCwd] || []}
-                                claudeModels={claudeModels}
-                                claudeModelLabels={claudeModelLabels}
-                                claudeReasoningOptions={claudeReasoningOptions}
-                                codexAgents={codexAgentsByCwd[topicCwd] || []}
-                                codexModels={codexModels}
                                 containerClass="border-t border-cyan/20 bg-background/35"
                               />
                             );
@@ -2033,10 +1885,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             require_mention: rawConfig.require_mention !== undefined ? rawConfig.require_mention : def.require_mention,
             require_bind: rawConfig.require_bind !== undefined ? rawConfig.require_bind : def.require_bind,
           };
-          const effectiveCwd = channelConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
-          const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
-          const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
-          const codexAgents = codexAgentsByCwd[effectiveCwd] || [];
           return (
             <div key={channel.id} className="rounded-xl border border-border bg-surface-3/60 p-4 transition-colors hover:border-border-strong hover:bg-surface-2/70">
               <div className="flex items-center justify-between gap-2">
@@ -2123,13 +1971,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   availableMessageTypes={availableMessageTypes(platform)}
                   showRequireMention={true}
                   inheritsFromKey={platform}
-                  opencodeOptions={opencodeOptions}
-                  claudeAgents={claudeAgents}
-                  claudeModels={claudeModels}
-                  claudeModelLabels={claudeModelLabels}
-                  claudeReasoningOptions={claudeReasoningOptions}
-                  codexAgents={codexAgents}
-                  codexModels={codexModels}
                   containerClass="mt-4 pl-8"
                 />
               )}

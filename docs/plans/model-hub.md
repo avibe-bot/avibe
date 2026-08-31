@@ -143,7 +143,7 @@ apply to UI nouns, not precise technical prose in this specification.
 | Provider (as a UI noun) | **Banned** | The UI manages concrete Sources; vendor may appear as metadata, and “upstream provider” remains valid architecture prose |
 | 账号池 / account pool | **Banned** | It implies operator tooling and multi-tenant pooling that Avibe does not ship |
 | 中转站 / relay station as a category | **Banned** | It is an API Key Source with a custom Base URL; helper copy may use it as an example |
-| 优先级 / priority as a standalone global noun | **Banned** | Name the owning model Route chain; ordinal copy such as “first upstream” is allowed |
+| 优先级 / priority as a standalone global noun | **Banned**, except in the backend-scoped UI title “全局路由优先级” / “Global route priority” | The title names one backend's shared Source order; otherwise name the owning model Route chain and use ordinal copy such as “first upstream” |
 
 **Copy-density rule (owner-approved interaction baseline, 2026-08-07 afternoon).**
 Use the glossary nouns in controls and status. Put explanations behind a compact info
@@ -167,18 +167,23 @@ model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 (subscription cycle % / monthly spend). Existing `last_discovered_at` records the last
 successful full inventory replacement; it is not a connectivity-check timestamp.
 Every Source read also carries the server-derived
-`adopted_by: [{backend, menu_model}]` projection of its persisted Route references.
-That unique projection is sorted by backend then menu model. It is reloadable Source-
-card data, not persisted Source state, and clients never reconstruct it from live chains.
+`adopted_by: [{backend, menu_model}]` projection of persisted Route references for
+backends currently in Hub mode. That unique projection is sorted by backend then menu
+model. It is reloadable Source-card data, not persisted Source state, and clients never
+reconstruct it from live chains. Routes retained while a backend is in Direct mode are
+not included because that backend bypasses the gateway.
 
 The Source workflow is complete at both entry points:
 
-- **Connectivity and protocol observation.** The normal Add Source form asks only for
-  optional name, Base URL, and API key. Its user-triggered Add action reuses one
-  connectivity interaction to classify reachability/authentication and observe the
-  protocol before Save can commit; it adds no separate step and presents no protocol
-  selector. This unsaved operation does not save a Source, consume routing order, or
-  run an Agent turn. For an API key it may provision an engine credential only
+- **Connectivity and protocol observation.** The normal Add Source form asks for an
+  optional name, an interface selection (Auto detect by default), Base URL, and API key.
+  A concrete interface restricts the preflight to one candidate; Auto detect tries the
+  supported candidates in the adapter's authoritative order. The user-triggered Add
+  action reuses one connectivity interaction to classify reachability/authentication
+  and prove the protocol before Save can commit. Its schema-invalid probe settles before
+  a relay selects or invokes a model, so observation never depends on a synthetic model
+  being routable. This unsaved operation does not save a Source, consume routing order,
+  or run an Agent turn. For an API key it may provision an engine credential only
   transiently:
   every success, failure, timeout, and cancellation path revokes that ref before the
   operation settles. A revoke failure enters the existing durable pending-revocation
@@ -187,6 +192,12 @@ The Source workflow is complete at both entry points:
   independently from protocol observation: Save may proceed only when that interaction
   still produced response evidence for the protocol, and it provisions the committed
   Source independently.
+- **CPA ownership after Save.** CPA requires a concrete upstream provider configuration,
+  so it cannot identify an unsaved Source without first being told the interface this
+  preflight exists to prove. Once the Source is saved, Avibe maps its proven protocol to
+  CPA's existing `claude-api-key`, `codex-api-key`, or `openai-compatibility` provider
+  section and every Agent invocation runs through CPA. Avibe owns only the bounded
+  pre-save evidence step; CPA owns compatible request translation and upstream dispatch.
 - **Saved Source refresh and recovery.** Source details exposes the distinct
   `POST /api/models/sources/<id>/refresh` operation. It is intentionally mutating: it
   tests the stored protocol, rediscovers inventory, updates Source health, and clears a
@@ -244,10 +255,12 @@ The Source workflow is complete at both entry points:
 
 **Source-create boundary.** `source-create.schema.json` is the complete API-key create
 request: `vendor` and transient `key`, plus optional `display_name`, `base_url`, probe-
-only `protocol_order`, client-generated `client_nonce`, and boolean
+constraining `protocol`, client-generated `client_nonce`, and boolean
 `accept_unavailable_inventory`; omission is `false`, and the boolean consents only when
 the server's repeated response-backed observation proves a protocol but returns
-`discovery: failed`. Source identity, protocol
+`discovery: failed`. Omitted `protocol` auto-detects across the supported interfaces;
+a supplied value probes exactly that interface but is not evidence and is persisted only
+after a matching response. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is unique among live Sources and live-process
 create reservations. The server reserves it atomically in process before observation or
@@ -327,21 +340,21 @@ nonempty. Create materialization and re-auth failures with no stranded sibling e
 plain-error row. No later Source read can reconstruct the historical report, so the
 error envelope carries it exactly once.
 
-**Protocol observation (owner ruling 2026-08-09, superseding AC-27's 2026-08-07
-manual-choice ruling).** Every stored `protocol` is traceable to a real response from
-that upstream before Save. Avibe never infers the value from vendor name or Base URL;
-known-vendor metadata may order the three probes but cannot produce a conclusion or a
-save-time default. When observation cannot distinguish a protocol, the failure state
-honestly asks the user for a one-time manual hint among the same three values. The hint
-changes probe order only: its selected adapter must still receive a successful upstream
-response before Save. A failed observation therefore stores nothing rather than guessing.
+**Protocol observation (owner ruling 2026-08-26, superseding the 2026-08-09
+ambiguity-only selector ruling).** Every stored `protocol` is traceable to a real response
+from that upstream before Save. Avibe never infers the value from vendor name or Base URL.
+The form exposes Auto detect plus the three supported protocols before the first request.
+Auto detect tries the authoritative sequence; a concrete selection restricts the attempt
+to exactly that protocol. Neither is a save-time conclusion: the selected adapter must
+still receive matching upstream response evidence before Save. A failed observation
+therefore stores nothing rather than guessing.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
 the stored adapter and never rewrite it. Changing protocol means creating a new Source,
 so a later operation cannot silently reinterpret existing inventory or configured hops.
 The stored shape carries no manual/automatic provenance marker and no unverified
-protocol state: manual and automatic probe ordering become indistinguishable after the
+protocol state: manual and automatic preflight become indistinguishable after the
 same response-backed conclusion. “Add anyway” is available only after protocol has been
 proved and some other information, such as model inventory, remains unavailable; that
 uncertainty belongs to Source health, not protocol identity. Every saved Source therefore
@@ -395,13 +408,14 @@ the user later places an already-added Source in a cross-vendor chain.
 The same model may be supplied by multiple Sources; §4.3 alone executes the exact
 stored route for that model.
 
-### 4.2 Gateway strategy — add-time defaults, then explicit configuration
+### 4.2 Gateway strategy — add-time defaults, global priority, then explicit configuration
 
 One record per Agent backend owns `mode`, its menu, one stored Source order, and one
-stored Route chain for each menu model. The Source order is a visible Gateway default
-for Add-time placement, not a runtime capability filter. There is no backend
-Source-order policy discriminator and no per-model route policy. The only order runtime
-can execute is the exact hop order stored for that model.
+stored Route chain for each menu model. The Source order is the visible Gateway priority
+and the Add-time placement input. Saving that priority atomically stores the complete
+order and applies it to existing Routes without changing their hop membership or
+mappings. There is no backend Source-order policy discriminator
+and no per-model route policy. Runtime executes the exact hop order stored for each model.
 
 Matching is an **Add Source write-time operation**. After connectivity, protocol, and
 inventory have been observed, the add transaction proposes exact Source/model matches,
@@ -440,7 +454,9 @@ metadata for audit/display; routing and placement never read or mutate it.
 
 The explicit `POST /api/models/agents/<backend>/chains/reorder` operation is the sole
 server-side post-creation operation that implicitly applies the stored Source-order
-sequence to existing Routes. It reorders existing hops only, preserves every exact
+sequence to existing Routes. When the UI supplies an `order` body, persisting that
+order and applying it to existing Routes are one mutation; an omitted body applies the
+already stored order. It reorders existing hops only, preserves every exact
 `(source_id, model_id)` member and mapping, and never reruns matching. Its complete stable
 order is defined in §4.6. A user-authored per-model `hops` PUT carries only the submitted
 explicit hop order, and its server handler never reads `sources.order`; an editor may use
@@ -477,7 +493,8 @@ The `matching-v1` decision is normative and exhaustive:
 
 ```text
 for each configuration-eligible Source added in this transaction:
-    observed = response_backed_observation(Source, protocol_order)
+    candidates = [request.protocol] if selected else SOURCE_PROTOCOLS
+    observed = response_backed_observation(Source, candidates)
     if observed.protocol is null:
         persist no Source and no Route hop
         return the classified observation failure
@@ -559,7 +576,7 @@ repairs or rewrites configuration.
 singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
 system never prepends native supply or chooses a model. If the requested reasoning
 effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
-value; otherwise pass `null`, with no approximation or downgrade.
+value; otherwise omit the effort field, with no approximation or downgrade.
 
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
@@ -595,11 +612,32 @@ The complete observation surface is limited to these facts:
    event lifecycle.
 3. EOF without a recognized terminal is the existing network family and is
    non-punitive to durable Source health.
-4. `stream_started` flips only when content, refusal, or tool-call model output crosses
-   the caller boundary. Role metadata, transport frames, and error frames do not flip it.
+4. `stream_started` flips only when content, refusal, tool-call, or image-generation
+   model output crosses the caller boundary. Role metadata, transport frames, and error
+   frames do not flip it.
 5. The observer performs only the framing normalization required to see those facts:
-   stripping an initial UTF-8 BOM and splitting bounded SSE lines and events across CRLF,
-   LF, or CR boundaries.
+   stripping an initial UTF-8 BOM and splitting SSE lines and events across CRLF, LF, or
+   CR boundaries. Its private metadata copy has a fixed memory budget: large string
+   values are elided, and an event whose remaining JSON structure still exceeds that
+   budget becomes unobserved rather than invalid. Event names are retained only up to
+   the supported discriminator budget. The original bytes continue downstream
+   unchanged, and no model-output fact is asserted until the event's data discriminator
+   has been observed.
+
+Response size is not a protocol-validity rule. Model Hub applies no local byte ceiling to
+successful upstream response bodies, SSE lines or frames, pre-output replay, or model
+inventory responses. Request admission limits remain separate request-side policy. Memory
+thresholds may spill retained replay bytes to a temporary file, but must never truncate,
+reject, reclassify, or trigger fallback for an otherwise valid response. Pre-output
+replay has one absolute transport deadline, so keepalives cannot renew the wait forever;
+buffered responses spill before replay. One taxonomy-backed selective JSON projector owns
+their terminal error, machine-code, and usage facts for every body size; it lexes only
+the finite protocol paths and skips unrelated subtrees while the exact body remains on
+disk for replay. Model discovery uses the same selective projection for its inventory.
+Optional response mutation, such as restoring an OpenCode tool alias, operates on the
+same exact-byte spool for every body size, has a bounded working set, and fails open to
+the original bytes when it cannot
+finish within that set.
 
 Everything else is forwarded and ignored for settlement. Model Hub does not judge
 `sequence_number` presence or order; completeness of the event vocabulary; lifecycle
@@ -792,8 +830,8 @@ Three classes, because the action owed by the user differs in each.
 
 | Status | zh (UI) | Heals itself | Meaning |
 | --- | --- | --- | --- |
-| `active` | 使用中 | — | currently serving |
-| `standby` | 备用 | — | healthy, but not currently serving any configured route |
+| `active` | 正常 | — | healthy source; route use is shown by the persisted reference projection |
+| `standby` | 正常 | — | healthy source; when `adopted_by` is non-empty it is shown as supplying the configured route |
 | `cooldown` | 暂不可用 (gold) | **yes** | shaped quota/rate/server result; persisted `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
 | `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |
@@ -806,7 +844,10 @@ dead-end error string.
 2026-08-11).** `host_platform` is detected on the Avibe server, never from the browser,
 and installation is supported exactly when it equals one
 `manifest.assets[].platform`. The install route and status reads mirror this closed
-state set; prose cannot add another runtime health value.
+state set; prose cannot add another runtime health value. `RuntimeDependency.enabled`
+is orthogonal persisted user intent: it defaults to false when absent, explicit Start
+sets it true, explicit Stop sets it false, and service startup starts the runtime only
+when it is true. A transient process loss changes health, never this switch state.
 
 | Decision | Meaning | Entry and exit rule | `status.error_key` |
 | --- | --- | --- | --- |
@@ -1215,9 +1256,11 @@ present even when empty.
 The request carrier shown in each row is the only one. The final `api.md`, server/client
 envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
 `PUT /api/models/agents/<backend>/sources` is intentionally outside the matrix: it
-changes only the Add-time Source-order sequence, never a Route chain or its members, and
-must not gain a guarded `409` branch. This is the G-9 behavioral tombstone; a guard here
-would imply the forbidden behavior of rewriting Routes during Source-order storage.
+changes only the persisted Source-order sequence, never a Route chain or its members, and
+must not gain a guarded `409` branch. The UI uses the explicit
+`POST /api/models/agents/<backend>/chains/reorder` operation with the complete order;
+that operation stores the order and applies it to existing Routes in one mutation while
+preserving the PUT's storage-only contract.
 Automatic background discovery never performs this cascade: when neither literal
 inventory nor sanctioned-alias evidence remains, it records the model as
 `model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
@@ -1329,7 +1372,8 @@ Source deletion removes its id from every backend order in the same transaction 
 preserves the relative order of survivors. Serialization/reload rejects a dangling id.
 
 `POST /api/models/agents/<backend>/chains/reorder` applies that sequence to every
-existing Route without changing Route membership or mappings. For an original hop at
+existing Route without changing Route membership or mappings. When its optional `order`
+body is present, it stores that sequence in the same mutation. For an original hop at
 index `i`, use stable key `(0, source_order_index, i)` when its Source appears in the
 current order and `(1, i, i)` otherwise, then sort lexicographically. Thus all listed
 Sources come first in configured order, hops sharing a listed Source retain their
@@ -1417,8 +1461,8 @@ drag handle, or persisted policy. Configuration lives at one of the two real own
 the Source or the Gateway chain.
 
 A Source card's “Supplying …” line consumes the existing
-`adopted_by: [{backend, menu_model}]` projection: group its configured rows
-by backend, de-duplicate backend names, and combine them with the current §4.3
+`adopted_by: [{backend, menu_model}]` projection for Hub-mode backends: group its
+configured rows by backend, de-duplicate backend names, and combine them with the current §4.3
 runnability projection. No parallel “supplying backends” field is stored. If this
 projection proves insufficient in implementation, the lane reports the exact missing
 fact for a targeted expansion of `adopted_by`; it does not add a sibling field.
@@ -1443,7 +1487,7 @@ Required interaction rules:
   a consent flow. When a backend already has its singleton native Source, its native
   choice is disabled rather than creating an alias for the same CLI login.
 - Add Source exposes §4.1's combined connectivity/protocol observation and compatible
-  model discovery without a normal protocol control. Source details exposes only the
+  model discovery with Auto detect plus a manual three-protocol selector. Source details exposes only the
   separately named mutating “Refresh models” / 「重新拉取」 action against the stored
   protocol; it has no “Test connectivity” button or second discovery mutation. Results
   stay in the current flow and use compact status plus an
@@ -1451,8 +1495,8 @@ Required interaction rules:
   paragraphs. Every inventory model exposes an editable per-model `reasoning_efforts`
   list beside the exact id. The list has no default item or selected state; the control
   form follows the owner-approved `design.pen` baseline and is not prescribed here. A
-  protocol selector appears only inside an observation-failure state and its hint still
-  requires a successful response before Save. Source freshness may say only “Model list
+  selection constrains the first observation and every retry but still requires a
+  successful response before Save. Source freshness may say only “Model list
   updated at …” / 「型号列表更新于…」 from `last_discovered_at`; latency and “last
   checked” copy are absent.
 - Compatibility detail for converted or cross-vendor supply stays behind a compact
@@ -1527,8 +1571,8 @@ through explicit OAuth add, not native-file import. The import entry points are 
 open after upgrade, the setup wizard, and the backend-page banner.
 - **Add-source closing loop (v3).** Creating a Source returns
   `added_to: [{backend, menu_model, source_id, model_id, position}]` for every exact hop
-  written by the one-time match. `adopted_by: [{backend, menu_model}]` is the stable
-  Source-card projection of those persisted references; transient health and process
+written by the one-time match. `adopted_by: [{backend, menu_model}]` is the stable
+Source-card projection of those persisted Hub-mode references; transient health and process
   availability do not change it. A Source with no automatic match reports an empty
   `added_to` and remains available for an explicit route edit, without a separate “not
   enabled” state.
@@ -1584,8 +1628,9 @@ one pinned hop it receives.
 
 ## 9. Explicit non-goals (v3)
 
-- **No product-global or backend-wide priority list.** Execution ordering exists only
-  inside one `(backend, menu model)` Route chain.
+- **No product-global priority list.** The backend-scoped Source order is explicitly in
+  scope, and execution ordering remains configurable inside each `(backend, menu model)`
+  Route chain.
 - **Per-model ordering is explicitly in scope.** Owner ruling 2026-08-07
   supersedes v2's “No per-model ordering” non-goal. The scope is exactly §4.3 and
   §4.6's stored configured-chain input;
@@ -1605,10 +1650,10 @@ one pinned hop it receives.
   executed exactly; that hop may use an API key or a hub-held subscription and requires
   no additional warning.
 - **No protocol guessing or post-save backfill.** A stored protocol comes from a real
-  pre-save upstream response, never a vendor/Base-URL string heuristic. If observation
-  fails, the product may ask once for a manual probe-order hint, but the hinted adapter
-  must still return a successful response before anything is saved. No later operation
-  changes the stored value.
+  pre-save upstream response, never a vendor/Base-URL string heuristic. Auto detect and
+  manual selection only choose which adapters to verify; the selected adapter must still
+  return matching response evidence before anything is saved. No later operation changes
+  the stored value.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 - No v3 Configure Agents module (§5), runtime plugin UI, or GA scope beyond the
@@ -1664,7 +1709,8 @@ directions into questions that later lanes must answer before writing mechanical
       every saved protocol is response-proven before Save and immutable afterward,
       with no persistent provenance marker or protocol-level unverified value.
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
-      Completions, and shows protocol choices only after observation cannot decide.
+      Completions, and shows Auto detect plus those three protocol choices before
+      observation; an ambiguous Auto result requires one concrete choice to retry.
 - [ ] §4.2 alone owns Add Source placement: every accepted match is persisted at one
       deterministic policy-chosen position that is visible and adjustable; no later
       path reruns placement, and no UI test infers newness from position.
@@ -1685,7 +1731,7 @@ directions into questions that later lanes must answer before writing mechanical
       attribution reuses `adopted_by`, and saved Source details has only guarded
       「重新拉取」 with no latency or “last checked” copy.
 - [ ] §6 reports the exact hops Add Source wrote through `added_to`, and Source-card
-      `adopted_by` reflects only persisted route references.
+      `adopted_by` reflects only persisted Hub-mode route references.
 - [ ] §6 reserves Direct for `mode: direct`, labels a `native_cli` Gateway hop Native,
       and defines a visible, reversible Direct ↔ Gateway action for every backend.
 - [ ] §9 explicitly supersedes the old no-per-model-ordering non-goal and states that

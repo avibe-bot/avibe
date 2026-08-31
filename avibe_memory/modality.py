@@ -7,16 +7,12 @@ amount of retrying can clear, so the capture boundary filters uploads here
 instead of discovering the limit at the provider.
 
 This mirrors ``everalgo.types.modality`` in the packaged EverOS runtime
-and must stay in sync with it. Two upstream groups stay out of the live
-allowlist for host-capability reasons:
+and must stay in sync with it. Upstream formats that need an optional external
+converter stay out of the live allowlist:
 
 - ``svg`` needs the cairosvg integration, which this runtime does not ship
 - video is still unimplemented in the pinned EverOS parser
-
-Office / iWork / ODF / RTF are admitted only when the host can resolve
-LibreOffice's ``soffice`` binary. EverOS converts those files to PDF before
-the multimodal LLM sees them; sending one without ``soffice`` aborts the
-whole ``/add`` batch with ``CAPABILITY_UNAVAILABLE``.
+- Office, iWork, ODF, and RTF need LibreOffice conversion
 
 Kept dependency-light on purpose: ``avibe_memory.sidecar`` imports this from the
 runtime child process, which runs with a minimal environment.
@@ -26,37 +22,10 @@ from __future__ import annotations
 
 import codecs
 import os
-import shutil
-import stat
-import struct
-import subprocess
-import tempfile
-import zipfile
 from pathlib import Path
 
 from avibe_memory.types import MemoryContentKind
 
-
-# EverOS's macOS fallback; keep this identical so Avibe and the parser agree.
-_MACOS_SOFFICE = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
-
-OFFICE_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
-    {
-        "docx",
-        "pptx",
-        "xlsx",
-        "doc",
-        "ppt",
-        "xls",
-        "pages",
-        "key",
-        "numbers",
-        "odt",
-        "ods",
-        "odp",
-        "rtf",
-    }
-)
 
 SUPPORTED_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -90,163 +59,33 @@ SUPPORTED_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
         "htm",
         # EMAIL
         "eml",
-        *OFFICE_ATTACHMENT_EXTENSIONS,
     }
 )
 
-# These pinned upstream formats need unavailable local integrations.  They are
-# deliberately a static Avibe policy, not a provider import in request handling.
-PINNED_UPSTREAM_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset({"svg"})
+# These pinned upstream formats need unavailable or external integrations. They
+# are deliberately a static Avibe policy, not a provider import in request handling.
+PINNED_UPSTREAM_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "svg",
+        "docx",
+        "pptx",
+        "xlsx",
+        "doc",
+        "ppt",
+        "xls",
+        "pages",
+        "key",
+        "numbers",
+        "odt",
+        "ods",
+        "odp",
+        "rtf",
+    }
+)
 
 _IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp", "tiff", "tif", "bmp"})
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "m4a", "amr", "aiff", "aac", "ogg", "flac"})
 _TEXT_EXTENSIONS = frozenset({"txt", "md", "vtt", "csv", "tsv"})
-_OFFICE_ZIP_MARKERS: dict[str, frozenset[str]] = {
-    "docx": frozenset({"[Content_Types].xml", "word/document.xml"}),
-    "pptx": frozenset({"[Content_Types].xml", "ppt/presentation.xml"}),
-    "xlsx": frozenset({"[Content_Types].xml", "xl/workbook.xml"}),
-    "odt": frozenset({"mimetype", "content.xml"}),
-    "ods": frozenset({"mimetype", "content.xml"}),
-    "odp": frozenset({"mimetype", "content.xml"}),
-    # Current iWork packages share the IWA document index; the extension tells
-    # LibreOffice which filter to apply.
-    "pages": frozenset({"Index/Document.iwa"}),
-    "key": frozenset({"Index/Document.iwa"}),
-    "numbers": frozenset({"Index/Document.iwa"}),
-}
-_OFFICE_OLE_EXTENSIONS = frozenset({"doc", "ppt", "xls"})
-_OFFICE_OLE_REQUIRED_STREAM_GROUPS: dict[str, tuple[frozenset[str], ...]] = {
-    "doc": (
-        frozenset({"WordDocument"}),
-        frozenset({"0Table", "1Table"}),
-    ),
-    "ppt": (frozenset({"PowerPoint Document"}),),
-    "xls": (frozenset({"Book", "Workbook"}),),
-}
-_OFFICE_RTF_EXTENSIONS = frozenset({"rtf"})
-_OFFICE_MIMES_BY_EXTENSION: dict[str, frozenset[str]] = {
-    "docx": frozenset(
-        {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
-    ),
-    "pptx": frozenset(
-        {"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
-    ),
-    "xlsx": frozenset(
-        {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
-    ),
-    "doc": frozenset({"application/msword"}),
-    "ppt": frozenset({"application/vnd.ms-powerpoint"}),
-    "xls": frozenset({"application/vnd.ms-excel"}),
-    "pages": frozenset(
-        {
-            "application/vnd.apple.pages",
-            "application/x-iwork-pages-sffpages",
-        }
-    ),
-    "key": frozenset(
-        {
-            "application/vnd.apple.keynote",
-            "application/x-iwork-keynote-sffkey",
-        }
-    ),
-    "numbers": frozenset(
-        {
-            "application/vnd.apple.numbers",
-            "application/x-iwork-numbers-sffnumbers",
-        }
-    ),
-    "odt": frozenset({"application/vnd.oasis.opendocument.text"}),
-    "ods": frozenset({"application/vnd.oasis.opendocument.spreadsheet"}),
-    "odp": frozenset({"application/vnd.oasis.opendocument.presentation"}),
-    "rtf": frozenset({"application/rtf", "text/rtf"}),
-}
-_ODF_MIME_BY_EXTENSION = {
-    "odt": "application/vnd.oasis.opendocument.text",
-    "ods": "application/vnd.oasis.opendocument.spreadsheet",
-    "odp": "application/vnd.oasis.opendocument.presentation",
-}
-_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-_RTF_MAGIC = b"{\\rtf"
-_ZIP_EOCD = struct.Struct("<4s4H2LH")
-_ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
-_ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
-_ZIP_CENTRAL_DIRECTORY_HEADER_BYTES = 46
-_MAX_ZIP_COMMENT_BYTES = 65_535
-_MAX_OFFICE_ZIP_ENTRIES = 4_096
-_MAX_OFFICE_ZIP_MEMBER_BYTES = 32 * 1024 * 1024
-_MAX_OFFICE_ZIP_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
-_OFFICE_CONVERSION_TIMEOUT_SECONDS = 30
-
-
-def _office_converter_path() -> Path | None:
-    resolved = shutil.which("soffice", path="/usr/bin:/bin")
-    if resolved is not None:
-        return Path(resolved)
-    if _MACOS_SOFFICE.is_file() and os.access(_MACOS_SOFFICE, os.X_OK):
-        return _MACOS_SOFFICE
-    return None
-
-
-def office_conversion_available() -> bool:
-    """Return whether the Memory sidecar can resolve LibreOffice.
-
-    The sidecar PATH is ``<runtime>/bin:/usr/bin:/bin``. Probe only those
-    locations plus EverOS's macOS App fallback so Avibe never admits an
-    Office file the parser child cannot convert.
-    """
-
-    return _office_converter_path() is not None
-
-
-def office_document_conversion_succeeds(
-    path: Path,
-    *,
-    timeout_seconds: float = _OFFICE_CONVERSION_TIMEOUT_SECONDS,
-) -> bool:
-    """Prove that the sidecar-visible converter accepts one private staged file."""
-
-    converter = _office_converter_path()
-    bounded_timeout = min(
-        float(_OFFICE_CONVERSION_TIMEOUT_SECONDS),
-        max(0.0, float(timeout_seconds)),
-    )
-    if converter is None or bounded_timeout <= 0:
-        return False
-    try:
-        with tempfile.TemporaryDirectory(prefix="avibe-office-preflight-") as temp_dir:
-            temp_root = Path(temp_dir)
-            output_dir = temp_root / "output"
-            profile_dir = temp_root / "profile"
-            output_dir.mkdir(mode=0o700)
-            profile_dir.mkdir(mode=0o700)
-            result = subprocess.run(
-                [
-                    str(converter),
-                    "--headless",
-                    f"-env:UserInstallation={profile_dir.as_uri()}",
-                    "--convert-to",
-                    "pdf",
-                    "--outdir",
-                    str(output_dir),
-                    str(path),
-                ],
-                cwd=temp_root,
-                env={"HOME": str(temp_root), "PATH": "/usr/bin:/bin"},
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=bounded_timeout,
-                check=False,
-            )
-            output = output_dir / f"{path.stem}.pdf"
-            output_info = output.lstat()
-            return (
-                result.returncode == 0
-                and stat.S_ISREG(output_info.st_mode)
-                and output_info.st_size > 0
-            )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
 
 
 def classify_pinned_attachment(
@@ -296,20 +135,6 @@ def classify_pinned_attachment(
         }:
             return None
         return "pdf", extension
-    if extension in OFFICE_ATTACHMENT_EXTENSIONS:
-        if not office_conversion_available() or not _office_container_matches(
-            extension,
-            path,
-            file_fd,
-            sample,
-        ):
-            return None
-        if (
-            normalized_mime != "application/octet-stream"
-            and normalized_mime not in _OFFICE_MIMES_BY_EXTENSION[extension]
-        ):
-            return None
-        return "doc", extension
     if not _valid_utf8_text_file(path, file_fd):
         return None
     if normalized_mime != "application/octet-stream" and not (
@@ -350,174 +175,6 @@ def _valid_utf8_text_file(path: Path, file_fd: int | None) -> bool:
 def _extension_aliases_match(expected: str, detected: str) -> bool:
     aliases = ({"jpg", "jpeg"}, {"tif", "tiff"}, {"m4a", "mp4"})
     return expected == detected or any({expected, detected} <= group for group in aliases)
-
-
-def _office_container_matches(
-    extension: str,
-    path: Path,
-    file_fd: int | None,
-    sample: bytes,
-) -> bool:
-    if extension in _OFFICE_ZIP_MARKERS:
-        return _office_zip_matches(extension, path, file_fd)
-    if extension in _OFFICE_OLE_EXTENSIONS:
-        return _office_ole_matches(extension, path, file_fd, sample)
-    if extension in _OFFICE_RTF_EXTENSIONS:
-        return sample.startswith(_RTF_MAGIC)
-    return False
-
-
-def _office_ole_matches(
-    extension: str,
-    path: Path,
-    file_fd: int | None,
-    sample: bytes,
-) -> bool:
-    if not sample.startswith(_OLE_MAGIC):
-        return False
-    try:
-        import olefile
-
-        with _open_attachment_file(path, file_fd) as file_obj:
-            file_obj.seek(0)
-            with olefile.OleFileIO(
-                file_obj,
-                raise_defects=olefile.DEFECT_INCORRECT,
-            ) as archive:
-                return all(
-                    any(
-                        archive.exists(stream_name)
-                        and archive.get_size(stream_name) > 0
-                        for stream_name in alternatives
-                    )
-                    for alternatives in _OFFICE_OLE_REQUIRED_STREAM_GROUPS[extension]
-                )
-    except Exception:
-        return False
-
-
-def _office_zip_matches(extension: str, path: Path, file_fd: int | None) -> bool:
-    try:
-        with _open_attachment_file(path, file_fd) as file_obj:
-            if not _office_zip_entry_count_bounded(file_obj):
-                return False
-            file_obj.seek(0)
-            with zipfile.ZipFile(file_obj) as archive:
-                names = archive.namelist()
-                if len(names) != len(set(names)):
-                    return False
-                total_uncompressed = 0
-                for info in archive.infolist():
-                    if (
-                        info.file_size < 0
-                        or info.file_size > _MAX_OFFICE_ZIP_MEMBER_BYTES
-                    ):
-                        return False
-                    total_uncompressed += info.file_size
-                    if total_uncompressed > _MAX_OFFICE_ZIP_TOTAL_UNCOMPRESSED_BYTES:
-                        return False
-                if not _OFFICE_ZIP_MARKERS[extension].issubset(names):
-                    return False
-                expected_mime = _ODF_MIME_BY_EXTENSION.get(extension)
-                if expected_mime is None:
-                    return True
-                mime_info = archive.getinfo("mimetype")
-                if mime_info.file_size > 128:
-                    return False
-                return archive.read(mime_info) == expected_mime.encode("ascii")
-    except (
-        KeyError,
-        NotImplementedError,
-        OSError,
-        RuntimeError,
-        ValueError,
-        zipfile.BadZipFile,
-        zipfile.LargeZipFile,
-    ):
-        return False
-
-
-def _office_zip_entry_count_bounded(file_obj) -> bool:
-    file_obj.seek(0, os.SEEK_END)
-    archive_size = file_obj.tell()
-    tail_size = min(archive_size, _ZIP_EOCD.size + _MAX_ZIP_COMMENT_BYTES)
-    if tail_size < _ZIP_EOCD.size:
-        return False
-    file_obj.seek(-tail_size, os.SEEK_END)
-    tail = file_obj.read(tail_size)
-    eocd_offset = tail.rfind(_ZIP_EOCD_SIGNATURE)
-    if eocd_offset < 0:
-        return False
-    try:
-        (
-            signature,
-            disk_number,
-            central_directory_disk,
-            entries_on_disk,
-            total_entries,
-            central_directory_size,
-            central_directory_offset,
-            comment_size,
-        ) = _ZIP_EOCD.unpack_from(tail, eocd_offset)
-    except struct.error:
-        return False
-    eocd_absolute_offset = archive_size - tail_size + eocd_offset
-    if not (
-        signature == _ZIP_EOCD_SIGNATURE
-        and eocd_offset + _ZIP_EOCD.size + comment_size == len(tail)
-        and disk_number == central_directory_disk == 0
-        and entries_on_disk == total_entries
-        and 0 < total_entries <= _MAX_OFFICE_ZIP_ENTRIES
-        and total_entries != 0xFFFF
-        and central_directory_size != 0xFFFFFFFF
-        and central_directory_offset != 0xFFFFFFFF
-        and central_directory_offset + central_directory_size
-        <= eocd_absolute_offset
-    ):
-        return False
-    return _office_zip_central_directory_matches(
-        file_obj,
-        eocd_absolute_offset=eocd_absolute_offset,
-        central_directory_size=central_directory_size,
-        expected_entries=total_entries,
-    )
-
-
-def _office_zip_central_directory_matches(
-    file_obj,
-    *,
-    eocd_absolute_offset: int,
-    central_directory_size: int,
-    expected_entries: int,
-) -> bool:
-    central_directory_start = eocd_absolute_offset - central_directory_size
-    if central_directory_start < 0:
-        return False
-    file_obj.seek(central_directory_start)
-    consumed = 0
-    observed_entries = 0
-    while consumed < central_directory_size:
-        header = file_obj.read(_ZIP_CENTRAL_DIRECTORY_HEADER_BYTES)
-        if (
-            len(header) != _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES
-            or not header.startswith(_ZIP_CENTRAL_DIRECTORY_SIGNATURE)
-        ):
-            return False
-        filename_size, extra_size, comment_size = struct.unpack_from("<3H", header, 28)
-        variable_size = filename_size + extra_size + comment_size
-        entry_size = _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES + variable_size
-        consumed += entry_size
-        observed_entries += 1
-        if (
-            consumed > central_directory_size
-            or observed_entries > _MAX_OFFICE_ZIP_ENTRIES
-        ):
-            return False
-        file_obj.seek(variable_size, os.SEEK_CUR)
-    return (
-        consumed == central_directory_size
-        and observed_entries == expected_entries
-    )
 
 
 def _image_extension(data: bytes) -> str | None:

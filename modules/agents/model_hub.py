@@ -40,9 +40,12 @@ from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
     create_default_service,
+    project_opencode_public_model,
 )
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from vibe.codex_config import format_toml_basic_string
+from vibe.opencode_config import model_hub_runtime_provider_id
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -96,6 +99,7 @@ class OpenCodeOverlay:
     path: Path
     content_hash: str
     content: bytes
+    provider_id: str
     checked_identifiers: tuple[str, ...]
     available_identifiers: tuple[str, ...]
     launches: tuple[ModelHubLaunch, ...] = field(repr=False)
@@ -294,11 +298,15 @@ def build_codex_hub_launch(
     base_args: list[str],
     base_env: dict[str, str],
     launch: ModelHubLaunch,
+    *,
+    model_catalog_path: Path | None = None,
 ) -> tuple[list[str], dict[str, str] | None]:
     """Return app-server global overrides and environment for a Hub turn."""
 
     if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
         return list(base_args), None
+    if model_catalog_path is None:
+        raise ValueError("Codex Model Hub launches require a provider-safe model catalog")
     env = dict(base_env)
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         env.pop(key, None)
@@ -320,6 +328,8 @@ def build_codex_hub_launch(
         f"model_providers.{provider}.supports_websockets=false",
         "-c",
         f"model_providers.{provider}.requires_openai_auth=false",
+        "-c",
+        f"model_catalog_json={format_toml_basic_string(str(model_catalog_path))}",
     ]
     return overrides + list(base_args), env
 
@@ -955,12 +965,12 @@ class ModelHubRuntimeRouter:
         checked = tuple(agent.menu.checked if agent.menu else ())
         if not checked:
             return None
-
         gateway_base_url, gateway_token = await self._gateway_credentials(
             "opencode",
             process_scope="opencode:shared-server",
             turn_id=None,
         )
+        overlay_provider_id = model_hub_runtime_provider_id(gateway_token)
         providers: dict[str, dict[str, Any]] = {}
         projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
@@ -972,9 +982,9 @@ class ModelHubRuntimeRouter:
                 identifier,
                 supply_channel="hub",
             )
-            provider_id = resolution.menu_provider_id
+            menu_provider_id = resolution.menu_provider_id
             menu_model_id = resolution.menu_model_id
-            if provider_id is None or menu_model_id is None:
+            if menu_provider_id is None or menu_model_id is None:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             inspection = (
                 resolution.candidate_hops[0]
@@ -1000,30 +1010,23 @@ class ModelHubRuntimeRouter:
             package = _provider_package()
             base_url = _provider_base_url(gateway_base_url)
             provider = providers.setdefault(
-                provider_id,
+                overlay_provider_id,
                 {
-                    "name": provider_id,
+                    "name": "Avibe Model Hub",
                     "npm": package,
                     "options": {"apiKey": gateway_token, "baseURL": base_url},
                     "models": {},
                 },
             )
-            model = next(
-                (item for item in source.models if item.id == exact_model_id),
-                None,
-            )
             runtime_model = identifier
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{exact_model_id}"
-            provider["models"][menu_model_id] = {
-                "id": runtime_model,
-                "name": (
-                    model.display_name
-                    if model is not None and model.display_name
-                    else menu_model_id
-                ),
-            }
+            projected_model = project_opencode_public_model(identifier, resolution)
+            if projected_model is None:
+                continue
+            projected_model["id"] = runtime_model
+            provider["models"][identifier] = projected_model
             projected_identifiers.append(identifier)
             if resolution.candidate_hops:
                 available_identifiers.append(identifier)
@@ -1058,6 +1061,7 @@ class ModelHubRuntimeRouter:
             path=self.overlay_path,
             content_hash=content_hash,
             content=content,
+            provider_id=overlay_provider_id,
             checked_identifiers=tuple(projected_identifiers),
             available_identifiers=tuple(available_identifiers),
             launches=tuple(launches),
@@ -1075,7 +1079,10 @@ class ModelHubRuntimeRouter:
         write_atomic(self.overlay_path, content)
 
 
-def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | None) -> str | None:
+def opencode_requested_model_for_overlay(
+    model: str | None,
+    overlay: OpenCodeOverlay | None,
+) -> str | None:
     if overlay is None:
         return model
     candidate = str(model or "").strip()
@@ -1086,3 +1093,27 @@ def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | Non
     if candidate in overlay.checked_identifiers:
         return candidate
     raise ModelHubError("mapping_target_unavailable", status=409)
+
+
+def opencode_model_for_overlay(
+    model: str | None,
+    overlay: OpenCodeOverlay | None,
+) -> str | None:
+    requested_model = opencode_requested_model_for_overlay(model, overlay)
+    if overlay is None or requested_model is None:
+        return requested_model
+    return f"{overlay.provider_id}/{requested_model}"
+
+
+def opencode_model_catalog_for_overlay(
+    overlay: OpenCodeOverlay,
+) -> dict[str, Any]:
+    """Project the private overlay into the model metadata needed by its turn."""
+
+    payload = json.loads(overlay.content)
+    provider = payload.get("provider", {}).get(overlay.provider_id, {})
+    models = provider.get("models", {}) if isinstance(provider, dict) else {}
+    return {
+        "providers": [{"id": overlay.provider_id, "models": models}],
+        "default": {},
+    }

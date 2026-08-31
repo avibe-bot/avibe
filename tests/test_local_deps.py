@@ -91,7 +91,7 @@ def _installable_avault_release(
         raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
-    def fake_candidate_cli_paths(binary: str):
+    def fake_candidate_cli_paths(binary: str, *, include_npm_global: bool = True):
         expanded = api.Path(api.os.path.expanduser(binary))
         has_path_separator = api.os.sep in binary or (api.os.altsep is not None and api.os.altsep in binary)
         if expanded.is_absolute() or has_path_separator:
@@ -195,6 +195,49 @@ def test_askill_install_command_does_not_persist_agent_cli_path(monkeypatch):
     assert config_loads == []
 
 
+def test_shared_install_runner_failures_have_structured_identity(monkeypatch):
+    class FailedPopen:
+        returncode = 17
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            return "", "installer stderr"
+
+    monkeypatch.setattr(api.subprocess, "Popen", FailedPopen)
+    failed = api._run_install_command("askill", ["bash"], lambda value: value)
+    assert failed["reason"] == "askill_install_failed"
+    assert failed["exit_code"] == 17
+
+    class ErrorPopen:
+        def __init__(self, *args, **kwargs):
+            raise OSError("runner unavailable")
+
+    monkeypatch.setattr(api.subprocess, "Popen", ErrorPopen)
+    errored = api._run_install_command("askill", ["bash"], lambda value: value)
+    assert errored["reason"] == "askill_install_error"
+    assert errored["error"] == "runner unavailable"
+
+    class TimedOutPopen:
+        returncode = 0
+
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise api.subprocess.TimeoutExpired(["bash"], timeout)
+            return "partial", ""
+
+    monkeypatch.setattr(api.subprocess, "Popen", TimedOutPopen)
+    monkeypatch.setattr(api, "signal_process_tree", lambda *args, **kwargs: None)
+    timed_out = api._run_install_command("askill", ["bash"], lambda value: value)
+    assert timed_out["reason"] == "askill_install_timeout"
+    assert timed_out["timeout_seconds"] == 300
+
+
 def test_install_askill_unsupported_without_curl(monkeypatch):
     # No curl/bash (e.g. Windows): no broken npm fallback — a clear manual
     # message pointing at askill.sh, and _run_install_command is never invoked.
@@ -203,6 +246,8 @@ def test_install_askill_unsupported_without_curl(monkeypatch):
     out = api.install_askill()
     assert out["ok"] is False
     assert "askill.sh" in out["message"]
+    assert out["reason"] == "askill_auto_install_unsupported"
+    assert out["required_tools"] == ["curl", "bash"]
 
 
 def test_install_askill_unsupported_on_windows_even_with_tools(monkeypatch):
@@ -214,6 +259,7 @@ def test_install_askill_unsupported_on_windows_even_with_tools(monkeypatch):
 
     assert out["ok"] is False
     assert "askill.sh" in out["message"]
+    assert out["reason"] == "askill_auto_install_unsupported"
 
 
 def test_ensure_askill_idempotent_when_present(monkeypatch):
@@ -246,6 +292,8 @@ def test_ensure_askill_install_not_discoverable_is_failure(monkeypatch):
     monkeypatch.setattr(api, "install_askill", lambda: {"ok": True})
     out = api.ensure_askill_installed()
     assert out["ok"] is False and out["installed"] is False and out["path"] is None
+    assert out["reason"] == "askill_install_path_missing"
+    assert out["expected_path"] == "askill"
 
 
 def test_ensure_askill_force_reinstalls_even_when_present(monkeypatch):
@@ -326,6 +374,8 @@ def test_install_avault_unsupported_platform_is_clear_failure(monkeypatch):
 
     assert out["ok"] is False
     assert "no avault build for FreeBSD-riscv64" in out["message"]
+    assert out["reason"] == "avault_platform_unsupported"
+    assert out["platform"] == "FreeBSD-riscv64"
 
 
 def test_install_avault_force_keeps_existing_binary_on_unsupported_platform(monkeypatch):
@@ -433,7 +483,28 @@ def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):
     installed = api.Path.home() / ".local" / "bin" / "avault"
     assert out["ok"] is False
     assert "checksum" in out["message"]
+    assert out["reason"] == "avault_checksum_mismatch"
+    assert out["expected_sha256"] == "0" * 64
+    assert len(out["actual_sha256"]) == 64
     assert not installed.exists()
+
+
+def test_install_avault_generic_failure_has_structured_identity(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _binary: None)
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        api,
+        "_download_avault_release_file",
+        lambda _url: (_ for _ in ()).throw(ValueError("invalid manifest")),
+    )
+
+    out = api.install_avault()
+
+    assert out["ok"] is False
+    assert out["reason"] == "avault_install_failed"
+    assert out["error"] == "invalid manifest"
 
 
 def test_install_avault_is_idempotent_when_present(monkeypatch):

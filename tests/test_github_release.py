@@ -41,12 +41,23 @@ def _release_payload(*, draft: bool, prerelease: bool = False, body: str = "note
     )
 
 
+def _release_pages(*payloads: str) -> str:
+    return json.dumps([[json.loads(payload) for payload in payloads]])
+
+
 def test_get_release_treats_only_http_404_as_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    reads = iter(
+        [
+            _completed([], returncode=1, stderr="gh: Not Found (HTTP 404)\n"),
+            _completed([], stdout=_release_pages()),
+        ]
+    )
+
     def not_found(arguments: list[str], *, check: bool = True):
         assert check is False
-        return _completed(arguments, returncode=1, stderr="gh: Not Found (HTTP 404)\n")
+        return next(reads)
 
     monkeypatch.setattr(github_release, "_run_gh", not_found)
     assert github_release.get_release(REPO, TAG) is None
@@ -60,6 +71,58 @@ def test_get_release_treats_only_http_404_as_absent(
         github_release.get_release(REPO, TAG)
 
 
+def test_get_release_falls_back_to_paginated_drafts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    reads = iter(
+        [
+            _completed([], returncode=1, stderr="gh: Not Found (HTTP 404)\n"),
+            _completed([], stdout=_release_pages(_release_payload(draft=True))),
+        ]
+    )
+
+    def fake_run(arguments: list[str], *, check: bool = True):
+        calls.append(arguments)
+        return next(reads)
+
+    monkeypatch.setattr(github_release, "_run_gh", fake_run)
+    state = github_release.get_release(REPO, TAG)
+
+    assert state is not None and state.draft is True
+    assert calls[1] == [
+        "api",
+        "--paginate",
+        "--slurp",
+        f"repos/{REPO}/releases?per_page=100",
+    ]
+
+
+def test_get_release_rejects_duplicate_drafts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads = iter(
+        [
+            _completed([], returncode=1, stderr="gh: Not Found (HTTP 404)\n"),
+            _completed(
+                [],
+                stdout=_release_pages(
+                    _release_payload(draft=True),
+                    _release_payload(draft=True),
+                ),
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        github_release,
+        "_run_gh",
+        lambda _arguments, check=True: next(reads),
+    )
+
+    with pytest.raises(github_release.ReleaseError, match="Multiple GitHub Releases"):
+        github_release.get_release(REPO, TAG)
+
+
 def test_ensure_draft_creates_a_verified_non_latest_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -67,7 +130,9 @@ def test_ensure_draft_creates_a_verified_non_latest_draft(
     release_reads = iter(
         [
             _completed([], returncode=1, stderr="gh: Not Found (HTTP 404)\n"),
-            _completed([], stdout=_release_payload(draft=True)),
+            _completed([], stdout=_release_pages()),
+            _completed([], returncode=1, stderr="gh: Not Found (HTTP 404)\n"),
+            _completed([], stdout=_release_pages(_release_payload(draft=True))),
         ]
     )
 

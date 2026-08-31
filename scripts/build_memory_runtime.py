@@ -18,9 +18,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-EVEROS_VERSION = "1.2.3"
-PYTHON_VERSION = "3.12.12"
+from avibe_memory.artifact_contract import (
+    EMBEDDED_PYTHON_VERSION,
+    EVEROS_VERSION,
+    run_cold_artifact_admission,
+)
+
+
+PYTHON_VERSION = EMBEDDED_PYTHON_VERSION
 LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 UV_VERSION = "0.9.18"
 BIN_PATH = "bin/python"
@@ -186,7 +195,17 @@ def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
         binary = _validate_runtime_tree(destination)
         if _sha256(binary) != binary_sha256:
             raise SystemExit("Memory Runtime extracted Python checksum mismatch")
-        _smoke(binary, cwd=destination.parent)
+        admission = run_cold_artifact_admission(binary)
+        print(
+            "Memory Runtime cold artifact admission: "
+            f"{admission.duration_ms} ms ({admission.reason or 'ok'})",
+            file=sys.stderr,
+        )
+        if not admission.ok:
+            raise SystemExit(
+                "Memory Runtime cold artifact admission failed: "
+                f"{admission.reason or 'memory_runtime_preparation_failed'}"
+            )
         with _short_socket_directory("mrv-") as health_home:
             _sidecar_health_smoke(binary, effective_home=health_home)
 

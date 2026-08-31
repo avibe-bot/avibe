@@ -17,7 +17,6 @@ import type {
 import {
   CONTRACT_VERSION,
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
-  SOURCE_PROTOCOLS,
   type RouteHopRef,
   type Source,
   type SourceObservation,
@@ -154,15 +153,35 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /Fetch models|拉取型号/i }));
-    expect(await screen.findByText(/Fetched 2 models|拉到 2 个型号/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /Fetch models|拉取模型/i }));
+    expect(await screen.findByText(/Fetched 2 models|拉到 2 个模型/i)).toBeTruthy();
     expect(create).not.toHaveBeenCalled();
 
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/changed');
-    expect(screen.queryByText(/Fetched 2 models|拉到 2 个型号/i)).toBeNull();
+    expect(screen.queryByText(/Fetched 2 models|拉到 2 个模型/i)).toBeNull();
   });
 
-  it('uses the interface choice only as the next complete probe order', async () => {
+  it('sends one manually selected interface on the first observation and create', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValueOnce(observed({ protocol: 'openai_responses' }));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+
+    expect(screen.getByRole('button', { name: /Auto detect|自动探测/i }).getAttribute('aria-pressed')).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(observe.mock.calls[0][0].protocol).toBe('openai_responses');
+    expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
+  });
+
+  it('turns an ambiguous auto-detection into one exact manual retry', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
       .mockResolvedValueOnce(observed({
         outcome: 'ambiguous',
@@ -188,10 +207,8 @@ describe('AddApiKeyDialog', () => {
 
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     const secondObservation = observe.mock.calls[1][0];
-    expect(secondObservation.protocol_order?.[0]).toBe('openai_responses');
-    expect(new Set(secondObservation.protocol_order)).toEqual(new Set(SOURCE_PROTOCOLS));
-    expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
-    expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_responses');
+    expect(secondObservation.protocol).toBe('openai_responses');
+    expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
     expect(onAdded).toHaveBeenCalledWith({ source, added_to: [], adopted_by: [] });
   });
 
@@ -215,8 +232,8 @@ describe('AddApiKeyDialog', () => {
 
     await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
-    expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_chat');
+    expect(create.mock.calls[0][0].protocol).toBe('openai_chat');
+    expect(create.mock.calls[0][0].accept_unavailable_inventory).toBe(true);
   });
 
   it('adopts the new observation result when inventory retry moves to interface undetermined', async () => {
@@ -243,6 +260,29 @@ describe('AddApiKeyDialog', () => {
     expect(screen.queryByRole('button', { name: /Add anyway|仍要添加/i })).toBeNull();
   });
 
+  it('preserves unavailable-inventory consent across lost-response reconciliation', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(
+      observed({ discovery: 'failed', models: [] }),
+    );
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
+    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls.map(([draft]) => draft.accept_unavailable_inventory)).toEqual([
+      true,
+      true,
+    ]);
+    expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
+  });
+
   it('aborts an in-flight pull and returns to the form without dismissing', async () => {
     let wasAborted = false;
     vi.spyOn(modelsApi, 'observeApiKeySource').mockImplementation((_draft, signal) => new Promise((_resolve, reject) => {
@@ -254,12 +294,12 @@ describe('AddApiKeyDialog', () => {
     const { onClose } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /Fetch models|拉取型号/i }));
+    await user.click(screen.getByRole('button', { name: /Fetch models|拉取模型/i }));
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
 
     expect(wasAborted).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /Fetch models|拉取型号/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Fetch models|拉取模型/i })).toBeTruthy();
   });
 
   it('reconciles a lost source-create response by nonce without posting twice', async () => {
@@ -449,7 +489,7 @@ describe('AddApiKeyDialog', () => {
 
     await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
 
-    expect(await screen.findByText(/model list did not come back|没拿到它的型号清单/i)).toBeTruthy();
+    expect(await screen.findByText(/model list did not come back|没拿到它的模型清单/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Add anyway|仍要添加/i })).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
   });
@@ -556,8 +596,8 @@ describe('AddApiKeyDialog', () => {
         would_interrupt: [gap],
       }],
     ]);
-    expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
-    expect(screen.getByText(/now have no usable source|现在没有可用来源/i)).toBeTruthy();
+    expect(await screen.findByText(/^Removed hops$|^已移除的路由项$/i)).toBeTruthy();
+    expect(screen.getByText(/now have no usable source|现在没有可用供应商/i)).toBeTruthy();
   });
 
   it('requires confirmation again when the server recomputes a different replacement plan', async () => {
@@ -678,7 +718,7 @@ describe('AddApiKeyDialog', () => {
       }
 
       if (outcome === 'impact') {
-        expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
+        expect(await screen.findByText(/^Removed hops$|^已移除的路由项$/i)).toBeTruthy();
         expect(screen.getByText(/pm-claude/)).toBeTruthy();
         expect(replace.mock.calls.at(-1)?.[1]).toEqual({
           key: 'sk-terminal',
@@ -720,7 +760,7 @@ describe('AddApiKeyDialog', () => {
     expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.repair.repaired'))).toBeNull();
-    expect(screen.queryByText(/^Removed hops$|^已移除的跳$/i)).toBeNull();
+    expect(screen.queryByText(/^Removed hops$|^已移除的路由项$/i)).toBeNull();
     expect(settled.readInventory).toHaveBeenCalledOnce();
     expect(settled.source).not.toHaveBeenCalled();
     expect(settled.unread).not.toHaveBeenCalled();

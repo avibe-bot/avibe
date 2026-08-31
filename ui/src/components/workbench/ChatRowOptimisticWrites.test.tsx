@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     getWorkbenchPrefs: vi.fn(),
     listSessionMessages: vi.fn(),
     listSessionQueue: vi.fn(),
+    waitForAgentActivityConfigMutations: vi.fn(),
     onSessionArchived: vi.fn(),
     updateSession: vi.fn(),
     cancelSession: vi.fn(),
@@ -115,6 +116,7 @@ vi.mock('./useShowPageAnnotation', () => ({
     state: { enabled: false, mode: 'smart' },
     setIframe: vi.fn(),
     handleIframeLoad: vi.fn(),
+    handleShortcutKeyDown: vi.fn(),
     enable: vi.fn(),
     disable: vi.fn(),
     setMode: vi.fn(),
@@ -316,6 +318,7 @@ describe('the chat row under an optimistic write', () => {
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
     mocks.api.listSessionQueue.mockResolvedValue([]);
+    mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
     mocks.api.onSessionArchived.mockReturnValue(() => {});
     // A turn started; no transcript row to graft in this harness.
     mocks.apiFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });

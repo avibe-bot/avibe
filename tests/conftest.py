@@ -144,6 +144,25 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     if request.node.get_closest_marker("uses_real_paths"):
         return
     monkeypatch.delenv("AVIBE_HOME", raising=False)
+    # Agent-launched pytest processes inherit the active conversation's caller
+    # identity. Tests must opt in to that context explicitly or unrelated
+    # Harness/session assertions can bind themselves to the live Agent session.
+    for name in (
+        "AVIBE_SESSION_ID",
+        "AVIBE_RUN_ID",
+        "AVIBE_NATIVE_SESSION_ID",
+        "AVIBE_CALLER_SOURCE",
+        "AVIBE_CALLER_BACKEND",
+        "AVIBE_CALLER_PLATFORM",
+        "AVIBE_CALLER_USER_ID",
+        "AVIBE_CALLER_CHANNEL_ID",
+        "AVIBE_CALLER_SESSION_KEY",
+        "AVIBE_CALLER_MESSAGE_ID",
+        "AVIBE_CALLER_WORKSPACE_ID",
+        "AVIBE_CALLER_REMOTE",
+        "AVIBE_CALLER_RESOURCE_CONTEXT",
+    ):
+        monkeypatch.delenv(name, raising=False)
     isolated_home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: isolated_home)
     monkeypatch.setenv("HOME", str(isolated_home))

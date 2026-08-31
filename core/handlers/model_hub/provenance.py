@@ -510,7 +510,16 @@ class ProcessScope:
     token: str
     active_turns: set[str] = field(default_factory=set)
     ambiguous_turns: set[str] = field(default_factory=set)
+    prepared_routes: dict[str, "PreparedGatewayRoute"] = field(default_factory=dict)
+    routing_conflicts: set[str] = field(default_factory=set)
     untracked_use: bool = False
+
+
+@dataclass(frozen=True)
+class PreparedGatewayRoute:
+    requested_model_id: str
+    resolved_model_id: str
+    source_id: str
 
 
 class GatewayTurnTerminalizer:
@@ -557,13 +566,15 @@ class GatewayTurnTerminalizer:
             self.turn_id = None
         return self.turn_id
 
-    def resolution_model(self, gateway_model_id: str) -> str:
-        """Return the caller model retained before the CLI rewrote its request."""
+    def resolution_model(self, gateway_model_id: str) -> Optional[str]:
+        """Return the uniquely prepared caller model for this gateway request."""
 
-        turn_id = self.bind_request_model(gateway_model_id)
-        if turn_id is None:
-            return gateway_model_id
-        return self._registry.gateway_requested_model(turn_id) or gateway_model_id
+        self.bind_request_model(gateway_model_id)
+        return self._registry.gateway_resolution_model(
+            backend=self._backend,
+            token=self._token,
+            gateway_model_id=gateway_model_id,
+        )
 
     def fail(
         self,
@@ -887,22 +898,51 @@ class TurnCorrelationRegistry:
         *,
         backend: str,
         token: str,
+        turn_id: Optional[str] = None,
         requested_model_id: str,
         resolved_model_id: str,
         source_id: str,
         via_mapping: bool,
     ) -> None:
-        """Retain the caller-facing model before the CLI rewrites its request."""
+        """Retain routing independently from best-effort provenance attribution."""
 
         with self._lock:
+            key = self._token_scopes.get(token)
+            if key is None or key[0] != backend:
+                return
+            scope = self._scopes[key]
+            normalized_turn_id = str(turn_id or "").strip()
+            if normalized_turn_id:
+                if normalized_turn_id not in scope.active_turns:
+                    return
+                route_turn_id = normalized_turn_id
+            else:
+                exact = self._exact_turn(backend, token)
+                if exact is None:
+                    return
+                route_turn_id = exact[0]
+            prepared = PreparedGatewayRoute(
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                source_id=source_id,
+            )
+            existing = scope.prepared_routes.get(route_turn_id)
+            if existing is not None and existing != prepared:
+                scope.prepared_routes.pop(route_turn_id, None)
+                scope.routing_conflicts.add(route_turn_id)
+            elif route_turn_id not in scope.routing_conflicts:
+                scope.prepared_routes[route_turn_id] = prepared
+
             exact = self._exact_turn(backend, token)
             if exact is None:
                 return
-            turn_id, key = exact
+            exact_turn_id, key = exact
+            if exact_turn_id != route_turn_id:
+                return
             trace = self._traces.setdefault(
-                turn_id,
+                exact_turn_id,
                 TurnTrace(
-                    turn_id=turn_id,
+                    turn_id=exact_turn_id,
                     agent=key[0],
                     requested_model_id=requested_model_id,
                     scope_key=key,
@@ -920,17 +960,50 @@ class TurnCorrelationRegistry:
                 )
             ):
                 trace.ambiguous = True
-                self._scopes[key].ambiguous_turns.add(turn_id)
+                self._scopes[key].ambiguous_turns.add(exact_turn_id)
                 return
             trace.gateway_source_id = source_id
             trace.gateway_model_id = resolved_model_id
 
-    def gateway_requested_model(self, turn_id: str) -> Optional[str]:
+    def gateway_resolution_model(
+        self,
+        *,
+        backend: str,
+        token: str,
+        gateway_model_id: str,
+    ) -> Optional[str]:
+        """Resolve only a route identity that the launching turn prepared."""
+
         with self._lock:
-            trace = self._traces.get(turn_id)
-            if trace is None or trace.ambiguous:
+            key = self._token_scopes.get(token)
+            if key is None or key[0] != backend:
                 return None
-            return trace.requested_model_id
+            scope = self._scopes[key]
+            if scope.routing_conflicts.intersection(scope.active_turns):
+                return None
+            active_routes = [
+                route
+                for turn_id, route in scope.prepared_routes.items()
+                if turn_id in scope.active_turns
+            ]
+            matching = [
+                route
+                for route in active_routes
+                if route.resolved_model_id == gateway_model_id
+            ]
+            identities = {
+                (
+                    route.requested_model_id,
+                    route.resolved_model_id,
+                    route.source_id,
+                )
+                for route in matching
+            }
+            if len(identities) == 1:
+                return matching[0].requested_model_id
+            if active_routes:
+                return None
+            return gateway_model_id if scope.untracked_use else None
 
     def gateway_terminalizer(
         self,
@@ -1262,6 +1335,8 @@ class TurnCorrelationRegistry:
                 poisoned = poisoned or scope.untracked_use
                 scope.active_turns.discard(normalized_turn_id)
                 scope.ambiguous_turns.discard(normalized_turn_id)
+                scope.prepared_routes.pop(normalized_turn_id, None)
+                scope.routing_conflicts.discard(normalized_turn_id)
             if trace is None or trace.ambiguous or poisoned:
                 return
 

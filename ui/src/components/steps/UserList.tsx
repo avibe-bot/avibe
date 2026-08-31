@@ -450,13 +450,6 @@ export const UserList: React.FC = () => {
   const [, setLoading] = useState(false);
   const [usersByPlatform, setUsersByPlatform] = useState<Record<string, Record<string, UserConfig>>>({});
   const [config, setConfig] = useState<any>({});
-  const [opencodeOptionsByCwd, setOpencodeOptionsByCwd] = useState<Record<string, any>>({});
-  const [claudeAgentsByCwd, setClaudeAgentsByCwd] = useState<Record<string, any[]>>({});
-  const [codexAgentsByCwd, setCodexAgentsByCwd] = useState<Record<string, any[]>>({});
-  const [claudeModels, setClaudeModels] = useState<string[]>([]);
-  const [claudeModelLabels, setClaudeModelLabels] = useState<Record<string, string>>({});
-  const [claudeReasoningOptions, setClaudeReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
-  const [codexModels, setCodexModels] = useState<string[]>([]);
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showDisabled, setShowDisabled] = useState(false);
@@ -501,43 +494,6 @@ export const UserList: React.FC = () => {
 
   useEffect(() => { loadAllUsers(); }, [enabledPlatforms.join(','), refreshTrigger]);
 
-  const loadOpenCodeOptions = async (cwd: string) => {
-    try {
-      const result = await api.opencodeOptions(cwd);
-      if (result.ok) setOpencodeOptionsByCwd((prev) => ({ ...prev, [cwd]: result.data }));
-    } catch (e) { console.error('Failed to load OpenCode options:', e); }
-  };
-
-  const loadClaudeAgents = async (cwd: string) => {
-    try {
-      const result = await api.claudeAgents(cwd);
-      if (result.ok) setClaudeAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-    } catch (e) { console.error('Failed to load Claude agents:', e); }
-  };
-
-  const loadCodexAgents = async (cwd: string) => {
-    try {
-      const result = await api.codexAgents(cwd);
-      if (result.ok) setCodexAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-    } catch (e) { console.error('Failed to load Codex agents:', e); }
-  };
-
-  useEffect(() => {
-    if (config.agents?.claude?.enabled) {
-      api.claudeModels().then((r) => {
-        if (r.ok) {
-          setClaudeModels(r.models || []);
-          setClaudeModelLabels(r.model_labels || {});
-          setClaudeReasoningOptions(r.reasoning_options || {});
-        }
-      });
-    }
-  }, [config.agents?.claude?.enabled]);
-
-  useEffect(() => {
-    if (config.agents?.codex?.enabled) api.codexModels().then(r => r.ok && setCodexModels(r.models || []));
-  }, [config.agents?.codex?.enabled]);
-
   // Aggregate users
   const aggregated = useMemo<AggregatedUser[]>(() => {
     const flat: AggregatedUser[] = [];
@@ -565,22 +521,6 @@ export const UserList: React.FC = () => {
       return name.includes(q) || id.includes(q);
     });
   }, [aggregated, searchQuery, showDisabled]);
-
-  // Load agent options for visible enabled users
-  useEffect(() => {
-    const defaultCwd = config.runtime?.default_cwd || '~/work';
-    const defaultAgent = agentByName[defaultAgentName || ''] || null;
-    aggregated.forEach((u) => {
-      if (!u.config.enabled) return;
-      const cwd = u.config.custom_cwd || defaultCwd;
-      const routing = u.config.routing || {};
-      const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const backend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-      if (backend === 'opencode' && config.agents?.opencode?.enabled && !opencodeOptionsByCwd[cwd]) loadOpenCodeOptions(cwd);
-      if (backend === 'claude' && config.agents?.claude?.enabled && !claudeAgentsByCwd[cwd]) loadClaudeAgents(cwd);
-      if (backend === 'codex' && config.agents?.codex?.enabled && !codexAgentsByCwd[cwd]) loadCodexAgents(cwd);
-    });
-  }, [aggregated, config, agentByName, defaultAgentName]);
 
   const persistUsers = async (platform: string, next: Record<string, UserConfig>) => {
     setLoading(true);
@@ -747,10 +687,6 @@ export const UserList: React.FC = () => {
               const defaultAgent = agentByName[defaultAgentName || ''] || null;
               const selectedAgent = agentByName[userConfig.routing?.agent_name || ''] || agentByName[defaultAgentName || ''];
               const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-              const effectiveCwd = userConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
-              const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
-              const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
-              const codexAgents = codexAgentsByCwd[effectiveCwd] || [];
               const isBot = !userConfig.is_admin && (userConfig.display_name || u.userId).toLowerCase().includes('bot');
               const tone = AVATAR_TONES[hashCode(u.userId) % AVATAR_TONES.length];
               const initials = getInitials(userConfig.display_name, u.userId);
@@ -888,13 +824,6 @@ export const UserList: React.FC = () => {
                       defaultAgentName={defaultAgentName}
                       availableMessageTypes={availableMessageTypes(u.platform)}
                       showRequireMention={false}
-                      opencodeOptions={opencodeOptions}
-                      claudeAgents={claudeAgents}
-                      claudeModels={claudeModels}
-                      claudeModelLabels={claudeModelLabels}
-                      claudeReasoningOptions={claudeReasoningOptions}
-                      codexAgents={codexAgents}
-                      codexModels={codexModels}
                       footerActions={
                         <Button
                           type="button"

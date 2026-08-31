@@ -65,6 +65,7 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
+  vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(agent);
 });
 
 describe('SourceOrderDrawer keyboard ordering', () => {
@@ -73,6 +74,10 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     renderDrawer();
     const handles = await screen.findAllByRole('button', { name: 'Reorder source' });
+    expect(screen.getByRole('heading', { name: 'Claude Code · Global route priority' })).toBeTruthy();
+    expect(screen.getByText("Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.")).toBeTruthy();
+    expect(screen.getByText("These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route.")).toBeTruthy();
+    expect(handles[0].className).toContain('cursor-grab');
 
     handles[0].focus();
     await user.keyboard('[Space]');
@@ -104,7 +109,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
   it('reads the current order on open and keeps the moved draft after a failed save', async () => {
     const user = userEvent.setup();
     const getAgentSources = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
-    const putAgentSources = vi.spyOn(modelsApi, 'putAgentSources').mockRejectedValue(new Error('offline'));
+    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockRejectedValue(new Error('offline'));
     renderDrawer();
 
     await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
@@ -115,7 +120,39 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     expect(screen.getByText('This order is empty. Add a source from below.')).toBeTruthy();
     expect(getAgentSources).toHaveBeenCalledWith('claude');
-    expect(putAgentSources).toHaveBeenCalledWith('claude', { order: [] });
+    expect(reorderAgentChains).toHaveBeenCalledWith('claude', []);
+  });
+
+  it('applies the saved priority to existing route chains', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(agent);
+    renderDrawer();
+
+    await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
+    await user.click(screen.getByRole('button', { name: 'Save order' }));
+
+    await waitFor(() => expect(reorderAgentChains).toHaveBeenCalledWith('claude', ['src_b']));
+  });
+
+  it('allows reapplying an unchanged saved priority to existing route chains', async () => {
+    const user = userEvent.setup();
+    const savedAgent: AgentSupply = {
+      ...agent,
+      sources: {
+        order: ['src_b', 'src_a'],
+        eligibility: sources.map((item) => ({ source_id: item.id, eligible: true })),
+      },
+    };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(savedAgent);
+    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(savedAgent);
+    renderDrawer({ agent: savedAgent });
+
+    const save = await screen.findByRole('button', { name: 'Save order' });
+    expect(save.hasAttribute('disabled')).toBe(false);
+    await user.click(save);
+
+    await waitFor(() => expect(reorderAgentChains).toHaveBeenCalledWith('claude', ['src_b', 'src_a']));
   });
 
   it('keeps a read failure inside the drawer and retries the collection read', async () => {

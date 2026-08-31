@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
-import type { AgentBackend } from './types';
 import type { SupplyRelation, SupplyRelationKind } from './supplyRelations';
 
 type DrawnRelation = SupplyRelation & {
@@ -14,19 +13,35 @@ type DrawnRelation = SupplyRelation & {
   endY: number;
 };
 
+type HighlightedEndpoint =
+  | { kind: 'source'; id: string }
+  | { kind: 'agent'; id: string };
+
+const endpointFromTarget = (target: EventTarget | null, container: HTMLElement): HighlightedEndpoint | null => {
+  if (!(target instanceof Element)) return null;
+  const source = target.closest<HTMLElement>('[data-source-id]');
+  if (source && container.contains(source) && source.dataset.sourceId) return { kind: 'source', id: source.dataset.sourceId };
+  const agent = target.closest<HTMLElement>('[data-agent-backend]');
+  if (agent && container.contains(agent) && agent.dataset.agentBackend) return { kind: 'agent', id: agent.dataset.agentBackend };
+  return null;
+};
+
+const sameEndpoint = (left: HighlightedEndpoint | null, right: HighlightedEndpoint | null): boolean =>
+  left?.kind === right?.kind && left?.id === right?.id;
+
 export const SupplyGraph: React.FC<{
   containerRef: React.RefObject<HTMLDivElement | null>;
   relations: SupplyRelation[];
 }> = ({ containerRef, relations }) => {
-  const [drawing, setDrawing] = React.useState<{ width: number; height: number; railX: number; wires: DrawnRelation[] } | null>(null);
+  const [drawing, setDrawing] = React.useState<{ width: number; height: number; wires: DrawnRelation[] } | null>(null);
+  const [hoveredEndpoint, setHoveredEndpoint] = React.useState<HighlightedEndpoint | null>(null);
+  const [focusedEndpoint, setFocusedEndpoint] = React.useState<HighlightedEndpoint | null>(null);
 
   React.useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
     const measure = () => {
       const root = container.getBoundingClientRect();
-      const byBackend = new Map<AgentBackend, SupplyRelation[]>();
-      for (const relation of relations) byBackend.set(relation.backend, [...(byBackend.get(relation.backend) ?? []), relation]);
       const wires: DrawnRelation[] = [];
       for (const relation of relations) {
         const source = Array.from(container.querySelectorAll<HTMLElement>('[data-source-id]')).find((element) => element.dataset.sourceId === relation.sourceId);
@@ -34,17 +49,14 @@ export const SupplyGraph: React.FC<{
         if (!source || !backend) continue;
         const sourceBounds = source.getBoundingClientRect();
         const backendBounds = backend.getBoundingClientRect();
-        const siblings = byBackend.get(relation.backend) ?? [];
-        const backendIndex = siblings.findIndex((candidate) => candidate.sourceId === relation.sourceId);
         const startX = sourceBounds.right - root.left;
         const startY = sourceBounds.top - root.top + sourceBounds.height / 2;
         const endX = backendBounds.left - root.left;
-        const endY = backendBounds.top - root.top + backendBounds.height * ((backendIndex + 1) / (siblings.length + 1));
+        const endY = backendBounds.top - root.top + backendBounds.height / 2;
         const railX = startX + (endX - startX) / 2;
         wires.push({ ...relation, startX, startY, endX, endY, path: `M ${startX} ${startY} C ${railX} ${startY}, ${railX} ${endY}, ${endX} ${endY}` });
       }
-      const railX = wires.length > 0 ? wires.reduce((sum, wire) => sum + (wire.startX + wire.endX) / 2, 0) / wires.length : 0;
-      setDrawing({ width: root.width, height: root.height, railX, wires });
+      setDrawing({ width: root.width, height: root.height, wires });
     };
     measure();
     const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
@@ -58,17 +70,60 @@ export const SupplyGraph: React.FC<{
     };
   }, [containerRef, relations]);
 
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+    const handlePointerOver = (event: PointerEvent) => setHoveredEndpoint(endpointFromTarget(event.target, container));
+    const handlePointerOut = (event: PointerEvent) => {
+      const previous = endpointFromTarget(event.target, container);
+      const next = endpointFromTarget(event.relatedTarget, container);
+      if (previous && !sameEndpoint(previous, next)) setHoveredEndpoint(next);
+    };
+    const handlePointerLeave = () => setHoveredEndpoint(null);
+    const handleFocusIn = (event: FocusEvent) => setFocusedEndpoint(endpointFromTarget(event.target, container));
+    const handleFocusOut = (event: FocusEvent) => {
+      const previous = endpointFromTarget(event.target, container);
+      const next = endpointFromTarget(event.relatedTarget, container);
+      if (previous && !sameEndpoint(previous, next)) setFocusedEndpoint(next);
+    };
+    container.addEventListener('pointerover', handlePointerOver);
+    container.addEventListener('pointerout', handlePointerOut);
+    container.addEventListener('pointerleave', handlePointerLeave);
+    container.addEventListener('focusin', handleFocusIn);
+    container.addEventListener('focusout', handleFocusOut);
+    return () => {
+      container.removeEventListener('pointerover', handlePointerOver);
+      container.removeEventListener('pointerout', handlePointerOut);
+      container.removeEventListener('pointerleave', handlePointerLeave);
+      container.removeEventListener('focusin', handleFocusIn);
+      container.removeEventListener('focusout', handleFocusOut);
+    };
+  }, [containerRef]);
+
   if (!drawing || drawing.wires.length === 0) return null;
-  const yValues = drawing.wires.flatMap((wire) => [wire.startY, wire.endY]);
+  const sourceAnchors = Array.from(new Map(drawing.wires.map((wire) => [wire.sourceId, wire])).values());
+  const agentAnchors = Array.from(new Map(drawing.wires.map((wire) => [wire.backend, wire])).values());
   return (
-    <svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 hidden size-full overflow-hidden lg:block" viewBox={`0 0 ${drawing.width} ${drawing.height}`} preserveAspectRatio="none">
-      <line className="model-hub-rail-line" x1={drawing.railX} x2={drawing.railX} y1={Math.min(...yValues)} y2={Math.max(...yValues)} />
-      {drawing.wires.map((wire) => (
-        <g key={`${wire.sourceId}:${wire.backend}`}>
-          <path className={`model-hub-wire model-hub-wire--${wire.kind}`} d={wire.path} />
-          <circle className={`model-hub-wire-node model-hub-wire-node--${wire.kind}`} cx={wire.startX} cy={wire.startY} />
-          <circle className={`model-hub-wire-node model-hub-wire-node--${wire.kind}`} cx={wire.endX} cy={wire.endY} />
-        </g>
+    <svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 hidden size-full overflow-hidden xl:block" viewBox={`0 0 ${drawing.width} ${drawing.height}`} preserveAspectRatio="none">
+      {drawing.wires.map((wire) => {
+        const highlighted = [hoveredEndpoint, focusedEndpoint].some((endpoint) => endpoint?.kind === 'source'
+          ? endpoint.id === wire.sourceId
+          : endpoint?.kind === 'agent' && endpoint.id === wire.backend);
+        return (
+          <path
+            key={`${wire.sourceId}:${wire.backend}`}
+            className={cn(`model-hub-wire model-hub-wire--${wire.kind}`, highlighted && 'model-hub-wire--highlighted')}
+            data-wire-source-id={wire.sourceId}
+            data-wire-agent-backend={wire.backend}
+            d={wire.path}
+          />
+        );
+      })}
+      {sourceAnchors.map((anchor) => (
+        <circle key={anchor.sourceId} className="model-hub-wire-node model-hub-wire-node--shared-anchor" cx={anchor.startX} cy={anchor.startY} />
+      ))}
+      {agentAnchors.map((anchor) => (
+        <circle key={anchor.backend} className="model-hub-wire-node model-hub-wire-node--shared-anchor" cx={anchor.endX} cy={anchor.endY} />
       ))}
     </svg>
   );

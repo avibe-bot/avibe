@@ -49,6 +49,7 @@ dependencies = [
     "slack-sdk>=3.26.0",
     "discord.py>=2.4.0",
     "aiohttp>=3.8.0",
+    "ijson>=3.5.1",
     "markdown-it-py>=4.2.0",
     "markdown_to_mrkdwn>=0.2.0",
     "typing_extensions>=4.12.2",
@@ -69,7 +70,6 @@ dependencies = [
     "packaging>=23.0",
     "uvicorn[standard]>=0.27",
     "imagesize>=1.4.1",
-    "olefile>=0.47",
     "pywebpush>=2.0.3",
     "cryptography>=42.0",
     # keccak256 + ripemd160 for vault signing-key address derivation

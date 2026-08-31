@@ -210,6 +210,9 @@ export type NamedAgentSupply = {
   /** null exactly when `effective_model_id` is null — no model, no capability
    *  to report. */
   supply_status: SupplyStatus | null;
+  /** A configuration gap is distinct from a configured Route whose Sources
+   *  are unavailable. */
+  route_reason?: 'route_unconfigured' | null;
 };
 
 /** How many sources can currently serve a selectable model. `chain_length: 0`
@@ -240,7 +243,8 @@ export type AgentSupply = {
   /** Exact configured Route for each menu model. Runtime reads this verbatim. */
   routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
-   *  and whenever `selected_model_id` is null. */
+   *  and whenever `selected_model_id` is null. This is not a backend-wide
+   *  rollup; group summaries derive from `named_agents`. */
   supply_status?: SupplyStatus | null;
   /** Supply depth per selectable model. null when mode=direct. */
   model_supply?: ModelSupply[] | null;
@@ -501,6 +505,8 @@ export type RuntimeManifest = {
 
 export type RuntimeDependency = {
   contract_version: typeof CONTRACT_VERSION;
+  /** Persisted user intent. Older runtime payloads omit it. */
+  enabled?: boolean;
   /** Server host platform, never the browser platform. */
   host_platform?: string;
   manifest: RuntimeManifest;
@@ -635,8 +641,8 @@ export type ApiKeySourceObservation = {
   vendor: string;
   base_url?: string | null;
   key: string;
-  /** Probe order only. Every member occurs exactly once. */
-  protocol_order?: SourceProtocol[];
+  /** Omission auto-detects; a value restricts observation to this protocol. */
+  protocol?: SourceProtocol;
 };
 
 /** POST /api/models/sources — api_key create observes again before persisting. */
@@ -648,8 +654,10 @@ export type ApiKeySourceCreate = {
   key: string;
   /** Stable across a create retry; persisted only when the Source commits. */
   client_nonce?: string;
-  /** Probe order only; the client never sends a protocol conclusion. */
-  protocol_order?: SourceProtocol[];
+  /** Omission auto-detects; a value is persisted only after response proof. */
+  protocol?: SourceProtocol;
+  /** Explicit consent for a repeated, protocol-proven inventory failure. */
+  accept_unavailable_inventory?: boolean;
 };
 
 /**

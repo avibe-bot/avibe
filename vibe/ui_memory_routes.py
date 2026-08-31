@@ -796,6 +796,7 @@ def register_memory_routes(app) -> None:
             limit = payload.get("limit", 20)
             origin = payload.get("origin")
             from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+            from vibe.memory_contract import MAX_MEMORY_LIST_PAGE_SIZE
 
             cursor_bytes: int | None = None
             if isinstance(cursor, str):
@@ -809,7 +810,7 @@ def register_memory_routes(app) -> None:
                 or (origin is not None and origin not in ("user", "agent"))
                 or isinstance(limit, bool)
                 or not isinstance(limit, int)
-                or not 1 <= limit <= 20
+                or not 1 <= limit <= MAX_MEMORY_LIST_PAGE_SIZE
                 or (
                     page is not None
                     and (

@@ -1257,6 +1257,14 @@ as a rule because the reduced signal looked adequate each time.
   only from a manager-owned admission signal, never from a browser counter. Its
   design remains open in #1637 rather than being implied by PR #1640.
 
+The delivery record moves three resolved PR #1640 threads with that scope:
+[polling state must survive document replacement](https://github.com/avibe-bot/avibe/pull/1640#discussion_r3833946834),
+[a failed browser fetch cannot consume manager-owned confirmation](https://github.com/avibe-bot/avibe/pull/1640#discussion_r3835632885),
+and [a terminal response cannot trigger another automatic Runtime request](https://github.com/avibe-bot/avibe/pull/1640#discussion_r3835792302).
+Their resolution on PR #1640 records the split, not discharge of the behavior:
+the successor owns their consuming tests and exact-head close-out together with
+the manager-owned admission constraint above.
+
 **A probe proves only the state it was calibrated for.** The first attempt at the
 fix above reused `_healthy()` exactly as the already-running path calls it: one
 request, `connect=0.5s`, `read=2.0s`, no retry. That budget was chosen for a

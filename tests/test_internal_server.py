@@ -1065,7 +1065,9 @@ def test_memory_search_route_does_not_import_memory_types_on_request(monkeypatch
     assert response.json() == {"status": "ok", "items": []}
 
 
-def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
+def test_memory_list_accepts_everos_maximum_at_controller_boundary() -> None:
+    """MEMORY-LIST-009: the internal socket accepts the EverOS maximum."""
+
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(
@@ -1088,7 +1090,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
             return await client.post(
                 "/internal/memory/list",
                 headers={CALLER_SESSION_HEADER: "ses-memory-list"},
-                json={"project": "notes", "page": 2, "limit": 5},
+                json={"project": "notes", "page": 2, "limit": 100},
             )
 
     response = asyncio.run(_exercise())
@@ -1103,7 +1105,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
         "u-11111111111111111111111111111111",
         "notes",
         page=2,
-        page_size=5,
+        page_size=100,
     )
 
 
@@ -2081,6 +2083,43 @@ def test_memory_remember_route_does_not_hold_pointer_lock_during_capture() -> No
     assert module.calls == 1
 
 
+def test_memory_remember_accepts_text_over_legacy_controller_limit() -> None:
+    """MEMORY-SEARCH-018: the internal socket delegates large remember text."""
+
+    from avibe_memory import CaptureAccepted
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    text = "remember this detail " * 300
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = SimpleNamespace()
+    controller.capture_memory = AsyncMock(return_value=CaptureAccepted())
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/remember",
+                json={"text": text},
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert len(text) > 4_000
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    request = controller.capture_memory.await_args.args[0]
+    assert request.text == text
+
+
 # ---------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------
@@ -2394,6 +2433,27 @@ def test_reconcile_platforms_endpoint_reports_controller_failure(monkeypatch):
 
     assert resp.status_code == 500
     assert resp.json() == {"ok": False, "error": "IM thread for discord did not stop within timeout"}
+
+
+def test_invalidate_activity_streaming_endpoint_clears_controller_cache(monkeypatch):
+    controller = _build_controller_double()
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "core.message_mirror.reset_activity_flag_cache",
+        lambda: calls.append(True),
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/invalidate-activity-streaming")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert calls == [True]
 
 
 def test_reconcile_agent_backends_endpoint_calls_controller():

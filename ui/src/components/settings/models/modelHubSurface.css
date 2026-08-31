@@ -158,6 +158,15 @@
   white-space: nowrap;
 }
 
+.model-hub-source-interface-pill {
+  min-width: 0;
+  max-width: 52%;
+  flex: 0 1 auto;
+  border-color: var(--model-hub-cyan-4d);
+  background: var(--model-hub-cyan-1a);
+  color: var(--cyan-ink);
+}
+
 .model-hub-ink-mint { color: var(--mint-ink); }
 .model-hub-ink-gold { color: var(--gold-ink); }
 .model-hub-ink-violet { color: var(--violet-ink); }
@@ -329,14 +338,14 @@
 }
 
 .model-hub-overview {
-  --model-hub-upstream-track: 384px;
-  --model-hub-rail-track: 72px;
-  --model-hub-track-gap: 16px;
-  --model-hub-track-height: 806px;
+  --model-hub-upstream-track: 420px;
+  --model-hub-rail-track: 80px;
+  --model-hub-track-gap: 0px;
   --model-hub-legend-height: 34px;
   --model-hub-wire-active-width: 1.75px;
   --model-hub-wire-muted-width: 1px;
   --model-hub-wire-node: 7px;
+  --model-hub-wire-node-stroke: 1.25px;
   --model-hub-footer-action-height: 30px;
   --model-hub-footer-action-radius: 7px;
   --model-hub-footer-action-font-size: 11.5px;
@@ -348,8 +357,8 @@
   --model-hub-model-current-ink: var(--model-hub-muted-cc);
   --model-hub-model-collapse-ink: var(--model-hub-ink-59);
   --model-hub-takeover-current-ink: var(--model-hub-violet-ink);
-  --model-hub-agent-head-action-height: 36px;
-  --model-hub-agent-head-action-leading: 17px;
+  --model-hub-agent-head-action-height: 28px;
+  --model-hub-agent-head-action-leading: 16px;
   --model-hub-agent-head-status-height: 16px;
   display: flex;
   flex-direction: column;
@@ -358,16 +367,22 @@
 
 .model-hub-overview-chevron,
 .model-hub-overview-info { color: var(--model-hub-ink-40); }
-/* The agent group head is a fixed 66px band holding a 36px action row and a
-   16px status row with a 7px gap; the frame's 59px of content is centred in it,
-   so the inset is the half-pixel 3.5 rather than a round number. Both rows have
-   to be pinned, because inherited line-height alone grows them past that. */
+/* The agent group head keeps a 66px minimum while holding a 36px action row and a
+   16px status row with a 7px gap. Its height may grow when compact layouts wrap
+   the action row, while the row and status line dimensions stay pinned. */
 .model-hub-agent-head-action {
   height: var(--model-hub-agent-head-action-height, 36px);
   padding-block: 0;
   line-height: var(--model-hub-agent-head-action-leading, 17px);
 }
 .model-hub-agent-head-status { line-height: var(--model-hub-agent-head-status-height, 16px); }
+.model-hub-agent-mode-trigger {
+  height: var(--model-hub-agent-head-action-height, 28px);
+  max-width: 190px;
+  background: var(--model-hub-wash-0a);
+}
+.model-hub-mode-menu-current { background: var(--model-hub-wash-0a); }
+.model-hub-mode-menu-title { letter-spacing: 0; }
 .model-hub-upstream-count {
   border-color: var(--model-hub-wash-14);
   background: var(--model-hub-wash-0a);
@@ -664,10 +679,6 @@
 .model-hub-add-key-outcome-wrap {
   padding: var(--model-hub-add-key-outcome-padding-y) var(--model-hub-add-key-outcome-padding-x);
 }
-.model-hub-add-key-protocol-field {
-  gap: var(--model-hub-add-key-field-gap);
-  padding: 4px var(--model-hub-add-key-outcome-padding-x) 16px;
-}
 .model-hub-add-key-segments {
   width: fit-content;
   gap: 3px;
@@ -855,8 +866,9 @@
   border-radius: var(--model-hub-dialog-action-radius);
   font-size: var(--model-hub-route-selector-confirm-size);
 }
-.model-hub-route-remove { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
-.model-hub-route-remove > svg { width: 13px; height: 13px; }
+.model-hub-route-actions { gap: 4px; }
+.model-hub-route-action { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
+.model-hub-route-action > svg { width: 13px; height: 13px; }
 .model-hub-route-add { height: var(--model-hub-route-add-height); border-radius: var(--model-hub-route-hop-radius); border-color: var(--model-hub-wash-14); font-size: var(--model-hub-route-add-size); }
 .model-hub-route-add > svg { width: 13px; height: 13px; }
 .model-hub-route-reseed { font-size: 12px; }
@@ -867,27 +879,26 @@
 .model-hub-route-foot { height: var(--model-hub-dialog-foot-height); flex-shrink: 0; padding: 14px 20px; border-color: var(--model-hub-wash-14); }
 
 .model-hub-source-detail {
-  --model-hub-source-gap: 16px;
-  --model-hub-source-radius: 12px;
-  --model-hub-source-bar-height: 64px;
+  --model-hub-source-gap: 0px;
+  --model-hub-source-radius: 0px;
+  --model-hub-source-bar-height: 82px;
   --model-hub-source-bar-padding-y: 14px;
-  --model-hub-source-bar-padding-x: 18px;
-  --model-hub-source-bar-gap: 14px;
+  --model-hub-source-bar-padding-x: 20px;
+  --model-hub-source-bar-gap: 12px;
   --model-hub-source-tile-size: 36px;
   --model-hub-source-tile-radius: 9px;
-  --model-hub-source-action-width: 95px;
-  --model-hub-source-action-height: 33px;
+  --model-hub-source-action-height: 32px;
   --model-hub-source-action-radius: 7px;
   --model-hub-source-action-size: 12px;
   --model-hub-source-table-head-height: 36px;
-  --model-hub-source-table-row-height: 55px;
-  --model-hub-source-table-draft-height: 55px;
-  --model-hub-source-table-add-height: 41px;
-  --model-hub-source-table-columns: 250px 84px minmax(220px, 470px) 1fr;
-  --model-hub-source-table-gap: 16px;
-  --model-hub-source-table-padding-x: 18px;
-  --model-hub-source-table-padding-y: 11px;
-  --model-hub-source-title-size: 12px;
+  --model-hub-source-table-row-height: 40px;
+  --model-hub-source-table-draft-height: 56px;
+  --model-hub-source-table-columns: minmax(0, 1fr) minmax(120px, 180px) 64px;
+  --model-hub-source-table-gap: 12px;
+  --model-hub-source-table-padding-x: 20px;
+  --model-hub-source-table-padding-y: 7px;
+  --model-hub-source-notices-max-height: min(160px, 25dvh);
+  --model-hub-source-title-size: 15px;
   --model-hub-source-state-size: 12px;
   --model-hub-source-age-size: 11px;
   --model-hub-source-summary-size: 10.5px;
@@ -912,14 +923,34 @@
   --model-hub-source-entry-fill: var(--model-hub-wash-0a);
   --model-hub-source-entry-manual-fill: var(--model-hub-wash-14);
   display: flex;
+  min-height: 0;
+  height: 100%;
   flex-direction: column;
   gap: var(--model-hub-source-gap);
+}
+
+.model-hub-source-dialog { display: flex; }
+.model-hub-source-notices {
+  max-height: var(--model-hub-source-notices-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+.model-hub-source-dialog > button {
+  top: 18px;
+  right: 18px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
 }
 
 .model-hub-source-bar {
   min-height: var(--model-hub-source-bar-height);
   padding: var(--model-hub-source-bar-padding-y) var(--model-hub-source-bar-padding-x);
   gap: var(--model-hub-source-bar-gap);
+  padding-right: 58px;
   border-radius: var(--model-hub-source-radius);
 }
 .model-hub-source-tile {
@@ -928,6 +959,13 @@
   border-radius: var(--model-hub-source-tile-radius);
 }
 .model-hub-source-copy { gap: var(--model-hub-source-copy-gap); }
+.model-hub-source-eyebrow {
+  color: var(--model-hub-ink-59);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 13px;
+}
 .model-hub-source-line { min-height: var(--model-hub-source-line-height); line-height: var(--model-hub-source-line-height); }
 .model-hub-source-title { font-size: var(--model-hub-source-title-size); }
 .model-hub-source-state { font-size: var(--model-hub-source-state-size); }
@@ -938,8 +976,9 @@
   line-height: var(--model-hub-source-summary-line);
 }
 .model-hub-source-action {
-  width: var(--model-hub-source-action-width);
+  width: auto;
   height: var(--model-hub-source-action-height);
+  padding-inline: 11px;
   border-radius: var(--model-hub-source-action-radius);
   font-size: var(--model-hub-source-action-size);
   font-weight: 600;
@@ -948,10 +987,24 @@
    a slightly wide, slightly short box so it reads as part of that row rather than
    as an icon button dropped beside it. */
 .model-hub-source-more {
-  width: 33px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--model-hub-source-action-radius);
 }
+.model-hub-source-metadata dt {
+  color: var(--model-hub-source-label-ink);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+}
+.model-hub-source-metadata dd {
+  margin-top: 2px;
+  color: var(--foreground);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 15px;
+}
+.model-hub-source-search { background: var(--model-hub-wash-05); }
 .model-hub-source-table { border-radius: var(--model-hub-source-radius); }
 .model-hub-source-table-head,
 .model-hub-source-table-row,
@@ -959,6 +1012,13 @@
   grid-template-columns: var(--model-hub-source-table-columns);
   column-gap: var(--model-hub-source-table-gap);
   padding-inline: var(--model-hub-source-table-padding-x);
+}
+.model-hub-source-row-action {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
 }
 .model-hub-source-table-head {
   height: var(--model-hub-source-table-head-height);
@@ -1002,6 +1062,48 @@
   padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
   border-color: var(--model-hub-wash-24);
   color: var(--muted);
+}
+/* A suggestion is a value this source has not declared, so it is drawn as the
+   absence of one: the saved chip's box with a hairline outline instead of a
+   fill. It is never a vocabulary — clicking one types it, and typing anything
+   else remains equally valid. */
+.model-hub-source-tier-suggest {
+  padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
+  border-color: var(--model-hub-wash-24);
+  border-style: dashed;
+  color: var(--model-hub-ink-73);
+}
+.model-hub-source-tier-suggest:hover { border-color: var(--model-hub-wash-33); color: var(--foreground); }
+.model-hub-source-tier-note {
+  color: var(--model-hub-source-footnote-ink);
+  font-size: var(--model-hub-source-tier-size);
+  line-height: 15px;
+}
+/* The cell is the way into the editor, so its box is the row's band rather than
+   whatever its contents happen to measure — a model with no tiers offers only a
+   10.5px caption, and a touch device is shown no pill at all. Owned here, once,
+   outside both hover branches: the target a tap has to find cannot be decided by
+   what the row is currently drawing. */
+.model-hub-source-tier-cell {
+  min-height: calc(var(--model-hub-source-table-row-height) - 2 * var(--model-hub-source-table-padding-y));
+}
+/* The row's add affordance is drawn only while a pointer is on the row. It keeps
+   the box it reserves either way, so revealing it moves no chip and changes no
+   row height — the row answers a hover with fill alone. A keyboard reaches the
+   cell by focus and gets the same reveal; a touch device has no hover to answer
+   with, so the pill is removed there rather than left as a blank gap, which the
+   cell can afford because the tappable box is the cell's own, not the pill's. */
+@media (hover: hover) {
+  .model-hub-source-table-row:hover { background: var(--model-hub-wash-0a); }
+  .model-hub-source-tier-reveal { opacity: 0; transition: opacity 120ms ease; }
+  .model-hub-source-table-row:hover .model-hub-source-tier-reveal,
+  .model-hub-source-tier-cell:focus-visible .model-hub-source-tier-reveal { opacity: 1; }
+  .model-hub-source-row-action { opacity: 0; transition: opacity 120ms ease; }
+  .model-hub-source-table-row:hover .model-hub-source-row-action,
+  .model-hub-source-table-row:focus-within .model-hub-source-row-action { opacity: 1; }
+}
+@media (hover: none) {
+  .model-hub-source-tier-reveal { display: none; }
 }
 .model-hub-source-tier-empty {
   color: var(--model-hub-ink-59);
@@ -1277,6 +1379,24 @@
   font-weight: 600;
   letter-spacing: 0;
   line-height: normal;
+}
+.model-hub-order-section-head--held-out {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.model-hub-order-section-head--held-out > .model-hub-order-section-explanation {
+  display: block;
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--model-hub-order-meta-size);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 15px;
 }
 .model-hub-order-row {
   height: var(--model-hub-order-row-height);
@@ -1670,7 +1790,8 @@
   .model-hub-source-table-head { display: none; }
   .model-hub-source-table-row,
   .model-hub-source-table-draft { grid-template-columns: minmax(0, 1fr); }
-  .model-hub-source-bar { align-items: stretch; }
+  .model-hub-source-bar { align-items: center; }
+  .model-hub-source-toolbar > div:last-child { flex-wrap: wrap; }
   .model-hub-source-action { width: auto; flex: 1 1 0; }
   .model-hub-direct-card { min-height: 0; }
   /* Stacked, each cell carries its own label, so the column gutter becomes a
@@ -1680,28 +1801,27 @@
 
 @media (min-width: 1024px) {
   .model-hub-shell { padding-top: 4px; }
-  .model-hub-overview-body { height: 854px; }
+}
+
+@media (min-width: 1280px) {
   .model-hub-overview-grid {
     display: grid;
     grid-template-columns: var(--model-hub-upstream-track) var(--model-hub-rail-track) minmax(0, 1fr);
     gap: var(--model-hub-track-gap);
-    height: var(--model-hub-track-height);
     align-items: start;
-  }
-  .model-hub-legend {
-    position: absolute;
-    top: 820px;
-    left: 0;
-    width: 100%;
-    height: var(--model-hub-legend-height);
-    padding-block: 0;
   }
 }
 
 .model-hub-wire {
   fill: none;
+  opacity: 0.24;
   stroke-linecap: round;
   stroke-linejoin: round;
+  transition: opacity 120ms ease;
+}
+
+.model-hub-wire--highlighted {
+  opacity: 1;
 }
 
 .model-hub-wire--native {
@@ -1736,19 +1856,10 @@
   r: calc(var(--model-hub-wire-node) / 2);
 }
 
-.model-hub-wire-node--native { fill: var(--cyan); }
-.model-hub-wire-node--gateway { fill: var(--mint); }
-.model-hub-wire-node--connected_unused {
+.model-hub-wire-node--shared-anchor {
   fill: var(--background);
-  stroke: color-mix(in srgb, var(--foreground) 15%, transparent);
-  stroke-width: 1.25px;
-}
-.model-hub-wire-node--takeover { fill: var(--violet); }
-.model-hub-wire-node--unavailable { fill: var(--gold); }
-
-.model-hub-rail-line {
-  stroke: color-mix(in srgb, var(--mint) 20%, transparent);
-  stroke-width: 2px;
+  stroke: var(--model-hub-ink-73);
+  stroke-width: var(--model-hub-wire-node-stroke);
 }
 
 .model-hub-legend {

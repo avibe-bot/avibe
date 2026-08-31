@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   activityGroupsForForeground,
-  activityDurationParts,
   activityRowFromMessage,
   filterActivityRows,
+  formatActivityElapsedClock,
   genericChips,
   groupFromWire,
   initialLiveActivity,
@@ -220,16 +220,18 @@ describe('filterActivityRows (B: eye toggle filters tool rows only)', () => {
   });
 });
 
-describe('activityDurationParts', () => {
-  it('splits into whole-second minutes/seconds (units applied via i18n)', () => {
-    expect(activityDurationParts(45000)).toEqual({ minutes: 0, seconds: 45 });
-    expect(activityDurationParts(83000)).toEqual({ minutes: 1, seconds: 23 });
-    expect(activityDurationParts(600000)).toEqual({ minutes: 10, seconds: 0 });
+describe('formatActivityElapsedClock', () => {
+  it('adds hours and days only when those units become meaningful', () => {
+    expect(formatActivityElapsedClock(0, 'd')).toBe('00:00');
+    expect(formatActivityElapsedClock(59 * 60_000 + 59_000, 'd')).toBe('59:59');
+    expect(formatActivityElapsedClock(60 * 60_000, 'd')).toBe('01:00:00');
+    expect(formatActivityElapsedClock(23 * 3_600_000 + 59 * 60_000 + 59_000, 'd')).toBe('23:59:59');
+    expect(formatActivityElapsedClock((24 + 14) * 3_600_000 + 33 * 60_000 + 11_000, 'd')).toBe('1d 14:33:11');
   });
 
-  it('returns null for null/negative', () => {
-    expect(activityDurationParts(null)).toBeNull();
-    expect(activityDurationParts(-5)).toBeNull();
+  it('clamps invalid or negative elapsed values to zero', () => {
+    expect(formatActivityElapsedClock(-1, 'd')).toBe('00:00');
+    expect(formatActivityElapsedClock(Number.NaN, 'd')).toBe('00:00');
   });
 });
 
@@ -356,6 +358,22 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(s.gen).toBe(1);
     expect(s.rows).toEqual([]);
     expect(s.startedAt).toBeNull();
+  });
+
+  it('reset invalidates the visible generation and clears every live field', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 1 });
+    const visibleGen = s.gen;
+    s = liveActivityReducer(s, { type: 'reset' });
+    expect(s).toEqual({ gen: visibleGen + 1, settled: false, rows: [], startedAt: null });
+
+    const stale = liveActivityReducer(s, {
+      type: 'rehydrate_for_gen',
+      gen: visibleGen,
+      rows: [row('stale')],
+      startedAt: 1,
+    });
+    expect(stale.rows).toEqual([]);
   });
 
   it('rows append within a generation; the first stamps startedAt', () => {

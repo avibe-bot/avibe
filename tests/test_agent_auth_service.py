@@ -1611,6 +1611,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
     async def test_refresh_backend_runtime_registers_codex_when_enabled_after_startup(self):
         from config.v2_compat import CodexCompatConfig
+        from modules.agents.codex import CodexAgent
         from modules.agents.service import AgentService
 
         controller = _StubController()
@@ -1626,9 +1627,15 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
-        await service._refresh_backend_runtime("codex")
+        with patch.object(
+            CodexAgent,
+            "prepare_model_hub_runtime",
+            new=AsyncMock(side_effect=RuntimeError("catalog export unavailable")),
+        ) as prepare_model_hub_runtime:
+            await service._refresh_backend_runtime("codex")
 
         service._load_backend_runtime_config.assert_called_once_with("codex")
+        prepare_model_hub_runtime.assert_not_awaited()
         controller.agent_service.register.assert_called_once()
         registered = controller.agent_service.agents["codex"]
         self.assertEqual(registered.name, "codex")
@@ -1665,6 +1672,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
     async def test_refresh_backend_runtime_does_not_restore_legacy_default_after_late_registration(self):
         from config.v2_compat import CodexCompatConfig
         from modules.agent_router import AgentRouter
+        from modules.agents.codex import CodexAgent
         from modules.agents.service import AgentService
 
         controller = _StubController()
@@ -1678,7 +1686,12 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service._load_saved_enabled_backends = Mock(return_value=["codex"])
         service._sync_builtin_default_agents = Mock(wraps=service._sync_builtin_default_agents)
 
-        await service._refresh_backend_runtime("codex")
+        with patch.object(
+            CodexAgent,
+            "prepare_model_hub_runtime",
+            new=AsyncMock(return_value=Path("/runtime/codex-hub.json")),
+        ):
+            await service._refresh_backend_runtime("codex")
 
         self.assertEqual(controller.agent_router.global_default, "claude")
         self.assertEqual(controller.agent_router.platform_routes["slack"].default, "claude")
@@ -2137,13 +2150,23 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         new_config = CodexCompatConfig(enabled=True, binary="/new/codex", extra_args=[])
         agent = CodexAgent.__new__(CodexAgent)
         agent.codex_config = old_config
+        agent._model_hub_catalog_path = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog_lock = asyncio.Lock()
+        agent._model_hub_catalog_generation = 0
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=old_config))
         agent.refresh_auth_state = AsyncMock()
 
-        await agent.refresh_runtime_config(new_config)
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=RuntimeError("catalog export must not run"),
+        ) as prepare_catalog:
+            await agent.refresh_runtime_config(new_config)
 
+        prepare_catalog.assert_not_called()
         self.assertIs(agent.codex_config, new_config)
         self.assertIs(agent.controller.config.codex, new_config)
+        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once()
 
     async def test_claude_runtime_config_reload_updates_cli_path_before_refresh(self):

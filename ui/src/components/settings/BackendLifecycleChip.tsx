@@ -5,7 +5,11 @@ import clsx from 'clsx';
 import { useApi, type BackendRuntimeInfo } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { Button } from '../ui/button';
-import { badgeVariants } from '../ui/badge-variants';
+import {
+  badgeVariants,
+  interactiveBadgeTriggerClassName,
+  mobileHeaderPopoverClassName,
+} from '../ui/badge-variants';
 import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
@@ -216,7 +220,8 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         onClick={() => setIsOpen((prev) => !prev)}
         className={cn(
           badgeVariants({ variant: BADGE_VARIANT[visual] }),
-          'cursor-pointer font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+          interactiveBadgeTriggerClassName,
+          'font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         )}
         aria-label={chipLabel}
       >
@@ -228,7 +233,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         <div
           className={clsx(
             'z-50 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl',
-            'fixed inset-x-3 top-[4.5rem] max-h-[calc(100dvh-5.5rem)] overflow-auto',
+            mobileHeaderPopoverClassName,
             'md:absolute md:inset-x-auto md:right-0 md:top-full md:mt-2 md:w-72 md:max-h-none md:overflow-visible',
           )}
         >

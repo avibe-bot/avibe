@@ -22,13 +22,15 @@ import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceMutationReport } from './SourceMutationReport';
+import { TIER_SUGGESTIONS } from './tierSuggestions';
 import {
   COOLDOWN_DETAIL_KEYS,
   ERROR_DETAIL_KEYS,
   NEEDS_ACTION_DETAIL_KEYS,
+  SOURCE_PROTOCOLS,
   SOURCE_STATUSES,
 } from './types';
-import type { Source, SourceDetailKey, SourceKind, SupplyChannel } from './types';
+import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 import { useSourceMutationReport } from './useSourceMutationReport';
 
 const source: Source = {
@@ -77,7 +79,7 @@ const UNKNOWN_WRITE_CASES = (['edit', 'delete'] as const).flatMap((action) =>
 const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean) => {
   await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
   if (action === 'edit') {
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Unknown edit');
@@ -88,10 +90,10 @@ const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean
     return;
   }
 
-  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
   if (forced) {
-    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除供应商$/i }));
   }
 };
 
@@ -165,6 +167,17 @@ const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   </ToastProvider>,
 );
 
+const renderProtocol = (protocol: SourceProtocol, models: Source['models'] = source.models) => render(
+  <ToastProvider>
+    <I18nextProvider i18n={i18n}>
+      <ReportOwnedPanel source={{ ...source, protocol, models }} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider>
+  </ToastProvider>,
+);
+/** Read by the class the stylesheet owns: the ghost chip has no other identity. */
+const suggestedTiers = () => Array.from(document.querySelectorAll('.model-hub-source-tier-suggest'))
+  .map((chip) => chip.textContent?.trim() ?? '');
+
 const EchoPanel: React.FC<{
   reconcile?: () => Promise<SourceMutationLanding['verdict'] | void> | SourceMutationLanding['verdict'] | void;
   scheduler?: MutationScheduler;
@@ -226,12 +239,44 @@ describe('SourceDetailPanel', () => {
     expect(document.activeElement).toBe(headingRef.current);
   });
 
+  it('filters the model table by model ID without changing the source inventory', async () => {
+    renderPanel();
+
+    const search = screen.getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i });
+    await userEvent.type(search, 'missing-model');
+
+    const filteredRow = screen.getByText('model-a').closest('.model-hub-source-table-row') as HTMLElement;
+    expect(filteredRow.hidden).toBe(true);
+    expect(screen.getByText(/No models match this search|没有匹配的模型/i)).toBeTruthy();
+    await userEvent.clear(search);
+    expect(filteredRow.hidden).toBe(false);
+  });
+
+  it('keeps a row-local tier failure answerable while search filters the row', async () => {
+    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
+    renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'draft{Enter}');
+    const failure = await screen.findByText(/tier was not saved|档位没保存上/i);
+    const row = failure.closest('.model-hub-source-table-row') as HTMLElement;
+
+    const search = screen.getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i });
+    await userEvent.type(search, 'missing-model');
+    expect(row.hidden).toBe(true);
+    expect(document.activeElement).toBe(search);
+
+    await userEvent.clear(search);
+    expect(row.hidden).toBe(false);
+    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+    expect(document.activeElement).toBe(search);
+  });
+
   it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
     renderPanel();
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();
     expect(screen.queryByText(/^Standby$|^待命$/i)).toBeNull();
     expect(screen.getByText('model-a')).toBeTruthy();
-    expect(screen.getByText(/relay\.example/)).toBeTruthy();
+    expect(screen.getByTitle('relay.example · Anthropic Messages')).toBeTruthy();
   });
 
   it('shows in-use only when the response carries adoption for this source', () => {
@@ -265,7 +310,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(name);
@@ -284,7 +329,7 @@ describe('SourceDetailPanel', () => {
   it('explains client validation instead of leaving a mute disabled save', async () => {
     renderEchoPanel();
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
@@ -298,7 +343,7 @@ describe('SourceDetailPanel', () => {
       .mockRejectedValueOnce(new ApiCallError('discovery_failed'));
     renderEchoPanel();
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
@@ -308,7 +353,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(save);
 
     await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, { base_url: 'https:relay.example' }));
-    expect(await screen.findByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+    expect(await screen.findByText(/source was not saved|供应商没有保存/i)).toBeTruthy();
     expect(screen.getByDisplayValue('https:relay.example')).toBeTruthy();
   });
 
@@ -323,9 +368,9 @@ describe('SourceDetailPanel', () => {
       </I18nextProvider>,
     );
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
 
-    expect(screen.getByText(/OpenAI Chat Completions/i)).toBeTruthy();
+    expect(screen.getByTitle('relay.example · OpenAI Chat Completions')).toBeTruthy();
     expect(screen.queryByText('openai_chat')).toBeNull();
   });
 
@@ -339,13 +384,13 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, updated.display_name);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 
-    const impactDialog = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    const impactDialog = await screen.findByRole('dialog', { name: /source was updated|供应商已更新/i });
     expect(screen.queryByRole('heading', { name: updated.display_name })).toBeNull();
     const done = within(impactDialog)
       .getAllByRole('button', { name: /^Done$|^完成$/i })
@@ -374,10 +419,10 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
     expect(await screen.findAllByText(/claude-opus-4-6/)).toHaveLength(2);
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[0].url).not.toContain('force=true');
@@ -388,7 +433,7 @@ describe('SourceDetailPanel', () => {
       would_interrupt: gaps,
     });
     expect(screen.queryByTestId('source-gone')).toBeNull();
-    const impactDialog = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const impactDialog = await screen.findByRole('dialog', { name: /source was removed|供应商已移除/i });
     const done = within(impactDialog)
       .getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-action'));
@@ -411,8 +456,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
     expect(requests).toHaveLength(1);
@@ -434,8 +479,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     expect(await screen.findByRole('heading', { name: source.display_name })).toBeTruthy();
     const retry = await screen.findByRole('button', { name: /^Try again$|^重试$/i });
@@ -460,7 +505,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Held draft');
@@ -496,7 +541,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Held failure');
@@ -504,7 +549,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
 
     expect(await screen.findByDisplayValue('Held failure')).toBeTruthy();
-    expect(screen.getByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+    expect(screen.getByText(/source was not saved|供应商没有保存/i)).toBeTruthy();
   });
 
   it('retries a failed forced delete with the exact held server plan', async () => {
@@ -525,9 +570,9 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除供应商$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(3));
@@ -569,7 +614,7 @@ describe('SourceDetailPanel', () => {
 
       if (outcome === 'committed' && forced) {
         const impact = await screen.findByRole('dialog', {
-          name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+          name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
         });
         expect(impact.textContent).toContain('claude-opus-4-6');
         const done = within(impact)
@@ -611,7 +656,7 @@ describe('SourceDetailPanel', () => {
       renderEchoPanel();
 
       await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
       const endpoint = screen.getByLabelText(/^Base URL$/i);
       await userEvent.clear(endpoint);
       await userEvent.type(endpoint, requestedBaseUrl);
@@ -620,7 +665,7 @@ describe('SourceDetailPanel', () => {
       await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
       expect(patch).toHaveBeenCalledWith(source.id, { base_url: requestedBaseUrl });
       if (committed) {
-        expect(await screen.findByText(/requested\.example/)).toBeTruthy();
+        expect(await screen.findByTitle('requested.example · Anthropic Messages')).toBeTruthy();
         expect(document.querySelector('[data-manage-failure="edit"]')).toBeNull();
       } else {
         const failure = await waitFor(() => {
@@ -687,7 +732,7 @@ describe('SourceDetailPanel', () => {
 
       await submitManagementWrite(action, false);
       const impact = await screen.findByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       });
       const committedEvidence = () => Array.from(impact.querySelectorAll('.model-hub-guard-hop'))
         .map((node) => node.textContent);
@@ -706,7 +751,7 @@ describe('SourceDetailPanel', () => {
 
       await userEvent.click(within(impact).getByRole('button', { name: /^Try again$|^重试$/i }));
       await waitFor(() => expect(screen.queryByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       })).toBeNull());
       expect(reconcile).toHaveBeenCalledTimes(2);
     },
@@ -742,7 +787,7 @@ describe('SourceDetailPanel', () => {
     );
 
     await submitManagementWrite('edit', false);
-    const impact = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    const impact = await screen.findByRole('dialog', { name: /source was updated|供应商已更新/i });
     const closeBeforeLanding = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-close'));
     expect(closeBeforeLanding).toBeTruthy();
@@ -758,7 +803,7 @@ describe('SourceDetailPanel', () => {
     expect((dismissClose as HTMLButtonElement).disabled).toBe(false);
     expect(trackedSettled).toBe(false);
     await userEvent.click(dismissClose!);
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|来源已更新/i })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|供应商已更新/i })).toBeNull());
     expect(tracked).toBeDefined();
     await tracked;
     expect(trackedSettled).toBe(true);
@@ -773,19 +818,19 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel(() => landing.promise);
 
     await submitManagementWrite('delete', false);
-    const impact = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const impact = await screen.findByRole('dialog', { name: /source was removed|供应商已移除/i });
     const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-action'));
     expect(done).toBeTruthy();
     await userEvent.click(done!);
 
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
-    expect(screen.getByRole('dialog', { name: /source was removed|来源已移除/i })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: /source was removed|供应商已移除/i })).toBeTruthy();
     expect(impact.textContent).toContain(heldHops[0].menu_model);
     expect(impact.textContent).toContain(heldGaps[0].agents[0]);
 
     landing.resolve('landed');
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was removed|来源已移除/i })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was removed|供应商已移除/i })).toBeNull());
   });
 
   it.each((['edit', 'delete'] as const).flatMap((action) => [
@@ -831,7 +876,7 @@ describe('SourceDetailPanel', () => {
   it('opens the manual model draft in the table and keeps Add disabled while blank', async () => {
     renderPanel();
     await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
-    const input = screen.getByPlaceholderText(/^Model ID$|^型号 ID$/i);
+    const input = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     expect(input).toBeTruthy();
     const draft = input.closest('[data-manual-model-draft]');
     expect(draft).toBeTruthy();
@@ -959,8 +1004,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
-    const draft = screen.getByPlaceholderText(/^Model ID$|^型号 ID$/i).closest('[data-manual-model-draft]');
-    await userEvent.type(within(draft as HTMLElement).getByPlaceholderText(/^Model ID$|^型号 ID$/i), 'model-b');
+    const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]');
+    await userEvent.type(within(draft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
     await userEvent.click(within(draft as HTMLElement).getByRole('button', { name: /^Add model$|^添加模型$/i }));
 
     expect(await screen.findByText('model-b')).toBeTruthy();
@@ -998,6 +1043,191 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /Remove high|移除 high/i }));
 
     await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', []));
+  });
+
+  it('leaves a resting row to its model and the tiers it already carries', () => {
+    renderProtocol('openai_responses');
+    expect(suggestedTiers()).toEqual([]);
+    expect(screen.queryByText(/sent exactly as typed|按你输入的原样发送/i)).toBeNull();
+    // The add affordance is not absent from the row, only from what a resting row
+    // draws — keeping the box it reserves is what lets revealing it move nothing.
+    const cell = screen.getByRole('button', { name: /high/i });
+    expect(cell.querySelector('.model-hub-source-tier-add.model-hub-source-tier-reveal')).toBeTruthy();
+  });
+
+  // The suggestion set is discovered from its total protocol Record, so a protocol
+  // added later fails here until that table decides what it offers — and what it
+  // decides is what the open editor draws, minus whatever the model already has.
+  it('offers exactly the tiers its proved protocol names, and only while editing', async () => {
+    for (const protocol of SOURCE_PROTOCOLS) {
+      renderProtocol(protocol);
+      expect(suggestedTiers()).toEqual([]);
+      await userEvent.click(screen.getByRole('button', { name: /high/i }));
+      expect(suggestedTiers()).toEqual(TIER_SUGGESTIONS[protocol].filter((tier) => tier !== 'high'));
+      cleanup();
+    }
+  });
+
+  it('adds a suggested tier through the same write typing it would take', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
+      ...source,
+      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
+    });
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Add low$|^添加 low$/ }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', 'low']));
+  });
+
+  it('keeps a suggestion out of the draft and off the wire until it is clicked', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts');
+    renderProtocol('openai_chat');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+
+    expect(suggestedTiers().length).toBeGreaterThan(0);
+    expect((screen.getByPlaceholderText(/Enter to add|回车添加/i) as HTMLInputElement).value).toBe('');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('collapses the editor on Escape and on a click elsewhere', async () => {
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
+    expect(suggestedTiers()).toEqual([]);
+
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.click(screen.getByRole('heading', { name: source.display_name as string }));
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
+  });
+
+  it('hands the editor to the row that was clicked instead of opening a second one', async () => {
+    renderProtocol('openai_responses', [
+      source.models[0],
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole('button', { name: /No tiers set|未设置档位/i }));
+
+    const inputs = screen.getAllByPlaceholderText(/Enter to add|回车添加/i);
+    expect(inputs).toHaveLength(1);
+    expect(document.activeElement).toBe(inputs[0]);
+  });
+
+  // An editor is a place the keyboard moves around in, not only lands in. Keyed
+  // to the input's own blur, the collapse made every control inside it
+  // pointer-only: Tab left the field and took the editor with it.
+  it('lets the keyboard reach a suggestion and stays open around the write', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
+      ...source,
+      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
+    });
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.tab();
+    const suggestion = screen.getByRole('button', { name: /^Add low$|^添加 low$/ });
+    expect(document.activeElement).toBe(suggestion);
+
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', 'low']));
+    // The chip it was standing on is gone; focus is back on the one control the
+    // edit state cannot lose, not on the body with the editor closed behind it.
+    const input = screen.getByPlaceholderText(/Enter to add|回车添加/i);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('returns focus to the row it collapsed when Escape asked for it', async () => {
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /high/i }));
+  });
+
+  // A write that was rolled back is the row's unfinished business, and 重试 is
+  // the only answer to it — so moving the editor elsewhere, which answers
+  // nothing, cannot be what takes the answer away.
+  it('keeps a failed write answerable after the editor moves to another row', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
+    renderProtocol('openai_responses', [
+      source.models[0],
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /No tiers set|未设置档位/i }));
+    expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
+    expect(screen.getByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
+
+    update.mockResolvedValueOnce({ ...source, models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }] });
+    await userEvent.click(screen.getByRole('button', { name: /^Try again$|^重试$/i }));
+    await waitFor(() => expect(update).toHaveBeenLastCalledWith(source.id, 'model-a', ['high', 'low']));
+    await waitFor(() => expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull());
+  });
+
+  // Hover is a reveal, not a layout change, and the row answers it with fill
+  // alone. Asserted against the stylesheet because jsdom resolves neither a media
+  // query nor a hover state, and this half of the interaction is CSS-owned.
+  it('reveals the add affordance on hover without moving the row', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
+    const pointer = css.slice(css.indexOf('@media (hover: hover)'), css.indexOf('@media (hover: none)'));
+    const touch = css.slice(css.indexOf('@media (hover: none)'));
+    expect(pointer).toMatch(/\.model-hub-source-table-row:hover \{ background: var\(--model-hub-wash-0a\); \}/);
+    expect(pointer).toMatch(/\.model-hub-source-tier-reveal \{ opacity: 0;/);
+    expect(pointer).toMatch(/\.model-hub-source-table-row:hover \.model-hub-source-tier-reveal,[\s\S]*?opacity: 1;/);
+    expect(pointer).not.toMatch(/display: none|height|padding|margin|border/);
+    expect(pointer).toMatch(/\.model-hub-source-row-action \{ opacity: 0;/);
+    expect(pointer).not.toMatch(/\.model-hub-source-row-actions \{ opacity: 0;/);
+    expect(touch).toMatch(/\.model-hub-source-tier-reveal \{ display: none; \}/);
+  });
+
+  it('bounds refetch notices inside the fixed-height detail dialog', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
+    const notices = css.match(/\.model-hub-source-notices\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(notices).toContain('max-height: var(--model-hub-source-notices-max-height)');
+    expect(notices).toContain('overflow-y: auto');
+  });
+
+  // The reveal is a paint, so what a tap has to find cannot be part of it: the
+  // cell owns the row's band whatever it is drawing, which is what lets the pill
+  // be removed on touch and lets a model with no tiers still be a target at all.
+  it('gives the tier cell the row band to be tapped in, whichever branch is drawing', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
+    const base = css.slice(0, css.indexOf('@media (hover: hover)'));
+    expect(base).toMatch(/\.model-hub-source-tier-cell \{\s*min-height: calc\(var\(--model-hub-source-table-row-height\) - 2 \* var\(--model-hub-source-table-padding-y\)\);\s*\}/);
+    const pointer = css.slice(css.indexOf('@media (hover: hover)'), css.indexOf('@media (hover: none)'));
+    const touch = css.slice(css.indexOf('@media (hover: none)'), css.indexOf('.model-hub-source-tier-empty'));
+    for (const branch of [pointer, touch]) expect(branch).not.toMatch(/height/);
+
+    // And the class is on the control the tap opens, for a model with tiers and
+    // for one without — CSS nobody wears is not a hit area.
+    renderProtocol('openai_responses', [
+      source.models[0],
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+    ]);
+    for (const name of [/high/i, /No tiers set|未设置档位/i]) {
+      expect(screen.getByRole('button', { name }).className).toContain('model-hub-source-tier-cell');
+    }
+  });
+
+  it('explains standby beside the label rather than in a place the reader must find', async () => {
+    renderPanel([]);
+    expect(screen.getByText(i18n.t('settings.models.upstream.state.standby'))).toBeTruthy();
+
+    // Reached by keyboard, not by hover alone: the sentence is the only thing on
+    // the bar that says a just-added source is fine, so it cannot be pointer-only.
+    const hint = screen.getByRole('button', { name: /What this status means|这个状态是什么意思/i });
+    hint.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(await screen.findByText(/serves a route through it|它就会显示为使用中/i)).toBeTruthy();
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByText(/serves a route through it|它就会显示为使用中/i)).toBeNull());
   });
 
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {

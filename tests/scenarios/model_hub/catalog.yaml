@@ -11,10 +11,12 @@ capability:
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_opencode_server.py
+    - tests/test_runtime_activation.py
     # The user-visible half of metering. A vitest case is the only place these
     # properties can be observed, so the catalog checker resolves both shapes.
     - ui/src/components/settings/models/UsageTab.test.tsx
     - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+    - ui/src/components/settings/models/RouteChainDialog.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
@@ -65,6 +67,12 @@ scenarios:
     kind: persistence
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit
+  - id: MH-ROUTE-EDIT-001
+    name: Replacing one route hop preserves its position and every untouched hop
+    status: covered
+    kind: mutation
+    layer: unit
+    test: ui/src/components/settings/models/RouteChainDialog.test.tsx::MH-ROUTE-EDIT-001
   - id: MH-MATCH-001
     name: Add-time matching persists each exact hop and returns its visible position
     status: covered
@@ -101,6 +109,19 @@ scenarios:
     kind: contract
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports
+  - id: MH-PROTOCOL-003
+    name: Manual protocol selection constrains observation and persists only matching response proof
+    status: covered
+    kind: observation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_003_manual_selection_requires_matching_response_proof
+  - id: MH-PROTOCOL-004
+    name: Codex Model Hub launches use standard Responses provider capabilities
+    status: partial
+    kind: compatibility
+    layer: contract
+    missing_layer: scenario
+    test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered
@@ -144,6 +165,12 @@ scenarios:
     kind: timeout_cancel
     layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics
+  - id: MH-RUNTIME-007
+    name: An OpenCode overlay change retires drained durable owners without replacing an active native Turn
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_runtime_activation.py::test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered
@@ -169,11 +196,11 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_l3.py::test_neither_metering_owner_writes_the_ledger_on_the_event_loop
   - id: MH-USAGE-005
-    name: A usage report is metered even when the prelude buffer refuses to keep its bytes
+    name: A pre-output usage report remains metered when the stream then fails
     status: covered
     kind: recovery
     layer: unit
-    test: tests/test_model_hub_runtime.py::test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered
+    test: tests/test_model_hub_runtime.py::test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
   - id: MH-USAGE-006
     name: Every model identifier a persisted config still loads is one the ledger can key
     status: covered
@@ -372,6 +399,12 @@ scenarios:
     kind: recovery
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
+  - id: MH-OVERVIEW-001
+    name: Overview batches model chains by backend and reserves exact reads for route editing
+    status: covered
+    kind: projection
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-OVERVIEW-001
   - id: MH-ENGINE-001
     name: Local engine loss is terminal without Source mutation or replay
     status: covered
@@ -390,6 +423,12 @@ scenarios:
     kind: authentication
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_static_credential_failure_does_not_retry_or_claim_takeover
+  - id: MH-EFFORT-001
+    name: An undeclared requested effort is omitted from the exact-hop request and the turn still completes
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes
   - id: MH-TURN-RESULT-001
     name: All terminal outcomes are closed schema-valid provenance products
     status: covered
@@ -431,6 +470,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
 next_priority:
+  - MH-PROTOCOL-004
   - MH-RUNTIME-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001

@@ -50,6 +50,7 @@ from modules.agents.codex.session import CodexSessionManager
 from modules.agents.codex.transport import CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
+from vibe.i18n import t as i18n_t
 from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,10 @@ class CodexConnectionProbeRuntimeMismatchError(RuntimeError):
     """The cached transport does not represent direct Codex credentials."""
 
 
+class CodexModelHubCatalogUnavailableError(RuntimeError):
+    """The configured Codex binary could not provide Hub launch metadata."""
+
+
 class CodexResumeUnavailableError(RuntimeError):
     """The Codex thread associated with this session can no longer be resumed.
 
@@ -126,6 +131,9 @@ class CodexAgent(BaseAgent):
         super().__init__(controller)
         self.codex_config = codex_config
         self._registered_runtime = registered_runtime
+        self._model_hub_catalog_path: Path | None = None
+        self._model_hub_catalog_lock = asyncio.Lock()
+        self._model_hub_catalog_generation = 0
 
         # cwd → CodexTransport (one persistent process per working dir)
         self._transports: Dict[str, CodexTransport] = {}
@@ -403,12 +411,20 @@ class CodexAgent(BaseAgent):
             except Exception as e:
                 logger.error("Failed to start Codex transport: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
+                if isinstance(e, CodexModelHubCatalogUnavailableError):
+                    language = str(
+                        getattr(getattr(self.controller, "config", None), "language", "en")
+                        or "en"
+                    )
+                    display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
+                else:
+                    display_text = f"❌ Failed to start Codex CLI: {e}"
                 await emit_backend_failure(
                     self.controller,
                     request.context,
                     self.name,
                     str(e),
-                    display_text=f"❌ Failed to start Codex CLI: {e}",
+                    display_text=display_text,
                     request=request,
                 )
                 await self._remove_ack_reaction(request)
@@ -784,7 +800,34 @@ class CodexAgent(BaseAgent):
         """Reload persisted runtime config before respawning app-server transports."""
         self.codex_config = codex_config
         self.controller.config.codex = codex_config
+        self._model_hub_catalog_generation += 1
+        self._model_hub_catalog_path = None
         await self.refresh_auth_state()
+
+    async def prepare_model_hub_runtime(self) -> Path:
+        """Bind Hub metadata to this Agent's exact configured Codex binary."""
+        from vibe import backend_model_catalog
+
+        async with self._model_hub_catalog_lock:
+            if self._model_hub_catalog_path is not None:
+                return self._model_hub_catalog_path
+            generation = self._model_hub_catalog_generation
+            binary = self.codex_config.binary
+            try:
+                path = await asyncio.to_thread(
+                    backend_model_catalog.prepare_codex_hub_catalog,
+                    binary,
+                )
+            except Exception as exc:
+                raise CodexModelHubCatalogUnavailableError(
+                    "Codex Model Hub catalog preparation failed"
+                ) from exc
+            if self._model_hub_catalog_generation != generation:
+                raise CodexModelHubCatalogUnavailableError(
+                    "Codex Model Hub catalog generation changed during preparation"
+                )
+            self._model_hub_catalog_path = path
+            return path
 
     async def prepare_resume_binding(
         self,
@@ -1597,6 +1640,25 @@ class CodexAgent(BaseAgent):
                 if wait_for_active_turns:
                     pass
                 else:
+                    runtime_args: list[str] = []
+                    runtime_env: dict[str, str] | None = None
+                    runtime_fingerprint = "direct"
+                    if launch is not None:
+                        from modules.agents.model_hub import build_codex_hub_launch
+
+                        if (
+                            launch.channel == "hub"
+                            and self._model_hub_catalog_path is None
+                        ):
+                            await self.prepare_model_hub_runtime()
+                        runtime_args, runtime_env = build_codex_hub_launch(
+                            [],
+                            os.environ.copy(),
+                            launch,
+                            model_catalog_path=self._model_hub_catalog_path,
+                        )
+                        runtime_fingerprint = launch.fingerprint
+
                     # Stop stale transport if any
                     if existing:
                         async def replacement_is_safe() -> bool:
@@ -1652,14 +1714,6 @@ class CodexAgent(BaseAgent):
                                 cwd,
                             )
 
-                    runtime_args: list[str] = []
-                    runtime_env: dict[str, str] | None = None
-                    runtime_fingerprint = "direct"
-                    if launch is not None:
-                        from modules.agents.model_hub import build_codex_hub_launch
-
-                        runtime_args, runtime_env = build_codex_hub_launch([], os.environ.copy(), launch)
-                        runtime_fingerprint = launch.fingerprint
                     transport = CodexTransport(
                         binary=self.codex_config.binary,
                         cwd=cwd,
