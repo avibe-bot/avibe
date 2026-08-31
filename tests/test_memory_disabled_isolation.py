@@ -638,6 +638,30 @@ async def test_enabled_operation_bounds_disabled_cleanup_wait_and_remains_retrya
             match="Disabled Memory cleanup is still in progress",
         ):
             await asyncio.wait_for(controller.wake_memory(), timeout=0.1)
+
+        class _Python310AsyncioTimeoutError(Exception):
+            pass
+
+        async def raise_python310_timeout(
+            _future: object,
+            *,
+            timeout: float,
+        ) -> None:
+            assert timeout == 0.01
+            raise _Python310AsyncioTimeoutError
+
+        with monkeypatch.context() as python310:
+            python310.setattr(
+                asyncio,
+                "TimeoutError",
+                _Python310AsyncioTimeoutError,
+            )
+            python310.setattr(asyncio, "wait_for", raise_python310_timeout)
+            with pytest.raises(
+                MemoryStoreUnavailableError,
+                match="Disabled Memory cleanup is still in progress",
+            ):
+                await controller.wake_memory()
         assert cleanup_task.done() is False
         assert cleanup_task.cancelled() is False
 

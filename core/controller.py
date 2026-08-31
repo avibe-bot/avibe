@@ -767,7 +767,7 @@ class Controller:
                     asyncio.shield(cleanup_task),
                     timeout=wait_seconds,
                 )
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 raise MemoryStoreUnavailableError(
                     "Disabled Memory cleanup is still in progress"
                 ) from exc
