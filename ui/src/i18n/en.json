@@ -1901,6 +1901,7 @@
     "memory_package_metadata_unreadable": "The installed Memory package metadata could not be read. Repair it manually.",
     "memory_package_metadata_ambiguous": "Multiple Memory package providers were found. Remove the duplicate installation before retrying.",
     "memory_package_install_failed": "The Memory Python package could not be installed.",
+    "memory_package_restart_failed": "The Memory package was installed, but Avibe could not schedule the service restart.",
     "memory_implementation_unavailable": "The Memory implementation is unavailable.",
     "memory_implementation_incompatible": "The Memory implementation is incompatible with this Avibe version.",
     "memory_invalid_input": "That Memory request wasn't valid.",

@@ -2388,6 +2388,9 @@ class SessionTurnManager:
                 attachments=attachments,
             )
         context.files = file_attachments_from_specs(specs)
+        context.is_original_human_attachment = bool(
+            context.message_kind == "original" and context.files
+        )
         return payload
 
     @staticmethod

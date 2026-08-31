@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 MAX_PENDING_CAPTURE_EVENTS = 256
 
 
+def _record_attachment_capture(platform: str, total: int, captured: int) -> None:
+    try:
+        log_attachment_capture(platform, total, captured)
+    except BaseException:
+        logger.debug("Memory attachment capture telemetry failed", exc_info=True)
+
+
 class CaptureModule(Protocol):
     def reserve_capture_capacity(self) -> object: ...
 
@@ -79,10 +86,25 @@ class _QueuedTurn:
     lease: object | None
     active: bool = True
     task_owned: bool = False
+    attachment_capture_recorded: bool = False
+
+    def record_attachment_capture(self, captured: int = 0) -> None:
+        if self.attachment_capture_recorded:
+            return
+        event = self.event
+        if event.platform == "avibe" or not event.files:
+            return
+        self.attachment_capture_recorded = True
+        _record_attachment_capture(
+            str(event.platform),
+            len(event.files),
+            captured,
+        )
 
     def release(self) -> None:
         if not self.active:
             return
+        self.record_attachment_capture()
         self.active = False
         _release(self.lease)
         try:
@@ -202,6 +224,12 @@ class EnabledMemoryAdapter:
                     return
                 capacity = module.reserve_capture_capacity()
                 if isinstance(capacity, str):
+                    if event.platform != "avibe" and event.files:
+                        _record_attachment_capture(
+                            str(event.platform),
+                            len(event.files),
+                            0,
+                        )
                     return
                 lease = None
                 if event.attachment_lease is not None:
@@ -405,11 +433,7 @@ class EnabledMemoryAdapter:
                         if isinstance(result, CaptureAccepted)
                         else 0
                     )
-                    log_attachment_capture(
-                        str(item.event.platform),
-                        len(item.event.files),
-                        captured,
-                    )
+                    item.record_attachment_capture(captured)
         finally:
             _release(lifecycle_admission)
             ownership.release()

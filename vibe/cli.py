@@ -744,7 +744,7 @@ def cmd_memory(args) -> int:
 
     from vibe import internal_client
     from core.caller_context import caller_context_from_env
-    from avibe_memory.types import (
+    from vibe.memory_contract import (
         MAX_MEMORY_LIST_PAGE_SIZE,
         MAX_MEMORY_SEARCH_RESULTS,
     )
@@ -15508,11 +15508,12 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
-    from avibe_memory.artifact import get_memory_artifact_manager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        from avibe_memory.artifact import get_memory_artifact_manager
+
         return get_memory_artifact_manager().clean(
             keep_previous=keep_previous,
             dry_run=dry_run,

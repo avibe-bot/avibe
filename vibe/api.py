@@ -9300,11 +9300,29 @@ def _prepare_memory_package_job() -> dict:
             "output": output or None,
             "reason": "memory_package_install_failed",
         }
+    try:
+        restart = schedule_restart(
+            delay_seconds=2.0,
+            vibe_path=get_running_vibe_path(),
+            trigger="memory-package-repair",
+            scope="service",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
+        return {
+            "ok": False,
+            "message": "memory_package_restart_failed",
+            "output": output or str(exc),
+            "reason": "memory_package_restart_failed",
+            "restarting": False,
+        }
     return {
         "ok": True,
         "message": "memory_package_ready",
         "output": output or None,
         "reason": None,
+        "restarting": True,
+        "restart": restart,
     }
 
 

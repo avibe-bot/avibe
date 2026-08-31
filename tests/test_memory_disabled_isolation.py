@@ -16,6 +16,7 @@ import pytest
 from config import paths
 from config.v2_compat import to_app_config
 from config.v2_config import V2Config
+from core import memory_legacy_cleanup
 from core.controller import Controller
 from avibe_memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter
@@ -143,9 +144,11 @@ async def _start_disabled_cleanup(
         async def reconcile_orphans(self) -> None:
             await reconcile_orphans()
 
-    process_module = types.ModuleType("avibe_memory.process")
-    process_module.ReleasedEverOSOrphanReconciler = _Reconciler
-    monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
+    monkeypatch.setattr(
+        memory_legacy_cleanup,
+        "ReleasedEverOSOrphanReconciler",
+        _Reconciler,
+    )
 
     controller = _controller_with_memory()
     await controller._schedule_disabled_memory_cleanup()
@@ -334,6 +337,92 @@ assert not BLOCKED.intersection(sys.modules)
 
     assert completed.returncode == 0, completed.stderr
     assert _memory_state_entries(tmp_path / "home") == []
+
+
+def test_disabled_cleanup_consumes_released_record_without_optional_package(
+    tmp_path: Path,
+) -> None:
+    script = r'''
+import asyncio
+import importlib.abc
+import json
+import sys
+
+
+class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        del path, target
+        if fullname == "avibe_memory" or fullname.startswith("avibe_memory."):
+            raise ImportError(f"blocked optional Memory implementation: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, BlockMemoryImplementation())
+
+from config import paths
+from config.v2_compat import to_app_config
+from config.v2_config import V2Config
+from core.controller import Controller
+
+config = to_app_config(V2Config.from_payload({
+    "platform": "avibe",
+    "platforms": {"enabled": [], "primary": "avibe"},
+    "mode": "self_host",
+    "version": "v2",
+    "runtime": {"default_cwd": "_tmp", "log_level": "INFO"},
+    "agents": {
+        "default_backend": "opencode",
+        "opencode": {"enabled": True, "cli_path": "opencode"},
+    },
+    "memory": {"enabled": False},
+    "setup_completed": True,
+}))
+controller = Controller(config)
+home = paths.get_vibe_remote_dir()
+memory_dir = home / "memory"
+record_path = memory_dir / ".rt" / "everos.sidecar.json"
+record_path.parent.mkdir(mode=0o700, parents=True)
+record_path.write_text(json.dumps({
+    "pid": 99999999,
+    "create_time": 1.0,
+    "provider_root": str(memory_dir / "everos-root"),
+    "socket_path": str(memory_dir / ".rt" / "everos.sock"),
+    "role": "sidecar",
+    "python": "/runtime/bin/python",
+}), encoding="utf-8")
+record_path.chmod(0o600)
+
+
+async def cleanup() -> None:
+    await controller._schedule_disabled_memory_cleanup()
+    task = controller._memory_disabled_cleanup_task
+    assert task is not None
+    await task
+
+
+asyncio.run(cleanup())
+assert not record_path.exists()
+assert not any(
+    name == "avibe_memory" or name.startswith("avibe_memory.")
+    for name in sys.modules
+)
+'''
+    environment = os.environ.copy()
+    environment["AVIBE_HOME"] = str(tmp_path / "home")
+    environment["HOME"] = str(tmp_path)
+    environment["PYTHONPATH"] = str(ROOT)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_enabled_controller_degrades_when_runtime_attribute_probe_fails(
@@ -557,9 +646,11 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
         async def reconcile_orphans(self) -> None:
             calls.append(self._paths)
 
-    process_module = types.ModuleType("avibe_memory.process")
-    process_module.ReleasedEverOSOrphanReconciler = _Reconciler
-    monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
+    monkeypatch.setattr(
+        memory_legacy_cleanup,
+        "ReleasedEverOSOrphanReconciler",
+        _Reconciler,
+    )
 
     controller = _controller_with_memory()
 
@@ -981,9 +1072,11 @@ async def test_disabled_reaper_enable_and_shutdown_share_root_mutation_gate(
             reaper_started.set()
             await reaper_release.wait()
 
-    process_module = types.ModuleType("avibe_memory.process")
-    process_module.ReleasedEverOSOrphanReconciler = _Reconciler
-    monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
+    monkeypatch.setattr(
+        memory_legacy_cleanup,
+        "ReleasedEverOSOrphanReconciler",
+        _Reconciler,
+    )
     controller._try_memory_operation_lease = try_lease
     controller._disabled_memory_ownership_exists = lambda _path: True
 

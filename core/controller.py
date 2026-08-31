@@ -2556,7 +2556,7 @@ class Controller:
                 self._memory_disabled_cleanup_unproved = True
 
             try:
-                from avibe_memory.process import ReleasedEverOSOrphanReconciler
+                from core.memory_legacy_cleanup import ReleasedEverOSOrphanReconciler
 
                 reconciler = ReleasedEverOSOrphanReconciler(
                     provider_root=memory_dir / "everos-root",

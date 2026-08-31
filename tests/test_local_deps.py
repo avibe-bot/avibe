@@ -2152,6 +2152,11 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
 
     monkeypatch.setattr(api, "build_upgrade_plan", build_plan)
     monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
+    def schedule_restart(**kwargs):
+        calls["restart"] = kwargs
+        return {"job_id": "restart"}
+
+    monkeypatch.setattr(api, "schedule_restart", schedule_restart)
 
     result = api._prepare_memory_package_job()
 
@@ -2174,6 +2179,46 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
             "cwd": "/safe",
         },
     )
+    assert calls["restart"] == {
+        "delay_seconds": 2.0,
+        "vibe_path": "/bin/vibe",
+        "trigger": "memory-package-repair",
+        "scope": "service",
+    }
+    assert result["restarting"] is True
+    assert result["restart"] == {"job_id": "restart"}
+
+
+def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_scheduled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["repair"], 0, stdout="installed", stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        Mock(side_effect=RuntimeError("restart unavailable")),
+    )
+
+    result = api._prepare_memory_package_job()
+
+    assert result == {
+        "ok": False,
+        "message": "memory_package_restart_failed",
+        "output": "installed",
+        "reason": "memory_package_restart_failed",
+        "restarting": False,
+    }
 
 
 def test_memory_package_reachability_disabled_enable_bootstrap_ready(

@@ -1901,6 +1901,7 @@
     "memory_package_metadata_unreadable": "无法读取已安装记忆软件包的元数据，请手动修复。",
     "memory_package_metadata_ambiguous": "检测到多个记忆软件包提供者。请移除重复安装后重试。",
     "memory_package_install_failed": "无法安装记忆 Python 软件包。",
+    "memory_package_restart_failed": "记忆软件包已安装，但 Avibe 无法安排服务重启。",
     "memory_implementation_unavailable": "记忆实现当前不可用。",
     "memory_implementation_incompatible": "记忆实现与此 Avibe 版本不兼容。",
     "memory_invalid_input": "该记忆请求无效。",

@@ -5787,16 +5787,20 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
                 source="user",
                 text="",
                 content={"attachments": [{"token": token}]},
+                message_kind="original",
             ),
             dispatch_text="",
         )
-    dispatched: list[tuple[str, list[str]]] = []
+    dispatched: list[tuple[str, list[str], str, bool, bool]] = []
 
     async def capture(_session_id, context, text, **_kwargs):
         dispatched.append(
             (
                 text,
                 [str(item.local_path) for item in (context.files or [])],
+                context.message_kind,
+                context.is_original_human_text is True,
+                context.is_original_human_attachment is True,
             )
         )
         _complete_capture_admission(context)
@@ -5804,7 +5808,7 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
     manager._run = capture
     asyncio.run(manager.recover_durable_delivery_state())
 
-    assert dispatched == [("", [str(attachment)])]
+    assert dispatched == [("", [str(attachment)], "original", True, True)]
     assert _row(engine, delivery_id)["state"] == "claimed"
 
 

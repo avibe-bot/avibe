@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import hashlib
 import json
 import os
@@ -3096,6 +3097,57 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
     assert calls == [
         ("git", 2, True),
         ("memory-runtime", 2, True),
+        ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
+    ]
+
+
+def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
+    from core import tmux_runtime
+    from vibe.model_hub_runtime import installer as model_hub_installer
+
+    calls = []
+    original_import = builtins.__import__
+
+    def core_only_import(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    class FakeManager:
+        def __init__(self, runtime_id):
+            self.runtime_id = runtime_id
+
+        def clean(self, *, keep_previous, dry_run):
+            calls.append((self.runtime_id, keep_previous, dry_run))
+            return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(builtins, "__import__", core_only_import)
+    monkeypatch.setattr(
+        cli,
+        "_clean_git_runtime",
+        lambda **kwargs: calls.append(("git", kwargs["keep_previous"], kwargs["dry_run"]))
+        or {"ok": True, "removed": []},
+    )
+    monkeypatch.setattr(
+        model_hub_installer,
+        "EngineRuntimeManager",
+        lambda: FakeManager("model_hub_engine"),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
+
+    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
+
+    assert results["memory-runtime"]["reason"] == "memory-runtime_clean_failed"
+    assert results["git"]["ok"] is True
+    assert results["model_hub_engine"]["ok"] is True
+    assert results["tmux"]["ok"] is True
+    assert calls == [
+        ("git", 2, True),
         ("model_hub_engine", 2, True),
         ("tmux", 2, True),
     ]

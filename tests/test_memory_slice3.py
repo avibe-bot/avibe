@@ -31,6 +31,8 @@ from avibe_memory.store import MemoryStore
 from core.memory_adapter import SessionArchived
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
+    discord_message_kind,
+    feishu_message_kind,
     is_original_human_discord_attachment,
     is_original_human_discord_text,
     is_original_human_feishu_attachment,
@@ -41,6 +43,9 @@ from modules.im.message_facts import (
     is_original_human_telegram_text,
     is_original_human_wechat_attachment,
     is_original_human_wechat_text,
+    slack_message_kind,
+    telegram_message_kind,
+    wechat_message_kind,
 )
 
 
@@ -492,6 +497,40 @@ def test_im_adapters_normalize_native_ordinary_text_facts() -> None:
     assert is_original_human_wechat_text({"item_list": [{"type": "TEXT"}]}, None) is True
     assert is_original_human_wechat_text({"item_list": [{"type": 1}, {"type": 2}]}, None) is False
     assert is_original_human_wechat_text({"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]}, None) is False
+
+
+def test_im_adapters_publish_concrete_native_message_kinds() -> None:
+    discord_message = SimpleNamespace(
+        author=SimpleNamespace(bot=False),
+        edited_at=None,
+        attachments=[],
+        embeds=[],
+        flags=SimpleNamespace(forwarded=True),
+        message_snapshots=(),
+        is_system=lambda: False,
+    )
+    assert discord_message_kind(discord_message, None) == "forwarded"
+    assert slack_message_kind(
+        {"text": "edited", "subtype": "message_changed"},
+        None,
+    ) == "edited"
+    assert telegram_message_kind(
+        {"from": {"is_bot": False}, "is_system": True},
+        [],
+    ) == "system"
+    assert feishu_message_kind(
+        {
+            "sender": {"sender_type": "user"},
+            "message": {"message_type": "text", "forwarded": True},
+        },
+        {},
+        None,
+        shared_text="forwarded body",
+    ) == "forwarded"
+    assert wechat_message_kind(
+        {"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]},
+        None,
+    ) == "forwarded"
 
 
 def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:

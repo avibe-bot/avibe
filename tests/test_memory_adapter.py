@@ -13,8 +13,9 @@ from unittest.mock import Mock
 
 import pytest
 
+import avibe_memory.capture_adapter as capture_adapter_module
 from avibe_memory.capture_adapter import EnabledMemoryAdapter
-from avibe_memory.types import CaptureAttachment
+from avibe_memory.types import CaptureAccepted, CaptureAttachment
 from core.memory_adapter import (
     DisabledMemoryAdapter,
     MemoryFile,
@@ -380,6 +381,75 @@ async def test_success_releases_one_retained_lease_and_forwards_capture() -> Non
     assert lease.retained == lease.released == 1
     assert lifecycle.acquired == lifecycle.released == 1
     await adapter.cancel_memory_capture_tasks()
+
+
+@pytest.mark.asyncio
+async def test_attachment_capture_telemetry_accounts_each_terminal_path_once(
+    monkeypatch,
+) -> None:
+    records: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(
+        capture_adapter_module,
+        "log_attachment_capture",
+        lambda platform, total, captured: records.append(
+            (platform, total, captured)
+        ),
+    )
+    files = (MemoryFile("receipt.pdf", "application/pdf"),)
+
+    capacity_module = _Module()
+    capacity_module.capacity_outcome = "full"
+    capacity_adapter, _ = _adapter(capacity_module)
+    capacity_adapter.offer(_event(files=files))
+    await capacity_adapter.cancel_memory_capture_tasks()
+
+    denied_module = _Module()
+    denied_adapter, _ = _adapter(
+        denied_module,
+        bindings=_Bindings(enabled=False),
+    )
+    denied_adapter.offer(_event(files=files))
+    await _settle(denied_adapter)
+    await denied_adapter.cancel_memory_capture_tasks()
+
+    stale_module = _Module()
+    stale_lifecycle = _Lifecycle()
+    stale_lifecycle.matches = False
+    stale_adapter, _ = _adapter(stale_module, lifecycle=stale_lifecycle)
+    stale_adapter.offer(_event(files=files))
+    await _settle(stale_adapter)
+    await stale_adapter.cancel_memory_capture_tasks()
+
+    accepted_module = _Module()
+
+    async def accept_capture(*_args, **_kwargs):
+        return CaptureAccepted(captured_attachment_count=1)
+
+    accepted_module.capture = accept_capture
+    accepted_adapter, _ = _adapter(
+        accepted_module,
+        selector=lambda _lease: SimpleNamespace(
+            attachments=(
+                CaptureAttachment(
+                    kind="pdf",
+                    name="receipt.pdf",
+                    uri="file:///private/receipt.pdf",
+                    ext="pdf",
+                ),
+            ),
+            skipped=(),
+        ),
+    )
+    accepted_adapter.offer(_event(files=files, lease=_Lease()))
+    await _settle(accepted_adapter)
+    await accepted_adapter.cancel_memory_capture_tasks()
+
+    assert records == [
+        ("slack", 1, 0),
+        ("slack", 1, 0),
+        ("slack", 1, 0),
+        ("slack", 1, 1),
+    ]
 
 
 @pytest.mark.asyncio

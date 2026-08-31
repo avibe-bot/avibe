@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from core.delivery_target import MessageKind
+
 from .base import FileAttachment
 
 
@@ -130,6 +132,32 @@ def is_original_human_slack_attachment(
     )
 
 
+def slack_message_kind(
+    event: dict[str, Any],
+    files: Optional[list[FileAttachment]],
+    *,
+    shared: bool = False,
+) -> MessageKind:
+    if not shared and (
+        is_original_human_slack_text(event, files)
+        or is_original_human_slack_attachment(event, files)
+    ):
+        return "original"
+    if any(
+        (
+            event.get("is_system"),
+            event.get("system"),
+            event.get("type") in {"system", "system_message"},
+        )
+    ):
+        return "system"
+    if event.get("edited") or event.get("subtype") == "message_changed":
+        return "edited"
+    if shared or event.get("forwarded"):
+        return "forwarded"
+    return "unknown"
+
+
 def is_original_human_discord_text(message: Any, files: Optional[list[FileAttachment]]) -> bool:
     try:
         is_system = message.is_system() if callable(getattr(message, "is_system", None)) else False
@@ -178,6 +206,29 @@ def is_original_human_discord_attachment(
         and not getattr(message, "message_snapshots", None)
         and not is_system
     )
+
+
+def discord_message_kind(
+    message: Any,
+    files: Optional[list[FileAttachment]],
+) -> MessageKind:
+    if is_original_human_discord_text(
+        message, files
+    ) or is_original_human_discord_attachment(message, files):
+        return "original"
+    try:
+        if callable(getattr(message, "is_system", None)) and message.is_system():
+            return "system"
+    except Exception:
+        return "unknown"
+    if getattr(message, "edited_at", None) is not None:
+        return "edited"
+    flags = getattr(message, "flags", None)
+    if bool(getattr(flags, "forwarded", False)) or getattr(
+        message, "message_snapshots", None
+    ):
+        return "forwarded"
+    return "unknown"
 
 
 def is_original_human_telegram_text(message: dict[str, Any], files: list[FileAttachment]) -> bool:
@@ -236,6 +287,29 @@ def is_original_human_telegram_attachment(
     )
 
 
+def telegram_message_kind(
+    message: dict[str, Any],
+    files: list[FileAttachment],
+) -> MessageKind:
+    if is_original_human_telegram_text(
+        message, files
+    ) or is_original_human_telegram_attachment(message, files):
+        return "original"
+    if any(
+        (
+            message.get("is_system"),
+            message.get("system"),
+            message.get("type") in {"system", "system_message"},
+        )
+    ):
+        return "system"
+    if message.get("edit_date"):
+        return "edited"
+    if message.get("forward_origin") or message.get("forward_from"):
+        return "forwarded"
+    return "unknown"
+
+
 def is_original_human_feishu_text(
     event: dict[str, Any],
     files: Optional[list[FileAttachment]],
@@ -277,6 +351,35 @@ def is_original_human_feishu_attachment(
         and not shared_text
         and not any(message.get(key) for key in ("edited", "forwarded"))
     )
+
+
+def feishu_message_kind(
+    event: dict[str, Any],
+    content: dict[str, Any],
+    files: Optional[list[FileAttachment]],
+    *,
+    shared_text: Optional[str],
+) -> MessageKind:
+    if is_original_human_feishu_text(
+        event, files, shared_text=shared_text
+    ) or is_original_human_feishu_attachment(
+        event,
+        content,
+        files,
+        shared_text=shared_text,
+    ):
+        return "original"
+    sender = event.get("sender") or {}
+    message = event.get("message") or {}
+    if sender.get("sender_type") == "app" or any(
+        message.get(key) for key in ("is_system", "system")
+    ):
+        return "system"
+    if message.get("edited"):
+        return "edited"
+    if shared_text or message.get("forwarded"):
+        return "forwarded"
+    return "unknown"
 
 
 def workbench_message_kind(payload: object, quick_reply_for: object) -> str:
@@ -361,3 +464,23 @@ def is_original_human_wechat_attachment(
     return has_direct_media and not any(
         msg.get(key) for key in ("is_system", "system", "edited", "forwarded")
     )
+
+
+def wechat_message_kind(
+    msg: dict[str, Any],
+    files: Optional[list[FileAttachment]],
+) -> MessageKind:
+    if is_original_human_wechat_text(
+        msg, files
+    ) or is_original_human_wechat_attachment(msg, files):
+        return "original"
+    if msg.get("is_system") or msg.get("system"):
+        return "system"
+    if msg.get("edited"):
+        return "edited"
+    items = msg.get("item_list") or []
+    if msg.get("forwarded") or any(
+        isinstance(item, dict) and item.get("ref_msg") for item in items
+    ):
+        return "forwarded"
+    return "unknown"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import shlex
 from pathlib import Path
@@ -401,6 +402,34 @@ def test_memory_status_json_returns_a_closed_service_down_code(monkeypatch, caps
         "code": "memory_sidecar_unavailable",
         "error": "memory_sidecar_unavailable",
     }
+
+
+def test_memory_status_does_not_import_optional_implementation(monkeypatch, capsys) -> None:
+    args = cli.build_parser().parse_args(["memory", "status", "--json"])
+    original_import = builtins.__import__
+
+    def core_only_import(name, *args, **kwargs):
+        if name == "avibe_memory" or name.startswith("avibe_memory."):
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", core_only_import)
+    monkeypatch.setattr(
+        internal_client,
+        "memory_status_sync",
+        lambda **_kwargs: {
+            "status_code": 503,
+            "body": {
+                "status": "failed",
+                "error": "memory_implementation_unavailable",
+            },
+        },
+    )
+
+    assert cli.cmd_memory(args) == 1
+    assert json.loads(capsys.readouterr().out)["code"] == (
+        "memory_implementation_unavailable"
+    )
 
 
 def test_memory_cli_passes_agent_session_to_the_internal_boundary(monkeypatch, capsys) -> None:
