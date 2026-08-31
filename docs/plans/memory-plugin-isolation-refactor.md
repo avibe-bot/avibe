@@ -338,13 +338,17 @@ The package split does not silently disable Memory for existing users.
    exact-version Memory package install action under the shared upgrade lock.
    It persists a three-attempt budget per core version before mutation and
    schedules one ordinary service restart. Controller startup never installs or
-   downloads Python packages.
+   downloads Python packages. Disabled startup remains a zero-install path; a
+   published core-only install exposes only a user-invoked companion bootstrap
+   so Memory can be enabled later.
 5. Later enabled upgrades fail before replacing the current installation if the
    compatible optional package cannot be resolved. The first-hop convergence
    fails closed with Memory unavailable and core Avibe healthy; it never changes
    Memory config or provider data. A later startup retries only within the
    persisted per-version budget; an explicit action remains available after
-   exhaustion.
+   exhaustion. A failed activation restart stays repairable and retries restart
+   without reinstalling the already-exact companion; the surviving UI process
+   continues reconciling its other managed dependencies.
 6. A successful upgrade or first-hop convergence schedules the ordinary Avibe
    restart when the runtime is active. Install, upgrade, or restart failures are
    structured terminal results and do not block a later explicit attempt.

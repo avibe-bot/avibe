@@ -15512,7 +15512,17 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
-        from avibe_memory.artifact import get_memory_artifact_manager
+        try:
+            from avibe_memory.artifact import get_memory_artifact_manager
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"avibe_memory", "avibe_memory.artifact"}:
+                raise
+            return {
+                "ok": True,
+                "removed": [],
+                "skipped": True,
+                "reason": "memory_implementation_unavailable",
+            }
 
         return get_memory_artifact_manager().clean(
             keep_previous=keep_previous,

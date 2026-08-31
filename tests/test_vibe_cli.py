@@ -3111,7 +3111,7 @@ def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
 
     def core_only_import(name, *args, **kwargs):
         if name == "avibe_memory.artifact":
-            raise ModuleNotFoundError(name)
+            raise ModuleNotFoundError(name, name="avibe_memory")
         return original_import(name, *args, **kwargs)
 
     class FakeManager:
@@ -3142,7 +3142,12 @@ def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
 
     results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
 
-    assert results["memory-runtime"]["reason"] == "memory-runtime_clean_failed"
+    assert results["memory-runtime"] == {
+        "ok": True,
+        "removed": [],
+        "skipped": True,
+        "reason": "memory_implementation_unavailable",
+    }
     assert results["git"]["ok"] is True
     assert results["model_hub_engine"]["ok"] is True
     assert results["tmux"]["ok"] is True
@@ -3151,6 +3156,21 @@ def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
         ("model_hub_engine", 2, True),
         ("tmux", 2, True),
     ]
+
+
+def test_runtime_clean_reports_broken_memory_implementation_import(monkeypatch):
+    original_import = builtins.__import__
+
+    def broken_memory_import(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ModuleNotFoundError("missing companion dependency", name="memory_dependency")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_memory_import)
+    cleaners = dict(cli._managed_runtime_cleaners())
+
+    with pytest.raises(ModuleNotFoundError, match="missing companion dependency"):
+        cleaners["memory-runtime"](keep_previous=2, dry_run=True)
 
 
 def test_runtime_clean_returns_nonzero_and_reports_git_exception_reason(monkeypatch, capsys):

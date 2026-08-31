@@ -8869,6 +8869,41 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
 
     metadata = _inspect_memory_package_metadata()
     if requirement.state == "not_required":
+        current_version = _published_running_version()
+        published_install = (
+            get_build_identity().kind != "source" and current_version is not None
+        )
+        if published_install and metadata.provider_count == 0:
+            return (
+                _memory_package_row(
+                    requirement,
+                    metadata,
+                    status="missing",
+                    readiness="not_required",
+                    reason="memory_package_missing",
+                    action_class="repairable",
+                    current_version=current_version,
+                ),
+                _memory_runtime_row(requirement, None),
+            )
+        if (
+            published_install
+            and metadata.provider_count == 1
+            and metadata.version is not None
+            and not _memory_versions_match(metadata.version, current_version)
+        ):
+            return (
+                _memory_package_row(
+                    requirement,
+                    metadata,
+                    status="error",
+                    readiness="not_required",
+                    reason="memory_package_version_mismatch",
+                    action_class="repairable",
+                    current_version=current_version,
+                ),
+                _memory_runtime_row(requirement, None),
+            )
         return (
             _memory_package_row(
                 requirement,
@@ -8951,6 +8986,21 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
                 readiness="not_ready",
                 reason=reason,
                 action_class=action_class,
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    if _memory_package_restart_retry_required(current_version):
+        reason = "memory_package_restart_failed"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
                 current_version=current_version,
             ),
             _memory_runtime_row(requirement, None, reason=reason),
@@ -9203,7 +9253,7 @@ def _prepare_memory_runtime_job() -> dict:
     }
 
 
-def _memory_package_repair_rejection() -> dict | None:
+def _memory_package_repair_rejection(*, allow_optional: bool = False) -> dict | None:
     """Recheck the status-owned package repair contract before mutation."""
 
     try:
@@ -9226,7 +9276,10 @@ def _memory_package_repair_rejection() -> dict | None:
         provider_count == 1 and isinstance(version, str) and bool(version)
     )
     if (
-        package.get("required") is True
+        (
+            package.get("required") is True
+            or (allow_optional and package.get("required") is False)
+        )
         and package.get("action_class") == "repairable"
         and metadata_readable
     ):
@@ -9254,6 +9307,24 @@ def _memory_package_repair_rejection() -> dict | None:
 
 def _memory_package_auto_repair_state_path() -> Path:
     return paths.get_state_dir() / "memory-package-auto-repair.json"
+
+
+def _memory_package_restart_retry_required(version: str) -> bool:
+    """Whether package install succeeded but activation restart did not."""
+
+    try:
+        payload = json.loads(
+            _memory_package_auto_repair_state_path().read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("state_version") == _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION
+        and payload.get("core_version") == version
+        and payload.get("result") == "failed"
+        and payload.get("reason") == "memory_package_restart_failed"
+    )
 
 
 def _reserve_memory_package_auto_repair_attempt(version: str) -> dict:
@@ -9340,6 +9411,49 @@ def _finish_memory_package_auto_repair_attempt(
         logger.warning("Memory package auto-repair result could not be persisted", exc_info=True)
 
 
+def _record_memory_package_repair_result(
+    version: str,
+    *,
+    result: str,
+    reason: str | None,
+) -> None:
+    """Persist manual activation state without consuming the automatic budget."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with MigrationFileLock(lock_path, timeout_seconds=5.0):
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+                payload = {}
+            attempts = (
+                payload.get("attempts", 0)
+                if isinstance(payload, dict) and payload.get("core_version") == version
+                else 0
+            )
+            if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+                attempts = 0
+            write_atomic(
+                state_path,
+                json.dumps(
+                    {
+                        "state_version": _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION,
+                        "core_version": version,
+                        "attempts": attempts,
+                        "result": result,
+                        "reason": reason,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+            )
+    except (OSError, MigrationLockTimeout):
+        logger.warning("Memory package repair result could not be persisted", exc_info=True)
+
+
 def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
     """Install the matching optional package through the existing dependency job."""
 
@@ -9347,7 +9461,9 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
     current_version: str | None = None
     try:
         with atomic_upgrade_lock():
-            rejection = _memory_package_repair_rejection()
+            rejection = _memory_package_repair_rejection(
+                allow_optional=not automatic,
+            )
             if rejection is not None:
                 return rejection
 
@@ -9362,20 +9478,7 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                     "action_class": "operator_only",
                 }
             current_vibe_path = get_running_vibe_path()
-            plan = build_upgrade_plan(
-                version=current_version,
-                package_name=PACKAGE_NAME,
-                memory_package=True,
-                memory_version=current_version,
-                vibe_path=current_vibe_path,
-            )
-            if plan.preflight_error:
-                return {
-                    "ok": False,
-                    "message": "memory_package_install_unsafe",
-                    "output": plan.preflight_error,
-                    "reason": "memory_package_install_unsafe",
-                }
+            restart_only = _memory_package_restart_retry_required(current_version)
             if restart_is_pending():
                 return {
                     "ok": False,
@@ -9396,67 +9499,84 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                         "attempts": reservation.get("attempts"),
                     }
 
-            install = execute_upgrade_plan(
-                plan,
-                run=subprocess.run,
-                capture_output=True,
-                text=True,
-                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
-                cwd=get_safe_cwd(),
-            )
-            output = _truncate_install_output(
-                ((install.stdout or "") + (f"\n{install.stderr}" if install.stderr else "")).strip()
-            )
-            if install.returncode != 0:
-                result = {
-                    "ok": False,
-                    "message": "memory_package_install_failed",
-                    "output": output or None,
-                    "reason": "memory_package_install_failed",
-                }
+            output = ""
+            if restart_only:
+                result = {"ok": True}
             else:
-                # Keep the current UI process on its live tool environment so a
-                # service-only restart can immediately observe the companion.
-                # The shared upgrade lock serializes this exact repair with
-                # staged forward upgrades; switching generations here would
-                # strand the still-running UI on stale package metadata.
-                integrity = verify_python_environment(sys.executable)
-                result = (
-                    {"ok": True}
-                    if integrity.ok
-                    else {
+                plan = build_upgrade_plan(
+                    version=current_version,
+                    package_name=PACKAGE_NAME,
+                    memory_package=True,
+                    memory_version=current_version,
+                    vibe_path=current_vibe_path,
+                )
+                if plan.preflight_error:
+                    return {
+                        "ok": False,
+                        "message": "memory_package_install_unsafe",
+                        "output": plan.preflight_error,
+                        "reason": "memory_package_install_unsafe",
+                    }
+                install = execute_upgrade_plan(
+                    plan,
+                    run=subprocess.run,
+                    capture_output=True,
+                    text=True,
+                    timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                    cwd=get_safe_cwd(),
+                )
+                output = _truncate_install_output(
+                    ((install.stdout or "") + (f"\n{install.stderr}" if install.stderr else "")).strip()
+                )
+                if install.returncode != 0:
+                    result = {
                         "ok": False,
                         "message": "memory_package_install_failed",
-                        "output": integrity.detail,
+                        "output": output or None,
                         "reason": "memory_package_install_failed",
                     }
-                )
-                if result.get("ok"):
-                    try:
-                        restart = schedule_restart(
-                            delay_seconds=2.0,
-                            vibe_path=current_vibe_path,
-                            trigger="memory-package-repair",
-                            scope="service",
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
-                        result = {
+                else:
+                    # Keep the current UI process on its live tool environment
+                    # so a service-only restart can immediately observe the
+                    # companion. The shared upgrade lock serializes this exact
+                    # repair with staged forward upgrades.
+                    integrity = verify_python_environment(sys.executable)
+                    result = (
+                        {"ok": True}
+                        if integrity.ok
+                        else {
                             "ok": False,
-                            "message": "memory_package_restart_failed",
-                            "output": output or str(exc),
-                            "reason": "memory_package_restart_failed",
-                            "restarting": False,
+                            "message": "memory_package_install_failed",
+                            "output": integrity.detail,
+                            "reason": "memory_package_install_failed",
                         }
-                    else:
-                        result = {
-                            "ok": True,
-                            "message": "memory_package_ready",
-                            "output": output or None,
-                            "reason": None,
-                            "restarting": True,
-                            "restart": restart,
-                        }
+                    )
+            if result.get("ok"):
+                try:
+                    restart = schedule_restart(
+                        delay_seconds=2.0,
+                        vibe_path=current_vibe_path,
+                        trigger="memory-package-repair",
+                        scope="service",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
+                    result = {
+                        "ok": False,
+                        "message": "memory_package_restart_failed",
+                        "output": output or str(exc),
+                        "reason": "memory_package_restart_failed",
+                        "restarting": False,
+                    }
+                else:
+                    result = {
+                        "ok": True,
+                        "message": "memory_package_ready",
+                        "output": output or None,
+                        "reason": None,
+                        "restarting": True,
+                        "restart": restart,
+                    }
     except (OSError, subprocess.TimeoutExpired, ValueError, MigrationLockTimeout) as exc:
         logger.warning("Memory package repair failed before completion: %s", exc)
         result = {
@@ -9469,6 +9589,14 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
         _finish_memory_package_auto_repair_attempt(
             current_version,
             str(reservation["token"]),
+            result="restart_scheduled" if result.get("restarting") else "failed",
+            reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
+        )
+    elif current_version is not None and (
+        result.get("restarting") or result.get("reason") == "memory_package_restart_failed"
+    ):
+        _record_memory_package_repair_result(
+            current_version,
             result="restart_scheduled" if result.get("restarting") else "failed",
             reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
         )
@@ -9620,16 +9748,6 @@ def reconcile_startup_dependencies() -> dict:
                 "reason": "memory_package_install_failed",
             }
         result["memory_package"] = memory_package
-        if memory_package.get("restarting"):
-            deferred = {
-                "ok": True,
-                "status": "deferred",
-                "reason": "memory_package_restart_pending",
-            }
-            for dependency in ("node", "askill", "avault", "show_runtime", "tmux"):
-                result[dependency] = dict(deferred)
-            result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
-            return result
 
         try:
             askill = ensure_askill_installed(force=False)
@@ -9722,7 +9840,7 @@ def start_dependency_install_job(dep: str) -> dict:
     if dep not in _ALLOWED_DEP_INSTALLS:
         return {"ok": False, "message": f"Unknown dependency: {dep}"}
     if dep == "memory-package":
-        rejection = _memory_package_repair_rejection()
+        rejection = _memory_package_repair_rejection(allow_optional=True)
         if rejection is not None:
             return rejection
 

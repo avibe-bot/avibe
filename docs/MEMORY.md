@@ -99,12 +99,17 @@ enabled state after the host is ready, installs the exact same-version companion
 under the shared upgrade lock, and schedules one ordinary service
 restart. Automatic attempts are persisted per core version and stop after three
 failures or non-converging restarts. Disabled, source, editable, and already-ready
-installs do not trigger that convergence.
+installs do not trigger that convergence. A disabled published install may expose
+an explicit companion-package bootstrap so the user can install the optional
+package before enabling Memory; it never runs automatically.
 
 Package resolution, installation, upgrade, or restart failures leave core
 Avibe running and are reported as structured terminal results; a later startup
 may retry within that version's budget, while an explicit attempt remains
-available after exhaustion. Avibe performs no automatic package rollback
+available after exhaustion. If package installation succeeds but the service
+restart cannot be scheduled, the same ledger keeps the dependency repairable and
+the next explicit Repair retries only activation. Other startup dependencies
+continue reconciling in the surviving UI process. Avibe performs no automatic package rollback
 and keeps no rollback plan, lifecycle reservation, quarantine, Gate 5 lifecycle
 verifier, or general recovery bootstrap.
 
