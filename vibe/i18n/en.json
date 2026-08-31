@@ -822,8 +822,8 @@
         "deleteDataFailed": "Memory data deletion failed",
         "reconfigureFailed": "Memory reconfiguration failed",
         "operationInProgress": "another Memory operation is in progress",
-        "pluginUnavailable": "Memory implementation unavailable",
-        "pluginIncompatible": "Memory implementation is incompatible",
+        "implementationUnavailable": "Memory implementation unavailable",
+        "implementationIncompatible": "Memory implementation is incompatible",
         "unknown": "unknown reason"
       },
       "fault": {

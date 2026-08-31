@@ -642,7 +642,8 @@ def test_wheel_installation_matrix(
             "import core.memory_loader as loader; "
             f"assert (importlib.util.find_spec('avibe_memory') is not None) is {expected!r}; "
             "assert loader.MEMORY_RUNTIME_ENTRYPOINT == 'avibe_memory.runtime'; "
-            "assert loader.MEMORY_RUNTIME_PROTOCOL_VERSION == 1"
+            "assert not hasattr(loader, 'MEMORY_RUNTIME_PROTOCOL_VERSION'); "
+            "assert not hasattr(loader, 'MEMORY_RUNTIME_LIFECYCLE_CONTRACT')"
         ),
         cwd=tmp_path,
     )

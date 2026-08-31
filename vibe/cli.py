@@ -450,8 +450,8 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
     "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
     "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
-    "memory_plugin_unavailable": "memory.cli.reason.pluginUnavailable",
-    "memory_plugin_incompatible": "memory.cli.reason.pluginIncompatible",
+    "memory_implementation_unavailable": "memory.cli.reason.implementationUnavailable",
+    "memory_implementation_incompatible": "memory.cli.reason.implementationIncompatible",
 }
 
 

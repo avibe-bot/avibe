@@ -65,8 +65,8 @@ from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLea
 from core.memory_loader import load_memory_runtime
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.memory_contract import (
-    MemoryPluginIncompatibleError,
-    MemoryPluginUnavailableError,
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
     MemoryRuntimeBusyError,
     MemoryStoreUnavailableError,
 )
@@ -286,7 +286,7 @@ class Controller:
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
         self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
-        self._memory_plugin_cli_sessions: set[str] = set()
+        self._memory_implementation_cli_sessions: set[str] = set()
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -512,13 +512,13 @@ class Controller:
         self.memory_adapter: MemoryCaptureAdapter = DisabledMemoryAdapter()
         self.memory_runtime = None
         self.memory_module = None
-        self._memory_plugin_error: MemoryPluginUnavailableError | MemoryPluginIncompatibleError | None = None
+        self._memory_implementation_error: MemoryImplementationUnavailableError | MemoryImplementationIncompatibleError | None = None
         if memory_config.enabled:
             try:
                 self.memory_runtime = self._create_memory_runtime(memory_config)
-            except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-                self._memory_plugin_error = exc
-                logger.warning("Memory plugin unavailable during startup: %s", exc)
+            except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+                self._memory_implementation_error = exc
+                logger.warning("Memory implementation unavailable during startup: %s", exc)
             else:
                 self.memory_module = self.memory_runtime.module
                 self.memory_adapter = self.memory_runtime.capture_adapter
@@ -800,10 +800,10 @@ class Controller:
                 memory_config,
                 **({"allow_disabled": True} if allow_disabled else {}),
             )
-        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
-            self._memory_plugin_error = exc
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            self._memory_implementation_error = exc
             raise
-        self._memory_plugin_error = None
+        self._memory_implementation_error = None
         return runtime
 
     async def _close_unpublished_memory_runtime(
@@ -890,7 +890,7 @@ class Controller:
                 accept_ownership()
             self.memory_runtime = runtime
             self.memory_module = runtime.module
-            self._memory_plugin_error = None
+            self._memory_implementation_error = None
             if capture_enabled:
                 self._start_memory_capture_adapter(runtime)
             self.memory_adapter = (
@@ -961,9 +961,9 @@ class Controller:
             if not self.config.memory.enabled:
                 raise MemoryStoreUnavailableError("Memory is disabled")
             runtime = getattr(self, "memory_runtime", None)
-            plugin_error = getattr(self, "_memory_plugin_error", None)
-            if runtime is None and plugin_error is not None:
-                raise plugin_error
+            implementation_error = getattr(self, "_memory_implementation_error", None)
+            if runtime is None and implementation_error is not None:
+                raise implementation_error
         if runtime is None:
             raise MemoryStoreUnavailableError("Memory runtime is unavailable")
         return runtime
@@ -1079,17 +1079,17 @@ class Controller:
 
         if not self.config.memory.enabled:
             return DisabledCaptureReceipt()
-        plugin_error = getattr(self, "_memory_plugin_error", None)
-        if plugin_error is not None:
-            raise plugin_error
+        implementation_error = getattr(self, "_memory_implementation_error", None)
+        if implementation_error is not None:
+            raise implementation_error
         _CaptureAccepted, _CaptureRequest, CaptureSkipped = (
             _load_memory_capture_types()
         )
         del _CaptureAccepted, _CaptureRequest
         async with self._memory_replacement_lock():
-            plugin_error = getattr(self, "_memory_plugin_error", None)
-            if plugin_error is not None:
-                raise plugin_error
+            implementation_error = getattr(self, "_memory_implementation_error", None)
+            if implementation_error is not None:
+                raise implementation_error
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
                 return CaptureSkipped(reason="memory_operation_in_progress")
@@ -3085,19 +3085,19 @@ class Controller:
         if not isinstance(facts_by_session, dict):
             facts_by_session = {}
             self._memory_cli_facts_by_session = facts_by_session
-        plugin_error = getattr(self, "_memory_plugin_error", None)
-        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
-        if plugin_error is not None:
+        implementation_error = getattr(self, "_memory_implementation_error", None)
+        implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
+        if implementation_error is not None:
             if admitted:
-                if not isinstance(plugin_sessions, set):
-                    plugin_sessions = set()
-                    self._memory_plugin_cli_sessions = plugin_sessions
-                plugin_sessions.add(caller.session_id)
+                if not isinstance(implementation_sessions, set):
+                    implementation_sessions = set()
+                    self._memory_implementation_cli_sessions = implementation_sessions
+                implementation_sessions.add(caller.session_id)
                 self._memory_scopes_by_session.pop(caller.session_id, None)
                 facts_by_session.pop(caller.session_id, None)
                 return True
-            if isinstance(plugin_sessions, set):
-                plugin_sessions.discard(caller.session_id)
+            if isinstance(implementation_sessions, set):
+                implementation_sessions.discard(caller.session_id)
             self._memory_scopes_by_session.pop(caller.session_id, None)
             facts_by_session.pop(caller.session_id, None)
             return False
@@ -3106,14 +3106,14 @@ class Controller:
         principal_id = admission.principal_for(facts) if admitted else None
         project_id = admission.project_for(facts) if admitted else None
         if principal_id is None or project_id is None:
-            if isinstance(plugin_sessions, set):
-                plugin_sessions.discard(caller.session_id)
+            if isinstance(implementation_sessions, set):
+                implementation_sessions.discard(caller.session_id)
             self._memory_scopes_by_session.pop(caller.session_id, None)
             facts_by_session.pop(caller.session_id, None)
             return False
-        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
-        if isinstance(plugin_sessions, set):
-            plugin_sessions.discard(caller.session_id)
+        implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
+        if isinstance(implementation_sessions, set):
+            implementation_sessions.discard(caller.session_id)
         self._memory_scopes_by_session[caller.session_id] = (principal_id, project_id)
         facts_by_session[caller.session_id] = facts
         return True
@@ -3124,13 +3124,13 @@ class Controller:
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return None
         session_key = str(session_id or "").strip()
-        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
+        implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
         if (
-            getattr(self, "_memory_plugin_error", None) is not None
-            and isinstance(plugin_sessions, set)
-            and session_key in plugin_sessions
+            getattr(self, "_memory_implementation_error", None) is not None
+            and isinstance(implementation_sessions, set)
+            and session_key in implementation_sessions
         ):
-            return ("__memory_plugin_error__", "default")
+            return ("__memory_implementation_error__", "default")
         from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
         from avibe_memory.store import is_principal_id, is_project_id
 
@@ -3171,9 +3171,9 @@ class Controller:
         facts = getattr(self, "_memory_cli_facts_by_session", None)
         if isinstance(facts, dict):
             facts.pop(session_id, None)
-        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
-        if isinstance(plugin_sessions, set):
-            plugin_sessions.discard(session_id)
+        implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
+        if isinstance(implementation_sessions, set):
+            implementation_sessions.discard(session_id)
 
     def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
         """Return the principal associated with an admitted Agent session."""

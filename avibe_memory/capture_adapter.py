@@ -95,7 +95,6 @@ class _QueuedTurn:
 class _CaptureOwnership:
     item: _QueuedTurn
     reservation: object
-    settled: asyncio.Event
     active: bool = True
 
     def release(self) -> None:
@@ -107,7 +106,6 @@ class _CaptureOwnership:
         except BaseException:
             pass
         self.item.release()
-        self.settled.set()
 
 
 class EnabledMemoryAdapter:
@@ -333,8 +331,7 @@ class EnabledMemoryAdapter:
         except BaseException:
             item.release()
             return
-        settled = asyncio.Event()
-        ownership = _CaptureOwnership(item, reservation, settled)
+        ownership = _CaptureOwnership(item, reservation)
         pending = self._run_capture(item, request, ownership)
         task: asyncio.Task[Any] | None = None
         try:
@@ -352,7 +349,6 @@ class EnabledMemoryAdapter:
                 await asyncio.gather(task, return_exceptions=True)
             ownership.release()
             return
-        await settled.wait()
 
     def _validate_attachment_generation(
         self,
