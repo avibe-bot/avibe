@@ -81,7 +81,7 @@ def _processing_record_list_query(
         raise ValueError("invalid Processing Record limit")
     project = values.get("project")
     if project is not None:
-        from core.memory.project_ids import parse_agent_search_project
+        from vibe.memory_project_ids import parse_agent_search_project
 
         project = parse_agent_search_project(project)
     return cursor, limit, project
@@ -104,7 +104,7 @@ def _processing_record_entry_query(
         raise ValueError("invalid Processing Record entry id")
     project = values.get("project")
     if project is not None:
-        from core.memory.project_ids import parse_agent_search_project
+        from vibe.memory_project_ids import parse_agent_search_project
 
         project = parse_agent_search_project(project)
     return memcell_id, project
@@ -146,7 +146,7 @@ def _memory_settings_projection(memory: object) -> dict:
 
 
 def _memory_im_attachment_capture_available(config: V2Config) -> bool:
-    from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
+    from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
     return bool(
         IM_ATTACHMENT_CAPTURE_PLATFORMS.intersection(config.enabled_platforms())
@@ -331,7 +331,7 @@ def _memory_preflight_projection(payload: dict) -> dict:
 
 
 def _memory_closed_error(payload: dict, *, fallback: str) -> str:
-    from core.memory.types import is_memory_error_code
+    from vibe.memory_contract import is_memory_error_code
 
     value = payload.get("error")
     return value if is_memory_error_code(value) else fallback
@@ -739,7 +739,7 @@ def register_memory_routes(app) -> None:
             query = payload.get("query")
             if not isinstance(query, str):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from core.memory.types import RecallPolicy
+            from vibe.memory_contract import RecallPolicy
 
             try:
                 policy = RecallPolicy.from_payload(payload.get("policy"))
@@ -795,8 +795,8 @@ def register_memory_routes(app) -> None:
             cursor = payload.get("cursor")
             limit = payload.get("limit", 20)
             origin = payload.get("origin")
-            from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
-            from core.memory.types import MAX_MEMORY_LIST_PAGE_SIZE
+            from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+            from vibe.memory_contract import MAX_MEMORY_LIST_PAGE_SIZE
 
             cursor_bytes: int | None = None
             if isinstance(cursor, str):

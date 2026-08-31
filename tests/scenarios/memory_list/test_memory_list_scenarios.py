@@ -8,11 +8,11 @@ from collections import deque
 from datetime import datetime, timezone
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
-from core.memory.everos import AddAck, FakeMemoryProvider
-from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
-from core.memory.runtime import MemoryRuntime
-from core.memory.store import MemoryStore
-from core.memory.types import CaptureAccepted, CaptureRequest, MemoryListItem, MemoryListPage
+from avibe_memory.everos import AddAck, FakeMemoryProvider
+from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+from avibe_memory.runtime import MemoryRuntime
+from avibe_memory.store import MemoryStore
+from avibe_memory.types import CaptureAccepted, CaptureRequest, MemoryListItem, MemoryListPage
 from vibe import cli, internal_client
 
 
@@ -103,7 +103,7 @@ def test_captured_processed_episodes_list_through_cli_with_exact_page_boundary(
     asyncio.run(_capture_and_process())
     runtime = object.__new__(MemoryRuntime)
     runtime._module = module
-    runtime._retired = False
+    runtime._closing = False
     monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "ses-memory-list-scenario")
 
     def list_sync(*, project, page, limit, caller_session_id):
@@ -193,7 +193,7 @@ def test_settings_can_browse_agent_episodes_without_crossing_owner_scopes(
         await module.wait_writer_idle_for_tests()
         runtime = object.__new__(MemoryRuntime)
         runtime._module = module
-        runtime._retired = False
+        runtime._closing = False
         return (
             await runtime.list_episodes_payload(
                 PRINCIPAL,

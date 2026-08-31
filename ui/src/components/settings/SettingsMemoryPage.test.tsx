@@ -159,6 +159,22 @@ afterEach(() => {
 });
 
 describe('SettingsMemoryPage', () => {
+  it('directs disabled Memory to the explicit package bootstrap when missing', async () => {
+    api.getMemorySettings.mockResolvedValue({ ...settings, enabled: false });
+    api.listDependencies.mockResolvedValue({
+      deps: [
+        { id: 'memory-package', installed: false, status: 'missing', action_class: 'repairable' },
+        { id: 'memory-runtime', installed: null, status: 'not_required', action_class: 'none' },
+      ],
+    });
+
+    renderPage();
+
+    await screen.findByText('repair-supported');
+    expect(screen.getByText('memory.setup.runtimeRequired')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /memory.settings.goToDependencies/ })).toBeTruthy();
+  });
+
   it('offers Retry startup for degraded Memory', async () => {
     api.getMemoryStatus.mockResolvedValue(status('degraded'));
     renderPage();

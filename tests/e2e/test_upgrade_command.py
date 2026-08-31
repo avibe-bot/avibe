@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,12 +36,27 @@ def _docker_available() -> bool:
     return result.returncode == 0
 
 
-def _build_test_wheel(fixtures_dir: Path, version: str) -> Path:
+def _build_test_wheel(
+    fixtures_dir: Path,
+    version: str,
+    *,
+    project: Path = REPO_ROOT,
+    distribution: str = "avibe_os",
+) -> Path:
     env = os.environ.copy()
     env["SETUPTOOLS_SCM_PRETEND_VERSION"] = version
 
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "--wheel-dir", str(fixtures_dir)],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            str(project),
+            "--no-deps",
+            "--wheel-dir",
+            str(fixtures_dir),
+        ],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -49,7 +65,7 @@ def _build_test_wheel(fixtures_dir: Path, version: str) -> Path:
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
-    wheel_path = fixtures_dir / f"avibe_os-{version}-py3-none-any.whl"
+    wheel_path = fixtures_dir / f"{distribution}-{version}-py3-none-any.whl"
     assert wheel_path.exists(), f"Expected built wheel at {wheel_path}"
     return wheel_path
 
@@ -70,7 +86,9 @@ def _released_initial_wheel(fixtures_dir: Path) -> Path:
 
 
 @pytest.mark.integration
-def test_upgrade_command_bridges_released_3_0_13_generation():
+def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
+    """The released bundled-Memory upgrader converges onto the split package pair."""
+
     if not _docker_available():
         pytest.skip("Docker is not available")
 
@@ -78,6 +96,31 @@ def test_upgrade_command_bridges_released_3_0_13_generation():
         fixtures_dir = Path(tmpdir)
         initial_wheel_path = _released_initial_wheel(fixtures_dir)
         wheel_path = _build_test_wheel(fixtures_dir, TEST_RELEASE_VERSION)
+        memory_wheel_path = _build_test_wheel(
+            fixtures_dir,
+            TEST_RELEASE_VERSION,
+            project=REPO_ROOT / "packaging" / "avibe-memory",
+            distribution="avibe_memory",
+        )
+        assert memory_wheel_path.exists()
+
+        memory_payload = {
+            "enabled": True,
+            "mode": "custom",
+            "processing": {
+                "llm": {
+                    "base_url": "https://llm.example.test/v1",
+                    "model": "chat",
+                    "api_key": "test-key",
+                },
+                "embedding": {
+                    "base_url": "https://embedding.example.test/v1",
+                    "model": "embedding",
+                    "api_key": "test-key",
+                },
+            },
+        }
+        enable_memory = "from vibe import api; api.save_memory_config(" + repr(memory_payload) + ")"
 
         metadata_path = fixtures_dir / "metadata.json"
         metadata_path.write_text(json.dumps({"info": {"version": TEST_RELEASE_VERSION}}), encoding="utf-8")
@@ -89,13 +132,18 @@ def test_upgrade_command_bridges_released_3_0_13_generation():
                 "apt-get install -y --no-install-recommends curl ca-certificates bash procps >/dev/null",
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",
                 'export PATH="$HOME/.local/bin:$PATH"',
+                'export AVIBE_HOME="$HOME/.avibe-upgrade-test"',
                 "VIBE_INSTALL_SKIP_NODE=1 VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 "
                 f"AVIBE_INSTALL_PACKAGE_SPEC=/fixtures/{initial_wheel_path.name} bash /work/install.sh",
                 'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"',
                 'initial_vibe="$(readlink -f "$HOME/.local/bin/vibe")"',
+                'initial_python="$(dirname "$initial_vibe")/python"',
                 'printf "%s\\n" "$initial_vibe" | grep "/uv/tools/"',
                 "vibe version",
-                'printf "preserved\\n" > "$HOME/.avibe/upgrade-state-marker"',
+                '"$initial_python" -c "from config.v2_config import V2Config; V2Config.default().save()"',
+                f'"$initial_python" -c {shlex.quote(enable_memory)}',
+                '"$initial_python" -c "from config.v2_config import V2Config; assert V2Config.load().memory.enabled"',
+                'printf "preserved\\n" > "$AVIBE_HOME/upgrade-state-marker"',
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json "
                 f"VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 AVIBE_UPGRADE_PACKAGE_SPEC=/fixtures/{wheel_path.name} vibe check-update",
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json "
@@ -104,11 +152,28 @@ def test_upgrade_command_bridges_released_3_0_13_generation():
                 'printf "launcher=%s\n" "$(command -v vibe)"',
                 "vibe version",
                 'test -x "$initial_vibe"',
-                'test "$(cat "$HOME/.avibe/upgrade-state-marker")" = "preserved"',
+                'test "$(cat "$AVIBE_HOME/upgrade-state-marker")" = "preserved"',
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json vibe check-update",
+                'upgraded_vibe="$(readlink -f "$(command -v vibe)")"',
+                'upgraded_python="$(dirname "$upgraded_vibe")/python"',
+                '"$upgraded_python" -c "import importlib.util; from config.v2_config import V2Config; '
+                "assert V2Config.load().memory.enabled; assert importlib.util.find_spec('avibe_memory') is None\"",
+                "export UV_FIND_LINKS=/fixtures",
+                "export PIP_FIND_LINKS=/fixtures",
                 "vibe",
-                "sleep 2",
-                "vibe status",
+                "for attempt in $(seq 1 120); do "
+                'current_vibe="$(readlink -f "$(command -v vibe)")"; '
+                'current_python="$(dirname "$current_vibe")/python"; '
+                f'if "$current_python" -c "from importlib.metadata import version; assert version(\'avibe-memory\') == \'{TEST_RELEASE_VERSION}\'" 2>/dev/null; '
+                "then break; fi; sleep 1; done",
+                '"$current_python" -c "from config.v2_config import V2Config; '
+                f"from importlib.metadata import version; assert V2Config.load().memory.enabled; assert version('avibe-os') == '{TEST_RELEASE_VERSION}'; "
+                f"assert version('avibe-memory') == '{TEST_RELEASE_VERSION}'\"",
+                "for attempt in $(seq 1 120); do "
+                'status_output="$(vibe status 2>/dev/null || true)"; '
+                "if printf '%s' \"$status_output\" | grep -q '\"running\": true'; then break; fi; sleep 1; done",
+                "printf '%s\\n' \"$status_output\"",
+                "printf '%s' \"$status_output\" | grep -q '\"running\": true'",
             ]
         )
 
@@ -125,7 +190,7 @@ def test_upgrade_command_bridges_released_3_0_13_generation():
                     "-v",
                     f"{fixtures_dir}:/fixtures",
                     "-w",
-                    "/work",
+                    "/tmp",
                     BASE_IMAGE,
                     "bash",
                     "-lc",

@@ -449,7 +449,7 @@ def test_memory_archive_session_round_trip_uses_only_session_identity(socket_pat
 
 
 def test_memory_recovery_reads_round_trip_signed_operator(monkeypatch, socket_path):
-    from core.memory import ui_access
+    from vibe import memory_ui_access as ui_access
 
     captured: list[httpx.Request] = []
     monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
@@ -588,7 +588,7 @@ def test_memory_list_sync_forwards_page_project_and_caller_session(socket_path):
 
 
 def test_memory_list_async_signs_ui_aggregate_cursor(monkeypatch, socket_path):
-    from core.memory import ui_access
+    from vibe import memory_ui_access as ui_access
 
     monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
     captured: dict[str, object] = {}
@@ -636,7 +636,7 @@ def test_memory_list_async_signs_ui_aggregate_cursor(monkeypatch, socket_path):
 
 
 def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_path):
-    from core.memory import ui_access
+    from vibe import memory_ui_access as ui_access
 
     captured: dict[str, str] = {}
     monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
@@ -680,7 +680,7 @@ def test_memory_destructive_clients_sign_owner_and_post_exact_loss_confirmation(
     operation,
     path,
 ):
-    from core.memory import ui_access
+    from vibe import memory_ui_access as ui_access
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
@@ -761,7 +761,7 @@ def test_memory_reconfigure_forwards_candidate_and_expected_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     socket_path,
 ) -> None:
-    from core.memory import ui_access
+    from vibe import memory_ui_access as ui_access
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
@@ -825,7 +825,7 @@ def test_memory_wake_maps_read_transport_errors_to_unavailable(
 
 
 def test_memory_processing_record_helpers_forward_query_and_sign_owner(monkeypatch, socket_path):
-    from core.memory import ui_access
+    from vibe import memory_ui_access as ui_access
 
     captured: list[httpx.Request] = []
     monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import core.memory.confined_filesystem as confined_filesystem_module
-from core.memory.provider_root import (
+import avibe_memory.confined_filesystem as confined_filesystem_module
+from avibe_memory.provider_root import (
     PROVIDER_ROOT_CONTROL_FILES,
     ROOT_SENTINEL_FILENAME,
     ProviderRoot,

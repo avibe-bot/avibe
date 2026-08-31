@@ -12,9 +12,9 @@ from urllib.parse import quote
 
 import pytest
 
-import core.memory.attachments as attachment_module
-import core.memory.confined_filesystem as confined_filesystem_module
-from core.memory.attachments import (
+import avibe_memory.attachments as attachment_module
+import avibe_memory.confined_filesystem as confined_filesystem_module
+from avibe_memory.attachments import (
     AttachmentBundleInvalidError,
     AttachmentCleanupUnprovenError,
     AttachmentPinError,
@@ -23,7 +23,7 @@ from core.memory.attachments import (
     PinnedBundle,
     workbench_capture_attachments,
 )
-from core.memory.types import CaptureAttachment
+from avibe_memory.types import CaptureAttachment
 
 
 @pytest.fixture

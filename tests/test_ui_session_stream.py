@@ -248,6 +248,10 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
         patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
     ):
         client = app.test_client()
@@ -267,7 +271,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert payload["author"] == "user"
     assert payload["author_id"] == "remote:user-a"
     assert "_web_push_user_key" not in payload["metadata"]
-    assert payload["metadata"]["_memory_cli_admitted"] is False
+    assert not any(key.startswith("_memory_") for key in payload["metadata"])
     assert payload["text"] == "no stream"
     assert payload["draft_advanced"] is True
     assert payload["draft"]["text"] == ""
@@ -277,8 +281,36 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     sent = dispatch_mock.await_args.args[0]
     assert sent["session_id"] == session_id
     assert sent["text"] == "no stream"
-    assert sent["memory_cli_admitted"] is False
-    assert sent["is_ordinary_text"] is True
+    assert sent["author_id"] == "remote:user-a"
+    assert sent["message_kind"] == "original"
+    assert "user_id" not in sent
+    assert "memory_cli_admitted" not in sent
+    assert "is_ordinary_text" not in sent
+
+
+def test_lan_workbench_message_has_no_memory_author(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = _accepted_dispatch(session_id)
+    with (
+        patch("vibe.internal_client.dispatch_async", dispatch),
+        patch("vibe.ui_server._web_push_user_key", return_value="local"),
+        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
+        patch("vibe.ui_server._load_remote_access_config", return_value=None),
+    ):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "LAN input"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    assert response.get_json()["author_id"] is None
+    sent = dispatch.await_args.args[0]
+    assert sent["author_id"] is None
+    assert "memory_cli_admitted" not in sent
 
 
 @pytest.mark.parametrize(
@@ -288,7 +320,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
         {"text": "forwarded text", "metadata": {"forwarded": True}},
     ],
 )
-def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
+def test_workbench_side_actions_have_fail_closed_core_message_kinds(
     isolated_state,
     tmp_path,
     payload,
@@ -306,14 +338,19 @@ def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
         )
 
     assert response.status_code == 201
-    assert dispatch.await_args.args[0]["is_ordinary_text"] is False
+    expected_kind = (
+        "quick_reply"
+        if "quick_reply_for" in payload.get("metadata", {})
+        else "forwarded"
+    )
+    assert dispatch.await_args.args[0]["message_kind"] == expected_kind
     assert response.get_json()["draft_advanced"] is (
         "quick_reply_for" not in payload.get("metadata", {})
     )
 
 
 
-def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
+def test_workbench_text_uses_authenticated_author_and_core_message_kind(
     isolated_state,
     tmp_path,
 ):
@@ -338,29 +375,11 @@ def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
     assert response_payload["text"] == "/memory status"
     payload = dispatch.await_args.args[0]
     assert payload["text"] == "/memory status"
-    assert payload["user_id"] == "local"
+    assert payload["author_id"] == "local"
     assert payload["message_id"] == response_payload["id"]
-    assert payload["memory_cli_admitted"] is True
-
-
-@pytest.mark.parametrize(
-    "session_payload,expected",
-    [
-        ({"sub": "user-a"}, "remote:user-a"),
-        ({}, None),
-        (None, None),
-    ],
-)
-def test_remote_workbench_memory_identity_requires_a_stable_subject(session_payload, expected):
-    from vibe.ui_server import app, _workbench_memory_user_id
-
-    with (
-        app.test_request_context("/chat/session", headers={"Cookie": "avibe_remote_session=session"}),
-        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
-        patch("vibe.ui_server._load_remote_access_config", return_value=object()),
-        patch("vibe.ui_server._resolved_remote_session_payload", return_value=session_payload),
-    ):
-        assert _workbench_memory_user_id() == expected
+    assert payload["message_kind"] == "original"
+    assert "memory_cli_admitted" not in payload
+    assert "user_id" not in payload
 
 
 def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
@@ -398,7 +417,8 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
 
     assert response.status_code == 201
     payload = dispatch.await_args.args[0]
-    assert payload["user_id"] == "local"
+    assert payload["author_id"] == "local"
+    assert payload["message_kind"] == "original"
     assert payload["message_id"] == response.get_json()["id"]
     assert len(payload["files"]) == 1
     assert payload["files"][0]["name"] == "diagram.png"
@@ -433,6 +453,7 @@ def test_route_reads_the_materialized_message_id_for_a_merged_batch(
                     text="older queued input",
                     metadata={"_web_push_user_key": "remote:user-a"},
                     author_id="remote:user-a",
+                    message_kind="original",
                 ),
                 dispatch_text="older queued input",
                 now="2026-01-01T00:00:00Z",
@@ -479,6 +500,10 @@ def test_route_reads_the_materialized_message_id_for_a_merged_batch(
     with (
         patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
     ):
         client = app.test_client()
         response = client.post(

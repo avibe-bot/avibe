@@ -13,19 +13,21 @@ import inspect
 import re
 from pathlib import Path
 
-from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
-from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
-from core.memory.everos import PROCESSING_PROBE_MAX_DEADLINE_SECONDS
-from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
-from core.memory.processing_record import (
+from avibe_memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
+from avibe_memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from avibe_memory.everos import PROCESSING_PROBE_MAX_DEADLINE_SECONDS
+from avibe_memory.processing_record import (
     PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS,
-    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
     PROCESSING_RECORD_WORK_TIMEOUT_SECONDS,
 )
-from core.memory.process import (
+from avibe_memory.process import (
     _PROCESSING_PROBE_TIMEOUT_SECONDS,
     _STARTUP_TIMEOUT_SECONDS,
     _STOP_TIMEOUT_SECONDS,
+)
+from vibe.memory_contract import (
+    MAX_AGENTIC_TIMEOUT_SECONDS,
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
 )
 ADD_TIMEOUT_SECONDS = 30.0
 from vibe.internal_client import (

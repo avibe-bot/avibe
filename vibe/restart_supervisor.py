@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import email.parser
-import json
 import logging
 import os
-import shlex
 import subprocess
 import time
-import urllib.error
-import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,64 +12,27 @@ from typing import NamedTuple
 
 from config import paths
 
-# Imported here, at the top, rather than where the rollback path uses it. This
-# process runs the version being rolled back FROM, and a pinned reinstall
-# replaces the source tree underneath it, so a first import taken after that
-# install reads the OTHER release's source into this process. Importing at module
-# load makes every later use a `sys.modules` hit that touches no file. The module
-# is pure stdlib, so paying for it on every restart costs nothing.
-from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
-from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
-    LEGACY_PACKAGE_NAME,
-    PACKAGE_NAME,
     RestartState,
-    RollbackTarget,
-    activate_launcher_target,
-    atomic_uv_install_root,
     atomic_upgrade_lock,
-    _launcher_generation,
-    get_cli_launcher_path,
-    _names_a_published_release,
-    build_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
-    installed_package_name,
 )
 
 
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
-# Long enough for a package index to be slow, short enough that a hung download
-# does not leave the machine sitting with no service forever. A rollback that
-# times out is recorded as failed, which is a diagnosable state; a rollback that
-# waits without a bound is not.
-_ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
-# A cold UI process has an interpreter to start and an ASGI app to import before
-# it answers, so the 5s default of `wait_for_ui_server` -- sized for a UI started
-# next to an already-warm CLI -- is not the right bound here. This one is only
-# ever paid in full when the UI is genuinely not coming.
-_ROLLBACK_UI_READY_TIMEOUT_SECONDS = 60.0
 
 
 class StartedRuntime(NamedTuple):
-    """What a start actually launched, and where its UI can be checked.
-
-    The health target travels with the pids because `_start_runtime_processes` is
-    the only place that resolves it -- it loads the config to decide the bind host
-    and port -- and a caller that recomputed it would become a second answer to
-    "where is the UI", free to drift from the one the UI was actually started on.
-    It is `None` when this job does not own the UI, which is also the answer to
-    whether this job is in a position to judge the UI at all.
-    """
+    """The process IDs launched by a restart."""
 
     service_pid: int
     ui_pid: int | None
-    ui_health_target: tuple[str, int] | None
 
 
 def _live_ui_pid(candidate: object) -> int | None:
@@ -89,202 +47,6 @@ def _live_ui_pid(candidate: object) -> int | None:
     if not isinstance(candidate, int) or candidate <= 0:
         return None
     return candidate if runtime.pid_alive(candidate) else None
-
-
-def _ui_is_serving(started: StartedRuntime) -> bool:
-    """Whether the UI this job started is answering its health endpoint."""
-
-    if not started.ui_pid or started.ui_health_target is None:
-        return False
-    if not runtime.pid_alive(started.ui_pid):
-        return False
-    host, port = started.ui_health_target
-    return runtime.wait_for_ui_server(host, port, timeout=_ROLLBACK_UI_READY_TIMEOUT_SECONDS)
-
-
-def _running_ui_version() -> str | None:
-    """Read the version that is still serving while an upgrade is being staged.
-
-    Releases before the rollback protocol cannot pass a target into the detached
-    supervisor. The old service is still alive when that supervisor starts, so
-    its own version endpoint is the last authoritative answer before the old
-    install is stopped and replaced.
-    """
-
-    from core.services import settings as settings_service
-
-    config = settings_service.load_config(default_factory=settings_service.default_config)
-    host = runtime.effective_ui_bind_host(config)
-    if host in {"0.0.0.0", ""}:
-        host = "127.0.0.1"
-    elif host in {"::", "::0"}:
-        host = "::1"
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    base_url = f"http://{host}:{config.ui.setup_port}"
-    for endpoint in ("/api/version/local", "/api/version"):
-        try:
-            with urllib.request.urlopen(f"{base_url}{endpoint}", timeout=2.0) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (OSError, ValueError, TypeError, urllib.error.URLError):
-            continue
-        version = payload.get("current") if isinstance(payload, dict) else None
-        if isinstance(version, str) and _names_a_published_release(version):
-            return version
-    return None
-
-
-def _launcher_from_python(python: str) -> runtime.ServiceLauncher | None:
-    """Pair an interpreter with the service entry point in its install."""
-
-    python_path = Path(python)
-    package_root = python_path.parent.parent / "lib"
-    main_candidates = sorted(package_root.glob("python*/site-packages/vibe/service_main.py"))
-    if not main_candidates:
-        package_root = python_path.parent.parent / "Lib" / "site-packages"
-        main_candidates = sorted(package_root.glob("vibe/service_main.py"))
-    if not main_candidates:
-        return None
-    return runtime.ServiceLauncher(python=python, main=str(main_candidates[0]))
-
-
-def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher | None:
-    """Read the old launcher from a still-running service or UI command line."""
-
-    if not pid:
-        return None
-    command = runtime.get_process_command(pid)
-    if not command:
-        return None
-    try:
-        argv = [arg.strip("\"'") for arg in shlex.split(command, posix=(os.name != "nt"))]
-        if Path(argv[0]).name.lower() == "systemd-run" and "--" in argv:
-            argv = argv[argv.index("--") + 1 :]
-        if not argv or not Path(argv[0]).name.lower().startswith("python"):
-            return None
-        entry = next(
-            (arg for arg in argv[1:] if not arg.startswith("-") and Path(arg).name in {"main.py", "service_main.py"}),
-            None,
-        )
-        if entry is not None:
-            return runtime.ServiceLauncher(python=argv[0], main=entry)
-        # The UI is launched with ``python -c`` rather than service_main.py.
-        # Its interpreter still identifies the install that owns the old code.
-        return _launcher_from_python(argv[0])
-    except (IndexError, ValueError):
-        return None
-
-
-def _legacy_service_launcher(
-    vibe_path: str | None, *, service_pid: int | None = None, ui_pid: int | None = None
-) -> runtime.ServiceLauncher:
-    """Recover the launcher that existed before the package-manager replace.
-
-    The service command is authoritative: the normal ``~/.local/bin/vibe``
-    symlink may already point at the replacement by the time this process starts.
-    """
-
-    for pid in (service_pid, ui_pid):
-        process_launcher = _service_launcher_from_process(pid)
-        if process_launcher is not None:
-            return process_launcher
-
-    fallback = runtime.current_service_launcher()
-    if not vibe_path:
-        return fallback
-
-    try:
-        script = Path(vibe_path).resolve()
-        shebang = script.read_text(encoding="utf-8", errors="replace").splitlines()[0]
-        python = shebang[2:].strip().split()[0] if shebang.startswith("#!") else ""
-        python_path = Path(python)
-        if not python or not python_path.is_file():
-            return fallback
-        return _launcher_from_python(str(python_path)) or fallback
-    except (OSError, IndexError, ValueError):
-        return fallback
-
-
-def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
-    """Read all supported distributions from the launcher's site-packages."""
-
-    site_packages = Path(launcher.main).resolve().parent.parent
-    entries: list[tuple[str, str]] = []
-    try:
-        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
-            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
-            name = str(payload.get("Name") or "").strip()
-            version = str(payload.get("Version") or "").strip()
-            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
-                entries.append((name, version))
-    except (OSError, UnicodeError, ValueError):
-        return []
-    return entries
-
-
-def _launcher_package_name(launcher: runtime.ServiceLauncher, *, version: str | None = None) -> str:
-    """Infer the distribution name that owns a launcher when metadata is stale."""
-
-    metadata = _launcher_dist_metadata(launcher)
-    if version:
-        exact = [name for name, candidate in metadata if candidate == version]
-        if exact:
-            return exact[0]
-
-    executable = launcher.python.replace("\\", "/")
-    for package in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
-        if f"/uv/tools/{package}/" in executable:
-            return package
-    names = {name for name, _version in metadata}
-    if PACKAGE_NAME in names:
-        return PACKAGE_NAME
-    if LEGACY_PACKAGE_NAME in names:
-        return LEGACY_PACKAGE_NAME
-    return installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
-
-
-def _legacy_install_metadata(
-    launcher: runtime.ServiceLauncher, *, package_name: str
-) -> tuple[str, str] | None:
-    """Read the old release metadata from the launcher-owned site-packages.
-
-    A renamed distribution can leave an older ``vibe-remote`` dist-info beside
-    the current ``avibe-os`` install. The launcher identifies which side was
-    running, so unrelated metadata must never win by directory order.
-    """
-
-    try:
-        from vibe import __version__ as replacement_version
-
-        for name, version in _launcher_dist_metadata(launcher):
-            if (
-                name == package_name
-                and version
-                and version != replacement_version
-                and _names_a_published_release(version)
-            ):
-                return version, name
-    except (OSError, UnicodeError, ValueError):
-        return None
-    return None
-
-
-def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> RollbackTarget | None:
-    """Build a rollback target for an upgrade initiated by an older release."""
-
-    if trigger != "upgrade":
-        return None
-    service_pid = _read_recorded_pid()
-    ui_pid = _read_recorded_ui_pid()
-    launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid, ui_pid=ui_pid)
-    version = _running_ui_version()
-    package = _launcher_package_name(launcher, version=version)
-    if version is None:
-        metadata = _legacy_install_metadata(launcher, package_name=package)
-        if metadata is None:
-            return None
-        version, package = metadata
-    return RollbackTarget(version=version, package=package, launcher=launcher)
 
 
 def _now_iso() -> str:
@@ -429,19 +191,10 @@ def _runtime_ready_for_config(config) -> bool:
 
 def _start_runtime_processes(
     start_ui: bool = True,
-    launcher: runtime.ServiceLauncher | None = None,
 ) -> StartedRuntime:
-    """Start the service, and the UI when this job owns it.
+    """Start the service, and the UI when this job owns it."""
 
-    `launcher` is the install to start them from, and `None` means this one --
-    which is the right answer for every restart except a rollback, where this
-    process is running the release being replaced and so is the one install that
-    must not be started. It is taken once here and handed to both spawns, because
-    the service and the UI are two halves of one generation: starting them from
-    different installs is a state neither release was ever tested in.
-    """
-
-    from core.memory.ui_access import generate_ui_read_secret, process_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret, process_ui_read_secret
     from core.services import settings as settings_service
 
     paths.ensure_data_dirs()
@@ -465,18 +218,14 @@ def _start_runtime_processes(
         wait_for_ready=False,
         initial_ready_timeout=0,
         memory_ui_secret=memory_ui_secret,
-        launcher=launcher,
     )
-    ui_health_target: tuple[str, int] | None = None
     if start_ui:
         bind_host = runtime.effective_ui_bind_host(config)
-        ui_health_target = (bind_host, config.ui.setup_port)
         ui_pid = runtime.start_ui(
             bind_host,
             config.ui.setup_port,
             wait_for_ready=False,
             memory_ui_secret=memory_ui_secret,
-            launcher=launcher,
         )
     else:
         ui_pid = preserved_ui_pid
@@ -492,7 +241,7 @@ def _start_runtime_processes(
         runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
         raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
-    return StartedRuntime(service_pid, ui_pid, ui_health_target)
+    return StartedRuntime(service_pid, ui_pid)
 
 
 def _stop_ui_for_restart() -> tuple[bool, dict[str, float | bool], float, int | None]:
@@ -523,282 +272,6 @@ def _stop_runtime_for_restart(stop_ui: bool = True) -> tuple[bool, dict[str, flo
     return ui_stopped, ui_timings, stop_ui_seconds, ui_pid, service_stopped, stop_service_seconds
 
 
-def _failed_generation_still_running(*, include_ui: bool) -> bool:
-    """Whether anything the failed generation left behind is still alive.
-
-    Measured -- from the lock, the pid file and the process table -- and never
-    read off whether the stop helpers reported killing something. That report
-    answers a different question and answers it backwards on the ordinary case: a
-    version that died in its migration leaves nothing to kill, so `stop_service`
-    says it stopped nothing, exactly as it does for a process that refused to
-    die. The restart path above already knew this and asks
-    `_remaining_service_pids_after_stop` rather than believe the report; asking
-    it here too is what keeps one fact from having two answers.
-    """
-
-    if _remaining_service_pids_after_stop():
-        return True
-    return bool(include_ui and runtime.ui_pid_file_points_to_running_ui())
-
-
-def _restore_database_for_rollback(backup_watermark: int | None, write) -> dict:
-    """Put back the database the version being rolled back from migrated, if it did.
-
-    Whether a migration happened is decided from a number this job read out of
-    the backup window itself before the new version was allowed to start. Any
-    rollback point recorded at or above it was written during that window, so it
-    was written by the version now being rolled back from -- measured by our own
-    code, before and after, with nothing in between that the failing version got
-    to report about itself.
-
-    Every cheaper test compares labels and every one of them is wrong on a real
-    case: the revision stamp and the schema both stay put when a migration
-    commits rows and then fails, and the wall clock reverses the order of two
-    attempts if it is corrected backwards between them. `storage.backups` refuses
-    to answer from those for the same reason.
-
-    No watermark means the job never reached the point of starting the new
-    version, so no migration of its doing can exist and there is nothing to put
-    back. That is a normal outcome, not a degraded one.
-    """
-
-    if backup_watermark is None:
-        return {"restored": False, "reason": "no_migration_window"}
-
-    backups_dir = paths.get_state_backups_dir()
-    rollback_point = find_restorable_backup(backups_dir, written_at_or_after=backup_watermark)
-    if rollback_point is None:
-        write(f"no rollback point was written at or after backup sequence {backup_watermark}; database left as it is")
-        return {"restored": False, "reason": "no_rollback_point"}
-
-    db_path = paths.get_sqlite_state_path()
-    write(f"restoring the database from {rollback_point}")
-    replaced = restore_sqlite_backup(rollback_point, db_path)
-    write(f"database restored; the one it replaced is at {replaced}" if replaced else "database restored")
-    return {
-        "restored": True,
-        "restored_from": str(rollback_point),
-        "replaced_database": str(replaced) if replaced else None,
-    }
-
-
-def _roll_back_failed_upgrade(
-    *,
-    rollback_to: RollbackTarget,
-    vibe_path: str | None,
-    start_ui: bool,
-    backup_watermark: int | None,
-    write,
-    record,
-) -> dict:
-    """Put the machine back on the version it was upgrading from.
-
-    Reached only when a restart has failed AND nothing holds the service lock.
-    That second half is the whole condition, and it is deliberately not a list of
-    the failure branches that ought to qualify: such a list is complete only
-    until the next branch is added, and the branch nobody remembered is exactly
-    the one that leaves an instance dark. "No service is running" is the property
-    the upgrade must not be able to produce, so it is what gets asked -- and it
-    answers correctly for free on the failures that changed nothing, like a stop
-    that did not stop, where the old service is still serving and rolling back
-    underneath it would be the damage.
-
-    Nothing of the failed generation is left running first. "No service is
-    running" is a statement about the lock, and a process can be alive without it
-    -- one that died before reaching it, or one still on its way there. Left
-    alone that process is not merely litter: `start_service` adopts a live
-    recorded pid instead of launching what was just reinstalled, so the rollback
-    would report success while the failed version is what is running, and the
-    restore would rewrite the database file under a process holding it open.
-
-    Install, then restore, then start. The install is the step that needs a
-    package index and so the step most likely to fail, and it is the only one
-    with no effect on the data: failing there leaves the database exactly as the
-    upgrade left it, and a rollback that changed nothing is a far better thing to
-    find than one that half-changed the schema. Restoring before starting is what
-    makes the started version able to read what it finds.
-
-    Each step is recorded before the next begins, because this process can be
-    killed mid-rollback and what it has already done to the database has to be
-    readable afterwards from the status record rather than inferred from the
-    disk.
-
-    Start comes from `rollback_to.launcher`, never from this process. This
-    process is the release the rollback is undoing: an upgrade spawns the restart
-    job through the `vibe` on PATH, which the install has already replaced, so by
-    the time this runs `sys.executable` names the failed generation. Reading it
-    here was how a rollback across the `vibe-remote` -> `avibe-os` rename
-    reinstalled the right release into the right directory, started the wrong one
-    out of the other directory, and recorded success.
-    """
-
-    version = rollback_to.version
-    restore_stable_launcher = bool(
-        vibe_path and _launcher_generation(Path(vibe_path).expanduser(), atomic_uv_install_root()) is not None
-    )
-    rollback: dict = {
-        "target_version": version,
-        "state": RestartState.RUNNING.value,
-        "started_at": _now_iso(),
-    }
-    record(rollback)
-    write(f"rolling back to {version}: no service is running after the failed restart")
-
-    # `start_ui` is also the answer to whether the UI is this job's to manage: a
-    # service-only restart left the running UI alone on purpose, and quiescing
-    # must not take it down when starting will not bring it back.
-    #
-    # The outcome is then measured rather than taken from what the stop helpers
-    # report, because a process that resists termination is the entire reason
-    # this step exists and "did the stop kill something" is not that question.
-    _stop_runtime_for_restart(stop_ui=start_ui)
-    quiesced = not _failed_generation_still_running(include_ui=start_ui)
-    rollback["quiesced"] = quiesced
-    record(rollback)
-    if not quiesced:
-        # Nothing further is safe. The restore rewrites a database file this
-        # process holds open, and the final start adopts its pid instead of
-        # launching what was reinstalled -- so a rollback that continued here
-        # would report success for the version it was rolling back from.
-        rollback.update(
-            state=RestartState.FAILED.value,
-            error=f"the failed generation is still running; not rolling back to {version}",
-        )
-        record(rollback)
-        write(f"cannot roll back to {version}: the failed generation did not stop")
-        return rollback
-
-    # A staged upgrade leaves the previous tool generation untouched. Reuse it
-    # directly during rollback; reinstalling the old wheel would reintroduce a
-    # long, mutable operation into the one path that exists to recover quickly.
-    rollback_cli_launcher = get_cli_launcher_path(rollback_to.launcher) if restore_stable_launcher else None
-    if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
-        rollback["install"] = {"method": "atomic", "ok": True, "reused": True}
-        record(rollback)
-        write(f"reusing the previous {version} generation")
-    else:
-        try:
-            plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
-        except Exception as exc:
-            rollback.update(
-                state=RestartState.FAILED.value,
-                error=f"cannot build a pinned install for {version}: {exc}",
-            )
-            record(rollback)
-            return rollback
-
-        rollback["install"] = {"method": plan.method, "ok": None}
-        record(rollback)
-        try:
-            result = subprocess.run(
-                plan.command,
-                capture_output=True,
-                text=True,
-                env=plan.env,
-                cwd=get_safe_cwd(),
-                timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
-            rollback.update(
-                state=RestartState.FAILED.value,
-                error=f"installing {version} failed: {exc}",
-            )
-            record(rollback)
-            return rollback
-        if result.returncode != 0:
-            # The installer's own stderr, trimmed: it is the only account of why the
-            # rollback could not proceed, and the full text can be megabytes of
-            # resolver output.
-            detail = (result.stderr or result.stdout or "").strip()[-2000:]
-            rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
-            rollback.update(
-                state=RestartState.FAILED.value,
-                error=f"installing {version} failed with exit code {result.returncode}",
-            )
-            record(rollback)
-            write(f"pinned install of {version} failed: {detail}")
-            return rollback
-        rollback["install"] = {"method": plan.method, "ok": True}
-        record(rollback)
-        write(f"installed {version} using {plan.method}")
-
-    if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
-        try:
-            with atomic_upgrade_lock():
-                activate_launcher_target(vibe_path, rollback_cli_launcher)
-        except Exception as exc:  # noqa: BLE001
-            rollback.update(
-                state=RestartState.FAILED.value,
-                error=f"restoring the active launcher failed: {exc}",
-            )
-            record(rollback)
-            return rollback
-        rollback["launcher"] = {"restored": True, "path": str(rollback_cli_launcher)}
-        record(rollback)
-
-    try:
-        rollback["database"] = _restore_database_for_rollback(backup_watermark, write)
-    except Exception as exc:
-        rollback["database"] = {"restored": False, "error": str(exc)}
-        rollback.update(
-            state=RestartState.FAILED.value,
-            error=f"restoring the database failed: {exc}",
-        )
-        record(rollback)
-        return rollback
-    record(rollback)
-
-    try:
-        started = _start_runtime_processes(start_ui=start_ui, launcher=rollback_to.launcher)
-    except Exception as exc:
-        rollback.update(
-            state=RestartState.FAILED.value,
-            error=f"starting {version} failed: {exc}",
-        )
-        record(rollback)
-        return rollback
-    ready_pid = runtime.wait_for_service_ready(started.service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
-    if ready_pid is None:
-        rollback.update(
-            state=RestartState.FAILED.value,
-            service_pid=started.service_pid,
-            error=f"{version} started but service pid {started.service_pid} did not finish starting",
-        )
-        record(rollback)
-        return rollback
-
-    # The UI is checked too, and only here. It is started with
-    # `wait_for_ready=False` so a slow asset load cannot stall the service's own
-    # readiness, but not waiting for it is not the same as not checking it: this
-    # rollback is unattended and is the last line of defence, so "the machine is
-    # back" has to mean every process this job took down came back. An ordinary
-    # `vibe restart` deliberately does not gate on this -- a human is watching it,
-    # and failing a restart on a slow UI would be a worse answer than reporting
-    # it (see the PR's known-by-design ledger).
-    ui_serving: bool | None = None
-    if start_ui:
-        ui_serving = _ui_is_serving(started)
-        rollback["ui"] = {"pid": started.ui_pid, "serving": ui_serving}
-    runtime.write_status("running", f"pid={ready_pid}", ready_pid, _live_ui_pid(started.ui_pid))
-    if ui_serving is False:
-        rollback.update(
-            state=RestartState.FAILED.value,
-            service_pid=ready_pid,
-            error=(
-                f"rolled back to {version} and the service is running as pid {ready_pid}, "
-                f"but the Web UI this rollback restarted never started serving"
-            ),
-        )
-        record(rollback)
-        write(f"rolled back to {version} but the Web UI did not come back; service pid={ready_pid}")
-        return rollback
-    rollback.update(state=RestartState.SUCCEEDED.value, service_pid=ready_pid, error=None)
-    record(rollback)
-    write(f"rolled back to {version}; service pid={ready_pid}")
-    return rollback
-
-
 def _wait_for_service_lock_release(timeout: float = _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -818,7 +291,6 @@ def _run_restart_job(
     trigger: str,
     scope: str = "all",
     prepare_show_runtime: bool = False,
-    rollback_to: RollbackTarget | None = None,
 ) -> int:
     # "service": restart only the service process, leaving the Web UI process
     # running (a config change shouldn't tear down the open Web UI). "all"
@@ -830,20 +302,6 @@ def _run_restart_job(
     log_path = _restart_log_path(job_id)
     safe_cwd = get_safe_cwd()
     _prune_restart_logs()
-
-    rollback_target_source = "explicit" if rollback_to else None
-    rollback_discovery_error: str | None = None
-    legacy_target_required = trigger == "upgrade" and get_build_identity().kind == "package"
-    if rollback_to is None and trigger == "upgrade":
-        try:
-            rollback_to = _discover_legacy_upgrade_target(trigger=trigger, vibe_path=vibe_path)
-            if rollback_to is not None:
-                rollback_target_source = "running_service"
-        except Exception as exc:
-            # Older releases do not know how to carry a target. Discovery is a
-            # compatibility aid; if it cannot identify one, the job fails closed
-            # before stopping the old runtime rather than creating a dark one.
-            rollback_discovery_error = str(exc)
 
     with log_path.open("a", encoding="utf-8") as log:
         def write(message: str) -> None:
@@ -862,56 +320,9 @@ def _run_restart_job(
         def mark_duration(name: str, started_at: float) -> float:
             return record_duration(name, _rounded_seconds(time.monotonic() - started_at))
 
-        # The backup sequence read just before the new version was allowed to
-        # start, which is what tells a rollback whether that version migrated the
-        # database. None until then, and None is the right answer for a failure
-        # that never got that far: nothing it could have migrated exists.
-        backup_watermark: int | None = None
-
-        def record_rollback(rollback: dict) -> None:
-            payload["rollback"] = dict(rollback)
-            _write_status(payload)
-
         def fail(error: str, return_code: int, *, started_at: float | None = None) -> int:
-            """End this job as failed, rolling back first when nothing is running.
+            """Record a terminal restart failure for operator-visible retry."""
 
-            Every failure in this job goes through here rather than each branch
-            deciding whether it is the kind that warrants a rollback. Which
-            branches those are is not knowable as a list -- the next branch added
-            would not be on it -- so the decision is made once, from the state the
-            upgrade must never be able to produce: no service holding the lock.
-            """
-
-            if rollback_to and not runtime.verified_service_running():
-                try:
-                    _roll_back_failed_upgrade(
-                        rollback_to=rollback_to,
-                        vibe_path=vibe_path,
-                        start_ui=restart_ui,
-                        backup_watermark=backup_watermark,
-                        write=write,
-                        record=record_rollback,
-                    )
-                except Exception as exc:
-                    # A rollback that raises must not swallow the failure that
-                    # caused it: the original error is what the operator needs,
-                    # and the rollback's own is recorded beside it.
-                    record_rollback(
-                        {
-                            "target_version": rollback_to.version,
-                            "state": RestartState.FAILED.value,
-                            "error": str(exc),
-                        }
-                    )
-                    write(f"rollback to {rollback_to.version} raised: {exc}")
-            elif rollback_to:
-                record_rollback(
-                    {
-                        "target_version": rollback_to.version,
-                        "state": RestartState.SKIPPED.value,
-                        "reason": "service_running",
-                    }
-                )
             return _fail(payload, error, log, return_code, started_at=started_at)
 
         old_pid = _read_recorded_pid()
@@ -925,25 +336,10 @@ def _run_restart_job(
             # seeds with the spawned subprocess pid (this process is that pid).
             "supervisor_pid": os.getpid(),
             "supervisor_started_at": runtime.process_create_time(os.getpid()),
-            "state": (
-                RestartState.SCHEDULED.value
-                if delay_seconds > 0
-                else RestartState.RUNNING.value
-            ),
+            "state": RestartState.SCHEDULED.value if delay_seconds > 0 else RestartState.RUNNING.value,
             "trigger": trigger,
             "delay_seconds": delay_seconds,
             "scope": scope,
-            # Recorded whether or not a rollback ends up happening, so a failed
-            # restart with no `rollback` record is readable: armed and killed
-            # before it could recover, versus never recoverable at all. All three
-            # fields of the target, because a record that named the version and
-            # the distribution but not the install would be silent about the one
-            # of the three that has actually been wrong in production.
-            "rollback_to": rollback_to.version if rollback_to else None,
-            "rollback_package": rollback_to.package if rollback_to else None,
-            "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
-            "rollback_target_source": rollback_target_source,
-            "rollback_discovery_error": rollback_discovery_error,
             "old_pid": old_pid,
             "new_pid": None,
             "log_path": str(log_path),
@@ -963,13 +359,6 @@ def _run_restart_job(
             _write_status(payload)
             write("restart job started after delay")
             restart_started_at = time.monotonic()
-
-        if legacy_target_required and rollback_to is None:
-            return fail(
-                "legacy upgrade rollback target unavailable; existing runtime was left running",
-                2,
-                started_at=restart_started_at,
-            )
 
         write("stopping UI and service" if restart_ui else "stopping service (Web UI kept running)")
         stop_runtime_started_at = time.monotonic()
@@ -999,15 +388,6 @@ def _run_restart_job(
             mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
             return fail("service lock did not release after stopping runtime", 2, started_at=restart_started_at)
         mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
-
-        if rollback_to:
-            # Read here and nowhere else: the service is stopped, its lock is
-            # released, and the new version has not run yet, so this is the last
-            # instant at which the window still holds only what earlier versions
-            # put there. Every backup numbered at or above it afterwards was
-            # written by the version about to start.
-            backup_watermark = next_backup_sequence(paths.get_state_backups_dir())
-            write(f"pre-start backup sequence is {backup_watermark}; rollback target is {rollback_to.version}")
 
         write("starting service")
         start_runtime_started_at = time.monotonic()
@@ -1115,16 +495,11 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
-    rollback_to: RollbackTarget | None = None,
     python_executable: str | None = None,
 ) -> dict:
-    """Serialize every restart seed with install activation and pruning."""
-
+    """Serialize restart seeding with staged install activation."""
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
-    # The lock lives under the runtime directory. Preserve the development
-    # guard's contract by checking it before lock acquisition can create that
-    # directory.
     guard_source_checkout_default_state_bootstrap()
     with atomic_upgrade_lock():
         return _schedule_restart_locked(
@@ -1134,7 +509,6 @@ def schedule_restart(
             scope=scope,
             prepare_show_runtime=prepare_show_runtime,
             memory_ui_secret=memory_ui_secret,
-            rollback_to=rollback_to,
             python_executable=python_executable,
         )
 
@@ -1147,34 +521,18 @@ def _schedule_restart_locked(
     scope: str,
     prepare_show_runtime: bool,
     memory_ui_secret: str | None,
-    rollback_to: RollbackTarget | None,
     python_executable: str | None,
 ) -> dict:
-    """Spawn the detached restart job.
+    """Spawn the detached restart job while the caller owns activation."""
+    from vibe.memory_ui_access import process_ui_read_secret
 
-    `rollback_to` is the install currently on the machine, and passing it is what
-    makes this restart recoverable: if the restart fails and leaves nothing
-    holding the service lock, the job reinstalls exactly that release, puts back
-    the database if the new one migrated it, and starts the service again. Only
-    an upgrade has an answer for it -- a plain restart is already running the
-    version it would roll back to, so there is nothing to reinstall and the
-    failure is the operator's to look at.
-
-    It arrives as one value from `rollback_target()` rather than as a version, a
-    distribution name and an install, because a caller that can pass one without
-    the others eventually does, and what it produces then is a pin naming a
-    release that was never published, or a reinstall of the right release
-    followed by a start of the wrong one. The argv below is the only place the
-    three are apart, and only because a command line has no other shape; `main()`
-    is the only place they are put back together.
-    """
-    from core.memory.ui_access import process_ui_read_secret
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     job_id = uuid.uuid4().hex[:12]
-    if python_executable:
-        invocation = [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
-    else:
-        invocation = get_restart_invocation_command(vibe_path=vibe_path)
+    invocation = (
+        [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
+        if python_executable
+        else get_restart_invocation_command(vibe_path=vibe_path)
+    )
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
         *(invocation or ["vibe"]),
         "__restart-supervisor",
@@ -1186,28 +544,8 @@ def _schedule_restart_locked(
         command.extend(["--vibe-path", vibe_path])
     if prepare_show_runtime:
         command.append("--prepare-show-runtime")
-    if rollback_to:
-        command.extend(
-            [
-                "--rollback-to",
-                rollback_to.version,
-                # Not optional the way the package name is. A missing package
-                # name still leaves `build_upgrade_plan` a defensible default,
-                # while a missing launcher leaves the job with only its own --
-                # which, in the case this exists for, is the release being
-                # undone.
-                "--rollback-python",
-                rollback_to.launcher.python,
-                "--rollback-main",
-                rollback_to.launcher.main,
-            ]
-        )
-        if rollback_to.package:
-            command.extend(["--rollback-package", rollback_to.package])
     env = get_restart_environment(vibe_path=vibe_path)
     if python_executable:
-        # A candidate supervisor must import the staged wheel, never a source
-        # checkout inherited from the parent process.
         env = dict(os.environ if env is None else env)
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
@@ -1273,7 +611,7 @@ def _schedule_restart_locked(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from core.memory.ui_access import initialize_process_ui_read_secret
+    from vibe.memory_ui_access import initialize_process_ui_read_secret
 
     initialize_process_ui_read_secret()
     parser = argparse.ArgumentParser()
@@ -1283,25 +621,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", default="all", choices=("all", "service"))
     parser.add_argument("--vibe-path")
     parser.add_argument("--prepare-show-runtime", action="store_true")
-    parser.add_argument("--rollback-to")
-    parser.add_argument("--rollback-package")
-    parser.add_argument("--rollback-python")
-    parser.add_argument("--rollback-main")
+    # A released scheduler can replace the package before launching this parser.
+    # Accept its retired rollback argv so the normal restart still runs, but do
+    # not carry any of these values into job state or behavior.
+    parser.add_argument("--rollback-to", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-package", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-memory-package", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-memory-version", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-python", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-main", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    # The one place a rollback target is apart, and so the one place it is put
-    # back together. Reassembling here rather than passing four values inward
-    # means nothing downstream can hold a version without the install it names --
-    # and an incomplete `--rollback-*` set is refused outright rather than
-    # quietly completed from this process, which is the failed release.
-    rollback_to = None
-    if args.rollback_to:
-        if not args.rollback_python or not args.rollback_main:
-            parser.error("--rollback-to requires --rollback-python and --rollback-main")
-        rollback_to = RollbackTarget(
-            version=args.rollback_to,
-            package=args.rollback_package,
-            launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
-        )
     return _run_restart_job(
         job_id=args.job_id,
         delay_seconds=max(0.0, args.delay_seconds),
@@ -1309,7 +638,6 @@ def main(argv: list[str] | None = None) -> int:
         trigger=args.trigger,
         scope=args.scope,
         prepare_show_runtime=args.prepare_show_runtime,
-        rollback_to=rollback_to,
     )
 
 

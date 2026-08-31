@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from core.controller import Controller
+from avibe_memory.capture_adapter import EnabledMemoryAdapter
+from core.handlers.message_handler import memory_turn_event
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
-from core.memory.everos import FakeMemoryProvider, ProviderCapture
-from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
-from core.memory.store import MemoryStore
-from core.memory.types import MemoryItem
+from avibe_memory.everos import FakeMemoryProvider, ProviderCapture
+from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+from avibe_memory.store import MemoryStore
+from avibe_memory.types import MemoryItem
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
-from modules.im.message_facts import is_ordinary_slack_attachment, is_ordinary_slack_text
+from modules.im.message_facts import is_original_human_slack_attachment, is_original_human_slack_text
 
 
 PRINCIPAL = "u-11111111111111111111111111111111"
@@ -53,24 +55,17 @@ class _SlackDownloader:
         return FileDownloadResult(True)
 
 
-class _UserStore:
+class _Bindings:
     def __init__(self, *, bound: bool) -> None:
         self.bound = bound
 
-    def maybe_reload(self) -> None:
+    def is_enabled_user(self, platform: str, user_id: str) -> bool:
+        return platform == "slack" and user_id == "U1" and self.bound
+
+
+class _LifecycleAdmission:
+    def release(self) -> None:
         return None
-
-    def get_user(self, _user_id: str, *, platform: str):
-        assert platform == "slack"
-        return SimpleNamespace(enabled=True) if self.bound else None
-
-
-class _SettingsManager:
-    def __init__(self, *, bound: bool) -> None:
-        self._store = _UserStore(bound=bound)
-
-    def get_store(self) -> _UserStore:
-        return self._store
 
 
 @dataclass
@@ -137,27 +132,26 @@ class MemoryIMAttachmentScenarioHarness:
             effective_home=self.home,
         )
         self.runtime = _Runtime(self.module, attachment_status=attachment_status)
-        self.controller = Controller.__new__(Controller)
-        multimodal = (
-            None
-            if attachment_status == "not_configured"
-            else SimpleNamespace(complete=lambda: True)
-        )
-        self.controller.config = SimpleNamespace(
-            memory=SimpleNamespace(
-                enabled=True,
-                processing=SimpleNamespace(multimodal=multimodal),
-            )
-        )
-        self.controller.platform_settings_managers = {
-            "slack": _SettingsManager(bound=bound)
-        }
-        self.controller.memory_runtime = self.runtime
-        self.controller.memory_module = self.module
-        self.controller.get_cwd = lambda _context: str(root / "project")
+        self.bound = bound
+        self.adapter = self._new_adapter()
         self.is_dm = is_dm
         self.downloader: _SlackDownloader | None = None
         self.last_context: MessageContext | None = None
+
+    def _new_adapter(self) -> EnabledMemoryAdapter:
+        return EnabledMemoryAdapter(
+            module=self.module,
+            principals=self.runtime,
+            is_enabled_user=_Bindings(bound=self.bound).is_enabled_user,
+            lifecycle_snapshot_matches=lambda _session_id, snapshot: snapshot == 1,
+            acquire_lifecycle_admission=lambda _session_id: _completed(
+                _LifecycleAdmission()
+            ),
+            attachment_capture_status=self.runtime.attachment_capture_status,
+            attachment_config_generation=(
+                self.runtime.attachment_capture_config_generation
+            ),
+        )
 
     async def capture(
         self,
@@ -203,8 +197,8 @@ class MemoryIMAttachmentScenarioHarness:
             message_id="native-1",
             platform_specific={"platform": "slack", "is_dm": self.is_dm},
             files=files,
-            is_ordinary_text=is_ordinary_slack_text(event, files),
-            is_ordinary_attachment=is_ordinary_slack_attachment(event, files),
+            is_original_human_text=is_original_human_slack_text(event, files),
+            is_original_human_attachment=is_original_human_slack_attachment(event, files),
         )
         self.last_context = context
         self.downloader = _SlackDownloader(
@@ -214,33 +208,31 @@ class MemoryIMAttachmentScenarioHarness:
             effective_home=self.home,
             attachments_root=self.home / "attachments",
         ).materialize(context, self.downloader)
-        memory_lease = None
         try:
-            reservation = self.controller.reserve_memory_attachment_capture(
-                context,
-                "stable-session",
-            )
-            config_generation = getattr(reservation, "config_generation", None)
-            if config_generation is not None:
-                memory_lease = batch.lease.retain()
-            await self.controller.capture_user_memory(
-                context,
-                text,
-                "stable-session",
-                attachment_lease=memory_lease,
-                attachment_reservation=reservation,
-                attachment_config_generation=config_generation,
+            self.adapter = self._new_adapter()
+            assert self.adapter.start(task_factory=asyncio.create_task)
+            self.adapter.offer(
+                memory_turn_event(
+                    context,
+                    text,
+                    "stable-session",
+                    1,
+                    batch.lease,
+                )
             )
             batch.lease.adopt()
         finally:
-            if memory_lease is not None:
-                memory_lease.release()
             batch.lease.release()
-        # Deterministic synchronization is test-only; product lifecycle offers
-        # remain non-blocking and never expose a delivery drain.
-        await self.module.wait_writer_idle_for_tests()
+        try:
+            await self.adapter.wait_idle_for_tests()
+        finally:
+            await self.adapter.cancel_memory_capture_tasks()
 
     @property
     def memory_bundle_entries(self) -> tuple[Path, ...]:
         bundles = self.home / "memory" / "attachments" / "bundles"
         return tuple(bundles.iterdir()) if bundles.exists() else ()
+
+
+async def _completed(value: object) -> object:
+    return value

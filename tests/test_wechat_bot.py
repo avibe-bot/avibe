@@ -443,7 +443,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         bot.on_message_callback.assert_awaited_once()
         args = bot.on_message_callback.await_args.args  # type: ignore[union-attr]
         self.assertEqual(args[0].user_id, "user-1")
-        self.assertTrue(args[0].is_ordinary_text)
+        self.assertTrue(args[0].is_original_human_text)
         self.assertEqual(args[1], "hi")
 
     async def test_process_inbound_message_marks_quoted_text_nonordinary(self):
@@ -469,7 +469,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tuple(bot._message_callback_tasks))
 
         context = bot.on_message_callback.await_args.args[0]  # type: ignore[union-attr]
-        self.assertFalse(context.is_ordinary_text)
+        self.assertFalse(context.is_original_human_text)
 
     async def test_direct_voice_and_video_publish_ordinary_attachment_fact(self):
         bot = self._make_bot()
@@ -499,7 +499,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tuple(bot._message_callback_tasks))
 
         context = bot.on_message_callback.await_args.args[0]  # type: ignore[union-attr]
-        self.assertIs(context.is_ordinary_attachment, True)
+        self.assertIs(context.is_original_human_attachment, True)
         self.assertEqual([file.mimetype for file in context.files or []], ["audio/silk", "video/mp4"])
 
     async def test_process_inbound_message_sends_pending_bind_menu_hint_once(self):

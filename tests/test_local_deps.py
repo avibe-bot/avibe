@@ -13,8 +13,11 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import urllib.error
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1219,7 +1222,7 @@ def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,
         "load",
-        classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=True))),
+        classmethod(lambda _cls: SimpleNamespace(memory_required=True)),
     )
     monkeypatch.setattr(
         api,
@@ -1251,25 +1254,53 @@ def test_dependencies_status_shape(monkeypatch):
             }
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-    import core.memory.artifact as memory_artifact
-
-    class _MemoryMgr:
-        def status(self):
-            return {
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (
+            {
+                "id": "memory-package",
+                "kind": "runtime",
+                "required": True,
+                "installed": True,
+                "provider_count": 1,
+                "version": "1.2.3",
+                "latest_version": "1.2.3",
+                "has_update": False,
+                "status": "ready",
+                "readiness": "ready",
+                "reason": None,
+                "action_class": "none",
+                "warnings": [],
+            },
+            {
+                "id": "memory-runtime",
+                "kind": "runtime",
+                "required": True,
                 "installed": False,
                 "version": None,
-                "selected_version": "1.2.3",
-                "matches_manifest": None,
+                "latest_version": "1.2.3",
+                "has_update": False,
                 "status": "missing",
-                "manifest": {"everos_version": "1.2.3", "release_state": "unavailable"},
                 "reason": "memory_runtime_unpublished",
-            }
-
-    monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: _MemoryMgr())
+                "action_class": "repairable",
+                "release_state": "unavailable",
+                "download_error": None,
+            },
+        ),
+    )
     out = api.dependencies_status()
     assert out["ok"]
     by = {d["id"]: d for d in out["deps"]}
-    assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
+    assert list(by) == [
+        "askill",
+        "avault",
+        "show-runtime",
+        "memory-package",
+        "memory-runtime",
+        "tmux",
+        "node",
+    ]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
@@ -1278,6 +1309,7 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
     assert by["show-runtime"]["latest_version"] == "1.4.0"
     assert by["show-runtime"]["has_update"] is False
+    assert by["memory-package"]["readiness"] == "ready"
     assert by["memory-runtime"] == {
         "id": "memory-runtime",
         "kind": "runtime",
@@ -1288,6 +1320,7 @@ def test_dependencies_status_shape(monkeypatch):
         "has_update": False,
         "status": "missing",
         "reason": "memory_runtime_unpublished",
+        "action_class": "repairable",
         "release_state": "unavailable",
         "download_error": None,
     }
@@ -1340,16 +1373,20 @@ def test_dependencies_status_projects_show_runtime_identity_without_pairing(monk
         classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=False))),
     )
 
-    import core.memory.artifact as memory_artifact
     import core.show_runtime as show_runtime
     import core.tmux_runtime as tmux_runtime
 
     manager = Mock()
     manager.status.return_value = runtime_status
-    memory_manager = Mock()
-    memory_manager.status.return_value = {"installed": False, "status": "missing", "manifest": None}
     monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
-    monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: memory_manager)
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (
+            {"id": "memory-package", "status": "not_required"},
+            {"id": "memory-runtime", "status": "not_required"},
+        ),
+    )
     monkeypatch.setattr(tmux_runtime, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
 
     entry = next(item for item in api.dependencies_status()["deps"] if item["id"] == "show-runtime")
@@ -1370,6 +1407,529 @@ def test_dependencies_status_projects_show_runtime_identity_without_pairing(monk
 )
 def test_memory_runtime_dependency_status_maps_closed_failures(runtime, expected) -> None:
     assert api._memory_runtime_dependency_status(runtime) == expected
+
+
+@pytest.mark.parametrize(
+    ("metadata", "status", "reason", "action_class"),
+    (
+        (api._MemoryPackageMetadata(0, None), "missing", "memory_package_missing", "repairable"),
+        (
+            api._MemoryPackageMetadata(2, None),
+            "error",
+            "memory_package_metadata_ambiguous",
+            "operator_only",
+        ),
+        (
+            api._MemoryPackageMetadata(None, None),
+            "error",
+            "memory_package_metadata_unreadable",
+            "operator_only",
+        ),
+        (
+            api._MemoryPackageMetadata(1, None),
+            "error",
+            "memory_package_metadata_unreadable",
+            "operator_only",
+        ),
+        (
+            api._MemoryPackageMetadata(1, "3.0.15"),
+            "error",
+            "memory_package_version_mismatch",
+            "repairable",
+        ),
+    ),
+)
+def test_required_memory_package_metadata_precedes_optional_imports(
+    monkeypatch,
+    metadata,
+    status,
+    reason,
+    action_class,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: metadata)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    probe = Mock(side_effect=AssertionError("metadata failure imported Memory runtime"))
+    artifact = Mock(side_effect=AssertionError("metadata failure imported Memory artifact"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", probe)
+    monkeypatch.setattr(api, "_memory_artifact_status", artifact)
+
+    package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert package["status"] == status
+    assert package["reason"] == reason
+    assert package["action_class"] == action_class
+    assert runtime["reason"] == reason
+    probe.assert_not_called()
+    artifact.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    (
+        "requirement",
+        "metadata",
+        "build_kind",
+        "current_version",
+        "probe_failure",
+        "artifact_imported",
+        "expected",
+    ),
+    (
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(1, "3.0.13"),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_version_mismatch", "repairable"),
+            id="not-required-exposes-version-bootstrap",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(0, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("missing", "not_required", "memory_package_missing", "repairable"),
+            id="not-required-exposes-missing-bootstrap",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            True,
+            True,
+            ("not_required", "not_required", None, "repairable"),
+            id="not-required-exact-package-keeps-explicit-repair",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(None, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_metadata_unreadable", "operator_only"),
+            id="not-required-unreadable-metadata-stays-operator-only",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(2, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_metadata_ambiguous", "operator_only"),
+            id="not-required-ambiguous-metadata-stays-operator-only",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(0, None),
+            "source",
+            "3.0.14",
+            False,
+            True,
+            ("not_required", "not_required", None, "none"),
+            id="not-required-source-stays-operator-owned",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("ready", "ready", None, "none"),
+            id="required-ready",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(0, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("missing", "not_ready", "memory_package_missing", "repairable"),
+            id="required-missing",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.13"),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_version_mismatch", "repairable"),
+            id="required-version-mismatch",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            True,
+            True,
+            ("error", "not_ready", "memory_package_runtime_unavailable", "repairable"),
+            id="required-runtime-probe-broken",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            False,
+            False,
+            ("error", "not_ready", "memory_package_artifact_unavailable", "repairable"),
+            id="required-artifact-import-broken",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(None, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_metadata_unreadable", "operator_only"),
+            id="operator-only-unreadable-metadata",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(2, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_metadata_ambiguous", "operator_only"),
+            id="operator-only-duplicate-provider",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "source",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_source_build", "operator_only"),
+            id="operator-only-source-deployment",
+        ),
+    ),
+)
+def test_memory_package_state_action_matrix(
+    monkeypatch,
+    requirement,
+    metadata,
+    build_kind,
+    current_version,
+    probe_failure,
+    artifact_imported,
+    expected,
+) -> None:
+    monkeypatch.setattr(api, "_load_memory_requirement", lambda: requirement)
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: metadata)
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind=build_kind))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    monkeypatch.setattr(
+        api,
+        "probe_memory_runtime_entrypoint",
+        Mock(side_effect=ImportError("broken entrypoint") if probe_failure else None),
+    )
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (
+            artifact_imported,
+            {"installed": True, "status": "ready", "matches_manifest": True},
+        ),
+    )
+
+    package, _runtime = api._memory_dependencies_status(offline=True)
+
+    assert (
+        package["status"],
+        package["readiness"],
+        package["reason"],
+        package["action_class"],
+    ) == expected
+
+
+def test_required_memory_package_probe_and_artifact_order_keeps_package_ready(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(
+        api,
+        "probe_memory_runtime_entrypoint",
+        lambda: events.append("runtime-probe"),
+    )
+
+    def artifact_status(*, offline: bool) -> tuple[bool, dict]:
+        assert offline is True
+        events.append("artifact-import-and-status")
+        return True, {
+            "installed": False,
+            "status": "error",
+            "reason": "memory_runtime_install_failed",
+        }
+
+    monkeypatch.setattr(api, "_memory_artifact_status", artifact_status)
+
+    package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert events == ["runtime-probe", "artifact-import-and-status"]
+    assert package["readiness"] == "ready"
+    assert package["reason"] is None
+    assert runtime["status"] == "error"
+    assert runtime["reason"] == "memory_runtime_install_failed"
+
+
+def test_memory_package_restart_failure_remains_explicitly_repairable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: True)
+    probe = Mock(side_effect=AssertionError("restart retry must not re-import the companion"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", probe)
+
+    package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert (package["status"], package["reason"], package["action_class"]) == (
+        "error",
+        "memory_package_restart_failed",
+        "repairable",
+    )
+    assert runtime["reason"] == "memory_package_restart_failed"
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("build_kind", "current_version"),
+    (("source", "3.0.14"), ("package", "3.0.14")),
+)
+def test_mismatched_memory_runtime_keeps_repair_action_across_build_paths(
+    monkeypatch,
+    build_kind,
+    current_version,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind=build_kind))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (
+            True,
+            {
+                "installed": True,
+                "status": "ready",
+                "matches_manifest": False,
+            },
+        ),
+    )
+
+    _package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert runtime["has_update"] is True
+    assert runtime["action_class"] == "repairable"
+
+
+def test_required_memory_package_accepts_pep440_equivalent_versions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14.0"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (True, {"installed": True, "status": "ready"}),
+    )
+
+    package, _runtime = api._memory_dependencies_status(offline=True)
+
+    assert package["readiness"] == "ready"
+    assert package["has_update"] is False
+
+
+def test_memory_package_metadata_enumerates_canonical_provider_set(
+    monkeypatch,
+) -> None:
+    import importlib.metadata
+
+    calls: list[str] = []
+    providers = (SimpleNamespace(version="3.0.14"), SimpleNamespace(version="3.0.14"))
+
+    def distributions(*, name: str):
+        calls.append(name)
+        return providers
+
+    monkeypatch.setattr(importlib.metadata, "distributions", distributions)
+
+    assert api._inspect_memory_package_metadata() == api._MemoryPackageMetadata(2, None)
+    assert calls == ["avibe-memory"]
+
+
+def test_missing_first_run_config_is_readable_not_required(monkeypatch) -> None:
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: (_ for _ in ()).throw(FileNotFoundError())),
+    )
+
+    requirement = api._load_memory_requirement()
+
+    assert requirement == api._MemoryRequirementProjection(False, "not_required")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("disabled", "safe-degraded-memory", "whole-config-failure"),
+)
+def test_memory_indep_021_status_import_fence(tmp_path, case) -> None:
+    script = r'''
+import importlib.abc
+import json
+import sys
+from types import SimpleNamespace
+
+from config import paths
+from config.v2_config import V2Config
+
+case = sys.argv[1]
+config_path = paths.get_config_path()
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config = V2Config.default()
+config.save(config_path)
+if case == "safe-degraded-memory":
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["memory"]["recovery_intent"] = "invalid"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+elif case == "whole-config-failure":
+    config_path.write_text("{", encoding="utf-8")
+
+assert not any(
+    name == "avibe_memory" or name.startswith("avibe_memory.")
+    for name in sys.modules
+)
+
+class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "avibe_memory" or fullname.startswith("avibe_memory."):
+            raise AssertionError(f"optional implementation import: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockMemoryImplementation())
+from vibe import api
+
+metadata_calls = []
+
+def inspect_metadata():
+    metadata_calls.append(True)
+    return api._MemoryPackageMetadata(0, None)
+
+api._inspect_memory_package_metadata = inspect_metadata
+api._published_running_version = lambda: "3.0.14"
+api.get_build_identity = lambda: SimpleNamespace(kind="package")
+package, runtime = api._memory_dependencies_status(offline=True)
+if case == "whole-config-failure":
+    assert package["readiness"] == "memory_requirement_unreadable"
+    assert package["reason"] == "memory_requirement_unreadable"
+    assert package["action_class"] == "operator_only"
+    assert metadata_calls == []
+else:
+    assert package["readiness"] == "not_required"
+    assert package["status"] == "missing"
+    assert package["reason"] == "memory_package_missing"
+    assert package["action_class"] == "repairable"
+    assert runtime["status"] == "not_required"
+    assert metadata_calls == [True]
+    if case == "safe-degraded-memory":
+        assert package["warnings"]
+
+from vibe.upgrade import MemoryRequirementUnreadableError, configured_memory_enabled
+
+if case == "whole-config-failure":
+    try:
+        configured_memory_enabled()
+    except MemoryRequirementUnreadableError:
+        pass
+    else:
+        raise AssertionError("whole-config failure admitted package mutation")
+else:
+    assert configured_memory_enabled() is False
+
+assert not any(
+    name == "avibe_memory" or name.startswith("avibe_memory.")
+    for name in sys.modules
+)
+'''
+    env = {
+        **os.environ,
+        "AVIBE_HOME": str(tmp_path / case),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script, case],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_memory_runtime_dependency_job_uses_controller_lifecycle(monkeypatch):
@@ -1440,6 +2000,13 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
     askill_calls = []
     avault_calls = []
+    memory_calls = []
+
+    def reconcile_memory_package():
+        memory_calls.append("reconcile")
+        return {"ok": True, "skipped": True, "reason": "memory_not_required"}
+
+    monkeypatch.setattr(api, "reconcile_memory_package_on_startup", reconcile_memory_package)
 
     def fake_ensure(force=False):
         askill_calls.append(force)
@@ -1486,6 +2053,8 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     out = api.reconcile_startup_dependencies()
 
     assert out["ok"] is True
+    assert memory_calls == ["reconcile"]
+    assert out["memory_package"]["reason"] == "memory_not_required"
     assert askill_calls == [False]
     assert avault_calls == [False]
     assert manager.prepared == [(False, True)]
@@ -1495,6 +2064,174 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     assert out["show_runtime"]["policy"]["state"] == "allowed"
     assert out["show_runtime"]["install"]["state"] == "installed"
     assert out["show_runtime"]["runtime"]["state"] == "unchecked"
+
+
+def test_memory_indep_026_startup_repairs_required_missing_companion_once(monkeypatch):
+    """MEMORY-INDEP-026: a split-first startup converges through exact repair."""
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda *, offline: (
+            {
+                "required": True,
+                "readiness": "not_ready",
+                "reason": "memory_package_missing",
+                "action_class": "repairable",
+            },
+            {},
+        ),
+    )
+
+    def repair(*, automatic: bool = False) -> dict:
+        assert automatic is True
+        calls.append(True)
+        return {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+            "restart": {"job_id": "restart"},
+        }
+
+    monkeypatch.setattr(api, "_prepare_memory_package_job", repair)
+
+    result = api.reconcile_memory_package_on_startup()
+
+    assert calls == [True]
+    assert result == {
+        "ok": True,
+        "message": "memory_package_ready",
+        "reason": None,
+        "restarting": True,
+        "restart": {"job_id": "restart"},
+    }
+
+
+def test_startup_memory_repair_continues_other_dependencies_before_service_restart(
+    monkeypatch,
+):
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda **_kwargs: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda **_kwargs: events.append("avault") or {"ok": True},
+    )
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
+            }
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == ["askill", "avault"]
+    assert result["memory_package"]["restarting"] is True
+    assert result["show_runtime"]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "package",
+    (
+        {
+            "required": False,
+            "readiness": "not_required",
+            "reason": None,
+            "action_class": "none",
+        },
+        {
+            "required": True,
+            "readiness": "ready",
+            "reason": None,
+            "action_class": "none",
+        },
+        {
+            "required": True,
+            "readiness": "not_ready",
+            "reason": "memory_package_source_build",
+            "action_class": "operator_only",
+        },
+    ),
+    ids=("disabled", "ready", "source"),
+)
+def test_startup_memory_package_reconcile_skips_nonrepairable_states(monkeypatch, package):
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda *, offline: (package, {}),
+    )
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda: pytest.fail("a non-repairable package state must not install"),
+    )
+
+    result = api.reconcile_memory_package_on_startup()
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+
+
+def test_startup_memory_repair_failure_keeps_other_dependency_reconcile_running(monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "reason": "memory_package_install_failed",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda *, force: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda *, force: events.append("avault") or {"ok": True},
+    )
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {"node_available": False, "node_supported": None, "node_version": None}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == ["askill", "avault"]
+    assert result["ok"] is False
+    assert result["memory_package"]["reason"] == "memory_package_install_failed"
 
 
 def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
@@ -1589,6 +2326,392 @@ def test_startup_show_page_prewarm_limit_env(monkeypatch):
 
     monkeypatch.setenv("VIBE_STARTUP_SHOW_PAGE_PREWARM_LIMIT", "99")
     assert api.startup_show_page_prewarm_limit() == 10
+
+
+@pytest.mark.parametrize(
+    ("package", "expected_reason"),
+    (
+        pytest.param(
+            {
+                "required": False,
+                "provider_count": 0,
+                "version": None,
+                "reason": None,
+                "action_class": "none",
+            },
+            "memory_not_required",
+            id="not-required",
+        ),
+        pytest.param(
+            {
+                "required": True,
+                "provider_count": None,
+                "version": None,
+                "reason": "memory_package_metadata_unreadable",
+                "action_class": "operator_only",
+            },
+            "memory_package_metadata_unreadable",
+            id="operator-only-metadata",
+        ),
+        pytest.param(
+            {
+                "required": True,
+                "provider_count": 1,
+                "version": "3.0.14",
+                "reason": "memory_package_source_build",
+                "action_class": "operator_only",
+            },
+            "memory_package_source_build",
+            id="source-deployment",
+        ),
+        pytest.param(
+            {
+                "required": True,
+                "provider_count": 1,
+                "version": "3.0.14",
+                "reason": None,
+                "action_class": "none",
+            },
+            "memory_package_not_repairable",
+            id="already-ready",
+        ),
+    ),
+)
+def test_memory_package_server_admission_rejects_nonrepairable_rows(
+    monkeypatch,
+    package,
+    expected_reason,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (package, {"id": "memory-runtime"}),
+    )
+
+    result = api.start_dependency_install_job("memory-package")
+
+    assert result == {
+        "ok": False,
+        "status": "rejected",
+        "message": expected_reason,
+        "output": None,
+        "reason": expected_reason,
+        "action_class": "operator_only",
+    }
+
+
+def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) -> None:
+    plan = SimpleNamespace(
+        command=["repair"],
+        activation=None,
+        method="pip",
+        preflight_error=None,
+    )
+    calls: dict[str, object] = {}
+    lock_events: list[str] = []
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    record_result = Mock()
+    monkeypatch.setattr(api, "_record_memory_package_repair_result", record_result)
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+
+    class _Lock:
+        def __enter__(self):
+            lock_events.append("entered")
+
+        def __exit__(self, *_args):
+            lock_events.append("exited")
+
+    monkeypatch.setattr(api, "atomic_upgrade_lock", _Lock)
+
+    def build_plan(**kwargs):
+        lock_events.append("build")
+        calls["plan"] = kwargs
+        return plan
+
+    def execute_plan(actual, **kwargs):
+        lock_events.append("execute")
+        calls["execute"] = (actual, kwargs)
+        return subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr="")
+
+    monkeypatch.setattr(api, "build_upgrade_plan", build_plan)
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
+    def schedule_restart(**kwargs):
+        lock_events.append("restart")
+        calls["restart"] = kwargs
+        return {"job_id": "restart"}
+
+    monkeypatch.setattr(api, "schedule_restart", schedule_restart)
+
+    result = api._prepare_memory_package_job()
+
+    assert result["ok"] is True
+    assert result["message"] == "memory_package_ready"
+    assert calls["plan"] == {
+        "version": "3.0.14",
+        "package_name": api.PACKAGE_NAME,
+        "memory_package": True,
+        "memory_version": "3.0.14",
+        "vibe_path": "/bin/vibe",
+    }
+    assert calls["execute"] == (
+        plan,
+        {
+            "run": subprocess.run,
+            "capture_output": True,
+            "text": True,
+            "timeout": api.UPGRADE_INSTALL_TIMEOUT_SECONDS,
+            "cwd": "/safe",
+        },
+    )
+    assert calls["restart"] == {
+        "delay_seconds": 2.0,
+        "vibe_path": "/bin/vibe",
+        "trigger": "memory-package-repair",
+        "scope": "service",
+    }
+    assert result["restarting"] is True
+    assert result["restart"] == {"job_id": "restart"}
+    assert lock_events == ["entered", "build", "execute", "restart", "exited"]
+    record_result.assert_called_once_with(
+        "3.0.14",
+        result="restart_scheduled",
+        reason=None,
+    )
+
+
+def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_scheduled(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    build_plan = Mock(
+        return_value=SimpleNamespace(
+            activation=None,
+            method="pip",
+            preflight_error=None,
+        )
+    )
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        build_plan,
+    )
+    execute_plan = Mock(
+        return_value=subprocess.CompletedProcess(
+            ["repair"], 0, stdout="installed", stderr=""
+        )
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        execute_plan,
+    )
+    schedule = Mock(side_effect=RuntimeError("restart unavailable"))
+    monkeypatch.setattr(api, "schedule_restart", schedule)
+
+    result = api._prepare_memory_package_job()
+
+    assert result == {
+        "ok": False,
+        "message": "memory_package_restart_failed",
+        "output": "installed",
+        "reason": "memory_package_restart_failed",
+        "restarting": False,
+    }
+    assert api._memory_package_restart_retry_required("3.0.14") is True
+
+    schedule.side_effect = None
+    schedule.return_value = {"job_id": "restart"}
+    retry = api._prepare_memory_package_job()
+
+    assert retry["ok"] is True
+    assert retry["restarting"] is True
+    assert build_plan.call_count == 1
+    assert execute_plan.call_count == 1
+    assert schedule.call_count == 2
+    assert api._memory_package_restart_retry_required("3.0.14") is False
+
+
+def test_memory_indep_026_auto_repair_persists_a_per_version_attempt_budget(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """MEMORY-INDEP-026: restart loops stop after the persisted attempt budget."""
+
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    installs: list[int] = []
+    restarts: list[int] = []
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **_kwargs: SimpleNamespace(
+            activation=None,
+            method="pip",
+            preflight_error=None,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: installs.append(1)
+        or subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr=""),
+    )
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **_kwargs: restarts.append(1) or {"job_id": f"restart-{len(restarts)}"},
+    )
+
+    results = [api._prepare_memory_package_job(automatic=True) for _ in range(4)]
+
+    assert len(installs) == len(restarts) == api._MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS
+    assert all(result.get("restarting") for result in results[:3])
+    assert results[3]["skipped"] is True
+    assert results[3]["reason"] == "memory_package_auto_repair_exhausted"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["core_version"] == "3.0.14"
+    assert state["attempts"] == 3
+    assert state["result"] == "restart_scheduled"
+
+
+def test_memory_auto_repair_budget_resets_only_for_a_new_core_version(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+
+    first = api._reserve_memory_package_auto_repair_attempt("3.0.14")
+    api._finish_memory_package_auto_repair_attempt(
+        "3.0.14",
+        first["token"],
+        result="failed",
+        reason="memory_package_install_failed",
+    )
+    second = api._reserve_memory_package_auto_repair_attempt("3.0.15")
+
+    assert first["attempts"] == 1
+    assert second["attempts"] == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["core_version"] == "3.0.15"
+    assert state["result"] == "running"
+
+
+def test_memory_package_reachability_disabled_enable_bootstrap_ready(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import time as _t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.V2Config.default().save()
+    metadata = {"value": api._MemoryPackageMetadata(0, None)}
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: metadata["value"])
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (True, {"installed": True, "status": "ready", "matches_manifest": True}),
+    )
+
+    disabled, _runtime = api._memory_dependencies_status(offline=True)
+    assert (disabled["required"], disabled["status"], disabled["action_class"]) == (
+        False,
+        "missing",
+        "repairable",
+    )
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda **_kwargs: pytest.fail("disabled startup must not auto-install"),
+    )
+    assert api.reconcile_memory_package_on_startup()["skipped"] is True
+
+    def bootstrap() -> dict:
+        metadata["value"] = api._MemoryPackageMetadata(1, "3.0.14")
+        return {"ok": True, "message": "memory_package_ready", "output": None}
+
+    monkeypatch.setattr(api, "_prepare_memory_package_job", bootstrap)
+    with api._AGENT_INSTALL_JOB_LOCK:
+        api._AGENT_INSTALL_JOBS.clear()
+        api._AGENT_INSTALL_LATEST_BY_BACKEND.clear()
+    started = api.start_dependency_install_job("memory-package")
+    result = started
+    for _ in range(100):
+        result = api.get_agent_install_job(started["job_id"], backend="memory-package")
+        if result.get("status") != "running":
+            break
+        _t.sleep(0.01)
+    assert result["status"] == "succeeded"
+
+    optional_ready, _runtime = api._memory_dependencies_status(offline=True)
+    assert (optional_ready["readiness"], optional_ready["action_class"]) == (
+        "not_required",
+        "repairable",
+    )
+    assert api._memory_package_repair_rejection(allow_optional=True) is None
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda **_kwargs: pytest.fail("disabled startup must remain a no-op"),
+    )
+    assert api.reconcile_memory_package_on_startup()["skipped"] is True
+
+    api.save_memory_config(
+        {
+            "enabled": True,
+            "mode": "custom",
+            "processing": {
+                "llm": {
+                    "base_url": "https://llm.example.test/v1",
+                    "model": "chat",
+                    "api_key": "test-key",
+                },
+                "embedding": {
+                    "base_url": "https://embedding.example.test/v1",
+                    "model": "embedding",
+                    "api_key": "test-key",
+                },
+            },
+        }
+    )
+    ready, _runtime = api._memory_dependencies_status(offline=True)
+    assert (ready["readiness"], ready["action_class"]) == (
+        "ready",
+        "none",
+    )
 
 
 def test_start_dependency_install_job_rejects_unknown():

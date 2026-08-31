@@ -9,7 +9,7 @@ from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
 from core.services import sessions as sessions_service
-from core.memory.store import derive_project_id
+from avibe_memory.store import derive_project_id
 from core.services.agent_run_target import (
     resolve_agent_run_target,
     resolve_default_agent_workdir,

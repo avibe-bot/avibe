@@ -146,7 +146,7 @@ def main():
     macos_session_diagnostics = None
     controller = None
     try:
-        from core.memory.ui_access import initialize_process_ui_read_secret
+        from vibe.memory_ui_access import initialize_process_ui_read_secret
 
         initialize_process_ui_read_secret()
         acquire_service_instance_lock()

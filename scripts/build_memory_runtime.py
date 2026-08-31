@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core.memory.artifact_contract import (
+from avibe_memory.artifact_contract import (
     EMBEDDED_PYTHON_VERSION,
     EVEROS_VERSION,
     run_cold_artifact_admission,
@@ -274,9 +274,9 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from core.memory.everos import EverOSPort
-from core.memory.process import EverOSProcess, EverOSProcessSettings
-from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
+from avibe_memory.everos import EverOSPort
+from avibe_memory.process import EverOSProcess, EverOSProcessSettings
+from avibe_memory.provider_root import ProviderRoot, ProviderRootMetadata
 
 async def verify() -> None:
     effective_home = Path(sys.argv[2])

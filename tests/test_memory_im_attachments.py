@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-import core.memory.im_attachments as im_attachment_module
+import avibe_memory.im_attachments as im_attachment_module
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
-from core.memory.attachments import AttachmentPinStore
-from core.memory.im_attachments import select_memory_attachments
-from core.memory.types import CaptureAttachment
+from avibe_memory.attachments import AttachmentPinStore
+from avibe_memory.im_attachments import select_memory_attachments
+from avibe_memory.types import CaptureAttachment
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 
 

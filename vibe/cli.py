@@ -63,15 +63,16 @@ from core.watches import (
 )
 from vibe import __version__, api, runtime
 from vibe.i18n import normalize_language, t as i18n_t
-from vibe.restart_supervisor import RestartState, schedule_restart
+from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
+    MemoryRequirementUnreadableError,
     PACKAGE_NAME,
     AtomicActivation,
     DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
-    RollbackTarget,
+    RestartState,
     activate_installer_candidate,
     activate_upgrade_candidate,
     activation_block_reason,
@@ -79,6 +80,8 @@ from vibe.upgrade import (
     atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
+    configured_memory_enabled,
+    execute_upgrade_plan,
     defer_upgrade_activation,
     get_latest_version_info,
     get_safe_cwd,
@@ -550,6 +553,8 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
     "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
     "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
+    "memory_implementation_unavailable": "memory.cli.reason.implementationUnavailable",
+    "memory_implementation_incompatible": "memory.cli.reason.implementationIncompatible",
 }
 _DOCTOR_MEMORY_REASON_I18N_KEYS = {
     "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
@@ -584,14 +589,23 @@ def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, languag
     if as_json:
         print(json.dumps(payload, indent=2))
     else:
-        print(i18n_t("memory.cli.error", language, operation=operation, code=code), file=sys.stderr)
+        display_code = _memory_cli_label(
+            code,
+            keys=_MEMORY_CLI_REASON_I18N_KEYS,
+            fallback_key="memory.cli.reason.unknown",
+            language=language,
+        )
+        print(
+            i18n_t("memory.cli.error", language, operation=operation, code=display_code),
+            file=sys.stderr,
+        )
     return 1
 
 
 def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
     """Validate the closed controller response shape used by ``vibe memory``."""
 
-    from core.memory.types import is_memory_error_code
+    from vibe.memory_contract import is_memory_error_code
 
     if not isinstance(response, dict):
         return None, "memory_provider_response_invalid"
@@ -730,7 +744,7 @@ def cmd_memory(args) -> int:
 
     from vibe import internal_client
     from core.caller_context import caller_context_from_env
-    from core.memory.types import (
+    from vibe.memory_contract import (
         MAX_MEMORY_LIST_PAGE_SIZE,
         MAX_MEMORY_SEARCH_RESULTS,
     )
@@ -12555,7 +12569,7 @@ def _start_service_after_repair(
     *,
     stopped_pids: list[int],
 ) -> dict:
-    from core.memory.ui_access import generate_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret
 
     # This repair stopped the old service and starts a replacement, so it is the
     # same shape ``cmd_start`` handles when it starts a service beside a
@@ -13230,7 +13244,7 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    from core.memory.ui_access import generate_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret
 
     # The Memory UI read proof is a per-launch secret: it reaches a child only
     # over stdin and is deliberately never persisted, so this launcher can only
@@ -14979,17 +14993,28 @@ def cmd_upgrade():
 
     if info["error"]:
         print(f"\033[33mFailed to check for updates: {info['error']}\033[0m")
-        print("Attempting upgrade anyway...")
     elif not info["has_update"]:
         print("\033[32mYou are already using the latest version.\033[0m")
         return 0
     else:
         print(f"New version available: {info['latest']}")
 
-    print("\nUpgrading...")
-
     current_vibe_path = cache_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            target_version=info.get("latest"),
+        )
+    except MemoryRequirementUnreadableError:
+        print(f"\033[31m{i18n_t('update.memoryRequirementUnreadable')}\033[0m")
+        return 1
+    except ValueError as exc:
+        print(f"\033[31mUpgrade failed: {exc}\033[0m")
+        return 1
+    if info["error"]:
+        print("Attempting upgrade anyway...")
+    print("\nUpgrading...")
     if plan.preflight_error:
         print(f"\033[31mUpgrade cannot be activated safely: {plan.preflight_error}\033[0m")
         return 1
@@ -15012,11 +15037,11 @@ def cmd_upgrade():
             if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
                 print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
                 return 1
-            result = subprocess.run(
-                plan.command,
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
                 capture_output=True,
                 text=True,
-                env=plan.env,
                 cwd=safe_cwd,
                 timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
             )
@@ -15029,7 +15054,6 @@ def cmd_upgrade():
                         defer_upgrade_activation(
                             plan.activation,
                             parent_pid=os.getpid(),
-                            rollback_to=plan.rollback_to,
                             restart_required=runtime_was_running,
                             prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
@@ -15055,7 +15079,6 @@ def cmd_upgrade():
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
-                        rollback_to=plan.rollback_to,
                         **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                 except Exception as exc:
@@ -15485,11 +15508,22 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
-    from core.memory.artifact import get_memory_artifact_manager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        try:
+            from avibe_memory.artifact import get_memory_artifact_manager
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"avibe_memory", "avibe_memory.artifact"}:
+                raise
+            return {
+                "ok": True,
+                "removed": [],
+                "skipped": True,
+                "reason": "memory_implementation_unavailable",
+            }
+
         return get_memory_artifact_manager().clean(
             keep_previous=keep_previous,
             dry_run=dry_run,
@@ -17530,10 +17564,6 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     parser.add_argument("--source-generation")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--prepare-show-runtime", action="store_true")
-    parser.add_argument("--rollback-to")
-    parser.add_argument("--rollback-package")
-    parser.add_argument("--rollback-python")
-    parser.add_argument("--rollback-main")
     args = parser.parse_args(argv)
 
     deadline = time.monotonic() + DEFERRED_ACTIVATION_TIMEOUT_SECONDS
@@ -17552,18 +17582,6 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         launcher=Path(args.launcher),
         candidate_launcher=Path(args.candidate),
         source_generation=source_generation,
-    )
-    if args.restart and args.rollback_to and (not args.rollback_python or not args.rollback_main):
-        print("deferred upgrade restart is missing its rollback launcher", file=sys.stderr)
-        return 1
-    rollback_to = (
-        RollbackTarget(
-            version=args.rollback_to,
-            package=args.rollback_package,
-            launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
-        )
-        if args.rollback_to
-        else None
     )
     activated = False
     try:
@@ -17585,7 +17603,6 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
                     vibe_path=args.launcher,
                     trigger="upgrade",
                     prepare_show_runtime=args.prepare_show_runtime,
-                    rollback_to=rollback_to,
                     python_executable=sys.executable,
                 )
     except Exception as exc:

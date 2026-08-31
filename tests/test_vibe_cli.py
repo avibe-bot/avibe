@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import hashlib
 import json
 import os
@@ -2936,7 +2937,7 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
     consumer,
 ):
     if consumer == "memory":
-        from core.memory.artifact import MemoryArtifactManager
+        from avibe_memory.artifact import MemoryArtifactManager
 
         manager = MemoryArtifactManager(
             runtime_dir=tmp_path / "memory-runtime",
@@ -3051,7 +3052,7 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
 
 def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
     from core import tmux_runtime
-    from core.memory import artifact as memory_artifact
+    from avibe_memory import artifact as memory_artifact
     from vibe.model_hub_runtime import installer as model_hub_installer
 
     calls = []
@@ -3099,6 +3100,77 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         ("model_hub_engine", 2, True),
         ("tmux", 2, True),
     ]
+
+
+def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
+    from core import tmux_runtime
+    from vibe.model_hub_runtime import installer as model_hub_installer
+
+    calls = []
+    original_import = builtins.__import__
+
+    def core_only_import(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ModuleNotFoundError(name, name="avibe_memory")
+        return original_import(name, *args, **kwargs)
+
+    class FakeManager:
+        def __init__(self, runtime_id):
+            self.runtime_id = runtime_id
+
+        def clean(self, *, keep_previous, dry_run):
+            calls.append((self.runtime_id, keep_previous, dry_run))
+            return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(builtins, "__import__", core_only_import)
+    monkeypatch.setattr(
+        cli,
+        "_clean_git_runtime",
+        lambda **kwargs: calls.append(("git", kwargs["keep_previous"], kwargs["dry_run"]))
+        or {"ok": True, "removed": []},
+    )
+    monkeypatch.setattr(
+        model_hub_installer,
+        "EngineRuntimeManager",
+        lambda: FakeManager("model_hub_engine"),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
+
+    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
+
+    assert results["memory-runtime"] == {
+        "ok": True,
+        "removed": [],
+        "skipped": True,
+        "reason": "memory_implementation_unavailable",
+    }
+    assert results["git"]["ok"] is True
+    assert results["model_hub_engine"]["ok"] is True
+    assert results["tmux"]["ok"] is True
+    assert calls == [
+        ("git", 2, True),
+        ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
+    ]
+
+
+def test_runtime_clean_reports_broken_memory_implementation_import(monkeypatch):
+    original_import = builtins.__import__
+
+    def broken_memory_import(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ModuleNotFoundError("missing companion dependency", name="memory_dependency")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_memory_import)
+    cleaners = dict(cli._managed_runtime_cleaners())
+
+    with pytest.raises(ModuleNotFoundError, match="missing companion dependency"):
+        cleaners["memory-runtime"](keep_previous=2, dry_run=True)
 
 
 def test_runtime_clean_returns_nonzero_and_reports_git_exception_reason(monkeypatch, capsys):

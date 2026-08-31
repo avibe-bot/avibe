@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from core.memory.everos_insight.reader import MemoryInsightPaths, MemoryInsightReader
+from avibe_memory.everos_insight.reader import MemoryInsightPaths, MemoryInsightReader
 
 
 def test_insight_reader_exposes_only_native_processing_record_operations(

@@ -50,7 +50,6 @@ export const SettingsMemoryPage: React.FC = () => {
   const [waking, setWaking] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
-  const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
   const [deleteResult, setDeleteResult] = useState<MemoryDataOperationResult | null>(null);
@@ -93,16 +92,21 @@ export const SettingsMemoryPage: React.FC = () => {
   const loadDependency = useCallback(async () => {
     try {
       const res = await api.listDependencies();
-      const dep = res.deps?.find((item) => item.id === 'memory-runtime');
-      if (dep) {
-        setRuntimeInstalled(dep.installed);
-        setDependencyReady(dep.installed && dep.status === 'ready');
+      const memoryPackage = res.deps?.find((item) => item.id === 'memory-package');
+      const memoryRuntime = res.deps?.find((item) => item.id === 'memory-runtime');
+      if (memoryPackage?.action_class === 'repairable' && memoryPackage.installed !== true) {
+        setRuntimeInstalled(false);
+      } else if (memoryRuntime) {
+        setRuntimeInstalled(
+          memoryRuntime.status === 'not_required'
+            ? null
+            : memoryRuntime.installed === true,
+        );
       } else {
         setRuntimeInstalled(true);
       }
     } catch {
       setRuntimeInstalled(true);
-      setDependencyReady(true);
     }
   }, [api]);
 
@@ -244,7 +248,6 @@ export const SettingsMemoryPage: React.FC = () => {
       settings={settings}
       maintenance={maintenanceRead.data}
       maintenanceError={maintenanceRead.error}
-      dependencyReady={dependencyReady}
       mutationBusy={waking || repairing || deleting}
       onSavingChange={setSettingsSaving}
       onSaved={(next) => {

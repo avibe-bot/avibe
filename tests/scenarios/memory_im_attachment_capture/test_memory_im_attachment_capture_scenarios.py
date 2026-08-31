@@ -10,16 +10,16 @@ from types import SimpleNamespace
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
-from core.memory.admission import CaptureAdmission, InboundTurnFacts
-from core.memory.attachments import AttachmentCleanupUnprovenError, AttachmentPinError
-from core.memory.observations import AddAck, AddRejected
-from core.memory.types import RecallItems, RecallPolicy, memory_item_payload
+from avibe_memory.admission import CaptureAdmission, InboundTurnFacts
+from avibe_memory.attachments import AttachmentCleanupUnprovenError, AttachmentPinError
+from avibe_memory.observations import AddAck, AddRejected
+from avibe_memory.types import RecallItems, RecallPolicy, memory_item_payload
 from modules.im.base import FileAttachment
 from modules.im.message_facts import (
-    is_ordinary_discord_attachment,
-    is_ordinary_feishu_attachment,
-    is_ordinary_telegram_attachment,
-    is_ordinary_wechat_attachment,
+    is_original_human_discord_attachment,
+    is_original_human_feishu_attachment,
+    is_original_human_telegram_attachment,
+    is_original_human_wechat_attachment,
 )
 from tests.scenario_harness.memory_im_attachments import (
     PNG_BYTES,
@@ -41,7 +41,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
     harness = MemoryIMAttachmentScenarioHarness(tmp_path)
     asyncio.run(
         harness.capture(
-            text="Remember this screenshot",
+            text="记住这张截图",
             payloads={"screenshot.png": ("image/png", PNG_BYTES)},
         )
     )
@@ -51,6 +51,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
         {"name": "screenshot.png", "max_bytes": None}
     ]
     assert len(harness.provider.captures) == 1
+    assert harness.provider.captures[0].text == "记住这张截图"
     assert harness.provider.flushes == []
     assert harness.provider.observed_payloads == [PNG_BYTES]
     assert harness.provider.provider_invocations == ["multimodal_llm"]
@@ -405,9 +406,9 @@ def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
             message_snapshots=(),
             is_system=lambda: False,
         )
-        return is_ordinary_discord_attachment(message, [file])
+        return is_original_human_discord_attachment(message, [file])
     if platform == "telegram":
-        return is_ordinary_telegram_attachment(
+        return is_original_human_telegram_attachment(
             {
                 "from": {"id": "U1", "is_bot": False},
                 "document": {"file_id": "native-file", "file_name": file.name},
@@ -415,7 +416,7 @@ def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
             [file],
         )
     if platform == "lark":
-        return is_ordinary_feishu_attachment(
+        return is_original_human_feishu_attachment(
             {
                 "sender": {"sender_type": "user"},
                 "message": {"message_type": "file"},
@@ -424,7 +425,7 @@ def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
             [file],
             shared_text=None,
         )
-    return is_ordinary_wechat_attachment(
+    return is_original_human_wechat_attachment(
         {
             "from_user_id": "U1",
             "item_list": [
@@ -480,7 +481,6 @@ def test_enabled_platform_attachment_fact_reaches_memory_admission(
         files=[file],
         is_dm=True,
         is_ordinary_attachment=_platform_attachment_fact(platform, file),
-        memory_enabled=True,
     )
 
     assert facts.is_ordinary_attachment is True

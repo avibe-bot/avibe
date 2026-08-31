@@ -21,7 +21,11 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
-from .message_facts import is_ordinary_slack_attachment, is_ordinary_slack_text
+from .message_facts import (
+    is_original_human_slack_attachment,
+    is_original_human_slack_text,
+    slack_message_kind,
+)
 from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
@@ -282,6 +286,9 @@ class SlackBot(BaseIMClient):
             message_id=context.message_id,
             platform_specific=context.platform_specific,
             files=context.files,
+            is_original_human_text=context.is_original_human_text,
+            is_original_human_attachment=context.is_original_human_attachment,
+            message_kind=context.message_kind,
         )
 
     def _ensure_clients(self):
@@ -2097,10 +2104,15 @@ class SlackBot(BaseIMClient):
                     "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
-                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
-                is_ordinary_attachment=(
-                    is_ordinary_slack_attachment(event, file_attachments)
+                is_original_human_text=is_original_human_slack_text(event, file_attachments) and not has_shared_content,
+                is_original_human_attachment=(
+                    is_original_human_slack_attachment(event, file_attachments)
                     and not has_shared_content
+                ),
+                message_kind=slack_message_kind(
+                    event,
+                    file_attachments,
+                    shared=has_shared_content,
                 ),
             )
 
@@ -2201,10 +2213,15 @@ class SlackBot(BaseIMClient):
                     "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
-                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),
-                is_ordinary_attachment=(
-                    is_ordinary_slack_attachment(event, file_attachments)
+                is_original_human_text=is_original_human_slack_text(event, file_attachments) and not bool(shared_text),
+                is_original_human_attachment=(
+                    is_original_human_slack_attachment(event, file_attachments)
                     and not bool(shared_text)
+                ),
+                message_kind=slack_message_kind(
+                    event,
+                    file_attachments,
+                    shared=bool(shared_text),
                 ),
             )
 
@@ -2282,7 +2299,8 @@ class SlackBot(BaseIMClient):
                 "payload": payload,
                 "is_dm": is_dm,
             },
-            is_ordinary_text=True,
+            is_original_human_text=True,
+            message_kind="original",
         )
 
         # Send immediate acknowledgment to Slack

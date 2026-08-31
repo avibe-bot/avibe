@@ -18,7 +18,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import (
     CONFIG_LOCK,
     MemoryConfig,
@@ -53,8 +54,9 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.memory_loader import probe_memory_runtime_entrypoint
+from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.install_integrity import verify_python_environment
-from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -63,13 +65,18 @@ from vibe.opencode_config import (
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     AtomicActivation,
+    MEMORY_PACKAGE_NAME,
+    PACKAGE_NAME,
+    MemoryRequirementUnreadableError,
     _candidate_python,
     activation_block_reason,
     activate_upgrade_candidate,
     atomic_upgrade_lock,
     build_upgrade_plan,
+    configured_memory_enabled,
     defer_upgrade_activation,
     discard_atomic_uv_install_generation,
+    execute_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
@@ -106,6 +113,7 @@ from core.vibe_agents import (
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
 from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
+from storage.lock import MigrationFileLock, MigrationLockTimeout
 
 
 logger = logging.getLogger(__name__)
@@ -6239,20 +6247,6 @@ def get_version_info() -> dict:
     return result
 
 
-def get_local_version_info() -> dict:
-    """Return only the version already loaded by this process.
-
-    Upgrade recovery must be able to identify the release that is still
-    running even when the package index is unavailable. Keep this endpoint
-    separate from :func:`get_version_info`, whose update check is intentionally
-    allowed to perform network I/O for the user-facing version screen.
-    """
-
-    from vibe import __version__
-
-    return {"current": __version__, "build": get_build_identity().as_dict()}
-
-
 def do_upgrade(auto_restart: bool = True) -> dict:
     """Perform upgrade to latest version.
 
@@ -6263,7 +6257,22 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            target_version=get_version_info().get("latest"),
+        )
+    except MemoryRequirementUnreadableError:
+        return {
+            "ok": False,
+            "message": backend_t("update.memoryRequirementUnreadable"),
+            "output": None,
+            "reason": "memory_requirement_unreadable",
+            "restarting": False,
+        }
+    except ValueError as exc:
+        return {"ok": False, "message": "Upgrade failed.", "output": str(exc), "restarting": False}
     if plan.preflight_error:
         return {
             "ok": False,
@@ -6299,8 +6308,9 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     "output": "The active Avibe generation changed while waiting for the upgrade lock; retry the upgrade.",
                     "restarting": False,
                 }
-            result = subprocess.run(
-                plan.command,
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
                 capture_output=True,
                 text=True,
                 # A wheel install copies the complete candidate environment before
@@ -6309,7 +6319,6 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 # existed.  The candidate is isolated now; this is only a bound for
                 # a genuinely hung resolver/download.
                 timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
-                env=plan.env,
                 cwd=safe_cwd,
             )
             if result.returncode == 0 and plan.activation is not None:
@@ -6321,7 +6330,6 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         defer_upgrade_activation(
                             plan.activation,
                             parent_pid=os.getpid(),
-                            rollback_to=plan.rollback_to,
                             restart_required=auto_restart and runtime_was_running,
                             prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
@@ -6355,7 +6363,6 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
-                        rollback_to=plan.rollback_to,
                         **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                     restarting = True
@@ -8635,13 +8642,425 @@ def reconcile_askill_auto_update() -> dict:
 
 
 # =============================================================================
-# Dependencies aggregate + manual install jobs (askill / show runtime)
+# Dependencies aggregate + explicit manual install jobs
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
+_ALLOWED_DEP_INSTALLS = {
+    "askill",
+    "avault",
+    "show-runtime",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
+_MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
+_MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
+
+
+@dataclass(frozen=True)
+class _MemoryRequirementProjection:
+    required: bool | None
+    state: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _MemoryPackageMetadata:
+    provider_count: int | None
+    version: str | None
+
+    @property
+    def installed(self) -> bool | None:
+        if self.provider_count is None:
+            return None
+        return self.provider_count > 0
+
+
+def _load_memory_requirement() -> _MemoryRequirementProjection:
+    """Read the persisted requirement before any optional implementation import."""
+
+    try:
+        config = V2Config.load()
+    except FileNotFoundError:
+        return _MemoryRequirementProjection(False, "not_required")
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the persisted Memory requirement", exc_info=True)
+        return _MemoryRequirementProjection(None, "memory_requirement_unreadable")
+
+    required = config.memory_required
+    if required is None:
+        return _MemoryRequirementProjection(
+            None,
+            "memory_requirement_unreadable",
+            tuple(config.load_warnings),
+        )
+    memory_recovered = any(
+        section == "memory" or section.startswith("memory.")
+        for section in config.recovered_sections
+    )
+    return _MemoryRequirementProjection(
+        required,
+        "required" if required else "not_required",
+        tuple(config.load_warnings) if memory_recovered else (),
+    )
+
+
+def _inspect_memory_package_metadata() -> _MemoryPackageMetadata:
+    """Inspect canonical distribution providers without importing implementation code."""
+
+    from importlib.metadata import distributions
+    from packaging.version import Version
+
+    try:
+        providers = tuple(distributions(name=MEMORY_PACKAGE_NAME))
+    except Exception:  # noqa: BLE001
+        return _MemoryPackageMetadata(None, None)
+    if len(providers) != 1:
+        return _MemoryPackageMetadata(len(providers), None)
+    try:
+        raw_version = str(providers[0].version).strip()
+        version = str(Version(raw_version))
+    except Exception:  # noqa: BLE001
+        version = None
+    return _MemoryPackageMetadata(1, version)
+
+
+def _published_running_version() -> str | None:
+    from packaging.version import InvalidVersion, Version
+    from vibe import __version__
+
+    try:
+        version = Version(__version__)
+    except InvalidVersion:
+        return None
+    if version.is_devrelease or version.local is not None:
+        return None
+    return str(version)
+
+
+def _memory_versions_match(left: str, right: str) -> bool:
+    from packaging.version import Version
+
+    return Version(left) == Version(right)
+
+
+def _memory_artifact_status(*, offline: bool) -> tuple[bool, dict]:
+    """Import the artifact contract, then inspect EverOS without changing package readiness."""
+
+    failed = {
+        "installed": False,
+        "status": "missing",
+        "manifest": None,
+        "reason": "memory_runtime_install_failed",
+    }
+    try:
+        from avibe_memory.artifact import (
+            MemoryArtifactManager,
+            get_memory_artifact_manager,
+        )
+    except Exception:  # noqa: BLE001
+        return False, failed
+    try:
+        manager = (
+            MemoryArtifactManager(offline=True)
+            if offline
+            else get_memory_artifact_manager()
+        )
+        status = manager.status()
+        if not isinstance(status, dict):
+            raise TypeError("Memory artifact status must be a mapping")
+        return True, status
+    except Exception:  # noqa: BLE001
+        return True, failed
+
+
+def _memory_package_row(
+    requirement: _MemoryRequirementProjection,
+    metadata: _MemoryPackageMetadata,
+    *,
+    status: str,
+    readiness: str,
+    reason: str | None,
+    action_class: str,
+    current_version: str | None = None,
+) -> dict:
+    return {
+        "id": "memory-package",
+        "kind": "runtime",
+        "required": requirement.required,
+        "installed": metadata.installed,
+        "provider_count": metadata.provider_count,
+        "version": metadata.version,
+        "latest_version": current_version,
+        "has_update": bool(
+            metadata.version
+            and current_version
+            and not _memory_versions_match(metadata.version, current_version)
+        ),
+        "status": status,
+        "readiness": readiness,
+        "reason": reason,
+        "action_class": action_class,
+        "warnings": list(requirement.warnings),
+    }
+
+
+def _memory_runtime_row(
+    requirement: _MemoryRequirementProjection,
+    runtime: dict | None,
+    *,
+    reason: str | None = None,
+    action_class: str = "none",
+) -> dict:
+    runtime = runtime or {}
+    manifest = runtime.get("manifest") if isinstance(runtime.get("manifest"), dict) else {}
+    release_state = manifest.get("release_state")
+    if requirement.state == "not_required":
+        status = "not_required"
+    elif reason is not None:
+        status = "error"
+    else:
+        status = _memory_runtime_dependency_status(runtime)
+    return {
+        "id": "memory-runtime",
+        "kind": "runtime",
+        "required": requirement.required,
+        "installed": (
+            None if requirement.state != "required" and not runtime else bool(runtime.get("installed"))
+        ),
+        "version": runtime.get("version"),
+        "latest_version": runtime.get("selected_version"),
+        "has_update": bool(
+            runtime.get("installed") and runtime.get("matches_manifest") is False
+        ),
+        "status": status,
+        "reason": reason if reason is not None else runtime.get("reason"),
+        "action_class": action_class,
+        "release_state": release_state if release_state in {"published", "unavailable"} else None,
+        "download_error": runtime.get("download_error"),
+    }
+
+
+def _memory_runtime_action_class(runtime: dict) -> str:
+    if not runtime.get("installed") or runtime.get("matches_manifest") is False:
+        return "repairable"
+    return "none"
+
+
+def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
+    requirement = _load_memory_requirement()
+    unknown_metadata = _MemoryPackageMetadata(None, None)
+    if requirement.state == "memory_requirement_unreadable":
+        reason = "memory_requirement_unreadable"
+        return (
+            _memory_package_row(
+                requirement,
+                unknown_metadata,
+                status="error",
+                readiness=reason,
+                reason=reason,
+                action_class="operator_only",
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    metadata = _inspect_memory_package_metadata()
+    if requirement.state == "not_required":
+        current_version = _published_running_version()
+        published_install = (
+            get_build_identity().kind != "source" and current_version is not None
+        )
+        if published_install:
+            if metadata.provider_count == 0:
+                status = "missing"
+                reason = "memory_package_missing"
+                action_class = "repairable"
+            elif metadata.provider_count is None:
+                status = "error"
+                reason = "memory_package_metadata_unreadable"
+                action_class = "operator_only"
+            elif metadata.provider_count > 1:
+                status = "error"
+                reason = "memory_package_metadata_ambiguous"
+                action_class = "operator_only"
+            elif metadata.version is None:
+                status = "error"
+                reason = "memory_package_metadata_unreadable"
+                action_class = "operator_only"
+            elif not _memory_versions_match(metadata.version, current_version):
+                status = "error"
+                reason = "memory_package_version_mismatch"
+                action_class = "repairable"
+            else:
+                status = "not_required"
+                reason = None
+                # Disabled means no automatic install, not no recovery path. An
+                # exact package can still have a broken import/entry point.
+                action_class = "repairable"
+            return (
+                _memory_package_row(
+                    requirement,
+                    metadata,
+                    status=status,
+                    readiness="not_required",
+                    reason=reason,
+                    action_class=action_class,
+                    current_version=current_version,
+                ),
+                _memory_runtime_row(requirement, None),
+            )
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="not_required",
+                readiness="not_required",
+                reason=None,
+                action_class="none",
+            ),
+            _memory_runtime_row(requirement, None),
+        )
+
+    current_version = _published_running_version()
+    build_is_source = get_build_identity().kind == "source"
+    if build_is_source or current_version is None:
+        reason = (
+            "memory_package_source_build"
+            if build_is_source
+            else "memory_package_unpublished_build"
+        )
+        package = _memory_package_row(
+            requirement,
+            metadata,
+            status="error",
+            readiness="not_ready",
+            reason=reason,
+            action_class="operator_only",
+        )
+        try:
+            probe_memory_runtime_entrypoint()
+        except Exception:  # noqa: BLE001
+            return package, _memory_runtime_row(
+                requirement,
+                None,
+                reason="memory_package_runtime_unavailable",
+            )
+        artifact_imported, runtime = _memory_artifact_status(offline=offline)
+        if not artifact_imported:
+            return package, _memory_runtime_row(
+                requirement,
+                None,
+                reason="memory_package_artifact_unavailable",
+            )
+        return package, _memory_runtime_row(
+            requirement,
+            runtime,
+            action_class=_memory_runtime_action_class(runtime),
+        )
+
+    if metadata.provider_count == 0:
+        reason = "memory_package_missing"
+        action_class = "repairable"
+        status = "missing"
+    elif metadata.provider_count is None:
+        reason = "memory_package_metadata_unreadable"
+        action_class = "operator_only"
+        status = "error"
+    elif metadata.provider_count > 1:
+        reason = "memory_package_metadata_ambiguous"
+        action_class = "operator_only"
+        status = "error"
+    elif metadata.version is None:
+        reason = "memory_package_metadata_unreadable"
+        action_class = "operator_only"
+        status = "error"
+    elif not _memory_versions_match(metadata.version, current_version):
+        reason = "memory_package_version_mismatch"
+        action_class = "repairable"
+        status = "error"
+    else:
+        reason = None
+        action_class = "none"
+        status = "ready"
+    if reason is not None:
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status=status,
+                readiness="not_ready",
+                reason=reason,
+                action_class=action_class,
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    if _memory_package_restart_retry_required(current_version):
+        reason = "memory_package_restart_failed"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    try:
+        probe_memory_runtime_entrypoint()
+    except Exception:  # noqa: BLE001
+        reason = "memory_package_runtime_unavailable"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+    artifact_imported, runtime = _memory_artifact_status(offline=offline)
+    if not artifact_imported:
+        reason = "memory_package_artifact_unavailable"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+    return (
+        _memory_package_row(
+            requirement,
+            metadata,
+            status="ready",
+            readiness="ready",
+            reason=None,
+            action_class="none",
+            current_version=current_version,
+        ),
+        _memory_runtime_row(
+            requirement,
+            runtime,
+            action_class=_memory_runtime_action_class(runtime),
+        ),
+    )
 
 
 def dependencies_status(*, offline: bool = False) -> dict:
@@ -8713,42 +9132,8 @@ def dependencies_status(*, offline: bool = False) -> dict:
         }
     )
 
-    try:
-        from core.memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
-
-        memory_manager = MemoryArtifactManager(offline=True) if offline else get_memory_artifact_manager()
-        memory_runtime = memory_manager.status()
-    except Exception:  # noqa: BLE001
-        memory_runtime = {
-            "installed": False,
-            "status": "missing",
-            "manifest": None,
-            "reason": "memory_runtime_install_failed",
-        }
-    memory_manifest = memory_runtime.get("manifest") if isinstance(memory_runtime.get("manifest"), dict) else {}
-    release_state = memory_manifest.get("release_state")
-    try:
-        memory_required = bool(V2Config.load().memory.enabled)
-    except Exception:  # noqa: BLE001
-        memory_required = False
-    deps.append(
-        {
-            "id": "memory-runtime",
-            "kind": "runtime",
-            "required": memory_required,
-            "installed": bool(memory_runtime.get("installed")),
-            "version": memory_runtime.get("version"),
-            "latest_version": memory_runtime.get("selected_version"),
-            "has_update": bool(
-                memory_runtime.get("installed")
-                and memory_runtime.get("matches_manifest") is False
-            ),
-            "status": _memory_runtime_dependency_status(memory_runtime),
-            "reason": memory_runtime.get("reason"),
-            "release_state": release_state if release_state in {"published", "unavailable"} else None,
-            "download_error": memory_runtime.get("download_error"),
-        }
-    )
+    memory_package, memory_runtime = _memory_dependencies_status(offline=offline)
+    deps.extend((memory_package, memory_runtime))
 
     try:
         from core.tmux_runtime import TmuxRuntimeManager, tmux_status
@@ -8876,6 +9261,385 @@ def _prepare_memory_runtime_job() -> dict:
     }
 
 
+def _memory_package_repair_rejection(*, allow_optional: bool = False) -> dict | None:
+    """Recheck the status-owned package repair contract before mutation."""
+
+    try:
+        package, _runtime = _memory_dependencies_status(offline=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("Memory package repair admission could not project readiness", exc_info=True)
+        reason = "memory_package_admission_unavailable"
+        return {
+            "ok": False,
+            "status": "rejected",
+            "message": reason,
+            "output": None,
+            "reason": reason,
+            "action_class": "operator_only",
+        }
+
+    provider_count = package.get("provider_count")
+    version = package.get("version")
+    metadata_readable = provider_count == 0 or (
+        provider_count == 1 and isinstance(version, str) and bool(version)
+    )
+    if (
+        (
+            package.get("required") is True
+            or (allow_optional and package.get("required") is False)
+        )
+        and package.get("action_class") == "repairable"
+        and metadata_readable
+    ):
+        return None
+
+    reason = package.get("reason")
+    if not isinstance(reason, str) or not reason:
+        if package.get("required") is False:
+            reason = "memory_not_required"
+        elif package.get("required") is not True:
+            reason = "memory_requirement_unreadable"
+        elif package.get("action_class") == "none":
+            reason = "memory_package_not_repairable"
+        else:
+            reason = "memory_package_admission_unavailable"
+    return {
+        "ok": False,
+        "status": "rejected",
+        "message": reason,
+        "output": None,
+        "reason": reason,
+        "action_class": "operator_only",
+    }
+
+
+def _memory_package_auto_repair_state_path() -> Path:
+    return paths.get_state_dir() / "memory-package-auto-repair.json"
+
+
+def _memory_package_restart_retry_required(version: str) -> bool:
+    """Whether package install succeeded but activation restart did not."""
+
+    try:
+        payload = json.loads(
+            _memory_package_auto_repair_state_path().read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("state_version") == _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION
+        and payload.get("core_version") == version
+        and payload.get("result") == "failed"
+        and payload.get("reason") == "memory_package_restart_failed"
+    )
+
+
+def _reserve_memory_package_auto_repair_attempt(version: str) -> dict:
+    """Persist one automatic attempt before any package mutation begins."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with MigrationFileLock(lock_path, timeout_seconds=5.0):
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            payload = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            logger.warning("Memory package auto-repair state is unreadable: %s", exc)
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+
+        if not isinstance(payload, dict) or (
+            payload and payload.get("state_version") != _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION
+        ):
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+        attempts = payload.get("attempts", 0) if payload.get("core_version") == version else 0
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+        if attempts >= _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS:
+            return {
+                "allowed": False,
+                "attempts": attempts,
+                "reason": "memory_package_auto_repair_exhausted",
+            }
+
+        token = uuid.uuid4().hex
+        attempt = {
+            "state_version": _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION,
+            "core_version": version,
+            "attempts": attempts + 1,
+            "result": "running",
+            "attempt_token": token,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        write_atomic(state_path, json.dumps(attempt, sort_keys=True) + "\n")
+        return {
+            "allowed": True,
+            "attempts": attempts + 1,
+            "token": token,
+        }
+
+
+def _finish_memory_package_auto_repair_attempt(
+    version: str,
+    token: str,
+    *,
+    result: str,
+    reason: str | None,
+) -> None:
+    """Settle only the exact attempt this process reserved."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    try:
+        with MigrationFileLock(lock_path, timeout_seconds=5.0):
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            if payload.get("core_version") != version or payload.get("attempt_token") != token:
+                return
+            payload["result"] = result
+            payload["reason"] = reason
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            write_atomic(state_path, json.dumps(payload, sort_keys=True) + "\n")
+    except (OSError, UnicodeError, json.JSONDecodeError, MigrationLockTimeout):
+        logger.warning("Memory package auto-repair result could not be persisted", exc_info=True)
+
+
+def _record_memory_package_repair_result(
+    version: str,
+    *,
+    result: str,
+    reason: str | None,
+) -> None:
+    """Persist manual activation state without consuming the automatic budget."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with MigrationFileLock(lock_path, timeout_seconds=5.0):
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+                payload = {}
+            attempts = (
+                payload.get("attempts", 0)
+                if isinstance(payload, dict) and payload.get("core_version") == version
+                else 0
+            )
+            if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+                attempts = 0
+            write_atomic(
+                state_path,
+                json.dumps(
+                    {
+                        "state_version": _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION,
+                        "core_version": version,
+                        "attempts": attempts,
+                        "result": result,
+                        "reason": reason,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+            )
+    except (OSError, MigrationLockTimeout):
+        logger.warning("Memory package repair result could not be persisted", exc_info=True)
+
+
+def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
+    """Install the matching optional package through the existing dependency job."""
+
+    reservation: dict | None = None
+    current_version: str | None = None
+    try:
+        with atomic_upgrade_lock():
+            rejection = _memory_package_repair_rejection(
+                allow_optional=not automatic,
+            )
+            if rejection is not None:
+                return rejection
+
+            current_version = _published_running_version()
+            if current_version is None:
+                reason = "memory_package_unpublished_build"
+                return {
+                    "ok": False,
+                    "message": reason,
+                    "output": None,
+                    "reason": reason,
+                    "action_class": "operator_only",
+                }
+            current_vibe_path = get_running_vibe_path()
+            restart_only = _memory_package_restart_retry_required(current_version)
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "memory_package_upgrade_busy",
+                    "output": None,
+                    "reason": "memory_package_upgrade_busy",
+                }
+            if automatic:
+                reservation = _reserve_memory_package_auto_repair_attempt(current_version)
+                if not reservation.get("allowed"):
+                    return {
+                        "ok": False,
+                        "skipped": True,
+                        "message": reservation.get("reason"),
+                        "output": None,
+                        "reason": reservation.get("reason"),
+                        "action_class": "repairable",
+                        "attempts": reservation.get("attempts"),
+                    }
+
+            output = ""
+            if restart_only:
+                result = {"ok": True}
+            else:
+                plan = build_upgrade_plan(
+                    version=current_version,
+                    package_name=PACKAGE_NAME,
+                    memory_package=True,
+                    memory_version=current_version,
+                    vibe_path=current_vibe_path,
+                )
+                if plan.preflight_error:
+                    return {
+                        "ok": False,
+                        "message": "memory_package_install_unsafe",
+                        "output": plan.preflight_error,
+                        "reason": "memory_package_install_unsafe",
+                    }
+                install = execute_upgrade_plan(
+                    plan,
+                    run=subprocess.run,
+                    capture_output=True,
+                    text=True,
+                    timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                    cwd=get_safe_cwd(),
+                )
+                output = _truncate_install_output(
+                    ((install.stdout or "") + (f"\n{install.stderr}" if install.stderr else "")).strip()
+                )
+                if install.returncode != 0:
+                    result = {
+                        "ok": False,
+                        "message": "memory_package_install_failed",
+                        "output": output or None,
+                        "reason": "memory_package_install_failed",
+                    }
+                else:
+                    # Keep the current UI process on its live tool environment
+                    # so a service-only restart can immediately observe the
+                    # companion. The shared upgrade lock serializes this exact
+                    # repair with staged forward upgrades.
+                    integrity = verify_python_environment(sys.executable)
+                    result = (
+                        {"ok": True}
+                        if integrity.ok
+                        else {
+                            "ok": False,
+                            "message": "memory_package_install_failed",
+                            "output": integrity.detail,
+                            "reason": "memory_package_install_failed",
+                        }
+                    )
+            if result.get("ok"):
+                try:
+                    restart = schedule_restart(
+                        delay_seconds=2.0,
+                        vibe_path=current_vibe_path,
+                        trigger="memory-package-repair",
+                        scope="service",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
+                    result = {
+                        "ok": False,
+                        "message": "memory_package_restart_failed",
+                        "output": output or str(exc),
+                        "reason": "memory_package_restart_failed",
+                        "restarting": False,
+                    }
+                else:
+                    result = {
+                        "ok": True,
+                        "message": "memory_package_ready",
+                        "output": output or None,
+                        "reason": None,
+                        "restarting": True,
+                        "restart": restart,
+                    }
+    except (OSError, subprocess.TimeoutExpired, ValueError, MigrationLockTimeout) as exc:
+        logger.warning("Memory package repair failed before completion: %s", exc)
+        result = {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "output": str(exc),
+            "reason": "memory_package_install_failed",
+        }
+    if reservation is not None and current_version is not None:
+        _finish_memory_package_auto_repair_attempt(
+            current_version,
+            str(reservation["token"]),
+            result="restart_scheduled" if result.get("restarting") else "failed",
+            reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
+        )
+    elif current_version is not None and (
+        result.get("restarting") or result.get("reason") == "memory_package_restart_failed"
+    ):
+        _record_memory_package_repair_result(
+            current_version,
+            result="restart_scheduled" if result.get("restarting") else "failed",
+            reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
+        )
+    return result
+
+
+def reconcile_memory_package_on_startup() -> dict:
+    """Converge an enabled published install onto its exact Memory companion.
+
+    The first upgrade from a bundled-Memory release is executed by the old
+    upgrader, which can only request ``avibe-os``.  Once the new core starts,
+    the persisted enabled state is the durable fact that requires the optional
+    companion.  Reuse the explicit repair path so package identity, mutation,
+    and restart behavior have one implementation.
+    """
+
+    package, _runtime = _memory_dependencies_status(offline=True)
+    if package.get("required") is True and package.get("action_class") == "repairable":
+        return _prepare_memory_package_job(automatic=True)
+
+    reason = package.get("reason")
+    if not isinstance(reason, str) or not reason:
+        if package.get("required") is False:
+            reason = "memory_not_required"
+        elif package.get("action_class") == "none":
+            reason = "memory_package_ready"
+        else:
+            reason = "memory_package_not_repairable"
+    return {
+        "ok": True,
+        "skipped": True,
+        "reason": reason,
+    }
+
+
 def _prepare_tmux_job() -> dict:
     try:
         from core.tmux_runtime import ensure_tmux_installed
@@ -8974,6 +9738,7 @@ def reconcile_startup_dependencies() -> dict:
     started_at = time.monotonic()
     result: dict[str, Any] = {
         "ok": True,
+        "memory_package": {"ok": False, "status": "unknown"},
         "node": {"ok": False, "status": "unknown"},
         "askill": {"ok": False, "status": "unknown"},
         "avault": {"ok": False, "status": "unknown"},
@@ -8981,6 +9746,17 @@ def reconcile_startup_dependencies() -> dict:
         "tmux": {"ok": False, "status": "unknown"},
     }
     try:
+        try:
+            memory_package = reconcile_memory_package_on_startup()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Startup dependency reconcile failed to repair Memory package: %s", exc, exc_info=True)
+            memory_package = {
+                "ok": False,
+                "message": "memory_package_install_failed",
+                "reason": "memory_package_install_failed",
+            }
+        result["memory_package"] = memory_package
+
         try:
             askill = ensure_askill_installed(force=False)
         except Exception as exc:  # noqa: BLE001
@@ -9051,7 +9827,8 @@ def reconcile_startup_dependencies() -> dict:
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
-            bool(result["askill"].get("ok"))
+            bool(result["memory_package"].get("ok"))
+            and bool(result["askill"].get("ok"))
             and bool(result["avault"].get("ok"))
             and bool(result["show_runtime"].get("ok"))
         )
@@ -9070,6 +9847,10 @@ def start_dependency_install_job(dep: str) -> dict:
     """
     if dep not in _ALLOWED_DEP_INSTALLS:
         return {"ok": False, "message": f"Unknown dependency: {dep}"}
+    if dep == "memory-package":
+        rejection = _memory_package_repair_rejection(allow_optional=True)
+        if rejection is not None:
+            return rejection
 
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -9101,6 +9882,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_avault_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
+            elif dep == "memory-package":
+                result = _prepare_memory_package_job()
             elif dep == "memory-runtime":
                 result = _prepare_memory_runtime_job()
             elif dep == "tmux":

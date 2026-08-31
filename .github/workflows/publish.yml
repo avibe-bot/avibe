@@ -256,6 +256,7 @@ jobs:
           PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
       - name: Verify Show Runtime release assets
         run: |
@@ -299,8 +300,29 @@ jobs:
       - name: Install build and test dependencies
         run: pip install -e . build pytest
 
-      - name: Build package
-        run: python -m build
+      - name: Build Python distributions
+        run: |
+          python -m build --outdir dist packaging/avibe-memory
+          python -m build
+
+      - name: Verify Python distribution asset matrix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          patterns = (
+              "avibe_memory-*.whl",
+              "avibe_memory-*.tar.gz",
+              "avibe_os-*.whl",
+              "avibe_os-*.tar.gz",
+          )
+          for pattern in patterns:
+              matches = sorted(Path("dist").glob(pattern))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"Expected exactly one release asset matching {pattern}, found {len(matches)}"
+                  )
+          PY
 
       - name: Build 3.0 compatibility legacy PyPI shim
         shell: bash
@@ -319,30 +341,50 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = [
+          core_wheels = [
               wheel
               for wheel in sorted(Path("dist").glob("*.whl"))
               if wheel.name.startswith("avibe_os-")
           ]
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected exactly one avibe-os wheel, found {len(wheels)}")
+          memory_wheels = [
+              wheel
+              for wheel in sorted(Path("dist").glob("*.whl"))
+              if wheel.name.startswith("avibe_memory-")
+          ]
+          if len(core_wheels) != 1:
+              raise SystemExit(f"Expected exactly one avibe-os wheel, found {len(core_wheels)}")
+          if len(memory_wheels) != 1:
+              raise SystemExit(f"Expected exactly one avibe-memory wheel, found {len(memory_wheels)}")
 
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              names = set(wheel.namelist())
+          with zipfile.ZipFile(core_wheels[0]) as wheel:
+              core_names = set(wheel.namelist())
               archives = {
-                  name for name in names
+                  name for name in core_names
                   if name.startswith("vibe/show_runtime/") and name.endswith(".tgz")
               }
 
           if archives:
               raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
-          if "vibe/show_runtime_manifest.json" not in names:
+          if "vibe/show_runtime_manifest.json" not in core_names:
               raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in names):
+          if any(name.startswith("vibe/memory_runtime/") for name in core_names):
               raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
-          if "vibe/memory_runtime_manifest.json" not in names:
-              raise SystemExit("Wheel is missing vibe/memory_runtime_manifest.json")
+          if "vibe/memory_runtime_manifest.json" in core_names:
+              raise SystemExit("avibe-os wheel unexpectedly owns the Memory Runtime manifest")
+
+          with zipfile.ZipFile(memory_wheels[0]) as wheel:
+              memory_names = set(wheel.namelist())
+          if "vibe/memory_runtime_manifest.json" not in memory_names:
+              raise SystemExit("avibe-memory wheel is missing vibe/memory_runtime_manifest.json")
+          if any(name.startswith("vibe/memory_runtime/") for name in memory_names):
+              raise SystemExit("avibe-memory wheel unexpectedly contains Memory Runtime archives")
           PY
+
+      - name: Verify distribution package matrix
+        run: |
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v
 
       - name: Run Memory Runtime release guard before publication
         run: |
@@ -430,10 +472,111 @@ jobs:
           name: dist
           path: dist/
 
+  publish-avibe-memory:
+    needs:
+      - build
+      - finalize-github-release
+    runs-on: ubuntu-latest
+    environment: pypi-avibe-memory
+    permissions:
+      id-token: write  # Required for trusted publishing
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Keep avibe-memory distributions only
+        shell: bash
+        run: |
+          find dist -type f ! \( -name 'avibe_memory-*' -o -name 'avibe-memory-*' \) -delete
+          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_memory-*.whl' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_memory-*.tar.gz' -print -quit)"
+
+      - name: Publish avibe-memory to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        with:
+          skip-existing: true
+        # Uses trusted publishing (OIDC), no API token needed
+        # Configure at: https://pypi.org/manage/project/avibe-memory/settings/publishing/
+
+  verify-avibe-memory-pypi:
+    needs:
+      - resolve-tag
+      - build
+      - publish-avibe-memory
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Download staged distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Verify PyPI serves the exact avibe-memory wheel
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          staged_wheels=(dist/avibe_memory-*.whl)
+          if [ "${#staged_wheels[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one staged avibe-memory wheel, found ${#staged_wheels[@]}." >&2
+            exit 1
+          fi
+
+          package_version="$(python scripts/release_package_version.py "$RELEASE_TAG")"
+          download_dir="$RUNNER_TEMP/avibe-memory-pypi"
+          mkdir -p "$download_dir"
+
+          for attempt in {1..12}; do
+            find "$download_dir" -mindepth 1 -maxdepth 1 -type f -delete
+            if python -m pip --isolated download \
+              --index-url https://pypi.org/simple \
+              --disable-pip-version-check \
+              --no-deps \
+              --no-cache-dir \
+              --only-binary=:all: \
+              --dest "$download_dir" \
+              "avibe-memory==$package_version"; then
+              public_wheels=("$download_dir"/avibe_memory-*.whl)
+              if [ "${#public_wheels[@]}" -ne 1 ]; then
+                echo "::error::Expected exactly one public avibe-memory wheel, found ${#public_wheels[@]}." >&2
+                exit 1
+              fi
+              if cmp -s "${staged_wheels[0]}" "${public_wheels[0]}"; then
+                echo "PyPI serves the exact staged avibe-memory wheel for $package_version."
+                exit 0
+              fi
+              echo "::error::PyPI already serves a non-identical avibe-memory wheel for $package_version." >&2
+              exit 1
+            fi
+
+            if [ "$attempt" -eq 12 ]; then
+              echo "::error::PyPI did not serve the avibe-memory wheel for $package_version after $attempt attempts." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
   publish-avibe-os:
     needs:
       - build
       - finalize-github-release
+      - verify-avibe-memory-pypi
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -449,7 +592,8 @@ jobs:
         shell: bash
         run: |
           find dist -type f ! \( -name 'avibe_os-*' -o -name 'avibe-os-*' \) -delete
-          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_os-*' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_os-*.whl' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_os-*.tar.gz' -print -quit)"
 
       - name: Publish avibe-os to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1

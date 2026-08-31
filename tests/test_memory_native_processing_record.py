@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 import sqlite3
 
-from core.memory.native_processing_record import NativeProcessingRecordReader
-from core.memory.store import derive_assistant_memory_owner_id
+from avibe_memory.native_processing_record import NativeProcessingRecordReader
+from avibe_memory.store import derive_assistant_memory_owner_id
 
 
 PRINCIPAL = "u-" + "a" * 32

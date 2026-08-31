@@ -949,6 +949,7 @@ def test_pair_rejects_custom_proxy_only_dns_backend(monkeypatch) -> None:
 
 def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
     class FakeResponse:
         status = 200
@@ -1002,6 +1003,7 @@ def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(mo
 
 def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> None:
     attempts: list[str] = []
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
     class FakeResponse:
         status = 200

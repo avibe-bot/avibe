@@ -33,11 +33,12 @@ from vibe.i18n import t as i18n_t
 from vibe.proxy import resolve_proxy
 from modules.im import wechat_api as _wechat_api_mod
 from modules.im import wechat_cdn as _wechat_cdn_mod
-from modules.im.formatters.wechat_formatter import WeChatFormatter
 from modules.im.message_facts import (
-    is_ordinary_wechat_attachment,
-    is_ordinary_wechat_text,
+    is_original_human_wechat_attachment,
+    is_original_human_wechat_text,
+    wechat_message_kind,
 )
+from modules.im.formatters.wechat_formatter import WeChatFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -1352,8 +1353,9 @@ class WeChatBot(BaseIMClient):
 
         # Handle media attachments
         await self._process_media_items(msg, context)
-        context.is_ordinary_text = is_ordinary_wechat_text(msg, context.files)
-        context.is_ordinary_attachment = is_ordinary_wechat_attachment(msg, context.files)
+        context.is_original_human_text = is_original_human_wechat_text(msg, context.files)
+        context.is_original_human_attachment = is_original_human_wechat_attachment(msg, context.files)
+        context.message_kind = wechat_message_kind(msg, context.files)
 
         # Authorization check
         auth_result = self.check_authorization(

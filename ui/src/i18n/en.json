@@ -386,6 +386,7 @@
       "statusReady": "Ready",
       "statusDetected": "Detected",
       "statusMissing": "Not installed",
+      "statusNotRequired": "Not required",
       "statusUpgradeRequired": "Upgrade required",
       "install": "Install",
       "reinstall": "Reinstall",
@@ -417,6 +418,10 @@
         "node": {
           "label": "Node.js",
           "detail": "Shared prerequisite for the runtimes above."
+        },
+        "memory-package": {
+          "label": "Memory Python package",
+          "detail": "Optional Memory implementation matched to this Avibe release."
         },
         "memory-runtime": {
           "label": "Memory runtime",
@@ -1887,6 +1892,18 @@
     "remote_access_diagnostics_failed": "Connectivity diagnostics could not finish.",
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
+    "memory_requirement_unreadable": "Memory settings could not be read safely. Repair the configuration before changing packages.",
+    "memory_not_required": "Enable Memory in Settings before installing its Python package.",
+    "memory_package_not_repairable": "The Memory Python package does not currently need repair.",
+    "memory_package_admission_unavailable": "Avibe could not verify whether the Memory package can be repaired safely.",
+    "memory_package_source_build": "Memory package repair is unavailable from a source checkout.",
+    "memory_package_unpublished_build": "Memory package repair requires a published Avibe release.",
+    "memory_package_metadata_unreadable": "The installed Memory package metadata could not be read. Repair it manually.",
+    "memory_package_metadata_ambiguous": "Multiple Memory package providers were found. Remove the duplicate installation before retrying.",
+    "memory_package_install_failed": "The Memory Python package could not be installed.",
+    "memory_package_restart_failed": "The Memory package was installed, but Avibe could not schedule the service restart.",
+    "memory_implementation_unavailable": "The Memory implementation is unavailable.",
+    "memory_implementation_incompatible": "The Memory implementation is incompatible with this Avibe version.",
     "memory_invalid_input": "That Memory request wasn't valid.",
     "memory_processing_record_entry_not_found": "That Memory processing entry is no longer available.",
     "memory_failure_history_unavailable": "Detailed Memory failure history is unavailable.",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import shlex
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
-from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
+from avibe_memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
 from core.system_prompt_injection import _MEMORY_CLI_PROMPT
 from vibe import cli, internal_client
 
@@ -403,6 +404,34 @@ def test_memory_status_json_returns_a_closed_service_down_code(monkeypatch, caps
     }
 
 
+def test_memory_status_does_not_import_optional_implementation(monkeypatch, capsys) -> None:
+    args = cli.build_parser().parse_args(["memory", "status", "--json"])
+    original_import = builtins.__import__
+
+    def core_only_import(name, *args, **kwargs):
+        if name == "avibe_memory" or name.startswith("avibe_memory."):
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", core_only_import)
+    monkeypatch.setattr(
+        internal_client,
+        "memory_status_sync",
+        lambda **_kwargs: {
+            "status_code": 503,
+            "body": {
+                "status": "failed",
+                "error": "memory_implementation_unavailable",
+            },
+        },
+    )
+
+    assert cli.cmd_memory(args) == 1
+    assert json.loads(capsys.readouterr().out)["code"] == (
+        "memory_implementation_unavailable"
+    )
+
+
 def test_memory_cli_passes_agent_session_to_the_internal_boundary(monkeypatch, capsys) -> None:
     args = cli.build_parser().parse_args(["memory", "status", "--json"])
     calls: list[dict[str, str | None]] = []
@@ -564,7 +593,37 @@ def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypa
     monkeypatch.setattr(internal_client, "memory_status_sync", unavailable)
 
     assert cli.cmd_memory(args) == 1
-    assert capsys.readouterr().err.strip() == "Memory status failed: memory_sidecar_unavailable"
+    assert capsys.readouterr().err.strip() == "Memory status failed: Memory sidecar unavailable"
+
+
+@pytest.mark.parametrize(
+    ("code", "label"),
+    [
+        ("memory_implementation_unavailable", "Memory implementation unavailable"),
+        ("memory_implementation_incompatible", "Memory implementation is incompatible"),
+    ],
+)
+def test_memory_cli_implementation_failure_localizes_human_error_without_changing_json_code(
+    monkeypatch,
+    capsys,
+    code,
+    label,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "status"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: "en")
+    monkeypatch.setattr(
+        internal_client,
+        "memory_status_sync",
+        lambda **_kwargs: {
+            "status_code": 503,
+            "body": {"status": "failed", "error": code},
+        },
+    )
+
+    assert cli.cmd_memory(args) == 1
+    error = capsys.readouterr().err.strip()
+    assert label in error
+    assert code not in error
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "duplicate"])

@@ -153,6 +153,56 @@ def test_dependency_install_route_allows_memory_runtime(monkeypatch, tmp_path):
     assert response.get_json()["backend"] == "memory-runtime"
 
 
+def test_dependency_install_route_allows_memory_package(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        api,
+        "start_dependency_install_job",
+        lambda dep: {
+            "ok": True,
+            "job_id": "job-memory-package",
+            "backend": dep,
+            "status": "running",
+        },
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/dependencies/memory-package/install",
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["backend"] == "memory-package"
+
+
+def test_dependency_install_route_preserves_structured_memory_package_rejection(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    rejection = {
+        "ok": False,
+        "status": "rejected",
+        "message": "memory_package_source_build",
+        "output": None,
+        "reason": "memory_package_source_build",
+        "action_class": "operator_only",
+    }
+    monkeypatch.setattr(api, "start_dependency_install_job", lambda _dep: rejection)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/dependencies/memory-package/install",
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == rejection
+
+
 def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
     monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "codex")
     monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "codex")

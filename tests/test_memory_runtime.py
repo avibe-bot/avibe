@@ -2,18 +2,25 @@
 
 import asyncio
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-import core.memory.runtime as runtime_module
+import avibe_memory.runtime as runtime_module
+from avibe_memory.capture_adapter import EnabledMemoryAdapter
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.everos import ProviderHealthSnapshot
-from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
-from core.memory.runtime import MemoryConfig, MemoryRuntime
-from core.memory.store import MemoryStore
-from core.memory.types import MemoryItems, MemoryListItem, MemoryListPage
+from avibe_memory.everos import ProviderHealthSnapshot
+from avibe_memory.processing_record import (
+    MaintenanceObservation,
+    RuntimeHealthProjection,
+    SourceObservation,
+)
+from avibe_memory.runtime import MemoryConfig, MemoryRuntime
+from avibe_memory.store import MemoryStore
+from avibe_memory.types import MemoryItems, MemoryListItem, MemoryListPage
+from vibe.memory_contract import MemoryRuntimeBusyError
 
 
 def _runtime(tmp_path: Path) -> MemoryRuntime:
@@ -81,7 +88,10 @@ async def test_all_project_list_accepts_everos_maximum_page_size(
         for index in range(100)
     )
 
-    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    async def list_memory_projects(_principal_id: str) -> tuple[str, ...]:
+        return ("default",)
+
+    runtime.list_memory_projects = list_memory_projects
 
     async def list_episodes(**kwargs: object) -> MemoryListPage:
         page = int(kwargs["page"])
@@ -152,10 +162,265 @@ async def test_session_lifecycle_offers_without_waiting_for_capture(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "read_kind",
+    ("sources", "maintenance", "principal", "projects"),
+)
+async def test_local_reads_hold_reset_and_fail_closed_after_detach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_kind: str,
+) -> None:
+    def fail_supervisor(**_kwargs):
+        raise RuntimeError("supervisor construction failed")
+
+    with pytest.raises(RuntimeError) as retained:
+        MemoryRuntime(
+            MemoryConfig(enabled=True),
+            effective_home=tmp_path,
+            supervisor_factory=fail_supervisor,
+        )
+    assert retained.traceback is not None
     runtime = _runtime(tmp_path)
+
+    observation = MaintenanceObservation(block_reason=None, can_delete_data=True)
+    principal_id = "u-11111111111111111111111111111111"
+    read_call = {
+        "sources": lambda: runtime._processing_record_sources(None),
+        "maintenance": lambda: runtime._processing_record_maintenance(
+            None, observation
+        ),
+        "principal": lambda: runtime.resolve_principal_for_user_key("avibe:local"),
+        "projects": lambda: runtime.list_memory_projects(principal_id),
+    }[read_kind]
+    wake = None
+    if read_kind == "sources":
+        failure = await runtime._processing_record_failure_log(None)
+        assert failure.items == ()
+        assert failure.unavailable_reason == "memory_failure_history_unavailable"
+        wake_entered = asyncio.Event()
+
+        async def pending_wake() -> None:
+            wake_entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(runtime, "_wake_after_writer_close", pending_wake)
+        runtime._defer_wake_until_writer_closed()
+        wake = runtime._wake_task
+        assert wake is not None
+        await wake_entered.wait()
+    run_local = runtime._run_local_observation
+    started = threading.Event()
+    release = threading.Event()
+
+    async def blocked(operation):
+        def run():
+            started.set()
+            assert release.wait(timeout=5.0)
+            return operation()
+
+        return await run_local(run)
+
+    monkeypatch.setattr(runtime, "_run_local_observation", blocked)
+    read = asyncio.create_task(read_call())
+
+    try:
+        assert await asyncio.to_thread(started.wait, 1.0)
+        ownership = runtime.begin_root_ownership_handoff()
+
+        async def close_and_reset():
+            await runtime.close(root_ownership=ownership)
+            return runtime.reset_mutable_data(ownership)
+
+        resetting = asyncio.create_task(close_and_reset())
+        while "local cleanup" not in runtime._close_phase_tasks:
+            await asyncio.sleep(0)
+        assert resetting.done() is False
+        assert (tmp_path / "memory").exists()
+    finally:
+        release.set()
+    await read
+    assert (await resetting).data_deleted is True
+    if wake is not None:
+        assert wake.cancelled() and runtime._wake_task is None
+    monkeypatch.setattr(runtime, "_run_local_observation", run_local)
+
+    if read_kind in {"sources", "maintenance"}:
+        detached = await read_call()
+    else:
+        with pytest.raises(MemoryRuntimeBusyError):
+            await read_call()
+    if read_kind == "sources":
+        assert {
+            detached.memcells.reason,
+            detached.runs.reason,
+            detached.semantic.reason,
+        } == {"busy"}
+        assert not hasattr(runtime, "log_entries_payload")
+        assert not hasattr(runtime, "_call_log_db_path")
+        failure = await runtime._processing_record_failure_log(None)
+        assert failure.unavailable_reason == "busy"
+    elif read_kind == "maintenance":
+        assert detached.data_exists is True
+        assert detached.can_delete_data is False
+        assert detached.error == "busy"
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
+
+    if read_kind == "sources":
+        replacement = runtime.replacement(MemoryConfig(enabled=True), ownership)
+        with pytest.raises(MemoryRuntimeBusyError):
+            _runtime(tmp_path)
+        replacement.accept_root_ownership()
+        await replacement.close()
+    else:
+        runtime.release_retained_root_ownership()
+    await _runtime(tmp_path).close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_timeouts_still_attempt_everos_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    release = asyncio.Event()
+    phases: list[str] = []
+
+    def stalled(label: str):
+        async def wait() -> None:
+            phases.append(label)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        return wait
+
+    async def stop_provider() -> None:
+        phases.append("provider")
+
+    monkeypatch.setattr(runtime, "_cancel_capture_tasks", stalled("capture"))
+    monkeypatch.setattr(runtime, "_close_local_runtime", stalled("local"))
+    monkeypatch.setattr(runtime._supervisor, "close", stop_provider)
+
+    with pytest.raises(RuntimeError, match="local cleanup"):
+        await runtime.close(timeout_seconds=0.03)
+
+    assert phases == ["capture", "local", "provider"]
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
+    release.set()
+    await asyncio.sleep(0)
+    await runtime.close(timeout_seconds=1.0)
+
+    replacement = _runtime(tmp_path)
+    await replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_artifact_install_keeps_root_across_cached_close_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    install_started = threading.Event()
+    install_release = threading.Event()
+
+    def blocked_ensure(*, force: bool) -> dict[str, object]:
+        assert force is True
+        install_started.set()
+        assert install_release.wait(timeout=2.0)
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime._artifact_manager, "ensure", blocked_ensure)
+    install = asyncio.create_task(runtime.install_artifact())
+    assert await asyncio.to_thread(install_started.wait, 1.0)
+
+    close = asyncio.create_task(runtime.close(timeout_seconds=1.0))
+    while "local cleanup" not in runtime._close_phase_tasks:
+        await asyncio.sleep(0)
+    with pytest.raises(TimeoutError):
+        await runtime.close(timeout_seconds=0.03)
+    assert close.done() is False
+    with pytest.raises(MemoryRuntimeBusyError):
+        _runtime(tmp_path)
+
+    install_release.set()
+    assert await install == {
+        "ok": False,
+        "reason": "memory_operation_in_progress",
+        "download_error": None,
+    }
+    await close
+    replacement = _runtime(tmp_path)
+    await replacement.close()
+
+
+@pytest.mark.parametrize("operation", ("reconcile", "wake"))
+@pytest.mark.asyncio
+async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
+    operation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    stop_started = asyncio.Event()
+    stop_release = asyncio.Event()
+
+    async def truthy(*_args) -> bool:
+        return True
+
+    async def delayed_stop() -> None:
+        stop_started.set()
+        await stop_release.wait()
+
+    async def unexpected_async(name: str, *_args, **_kwargs):
+        pytest.fail(f"revoked reconciliation reached {name}")
+
+    def unexpected_sync(name: str, *_args, **_kwargs):
+        pytest.fail(f"revoked reconciliation reached {name}")
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(runtime, "_reconcile_released_ownership", truthy)
+    monkeypatch.setattr(runtime, "_probe_processing", truthy)
+    monkeypatch.setattr(runtime, "artifact_admitted", lambda: True)
+    monkeypatch.setattr(runtime._artifact_manager, "resolve_python", lambda: Path("python"))
+    monkeypatch.setattr(runtime._supervisor, "stop", delayed_stop)
+    monkeypatch.setattr(
+        runtime._supervisor,
+        "wake",
+        lambda *_args, **_kwargs: unexpected_async("provider wake"),
+    )
+    monkeypatch.setattr(
+        runtime._store,
+        "ensure_meta",
+        lambda: unexpected_sync("store metadata"),
+    )
+    monkeypatch.setattr(
+        runtime._provider_root_owner,
+        "ensure",
+        lambda *_args: unexpected_sync("provider root ensure"),
+    )
+    monkeypatch.setattr(runtime, "_close_local_runtime", no_op)
+    monkeypatch.setattr(runtime._supervisor, "close", no_op)
+
+    lifecycle = asyncio.create_task(
+        runtime.reconcile(MemoryConfig(enabled=True))
+        if operation == "reconcile"
+        else runtime.wake(operation_lease_held=True)
+    )
+    await stop_started.wait()
+    runtime.begin_close()
+    stop_release.set()
+
+    expected = {"ok": False, "error": "memory_operation_in_progress"}
+    if operation == "wake":
+        expected["state"] = "starting"
+    assert await lifecycle == expected
     await runtime.close()
-    assert runtime.closed
 
 
 @pytest.mark.asyncio
@@ -187,6 +452,46 @@ async def test_environmental_store_failure_defers_durable_repair_fence(
 
     assert result["state"] == "needs_repair"
     assert runtime.needs_repair is True
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_store_recovery_keeps_facade_identity_and_starts_bound_scheduler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_type = runtime_module.MemoryStore
+
+    def unavailable_store(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    async def acquire(_session_id: str) -> object:
+        return type("Admission", (), {"release": lambda self: None})()
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", unavailable_store)
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+        is_enabled_user=lambda _platform, _user_id: True,
+        lifecycle_snapshot_matches=lambda _session_id, _snapshot: True,
+        acquire_lifecycle_admission=acquire,
+    )
+    facade = runtime.capture_adapter
+    assert isinstance(facade, EnabledMemoryAdapter)
+    assert runtime.available is False
+    assert runtime.start_capture_adapter(
+        task_factory=asyncio.get_running_loop().create_task
+    ) is False
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", store_type)
+    assert runtime._open_store() is True
+
+    assert runtime.capture_adapter is facade
+    assert runtime.available is True
+    assert facade._worker_task is not None
+    assert not facade._worker_task.done()
+    with pytest.raises(RuntimeError, match="scheduler is already bound"):
+        runtime.start_capture_adapter(task_factory=lambda _pending, **_kwargs: None)
     await runtime.close()
 
 
@@ -322,63 +627,6 @@ async def test_malformed_released_clear_journal_remains_repair_fenced(
 
 
 @pytest.mark.asyncio
-async def test_runtime_close_cancels_pending_automatic_wake(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MEMORY-INDEP-003: shutdown cancels volatile recovery work."""
-
-    runtime = _runtime(tmp_path)
-    wake_entered = asyncio.Event()
-
-    async def pending_wake() -> None:
-        wake_entered.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(runtime, "_wake_after_writer_close", pending_wake)
-    runtime._defer_wake_until_writer_closed()
-    wake = runtime._wake_task
-    assert wake is not None
-    await wake_entered.wait()
-
-    await asyncio.wait_for(runtime.close(), timeout=1.0)
-
-    assert wake.cancelled()
-    assert runtime._wake_task is None
-    assert runtime.closed
-
-
-@pytest.mark.asyncio
-async def test_processing_record_uses_native_sources_without_call_log(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-
-    projection = await runtime._processing_record_sources(None)
-
-    assert projection.memcells.status == "unavailable"
-    assert projection.runs.status == "unavailable"
-    assert projection.semantic.status == "unavailable"
-    assert not hasattr(runtime, "log_entries_payload")
-    assert not hasattr(runtime, "log_unlinked_calls_payload")
-    assert not hasattr(runtime, "_call_log_db_path")
-    await runtime.close()
-
-
-@pytest.mark.asyncio
-async def test_capture_diagnostics_are_unavailable_without_delivery_history(
-    tmp_path: Path,
-) -> None:
-    """MEMORY-SEARCH-014: absent durable history is unavailable, not empty."""
-
-    runtime = _runtime(tmp_path)
-
-    observation = await runtime._processing_record_failure_log(None)
-
-    assert observation.items == ()
-    assert observation.unavailable_reason == "memory_failure_history_unavailable"
-    await runtime.close()
-
-
-@pytest.mark.asyncio
 async def test_status_uses_unified_state_and_omits_cascade_protocol(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 
@@ -429,6 +677,13 @@ async def test_disabled_attachment_intake_is_unavailable_in_status(
         ),
         effective_home=tmp_path,
     )
+    first_epoch = runtime.attachment_capture_config_generation()
+    assert isinstance(first_epoch, int)
+    runtime._replace_provider(runtime._provider)
+    second_epoch = runtime.attachment_capture_config_generation()
+    assert isinstance(second_epoch, int)
+    assert second_epoch > first_epoch
+
     runtime.module._writer.disable_attachment_intake()
 
     assert (await runtime.status_payload())["attachment_capture"] == {

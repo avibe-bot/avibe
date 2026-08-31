@@ -443,7 +443,7 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     assert "python release-automation/scripts/github_release.py ensure-draft" in publish
     assert "path: release-automation" in publish
     assert "ref: ${{ needs.resolve-tag.outputs.workflow_sha }}" in publish
-    assert publish.index("- name: Build package") < publish.index(
+    assert publish.index("- name: Build Python distributions") < publish.index(
         "- name: Checkout release automation"
     )
     assert "finalize-github-release:" in publish
@@ -451,12 +451,22 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     assert "--run-sha \"${{ needs.resolve-tag.outputs.workflow_sha }}\"" in publish
     assert "--source-sha \"${{ needs.resolve-tag.outputs.source_sha }}\"" in publish
     assert "python scripts/github_release.py finalize" in publish
+    memory_publish = publish.split("  publish-avibe-memory:", 1)[1].split(
+        "  verify-avibe-memory-pypi:", 1
+    )[0]
+    memory_verify = publish.split("  verify-avibe-memory-pypi:", 1)[1].split(
+        "  publish-avibe-os:", 1
+    )[0]
     avibe_publish = publish.split("  publish-avibe-os:", 1)[1].split(
         "  publish-vibe-remote:", 1
     )[0]
     legacy_publish = publish.split("  publish-vibe-remote:", 1)[1].split(
         "  finalize-github-release:", 1
     )[0]
+    assert "- finalize-github-release" in memory_publish
+    assert "environment: pypi-avibe-memory" in memory_publish
+    assert "- publish-avibe-memory" in memory_verify
+    assert "- verify-avibe-memory-pypi" in avibe_publish
     assert "- finalize-github-release" in avibe_publish
     assert "- finalize-github-release" in legacy_publish
 

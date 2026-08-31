@@ -7,8 +7,8 @@ import sqlite3
 
 import pytest
 
-from core.memory.project_ids import MAX_NAMED_MEMORY_PROJECTS
-from core.memory.store import (
+from vibe.memory_project_ids import MAX_NAMED_MEMORY_PROJECTS
+from avibe_memory.store import (
     MEMORY_STORE_SCHEMA_VERSION,
     MemoryStore,
     _provider_session_ref,
@@ -47,7 +47,7 @@ def test_incomplete_v4_store_is_rejected_during_initialization(
     path = _store_path(tmp_path)
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as conn:
-        conn.executescript(Path("core/memory/schema.sql").read_text(encoding="utf-8"))
+        conn.executescript(Path("avibe_memory/schema.sql").read_text(encoding="utf-8"))
         conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
         conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
 
@@ -64,7 +64,7 @@ def test_v4_store_without_required_primary_key_is_rejected_during_initialization
     path.parent.mkdir(parents=True)
     replacement = f"{table}_without_key"
     with sqlite3.connect(path) as conn:
-        conn.executescript(Path("core/memory/schema.sql").read_text(encoding="utf-8"))
+        conn.executescript(Path("avibe_memory/schema.sql").read_text(encoding="utf-8"))
         conn.execute(f'CREATE TABLE "{replacement}" AS SELECT * FROM "{table}"')
         conn.execute(f'DROP TABLE "{table}"')
         conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
@@ -175,7 +175,7 @@ def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp
 
     path = _store_path(tmp_path)
     path.parent.mkdir(parents=True)
-    schema = Path("core/memory/schema_v2.sql").read_text(encoding="utf-8")
+    schema = Path("avibe_memory/schema_v2.sql").read_text(encoding="utf-8")
     with sqlite3.connect(path) as conn:
         conn.executescript(schema)
         conn.execute("PRAGMA user_version = 2")
@@ -298,7 +298,7 @@ def test_unknown_released_store_shape_is_left_untouched(
         (0, "tests/fixtures/memory_initial_foundation_v0.sql"),
         (0, "tests/fixtures/memory_foundation_v0.sql"),
         (1, "tests/fixtures/memory_foundation_v1.sql"),
-        (3, "core/memory/schema_v2.sql"),
+        (3, "avibe_memory/schema_v2.sql"),
     ],
 )
 def test_released_identity_shapes_migrate_without_provider_io(

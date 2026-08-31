@@ -10,16 +10,12 @@ from typing import Any, Iterable, Literal
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
+from core.delivery_target import normalize_message_kind
 from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
     FENCE_STATES,
     RUN_CANCEL_RETIRE_STATES,
     policy_for,
-)
-from core.memory.admission_metadata import (
-    MEMORY_CLI_ADMITTED_METADATA,
-    MEMORY_ORDINARY_TEXT_METADATA,
-    MEMORY_USER_ID_METADATA,
 )
 from storage.models import (
     agent_runs,
@@ -35,6 +31,77 @@ TURN_OWNER_STATES = ("starting", "active")
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+LEGACY_MEMORY_USER_ID_METADATA = "_memory_user_id"
+LEGACY_MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+LEGACY_MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
+LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS = (
+    LEGACY_MEMORY_USER_ID_METADATA,
+    LEGACY_MEMORY_ORDINARY_TEXT_METADATA,
+    LEGACY_MEMORY_CLI_ADMITTED_METADATA,
+)
+
+
+def _legacy_memory_metadata(metadata: object) -> dict[str, Any]:
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def legacy_admitted_user_id(metadata: object) -> str | None:
+    """Read the principal from a released pre-author_id Message row."""
+
+    memory_user_id = _legacy_memory_metadata(metadata).get(
+        LEGACY_MEMORY_USER_ID_METADATA
+    )
+    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
+        return None
+    return memory_user_id.strip()
+
+
+def legacy_is_ordinary_text(metadata: object) -> bool:
+    """Read the literal ordinary-text flag from a released Message row."""
+
+    return (
+        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_ORDINARY_TEXT_METADATA)
+        is True
+    )
+
+
+def legacy_is_cli_admitted(metadata: object) -> bool:
+    """Read the literal CLI-admission flag from a released Message row."""
+
+    return (
+        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_CLI_ADMITTED_METADATA)
+        is True
+    )
+
+
+def legacy_memory_merge_identity(
+    metadata: object,
+) -> tuple[str | None, bool, bool]:
+    """Return the released Memory facts that one dispatch kept singular."""
+
+    return (
+        legacy_admitted_user_id(metadata),
+        legacy_is_ordinary_text(metadata),
+        legacy_is_cli_admitted(metadata),
+    )
+
+
+def legacy_message_kind(metadata: object) -> str:
+    """Translate released `_memory_*` rows into the core message vocabulary."""
+
+    metadata = _legacy_memory_metadata(metadata)
+    if metadata.get("quick_reply_for"):
+        return "quick_reply"
+    if any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return "forwarded"
+    if metadata.get("edited"):
+        return "edited"
+    if metadata.get("is_system") or metadata.get("system"):
+        return "system"
+    return "original" if legacy_is_ordinary_text(metadata) else "unknown"
 
 
 def utc_now_iso() -> str:
@@ -126,6 +193,7 @@ def message_snapshot(
     author_name: str | None = None,
     native_message_id: str | None = None,
     parent_native_message_id: str | None = None,
+    message_kind: str | None = None,
     read_at: str | None = None,
 ) -> dict[str, Any]:
     """Build the immutable Message candidate held before native acceptance."""
@@ -137,6 +205,11 @@ def message_snapshot(
     if source == "harness" and author == "user" and resolved_type == "user":
         author = "harness"
         resolved_type = "harness"
+    filtered_metadata = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if not str(key).startswith("_memory_")
+    }
     return {
         "scope_id": scope_id,
         "session_id": session_id,
@@ -148,9 +221,10 @@ def message_snapshot(
         "source": source,
         "native_message_id": native_message_id,
         "parent_native_message_id": parent_native_message_id,
+        "message_kind": normalize_message_kind(message_kind),
         "content_text": text if text is not None else body.get("text") or None,
         "content_json": _canonical_json(body),
-        "metadata_json": _canonical_json(metadata or {}),
+        "metadata_json": _canonical_json(filtered_metadata),
         "read_at": read_at,
     }
 
@@ -358,6 +432,11 @@ def _delivery_payload_from_snapshot(
         "author_name": snapshot.get("author_name"),
         "native_message_id": snapshot.get("native_message_id"),
         "parent_native_message_id": snapshot.get("parent_native_message_id"),
+        "message_kind": (
+            normalize_message_kind(snapshot.get("message_kind"))
+            if "message_kind" in snapshot
+            else legacy_message_kind(metadata)
+        ),
         "text": snapshot.get("content_text") or content.get("text") or "",
         "content": content,
         "metadata": metadata,
@@ -417,13 +496,26 @@ _MESSAGE_MERGE_IDENTITY_FIELDS = (
     "author_id",
     "author_name",
     "parent_native_message_id",
+    "message_kind",
 )
 
 
 def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     """Return the Message fields that must stay singular after batching."""
 
-    return tuple(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS)
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = _json_object(value.get("metadata_json"))
+    kind = (
+        normalize_message_kind(value.get("message_kind"))
+        if "message_kind" in value
+        else legacy_message_kind(metadata)
+    )
+    return (
+        *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
+        kind,
+        legacy_memory_merge_identity(metadata),
+    )
 
 
 def has_substantive_input(
@@ -596,6 +688,7 @@ def enqueue_queued(
     author_id: str | None = None,
     author_name: str | None = None,
     native_message_id: str | None = None,
+    message_kind: str | None = None,
     metadata: dict[str, Any] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
@@ -620,6 +713,7 @@ def enqueue_queued(
             author_id=author_id,
             author_name=author_name,
             native_message_id=native_message_id,
+            message_kind=message_kind,
         ),
         dispatch_text=text if dispatch_text is None else dispatch_text,
         dedupe_key=native_dedupe_key(
@@ -1152,29 +1246,8 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
     metadata = _json_object(first.get("metadata_json"))
     web_push_user_keys: list[str] = []
     authorization_contexts: dict[str, dict[str, Any]] = {}
-    memory_user_ids: list[str] = []
-    memory_metadata_present = False
-    memory_ordinary_text = True
-    memory_cli_admitted = True
     for snapshot in snapshots:
         snapshot_metadata = _json_object(snapshot.get("metadata_json"))
-        memory_metadata_present = memory_metadata_present or any(
-            key in snapshot_metadata
-            for key in (
-                MEMORY_USER_ID_METADATA,
-                MEMORY_ORDINARY_TEXT_METADATA,
-                MEMORY_CLI_ADMITTED_METADATA,
-            )
-        )
-        memory_user_id = str(snapshot_metadata.get(MEMORY_USER_ID_METADATA) or "").strip()
-        if memory_user_id and memory_user_id not in memory_user_ids:
-            memory_user_ids.append(memory_user_id)
-        memory_ordinary_text = memory_ordinary_text and (
-            snapshot_metadata.get(MEMORY_ORDINARY_TEXT_METADATA) is True
-        )
-        memory_cli_admitted = memory_cli_admitted and (
-            snapshot_metadata.get(MEMORY_CLI_ADMITTED_METADATA) is True
-        )
         values = [snapshot_metadata.get(WEB_PUSH_USER_KEY_METADATA)]
         plural = snapshot_metadata.get(WEB_PUSH_USER_KEYS_METADATA)
         if isinstance(plural, list):
@@ -1197,13 +1270,6 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
         metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_user_keys[0]
     elif web_push_user_keys:
         metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_user_keys
-    if memory_metadata_present:
-        metadata[MEMORY_ORDINARY_TEXT_METADATA] = memory_ordinary_text
-        metadata[MEMORY_CLI_ADMITTED_METADATA] = memory_cli_admitted
-        if len(memory_user_ids) == 1:
-            metadata[MEMORY_USER_ID_METADATA] = memory_user_ids[0]
-        else:
-            metadata.pop(MEMORY_USER_ID_METADATA, None)
     filtered_contexts = [
         context
         for user_key, context in authorization_contexts.items()

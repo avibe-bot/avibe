@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import io
 import json
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -11,6 +13,8 @@ import pytest
 
 from scripts import memory_runtime_release_guard as guard
 from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_guard_platform_contract_keeps_no_follow_capable_shipped_targets_enabled() -> None:
@@ -75,6 +79,68 @@ def _manifest(
     manifest.write_bytes(manifest_bytes)
     remote[f"{base_url}/memory-runtime-manifest.json"] = manifest_bytes
     return manifest, remote
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_guard_policy_requires_integer_schema_version(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    payload = json.loads(manifest.read_bytes())
+    payload["schema_version"] = schema_version
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(guard.ManifestPolicyError, match="schema_version"):
+        guard.load_release_spec(manifest)
+
+
+def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    script = ROOT / "scripts/memory_runtime_release_guard.py"
+
+    result = subprocess.run(
+        [
+            sys._base_executable,
+            "-S",
+            str(script),
+            "--manifest",
+            str(manifest),
+            "check-policy",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_retired_gate5_verifier_symbols_have_no_production_or_workflow_callers() -> None:
+    retired_symbols = (
+        "Package" + "Metadata",
+        "PackageRelease" + "Policy",
+        "Requirement" + "Classification",
+        "load_package_release_" + "policy",
+        "classify_" + "requirement",
+        "inspect_" + "wheel",
+        "verify_static_" + "transition",
+        "verify_wheel_" + "transition",
+    )
+    sources = [
+        *sorted((ROOT / "scripts").rglob("*.py")),
+        *sorted((ROOT / ".github/workflows").glob("*.yml")),
+        *sorted((ROOT / ".github/workflows").glob("*.yaml")),
+    ]
+
+    references = {
+        symbol: path.relative_to(ROOT).as_posix()
+        for path in sources
+        for symbol in retired_symbols
+        if symbol in path.read_text(encoding="utf-8")
+    }
+
+    assert references == {}
 
 
 @pytest.mark.parametrize("everos_version", sorted(guard.PUBLISHED_RUNTIME_PROVENANCE))
@@ -148,6 +214,36 @@ def _fake_download(remote: dict[str, bytes]):
         destination.write_bytes(payload)
 
     return download
+
+
+def test_current_workflow_guard_command_shapes_execute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest, remote = _manifest(tmp_path)
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    for url, payload in remote.items():
+        (asset_dir / url.rsplit("/", 1)[-1]).write_bytes(payload)
+    monkeypatch.setattr(guard, "_download", _fake_download(remote))
+
+    command_lines = (
+        ["--manifest", str(manifest), "check-policy"],
+        ["--manifest", str(manifest), "verify", "--asset-dir", str(asset_dir)],
+        [
+            "--manifest",
+            str(manifest),
+            "fetch",
+            "--output-dir",
+            str(tmp_path / "fetched"),
+        ],
+    )
+
+    for argv in command_lines:
+        assert guard.main(argv) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result == {"ok": True, "release_tag": "v3.1.0", "asset_count": 4}
 
 
 def test_fetch_and_verify_exact_memory_runtime_release(
@@ -273,3 +369,49 @@ def test_guard_workflow_reports_and_verifies_supported_published_manifests() -> 
     assert "Excluded Memory Runtime manifests" in resolution
     assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
     assert "matrix.manifest.release_tag" in workflow
+
+
+def _guard_workflow() -> str:
+    return (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text(encoding="utf-8")
+
+
+def test_guard_workflow_prefers_memory_distribution_for_split_releases() -> None:
+    workflow = _guard_workflow()
+    memory_selection = '[.tag_name, "avibe-memory", "avibe_memory-*.whl"] | @tsv'
+    legacy_selection = '[.tag_name, "avibe-os", "avibe_os-*.whl"] | @tsv'
+
+    assert memory_selection in workflow
+    assert legacy_selection in workflow
+    assert workflow.index(memory_selection) < workflow.index(legacy_selection)
+
+
+def test_guard_workflow_keeps_legacy_core_only_releases_guarded() -> None:
+    workflow = _guard_workflow()
+
+    assert 'elif any(.assets[]?; (.name | startswith("avibe_os-"))' in workflow
+    assert '[.tag_name, "avibe-os", "avibe_os-*.whl"] | @tsv' in workflow
+    assert 'if [ "$manifest_owner" = "avibe-os" ]; then' in workflow
+
+
+def test_guard_workflow_never_falls_back_from_an_invalid_memory_owner() -> None:
+    workflow = _guard_workflow()
+    resolution = workflow.split("- name: Resolve every published Memory Runtime manifest", 1)[1]
+    resolution = resolution.split("  guard:", 1)[0]
+
+    assert resolution.count("gh release download") == 1
+    assert '--pattern "$wheel_pattern"' in resolution
+    assert "Memory wheel exists, it is authoritative and must not fall back." in resolution
+    assert '$manifest_owner wheel does not contain a valid self-pinned published manifest' in resolution
+
+
+def test_guard_workflow_verification_consumes_recorded_manifest_owner() -> None:
+    workflow = (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text(encoding="utf-8")
+    verification = workflow.split("- name: Resolve selected published Memory Runtime manifest", 1)[1]
+    verification = verification.split("- name: Fetch and verify published assets", 1)[0]
+
+    assert "manifest_owner: $manifest_owner" in workflow
+    assert "wheel_pattern: $wheel_pattern" in workflow
+    assert "MANIFEST_OWNER: ${{ matrix.manifest.manifest_owner }}" in verification
+    assert "WHEEL_PATTERN: ${{ matrix.manifest.wheel_pattern }}" in verification
+    assert '--pattern "$WHEEL_PATTERN"' in verification
+    assert 'glob(os.environ["WHEEL_PATTERN"])' in verification

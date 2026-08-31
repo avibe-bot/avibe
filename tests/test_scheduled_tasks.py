@@ -13044,6 +13044,7 @@ class _DispatchController:
     """
 
     def __init__(self, db_path: Path, working_path: Path) -> None:
+        from core.memory_adapter import DisabledMemoryAdapter
         from core.processing_indicator import ProcessingIndicatorService
         from storage.sessions_service import SQLiteSessionsService
 
@@ -13069,6 +13070,7 @@ class _DispatchController:
         # Reached only on HUMAN turns (the Workbench dispatch path); a bare
         # namespace makes the handler's ``getattr`` probes miss and move on.
         self.agent_auth_service = SimpleNamespace()
+        self.memory_adapter = DisabledMemoryAdapter()
         self.primary_platform = "slack"
         from core.vibe_agents import VibeAgentStore
 

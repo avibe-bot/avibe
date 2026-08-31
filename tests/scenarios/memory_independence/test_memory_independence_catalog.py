@@ -17,7 +17,7 @@ def test_retained_memory_lifecycle_scenarios_do_not_depend_on_retired_delivery_a
     )
     assert "non-blocking" in scenario["name"].lower()
     assert scenario["test"].endswith(
-        "test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_capture"
+        "test_reset_and_archive_events_preserve_barriers"
     )
 
     test_source = (ROOT / "tests/test_session_delivery_fsm.py").read_text()
@@ -28,3 +28,34 @@ def test_retained_memory_lifecycle_scenarios_do_not_depend_on_retired_delivery_a
         "SessionFlushCoordinator",
     )
     assert all(token not in test_source for token in retired_tokens)
+
+
+def test_memory_indep_021_catalog_points_to_executable_import_fence() -> None:
+    catalog = yaml.safe_load(
+        (ROOT / "tests/scenarios/memory_independence/catalog.yaml").read_text()
+    )
+    scenario = next(
+        item for item in catalog["scenarios"] if item["id"] == "MEMORY-INDEP-021"
+    )
+
+    assert scenario["status"] == "covered"
+    assert scenario["test"].endswith("test_memory_indep_021_status_import_fence")
+    test_source = (ROOT / "tests/test_local_deps.py").read_text()
+    assert "test_memory_indep_021_status_import_fence" in test_source
+
+
+def test_memory_indep_026_catalog_points_to_released_first_hop_upgrade() -> None:
+    catalog = yaml.safe_load(
+        (ROOT / "tests/scenarios/memory_independence/catalog.yaml").read_text()
+    )
+    scenario = next(
+        item for item in catalog["scenarios"] if item["id"] == "MEMORY-INDEP-026"
+    )
+
+    assert scenario["status"] == "covered"
+    assert scenario["test"].endswith(
+        "test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation"
+    )
+    test_source = (ROOT / "tests/e2e/test_upgrade_command.py").read_text()
+    assert "INITIAL_RELEASE_VERSION = \"3.0.13\"" in test_source
+    assert "version('avibe-memory')" in test_source

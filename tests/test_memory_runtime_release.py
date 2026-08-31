@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from core.memory.artifact_contract import ColdArtifactAdmissionResult
+from avibe_memory.artifact_contract import ColdArtifactAdmissionResult
 from scripts import build_memory_runtime as runtime_builder
 from scripts import generate_memory_runtime_manifest as manifest_generator
 from scripts.build_memory_runtime import (

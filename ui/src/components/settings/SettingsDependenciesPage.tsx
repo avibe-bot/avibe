@@ -40,6 +40,7 @@ const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan-ink' },
+  'memory-package': { icon: Brain, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
   'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
@@ -124,13 +125,15 @@ export const SettingsDependenciesPage: React.FC = () => {
     // of the generic "not installed" fallback.
     if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
     if (d.status === 'error') return t('settings.dependencies.statusError');
+    if (d.status === 'not_required') return t('settings.dependencies.statusNotRequired');
     if (!d.installed) return t('settings.dependencies.statusMissing');
     if (d.status === 'upgrade_required') return t('settings.dependencies.statusUpgradeRequired');
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
     return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
   };
 
-  const statusVariant = (d: DependencyItem): 'success' | 'warning' | 'destructive' => {
+  const statusVariant = (d: DependencyItem): 'secondary' | 'success' | 'warning' | 'destructive' => {
+    if (d.status === 'not_required') return 'secondary';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
     return d.installed ? 'success' : 'destructive';

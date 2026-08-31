@@ -11642,6 +11642,7 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
         return SimpleNamespace(available=True, reason=None)
 
     monkeypatch.setattr("vibe.api.reconcile_startup_dependencies", fake_reconcile)
+    monkeypatch.setattr("vibe.ui_server._server", SimpleNamespace(started=True))
     monkeypatch.setattr(
         "vibe.api.startup_show_page_prewarm_targets",
         lambda: {
@@ -11691,8 +11692,39 @@ def test_startup_dependency_reconcile_does_not_prewarm_policy_skip(monkeypatch):
         "core.show_runtime.prewarm_show_runtime",
         lambda: pytest.fail("a policy skip must not enter prewarm"),
     )
+    monkeypatch.setattr("vibe.ui_server._server", SimpleNamespace(started=True))
 
     asyncio.run(_reconcile_startup_dependencies_task())
+
+
+def test_startup_dependency_reconcile_waits_until_the_ui_host_is_ready(monkeypatch):
+    from vibe.ui_server import _reconcile_startup_dependencies_task
+
+    server = SimpleNamespace(started=False)
+    calls: list[str] = []
+    monkeypatch.setattr("vibe.ui_server._server", server)
+    monkeypatch.setattr(
+        "vibe.api.reconcile_startup_dependencies",
+        lambda: calls.append("reconcile")
+        or {
+            "ok": True,
+            "show_runtime": {
+                "ok": True,
+                "policy": {"state": "skipped"},
+                "install": {"state": "absent"},
+            },
+        },
+    )
+
+    async def run() -> None:
+        task = asyncio.create_task(_reconcile_startup_dependencies_task())
+        await asyncio.sleep(0.01)
+        assert calls == []
+        server.started = True
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+    assert calls == ["reconcile"]
 
 
 def test_show_runtime_proxy_logs_entry_timing(monkeypatch, tmp_path, caplog):

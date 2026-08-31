@@ -67,6 +67,59 @@ afterEach(() => {
 });
 
 describe('SettingsDependenciesPage Memory runtime', () => {
+  it('routes repairable Python package bootstrap through its own dependency action', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'memory-package',
+        installed: false,
+        status: 'missing',
+        action_class: 'repairable',
+        version: null,
+      })],
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.install' }));
+
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('memory-package'));
+    expect(api.installDependency).not.toHaveBeenCalledWith('memory-runtime');
+  });
+
+  it('hides package bootstrap while Memory is not required', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'memory-package',
+        installed: false,
+        status: 'not_required',
+        action_class: 'none',
+        version: null,
+      })],
+    });
+    renderPage();
+
+    expect(await screen.findByText('settings.dependencies.statusNotRequired')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'settings.dependencies.install' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'settings.dependencies.repair' })).toBeNull();
+  });
+
+  it('keeps explicit package repair available while disabled', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'memory-package',
+        status: 'not_required',
+        action_class: 'repairable',
+      })],
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.reinstall' }));
+
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('memory-package'));
+  });
+
   it('shows only dependency repair and the Memory settings link', async () => {
     renderPage();
     expect(await screen.findByRole('button', { name: 'settings.dependencies.repair' })).toBeTruthy();

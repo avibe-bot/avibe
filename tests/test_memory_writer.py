@@ -9,17 +9,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory.everos import (
+from avibe_memory.everos import (
     AddAck,
     FakeMemoryProvider,
     FlushRetryable,
     FlushSucceeded,
     MemoryProviderFailure,
 )
-from core.memory.attachments import AttachmentBundleInvalidError
-from core.memory.store import MemoryStore, VolatileAdmission
-from core.memory.types import ProviderSessionRef
-from core.memory.writer import (
+from avibe_memory.attachments import AttachmentBundleInvalidError
+from avibe_memory.store import MemoryStore, VolatileAdmission
+from avibe_memory.types import ProviderSessionRef
+from avibe_memory.writer import (
     IDLE_FLUSH_SECONDS,
     MAX_ATTEMPTS,
     MAX_DUPLICATE_ENTRIES,
@@ -39,10 +39,11 @@ PRINCIPAL = "u-" + "1" * 32
 
 def _writer(tmp_path: Path, provider: FakeMemoryProvider, **kwargs: object) -> BestEffortMemoryWriter:
     store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite", effective_home=tmp_path)
+    enabled = kwargs.pop("enabled", lambda: True)
     return BestEffortMemoryWriter(
         store=store,
         provider=provider,
-        enabled=lambda: True,
+        enabled=enabled,
         **kwargs,
     )
 
@@ -157,7 +158,7 @@ async def test_full_queue_discards_increment_process_local_count(
         if sleeps > 1:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    monkeypatch.setattr("avibe_memory.writer.asyncio.sleep", one_scheduler_tick)
     await writer._schedule_due_flushes()
 
     assert writer.dropped_count() == 3
@@ -176,6 +177,36 @@ async def test_worker_delivers_captures_in_offer_order(tmp_path: Path) -> None:
         "message-1",
         "message-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_revoked_runtime_drops_detached_provider_completion(
+    tmp_path: Path,
+) -> None:
+    active = True
+    provider = FakeMemoryProvider()
+    provider_entered = asyncio.Event()
+    provider_release = asyncio.Event()
+    successes: list[str] = []
+
+    async def delayed_add(capture):  # noqa: ANN001, ANN202
+        provider_entered.set()
+        await provider_release.wait()
+        return AddAck(request_id="old-runtime", status="accumulated")
+
+    provider.add = delayed_add
+    writer = _writer(tmp_path, provider, enabled=lambda: active)
+    writer._store.mark_capture_success = lambda: successes.append("published")
+    _reserve_and_offer(writer, 0)
+    await provider_entered.wait()
+
+    active = False
+    provider_release.set()
+    await writer.wait_idle_for_tests()
+
+    assert successes == []
+    assert writer._pending == {}
+    assert writer._permits == MAX_WRITER_PERMITS
 
 
 @pytest.mark.asyncio
@@ -618,7 +649,7 @@ async def test_close_during_attachment_projection_releases_reservation(
             await asyncio.Event().wait()
         return operation(*args)
 
-    monkeypatch.setattr("core.memory.writer.run_blocking", controlled_run_blocking)
+    monkeypatch.setattr("avibe_memory.writer.run_blocking", controlled_run_blocking)
     writer = _writer(
         tmp_path,
         FakeMemoryProvider(),
@@ -907,7 +938,7 @@ async def test_each_exact_flush_threshold_queues_a_visible_barrier(
         if sleeps > 1:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    monkeypatch.setattr("avibe_memory.writer.asyncio.sleep", one_scheduler_tick)
     await writer._schedule_due_flushes()
     assert writer._pending[key].scheduled
     assert writer._queued_items == 1
@@ -944,7 +975,7 @@ async def test_flush_threshold_near_misses_do_not_schedule(
         if sleeps > 1:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    monkeypatch.setattr("avibe_memory.writer.asyncio.sleep", one_scheduler_tick)
     await writer._schedule_due_flushes()
     assert not writer._pending[key].scheduled
     assert writer._queued_items == 0
@@ -983,7 +1014,7 @@ async def test_wall_clock_rollback_does_not_delay_due_flush(
         if sleeps > 1:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    monkeypatch.setattr("avibe_memory.writer.asyncio.sleep", one_scheduler_tick)
     await writer._schedule_due_flushes()
 
     assert writer._pending[key].scheduled
@@ -1083,7 +1114,7 @@ async def test_failed_automatic_barrier_offer_defers_for_five_minutes(
         if sleeps > 2:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr("core.memory.writer.asyncio.sleep", two_scheduler_ticks)
+    monkeypatch.setattr("avibe_memory.writer.asyncio.sleep", two_scheduler_ticks)
     await writer._schedule_due_flushes()
 
     assert writer._pending[key].retry_after == current + IDLE_FLUSH_SECONDS

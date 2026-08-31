@@ -1,7 +1,7 @@
 import io
 
-from core.memory import ui_access
-from core.memory.ui_access import build_ui_read_proof, verify_ui_read_proof
+from vibe import memory_ui_access as ui_access
+from vibe.memory_ui_access import build_ui_read_proof, verify_ui_read_proof
 from vibe import runtime
 
 

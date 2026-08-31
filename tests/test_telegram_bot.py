@@ -112,7 +112,7 @@ def test_group_message_uses_channel_require_mention_override() -> None:
     )
 
     bot.on_message_callback.assert_awaited_once()
-    assert bot.on_message_callback.await_args.args[0].is_ordinary_text is True
+    assert bot.on_message_callback.await_args.args[0].is_original_human_text is True
     assert bot.on_message_callback.await_args.args[1] == "hello team"
 
 
@@ -227,7 +227,7 @@ def test_photo_context_publishes_ordinary_attachment_fact_from_largest_photo() -
     )
 
     assert context is not None
-    assert context.is_ordinary_attachment is True
+    assert context.is_original_human_attachment is True
     assert context.files is not None
     assert [file.url for file in context.files] == ["large"]
 

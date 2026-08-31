@@ -11,21 +11,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory.admission import (
-    MEMORY_CLI_ADMITTED_METADATA,
-    MEMORY_ORDINARY_TEXT_METADATA,
-    MEMORY_USER_ID_METADATA,
+from avibe_memory.admission import (
     CaptureAdmission,
     InboundTurnFacts,
-    is_cli_admitted,
-    is_ordinary_text,
-    merge_identity,
 )
-from core.memory.attachments import workbench_capture_attachments
-from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
+from avibe_memory.attachments import workbench_capture_attachments
+from avibe_memory.im_attachments import select_memory_attachments
+from avibe_memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
-from modules.im.message_facts import is_ordinary_workbench_text
+from modules.im.message_facts import is_original_human_workbench_text
+from storage.message_deliveries import (
+    LEGACY_MEMORY_CLI_ADMITTED_METADATA as MEMORY_CLI_ADMITTED_METADATA,
+    LEGACY_MEMORY_ORDINARY_TEXT_METADATA as MEMORY_ORDINARY_TEXT_METADATA,
+    LEGACY_MEMORY_USER_ID_METADATA as MEMORY_USER_ID_METADATA,
+    legacy_is_cli_admitted as is_cli_admitted,
+    legacy_is_ordinary_text as is_ordinary_text,
+    legacy_memory_merge_identity as merge_identity,
+)
 
 
 PRINCIPAL = "u-" + ("1" * 32)
@@ -44,12 +47,6 @@ class _Principals:
             raise RuntimeError("memory store unavailable")
         self.keys.append(user_key)
         return PRINCIPAL
-
-    def project_for_workdir(self, workdir: str) -> str:
-        if self.raises:
-            raise RuntimeError("memory store unavailable")
-        return PROJECT
-
 
 class _Bindings:
     def __init__(self, *, enabled: bool = True, raises: bool = False) -> None:
@@ -79,7 +76,6 @@ def _facts(**overrides) -> InboundTurnFacts:
         "text": "ordinary text",
         "is_dm": True,
         "is_ordinary_text": True,
-        "memory_enabled": True,
     }
     return InboundTurnFacts(**{**defaults, **overrides})
 
@@ -212,7 +208,6 @@ def test_user_turns_capture_into_default_without_a_workdir() -> None:
 @pytest.mark.parametrize(
     "facts,reason",
     [
-        (_facts(memory_enabled=False), "memory_disabled"),
         (_facts(is_dm=False), "memory_access_denied"),
         (_facts(message_id=None), "memory_invalid_input"),
         (_facts(message_id=""), "memory_invalid_input"),
@@ -241,15 +236,6 @@ def test_a_non_bool_is_dm_never_admits_a_public_channel_turn(malformed: object) 
     assert admission.decide(facts) == CaptureSkipped(reason="memory_access_denied")
 
 
-@pytest.mark.parametrize("malformed", ["false", "true", "0", "1", 0, 1, None, "", []])
-def test_a_non_bool_memory_enabled_never_enables_capture(malformed: object) -> None:
-    """A mis-typed enablement flag must read as disabled, not as consent."""
-
-    assert _admission().decide(_facts(memory_enabled=malformed)) == CaptureSkipped(
-        reason="memory_disabled"
-    )
-
-
 @pytest.mark.parametrize("malformed", ["true", "1", 1, "ordinary"])
 def test_a_non_bool_is_ordinary_text_is_not_a_classification(malformed: object) -> None:
     """Only the surface's literal `True` counts as "this is ordinary human text"."""
@@ -262,7 +248,7 @@ def test_a_non_bool_is_ordinary_text_is_not_a_classification(malformed: object) 
 def test_a_literal_true_still_admits_after_strict_normalization() -> None:
     """The strict reading must not reject the well-behaved surfaces."""
 
-    assert isinstance(_admission().decide(_facts(is_dm=True, memory_enabled=True)), CaptureRequest)
+    assert isinstance(_admission().decide(_facts(is_dm=True)), CaptureRequest)
 
 
 def test_bound_slack_attachment_turn_selects_only_the_materialized_lease(
@@ -281,6 +267,7 @@ def test_bound_slack_attachment_turn_selects_only_the_materialized_lease(
                 attachment_lease=batch.lease,
                 attachment_capture_status="ready",
                 attachment_config_generation=1,
+                attachment_selection=select_memory_attachments(batch.lease),
             )
         )
     finally:
@@ -354,21 +341,22 @@ def test_im_attachment_only_turn_with_every_upload_filtered_is_not_captured() ->
     ],
 )
 def test_denied_attachment_turn_never_reads_the_lease(
-    monkeypatch: pytest.MonkeyPatch,
     overrides: dict[str, object],
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-002."""
 
-    monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
-        lambda _lease: pytest.fail("denied turn reached Memory attachment selection"),
-    )
+    class ForbiddenSelection:
+        @property
+        def attachments(self):
+            pytest.fail("denied turn reached Memory attachment selection")
+
     facts = _facts(
         **{
             "files": [object()],
             "is_ordinary_text": False,
             "is_ordinary_attachment": True,
             "attachment_capture_status": "ready",
+            "attachment_selection": ForbiddenSelection(),
             **overrides,
         }
     )
@@ -396,17 +384,7 @@ def test_not_configured_attachment_turn_keeps_safe_caption() -> None:
     assert request.attachments == ()
 
 
-def test_mixed_attachment_rejections_keep_caption(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
-        lambda _lease: SimpleNamespace(
-            attachments=(),
-            skipped=("file_too_large", "unsupported_type"),
-        ),
-    )
-
+def test_mixed_attachment_rejections_keep_caption() -> None:
     request = _admission().decide(
         _facts(
             text="safe caption",
@@ -416,61 +394,15 @@ def test_mixed_attachment_rejections_keep_caption(
             attachment_lease=object(),
             attachment_capture_status="ready",
             attachment_config_generation=1,
+            attachment_selection=SimpleNamespace(
+                attachments=(),
+                skipped=("file_too_large", "unsupported_type"),
+            ),
         )
     )
 
     assert isinstance(request, CaptureRequest)
     assert request.attachments == ()
-
-
-def test_unexpected_attachment_selection_failure_keeps_text(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Scenario: MEMORY-IM-ATTACH-004."""
-
-    monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
-        lambda _lease: (_ for _ in ()).throw(
-            RuntimeError("secret attachment name must not be logged")
-        ),
-    )
-    caplog.set_level("INFO", logger="core.memory.admission")
-
-    request = _admission().decide(
-        _facts(
-            text="keep this caption",
-            files=[object()],
-            is_ordinary_text=False,
-            is_ordinary_attachment=True,
-            attachment_lease=object(),
-            attachment_capture_status="ready",
-            attachment_config_generation=9,
-        )
-    )
-
-    assert isinstance(request, CaptureRequest)
-    assert request.text == "keep this caption"
-    assert request.attachments == ()
-    warnings = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_selection_failed")
-    ]
-    assert len(warnings) == 1
-    assert "error_type=RuntimeError" in warnings[0].getMessage()
-    assert "secret attachment name" not in caplog.text
-
-
-def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:
-    principals = _Principals(raises=True)
-    bindings = _Bindings(raises=True)
-
-    decision = _admission(principals=principals, bindings=bindings).decide(
-        _facts(memory_enabled=False)
-    )
-
-    assert decision == CaptureSkipped(reason="memory_disabled")
 
 
 def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path) -> None:
@@ -478,7 +410,7 @@ def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path)
     attachment = tmp_path / "attachments" / "avibe" / "receipt.pdf"
     attachment.parent.mkdir(parents=True)
     attachment.write_bytes(b"pdf")
-    ordinary = is_ordinary_workbench_text(
+    ordinary = is_original_human_workbench_text(
         {"content": {"attachments": [{"token": "receipt"}]}},
         None,
     )
@@ -546,7 +478,7 @@ def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, 
     assert [attachment.kind for attachment in converted] == ["doc", "pdf", "image"]
 def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch, tmp_path: Path) -> None:
     uploads = _uploads_dir(monkeypatch, tmp_path)
-    ordinary = is_ordinary_workbench_text(
+    ordinary = is_original_human_workbench_text(
         {"content": {"attachments": [{"token": "export"}]}},
         None,
     )
@@ -635,19 +567,19 @@ def test_merge_identity_normalizes_unusable_metadata(
     assert is_cli_admitted(metadata) is expected[2]
 
 
-def test_delivery_store_shares_metadata_keys_without_capture_admission() -> None:
-    """Storage can name the keys without loading CaptureAdmission or aiohttp."""
+def test_delivery_store_uses_only_legacy_translation_without_capture_admission() -> None:
+    """Storage can translate released rows without loading Memory runtime code."""
 
     script = """
 import sys
 from storage import message_deliveries
-from core.memory.admission_metadata import MEMORY_USER_ID_METADATA
-assert message_deliveries.MEMORY_USER_ID_METADATA is MEMORY_USER_ID_METADATA
-assert "core.memory.admission" not in sys.modules
-assert "core.memory.im_attachments" not in sys.modules
-assert "core.memory.module" not in sys.modules
-assert "core.memory.store" not in sys.modules
-assert "core.memory.types" not in sys.modules
+assert message_deliveries.legacy_message_kind({"_memory_ordinary_text": True}) == "original"
+assert not any(name == "avibe_memory" or name.startswith("avibe_memory.") for name in sys.modules)
+assert "avibe_memory.admission" not in sys.modules
+assert "avibe_memory.im_attachments" not in sys.modules
+assert "avibe_memory.module" not in sys.modules
+assert "avibe_memory.store" not in sys.modules
+assert "avibe_memory.types" not in sys.modules
 assert "core.handlers" not in sys.modules
 assert "httpx" not in sys.modules
 """
@@ -670,12 +602,12 @@ def test_session_turns_import_keeps_memory_and_handlers_behind_their_boundaries(
     script = """
 import sys
 import core.session_turns
-assert "core.memory.admission" not in sys.modules
-assert "core.memory.attachments" not in sys.modules
-assert "core.memory.im_attachments" not in sys.modules
-assert "core.memory.module" not in sys.modules
-assert "core.memory.runtime" not in sys.modules
-assert "core.memory.types" not in sys.modules
+assert "avibe_memory.admission" not in sys.modules
+assert "avibe_memory.attachments" not in sys.modules
+assert "avibe_memory.im_attachments" not in sys.modules
+assert "avibe_memory.module" not in sys.modules
+assert "avibe_memory.runtime" not in sys.modules
+assert "avibe_memory.types" not in sys.modules
 assert "core.handlers" not in sys.modules
 assert "core.handlers.message_handler" not in sys.modules
 assert "aiohttp" not in sys.modules
@@ -691,16 +623,16 @@ assert "aiohttp" not in sys.modules
 
 
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:
-    assert is_ordinary_workbench_text({"text": "hello"}, None) is True
-    assert is_ordinary_workbench_text({"text": "hello"}, "msg-7") is False
+    assert is_original_human_workbench_text({"text": "hello"}, None) is True
+    assert is_original_human_workbench_text({"text": "hello"}, "msg-7") is False
     assert (
-        is_ordinary_workbench_text(
+        is_original_human_workbench_text(
             {"content": {"attachments": [{"token": "upload-1"}]}},
             None,
         )
         is True
     )
-    assert is_ordinary_workbench_text({"files": [{"name": "a.png"}]}, None) is True
-    assert is_ordinary_workbench_text({"metadata": {"forwarded": True}}, None) is False
-    assert is_ordinary_workbench_text({"metadata": {"forward_origin": "chat"}}, None) is False
-    assert is_ordinary_workbench_text("not a payload", None) is False
+    assert is_original_human_workbench_text({"files": [{"name": "a.png"}]}, None) is True
+    assert is_original_human_workbench_text({"metadata": {"forwarded": True}}, None) is False
+    assert is_original_human_workbench_text({"metadata": {"forward_origin": "chat"}}, None) is False
+    assert is_original_human_workbench_text("not a payload", None) is False

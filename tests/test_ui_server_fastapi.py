@@ -2440,6 +2440,37 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
 
 
+def test_terminal_restart_failure_does_not_block_config_restart_retry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "ok": False,
+            "state": "failed",
+            "job_id": "failed-upgrade",
+            "supervisor_pid": 4242,
+            "error": "new release failed readiness",
+        },
+    )
+    scheduled: list[dict] = []
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": None, "ui_pid": 22})
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: scheduled.append(kwargs) or {"job_id": "retry"},
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result == {"ok": True, "restart": {"job_id": "retry"}}
+    assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
+
+
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     ui_dist = tmp_path / "dist"

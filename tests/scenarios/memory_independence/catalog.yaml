@@ -13,6 +13,12 @@ capability:
     - tests/test_native_session_providers.py
     - tests/test_core_services_dispatch.py
     - tests/test_admin_notifications.py
+    - tests/test_memory_disabled_isolation.py
+    - tests/test_memory_loader.py
+    - tests/test_local_deps.py
+    - tests/test_memory_upgrade_packaged.py
+    - tests/test_upgrade_flow.py
+    - tests/scenarios/memory_independence/test_memory_package_shape.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
@@ -37,13 +43,13 @@ scenarios:
     status: covered
     kind: correctness
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_capture_admitted_before_new_is_discarded_after_transition
+    test: tests/test_memory_adapter.py::test_worker_failure_and_stale_lifecycle_each_release_exactly_once
   - id: MEMORY-INDEP-003
     name: Idle-session capture still attributes while shutdown may drop volatile work
     status: covered
     kind: regression_keep
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_idle_session_capture_attributes_while_shutdown_may_drop
+    test: tests/test_memory_adapter.py::test_session_and_shutdown_cancellation_release_active_leases
   - id: MEMORY-INDEP-004
     name: Shared delivery imports do not load Memory implementations
     status: covered
@@ -61,13 +67,13 @@ scenarios:
     status: covered
     kind: correctness
     layer: contract
-    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_text_memory_capture_setup_failure_is_best_effort
+    test: tests/test_memory_adapter.py::test_capture_scheduling_failure_releases_retained_lease
   - id: MEMORY-INDEP-007
     name: Archive releases process-local Memory authorization after one non-blocking barrier offer
     status: covered
     kind: guardrail
     layer: contract
-    test: tests/test_memory_slice3.py::test_archive_memory_cli_session_commits_without_waiting_on_memory
+    test: tests/test_memory_slice3.py::test_archive_session_commits_then_offers_session_archived
   - id: MEMORY-INDEP-008
     name: Shutdown drops queued and tracked Memory work before closing the runtime
     status: covered
@@ -85,7 +91,7 @@ scenarios:
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_capture
+    test: tests/test_memory_adapter.py::test_reset_and_archive_events_preserve_barriers
   - id: MEMORY-INDEP-011
     name: Streaming waiters release lifecycle snapshots after handler admission
     status: covered
@@ -98,3 +104,57 @@ scenarios:
     kind: regression_keep
     layer: contract
     test: tests/test_admin_notifications.py::test_memory_indep_012_processing_events_stay_in_service_logs
+  - id: MEMORY-INDEP-013
+    name: Disabled fresh startup has no Memory runtime filesystem, task, or process side effects
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_013_disabled_fresh_startup_has_no_runtime_side_effects
+  - id: MEMORY-INDEP-014
+    name: Disabled Controller startup succeeds while optional Memory implementation imports are blocked
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_014_disabled_controller_starts_with_runtime_imports_blocked
+  - id: MEMORY-INDEP-015
+    name: Shutdown bounds capture cancellation, destructive settlement, and runtime close under one shared budget
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budget
+  - id: MEMORY-INDEP-016
+    name: New queued rows use authenticated author and message kind without Memory-private metadata
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_memory_indep_016_new_queue_uses_core_identity_without_memory_metadata
+  - id: MEMORY-INDEP-017
+    name: Core workflows run without importing the optional Memory implementation package
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory
+  - id: MEMORY-INDEP-021
+    name: Not-required and unreadable Memory status imports no optional implementation
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_local_deps.py::test_memory_indep_021_status_import_fence
+  - id: MEMORY-INDEP-024
+    name: Forward upgrades inspect Memory package shape without retired lifecycle imports
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_024_forward_package_shape_and_import_contract
+  - id: MEMORY-INDEP-025
+    name: A failed upgrade is terminal, has no compensating package mutation, and permits retry
+    status: covered
+    kind: correctness
+    layer: scenario
+    test: tests/test_upgrade_flow.py::test_memory_indep_025_failed_upgrade_is_terminal_and_retryable
+  - id: MEMORY-INDEP-026
+    name: An enabled bundled-Memory install automatically converges after its first split-package upgrade
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/e2e/test_upgrade_command.py::test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation

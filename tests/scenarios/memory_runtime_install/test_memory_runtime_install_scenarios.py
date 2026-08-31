@@ -12,9 +12,9 @@ from pathlib import Path
 import yaml
 
 from core import managed_runtime
-from core.memory import artifact as memory_artifact
-from core.memory.artifact import MemoryArtifactManager
-from core.memory.artifact_contract import ColdArtifactAdmissionResult
+from avibe_memory import artifact as memory_artifact
+from avibe_memory.artifact import MemoryArtifactManager
+from avibe_memory.artifact_contract import ColdArtifactAdmissionResult
 from tests.ui_server_test_helpers import csrf_headers, save_config
 from vibe import api
 from vibe.ui_server import app

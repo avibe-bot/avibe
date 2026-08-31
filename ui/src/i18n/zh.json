@@ -386,6 +386,7 @@
       "statusReady": "就绪",
       "statusDetected": "已检测",
       "statusMissing": "未安装",
+      "statusNotRequired": "无需安装",
       "statusUpgradeRequired": "需要升级",
       "install": "安装",
       "reinstall": "重新安装",
@@ -417,6 +418,10 @@
         "node": {
           "label": "Node.js",
           "detail": "上述运行时的共同前置依赖。"
+        },
+        "memory-package": {
+          "label": "记忆 Python 包",
+          "detail": "与当前 Avibe 版本匹配的可选记忆实现。"
         },
         "memory-runtime": {
           "label": "记忆运行时",
@@ -1887,6 +1892,18 @@
     "remote_access_diagnostics_failed": "连接诊断未能完成。",
     "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。",
     "memory_disabled": "记忆功能已禁用，或当前连接无法访问它。",
+    "memory_requirement_unreadable": "无法安全读取记忆设置。请先修复配置，再更改软件包。",
+    "memory_not_required": "请先在记忆设置中启用记忆功能，再安装其 Python 软件包。",
+    "memory_package_not_repairable": "记忆 Python 软件包当前无需修复。",
+    "memory_package_admission_unavailable": "Avibe 无法确认是否能安全修复记忆软件包。",
+    "memory_package_source_build": "源码检出环境不支持修复记忆软件包。",
+    "memory_package_unpublished_build": "修复记忆软件包需要已发布的 Avibe 版本。",
+    "memory_package_metadata_unreadable": "无法读取已安装记忆软件包的元数据，请手动修复。",
+    "memory_package_metadata_ambiguous": "检测到多个记忆软件包提供者。请移除重复安装后重试。",
+    "memory_package_install_failed": "无法安装记忆 Python 软件包。",
+    "memory_package_restart_failed": "记忆软件包已安装，但 Avibe 无法安排服务重启。",
+    "memory_implementation_unavailable": "记忆实现当前不可用。",
+    "memory_implementation_incompatible": "记忆实现与此 Avibe 版本不兼容。",
     "memory_invalid_input": "该记忆请求无效。",
     "memory_processing_record_entry_not_found": "该记忆处理条目已不可用。",
     "memory_failure_history_unavailable": "详细的记忆失败历史记录不可用。",

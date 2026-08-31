@@ -4,7 +4,7 @@ from types import ModuleType
 
 import pytest
 
-from core.memory.modality import (
+from avibe_memory.modality import (
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
     classify_pinned_attachment,

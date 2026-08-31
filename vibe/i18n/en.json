@@ -450,6 +450,7 @@
     "infoUnavailable": "Update information unavailable. Please try again later.",
     "upgradeFailed": "Upgrade failed. Please check logs.",
     "upgradeFailedShort": "Upgrade failed",
+    "memoryRequirementUnreadable": "Upgrade blocked because the persisted Memory requirement could not be read safely.",
     "upgradeFailedSlack": "❌ *Upgrade Failed*\n\nPlease check the logs for details.",
     "updating": "Updating Avibe...",
     "updatingSlack": "⏳ *Updating Avibe...*\n\nPlease wait, the service will restart shortly.",
@@ -828,6 +829,8 @@
         "deleteDataFailed": "Memory data deletion failed",
         "reconfigureFailed": "Memory reconfiguration failed",
         "operationInProgress": "another Memory operation is in progress",
+        "implementationUnavailable": "Memory implementation unavailable",
+        "implementationIncompatible": "Memory implementation is incompatible",
         "unknown": "unknown reason"
       },
       "fault": {

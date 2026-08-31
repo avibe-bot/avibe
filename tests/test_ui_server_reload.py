@@ -142,7 +142,7 @@ def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypat
         "core.services.settings.load_config",
         lambda *a, **k: _config_with_tunnel(enabled=False),
     )
-    monkeypatch.setattr("core.memory.ui_access._process_secret", memory_ui_secret)
+    monkeypatch.setattr("vibe.memory_ui_access._process_secret", memory_ui_secret)
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
     monkeypatch.setattr(runtime, "write_status", lambda *args: captured.setdefault("status", args))

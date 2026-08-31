@@ -11,19 +11,19 @@ from pathlib import Path
 
 import pytest
 
-import core.memory.runtime as runtime_module
+import avibe_memory.runtime as runtime_module
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.artifact import (
+from avibe_memory.artifact import (
     EVEROS_VERSION,
     FakeMemoryArtifactManager,
     MemoryArtifactCandidate,
     MemoryArtifactManager,
     MemoryProviderRootState,
 )
-from core.memory.confined_filesystem import ConfinedFilesystemError
-from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
-from core.memory.operation_lock import MemoryOperationBusy
-from core.memory.process import FakeEverOSProcessFactory
+from avibe_memory.confined_filesystem import ConfinedFilesystemError
+from avibe_memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
+from config.memory_operation_lock import MemoryOperationBusy
+from avibe_memory.process import FakeEverOSProcessFactory
 
 
 def _config(*, legacy_needs_repair: bool = False) -> MemoryConfig:
@@ -255,6 +255,8 @@ async def test_wake_retries_short_operation_lease_contention(
     )
     attempts = 0
     releases = 0
+    acquired = threading.Event()
+    finish_acquire = threading.Event()
 
     class Lease:
         def __init__(self, _home: Path) -> None:
@@ -265,6 +267,8 @@ async def test_wake_retries_short_operation_lease_contention(
             attempts += 1
             if attempts < 3:
                 raise MemoryOperationBusy("busy")
+            acquired.set()
+            finish_acquire.wait(timeout=5)
 
         def release(self) -> None:
             nonlocal releases
@@ -280,15 +284,28 @@ async def test_wake_retries_short_operation_lease_contention(
         effective_home=tmp_path,
     )
 
-    result = await runtime.wake()
+    wake = asyncio.create_task(runtime.wake())
+    assert await asyncio.to_thread(acquired.wait, 2)
+    runtime.begin_close()
+    finish_acquire.set()
+    result = await wake
 
-    assert result == {"ok": True, "state": "running"}
-    assert attempts == 3
-    assert releases == 1
+    assert result == {
+        "ok": False,
+        "state": "starting",
+        "error": "memory_operation_in_progress",
+    }
+    assert (attempts, releases) == (3, 1)
+    later = Lease(tmp_path)
+    later.acquire()
+    later.release()
+    assert (attempts, releases) == (4, 2)
 
 
+@pytest.mark.parametrize("consumer", ("wake", "install", "controller"))
 @pytest.mark.asyncio
-async def test_cancelled_wake_releases_a_completed_lease_acquisition(
+async def test_cancelled_operation_releases_a_completed_lease_acquisition(
+    consumer: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
@@ -310,8 +327,17 @@ async def test_cancelled_wake_releases_a_completed_lease_acquisition(
             lease_events.append("release")
 
     monkeypatch.setattr(runtime_module, "MemoryOperationLease", Lease)
-    runtime = memory_runtime_factory(_config(), effective_home=tmp_path)
-    task = asyncio.create_task(runtime.wake())
+    if consumer == "controller":
+        import core.controller as controller_module
+        from core.controller import Controller
+
+        monkeypatch.setattr(controller_module, "MemoryOperationLease", Lease)
+        controller = Controller.__new__(Controller)
+        task = asyncio.create_task(controller._try_memory_operation_lease(tmp_path))
+    else:
+        runtime = memory_runtime_factory(_config(), effective_home=tmp_path)
+        operation = runtime.wake if consumer == "wake" else runtime.install_artifact
+        task = asyncio.create_task(operation())
     assert await asyncio.to_thread(acquire_started.wait, 2)
 
     task.cancel()

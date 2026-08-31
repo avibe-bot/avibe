@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 
-MEMORY_ROOT = Path(__file__).resolve().parents[1] / "core" / "memory"
+MEMORY_ROOT = Path(__file__).resolve().parents[1] / "avibe_memory"
 
 
 def test_memory_modules_do_not_import_python_311_datetime_utc() -> None:

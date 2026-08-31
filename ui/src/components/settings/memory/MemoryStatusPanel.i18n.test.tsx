@@ -47,6 +47,24 @@ afterEach(cleanup);
 
 describe('MemoryStatusPanel localized recovery contract', () => {
   it.each([
+    [
+      'en',
+      'Memory is still handling work and could not stop safely.',
+      'Reason: Memory is still handling work and could not stop safely.',
+    ],
+    [
+      'zh',
+      '记忆仍在处理工作，无法安全停止。',
+      '原因：记忆仍在处理工作，无法安全停止。',
+    ],
+  ] as const)('localizes runtime-busy status and source reasons in %s', (language, reason, sourceReason) => {
+    renderStatus(language, 'degraded', 'memory_runtime_busy');
+    expect(screen.getByText(reason)).toBeTruthy();
+    expect(screen.getByText(sourceReason)).toBeTruthy();
+    expect(screen.queryByText(/memory_runtime_busy/)).toBeNull();
+  });
+
+  it.each([
     ['en', 'Needs repair', 'The confined local Memory data root is unusable or incompatible and needs Repair.'],
     ['zh', '需要修复', '受限的本地记忆数据根不可用或不兼容，需要修复。'],
   ] as const)('localizes needs_repair and its confined-root reason in %s', (language, state, reason) => {

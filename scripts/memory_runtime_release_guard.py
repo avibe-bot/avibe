@@ -114,7 +114,7 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         payload = json.loads(manifest_bytes)
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestPolicyError(f"cannot read Memory Runtime manifest: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
         raise ManifestPolicyError("Memory Runtime manifest schema_version must be 1")
     everos_version = payload.get("everos_version")
     provenance = (

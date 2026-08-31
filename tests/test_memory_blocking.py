@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from core.memory.blocking import run_blocking
+from core.blocking import run_blocking
 
 
 def test_run_blocking_returns_operation_result() -> None:

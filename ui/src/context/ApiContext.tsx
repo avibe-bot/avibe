@@ -1860,8 +1860,9 @@ export type InstallResult = {
   output: string | null;
   path?: string | null;
   job_id?: string;
-  status?: 'running' | 'succeeded' | 'failed';
+  status?: 'running' | 'succeeded' | 'failed' | 'rejected';
   reason?: string | null;
+  action_class?: 'operator_only';
   download_error?: DependencyDownloadError | null;
 };
 
@@ -1878,10 +1879,12 @@ export type DependencyDownloadError = {
 export type DependencyItem = {
   id: string;
   kind: 'tool' | 'runtime' | 'node';
-  required: boolean;
-  installed: boolean;
+  required: boolean | null;
+  installed: boolean | null;
   version: string | null;
-  status: 'ready' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
+  status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
+  readiness?: 'ready' | 'not_required' | 'not_ready' | 'memory_requirement_unreadable';
+  action_class?: 'none' | 'repairable' | 'operator_only';
   reason?: string | null;
   release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;

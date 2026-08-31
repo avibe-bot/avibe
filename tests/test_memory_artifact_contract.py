@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from core.memory import artifact_contract
+from avibe_memory import artifact_contract
 
 
 def test_cold_artifact_admission_is_bounded_and_warms_the_runtime(

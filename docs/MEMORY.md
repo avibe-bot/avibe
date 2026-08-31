@@ -85,6 +85,39 @@ diagnostics. It contains no Memory payload and is not a delivery queue or
 recovery state machine. The later sections define the product behavior at these
 seams.
 
+## Optional package and upgrades
+
+The implementation is the optional `avibe-memory` distribution. Avibe loads it
+in-process only when Memory is required; a missing, incompatible, or failed
+package degrades Memory without making Avibe or its Agent unavailable.
+
+Forward upgrades preserve the Memory package when Memory is enabled or the
+package is already present. The immutable upgrader in a bundled-Memory release
+can only install the new core on its first split-package upgrade. After that
+core starts, the existing background dependency reconciler sees the persisted
+enabled state after the host is ready, installs the exact same-version companion
+under the shared upgrade lock, and schedules one ordinary service
+restart. Automatic attempts are persisted per core version and stop after three
+failures or non-converging restarts. Disabled, source, editable, and already-ready
+installs do not trigger that convergence. A disabled published install may expose
+an explicit companion-package bootstrap so the user can install the optional
+package before enabling Memory; it never runs automatically.
+
+Package resolution, installation, upgrade, or restart failures leave core
+Avibe running and are reported as structured terminal results; a later startup
+may retry within that version's budget, while an explicit attempt remains
+available after exhaustion. If package installation succeeds but the service
+restart cannot be scheduled, the same ledger keeps the dependency repairable and
+the next explicit Repair retries only activation. Other startup dependencies
+continue reconciling in the surviving UI process. Avibe performs no automatic package rollback
+and keeps no rollback plan, lifecycle reservation, quarantine, Gate 5 lifecycle
+verifier, or general recovery bootstrap.
+
+Published Memory Runtime artifacts retain their manifest, hash, fetch, verify,
+and backup availability safeguards. Those checks protect immutable release
+assets and manual recovery inputs; they do not compensate for or reverse an
+installed-package transition.
+
 ## User and Agent memory ownership
 
 Automatic capture of a user's messages continues to target that user's Memory
@@ -106,10 +139,8 @@ Existing Memory data is not moved. Agent-recorded facts written before this
 split remain under the user owner and are still searchable there. A newer
 installation preserves the released four-field provider-session shape, but
 delivery remains process-local; pending Agent-owner work may be lost across restart,
-rollback, or runtime replacement and is never replayed from an older queue.
-On rollback, already-delivered Agent-owner memories remain stored but are hidden
-from an older reader until Avibe is upgraded again. Already submitted provider
-outcomes are never replayed by this path.
+or runtime replacement and is never replayed from an older queue. Already
+submitted provider outcomes are never replayed by this path.
 
 ## IM attachment capture
 
@@ -269,7 +300,7 @@ capture data.
 
 Lifecycle offers and barriers are non-blocking. `/new`, archive, runtime
 replacement, and shutdown never wait for capture delivery. Work still preparing
-or belonging to a stale authority generation may be missed or invalidated.
+after its runtime authority is revoked may be missed or invalidated.
 Shutdown and replacement intentionally drop volatile work.
 
 The writer gives add and flush operations at most three attempts, and retries

@@ -770,8 +770,8 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         async def _on_message(context, text):
             received.update(
                 text=text,
-                ordinary_text=context.is_ordinary_text,
-                ordinary_attachment=context.is_ordinary_attachment,
+                ordinary_text=context.is_original_human_text,
+                ordinary_attachment=context.is_original_human_attachment,
                 files=[file.name for file in context.files or ()],
             )
 

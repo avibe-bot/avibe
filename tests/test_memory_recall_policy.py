@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.memory.types import RecallPolicy
+from avibe_memory.types import RecallPolicy
 
 
 def test_non_agentic_policy_defaults_only_an_omitted_limit() -> None:
