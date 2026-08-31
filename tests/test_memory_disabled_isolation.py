@@ -606,6 +606,73 @@ async def test_disabled_cleanup_pending_projects_degraded_status(
         await cleanup_task
 
 
+@pytest.mark.asyncio
+async def test_enabled_operation_bounds_disabled_cleanup_wait_and_remains_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def reconcile_orphans() -> None:
+        cleanup_started.set()
+        await cleanup_release.wait()
+        record_path.unlink()
+
+    controller, cleanup_task, record_path = await _start_disabled_cleanup(
+        monkeypatch,
+        reconcile_orphans,
+    )
+    await cleanup_started.wait()
+    controller.config.memory = replace(controller.config.memory, enabled=True)
+    controller._memory_disabled_cleanup_wait_seconds = 0.01
+
+    class _Runtime:
+        async def wake(self) -> dict[str, object]:
+            return {"ok": True, "state": "running"}
+
+    controller.memory_runtime = _Runtime()
+
+    try:
+        with pytest.raises(
+            MemoryStoreUnavailableError,
+            match="Disabled Memory cleanup is still in progress",
+        ):
+            await asyncio.wait_for(controller.wake_memory(), timeout=0.1)
+
+        class _Python310AsyncioTimeoutError(Exception):
+            pass
+
+        async def raise_python310_timeout(
+            _future: object,
+            *,
+            timeout: float,
+        ) -> None:
+            assert timeout == 0.01
+            raise _Python310AsyncioTimeoutError
+
+        with monkeypatch.context() as python310:
+            python310.setattr(
+                asyncio,
+                "TimeoutError",
+                _Python310AsyncioTimeoutError,
+            )
+            python310.setattr(asyncio, "wait_for", raise_python310_timeout)
+            with pytest.raises(
+                MemoryStoreUnavailableError,
+                match="Disabled Memory cleanup is still in progress",
+            ):
+                await controller.wake_memory()
+        assert cleanup_task.done() is False
+        assert cleanup_task.cancelled() is False
+
+        cleanup_release.set()
+        await cleanup_task
+        assert await controller.wake_memory() == {"ok": True, "state": "running"}
+    finally:
+        cleanup_release.set()
+        await cleanup_task
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected_state"),
     [("failure", "degraded"), ("retained", "degraded"), ("released", "disabled")],

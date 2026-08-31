@@ -81,6 +81,7 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
+_DISABLED_MEMORY_CLEANUP_WAIT_SECONDS = 1.0
 
 
 def _load_memory_capture_types() -> tuple[type, type, type]:
@@ -751,7 +752,25 @@ class Controller:
     async def _await_disabled_memory_cleanup(self) -> None:
         cleanup_task = getattr(self, "_memory_disabled_cleanup_task", None)
         if cleanup_task is not None and not cleanup_task.done():
-            await asyncio.shield(cleanup_task)
+            wait_seconds = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        "_memory_disabled_cleanup_wait_seconds",
+                        _DISABLED_MEMORY_CLEANUP_WAIT_SECONDS,
+                    )
+                ),
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(cleanup_task),
+                    timeout=wait_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise MemoryStoreUnavailableError(
+                    "Disabled Memory cleanup is still in progress"
+                ) from exc
 
     def _start_memory_capture_adapter(self, runtime: "MemoryRuntime") -> bool:
         """Bind every capture task to the Controller-owned event loop."""

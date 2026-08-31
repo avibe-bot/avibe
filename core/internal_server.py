@@ -1049,6 +1049,12 @@ def create_app(
 
         try:
             result = await controller.wake_memory()
+        except MemoryStoreUnavailableError:
+            result = {
+                "ok": False,
+                "state": "degraded",
+                "error": "memory_store_unavailable",
+            }
         except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
             result = {"ok": False, "state": "degraded", "error": _memory_implementation_error_code(exc)}
         except Exception:

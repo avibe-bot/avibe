@@ -1447,6 +1447,34 @@ def test_memory_wake_uses_non_destructive_runtime_operation() -> None:
     runtime.wake.assert_awaited_once_with()
 
 
+def test_memory_wake_preserves_store_unavailable_outcome() -> None:
+    controller = _build_controller_double()
+    controller.wake_memory = AsyncMock(
+        side_effect=MemoryStoreUnavailableError(
+            "Disabled Memory cleanup is still in progress"
+        )
+    )
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/wake", json={})
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "ok": False,
+        "state": "degraded",
+        "error": "memory_store_unavailable",
+    }
+    controller.wake_memory.assert_awaited_once_with()
+
+
 def test_reconcile_memory_hot_applies_the_persisted_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
