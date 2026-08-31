@@ -11,13 +11,20 @@ const INSTALLABLE_DEPENDENCIES = new Set([
 
 export const dependencyHasInstallAction = (
   dependency: Pick<DependencyItem, 'id' | 'status' | 'action_class'>,
-): boolean => (
-  dependency.status !== 'unsupported'
-  && dependency.status !== 'not_required'
-  && dependency.action_class !== 'none'
-  && dependency.action_class !== 'operator_only'
-  && INSTALLABLE_DEPENDENCIES.has(dependency.id)
-);
+): boolean => {
+  const optionalMemoryPackageRepair = (
+    dependency.id === 'memory-package'
+    && dependency.status === 'not_required'
+    && dependency.action_class === 'repairable'
+  );
+  return (
+    dependency.status !== 'unsupported'
+    && (dependency.status !== 'not_required' || optionalMemoryPackageRepair)
+    && dependency.action_class !== 'none'
+    && dependency.action_class !== 'operator_only'
+    && INSTALLABLE_DEPENDENCIES.has(dependency.id)
+  );
+};
 
 /** Treat any active or uncertain runtime as unsafe for dependency replacement. */
 export const memoryRuntimeSidecarRunning = (

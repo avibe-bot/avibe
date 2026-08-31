@@ -8873,33 +8873,41 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
         published_install = (
             get_build_identity().kind != "source" and current_version is not None
         )
-        if published_install and metadata.provider_count == 0:
+        if published_install:
+            if metadata.provider_count == 0:
+                status = "missing"
+                reason = "memory_package_missing"
+                action_class = "repairable"
+            elif metadata.provider_count is None:
+                status = "error"
+                reason = "memory_package_metadata_unreadable"
+                action_class = "operator_only"
+            elif metadata.provider_count > 1:
+                status = "error"
+                reason = "memory_package_metadata_ambiguous"
+                action_class = "operator_only"
+            elif metadata.version is None:
+                status = "error"
+                reason = "memory_package_metadata_unreadable"
+                action_class = "operator_only"
+            elif not _memory_versions_match(metadata.version, current_version):
+                status = "error"
+                reason = "memory_package_version_mismatch"
+                action_class = "repairable"
+            else:
+                status = "not_required"
+                reason = None
+                # Disabled means no automatic install, not no recovery path. An
+                # exact package can still have a broken import/entry point.
+                action_class = "repairable"
             return (
                 _memory_package_row(
                     requirement,
                     metadata,
-                    status="missing",
+                    status=status,
                     readiness="not_required",
-                    reason="memory_package_missing",
-                    action_class="repairable",
-                    current_version=current_version,
-                ),
-                _memory_runtime_row(requirement, None),
-            )
-        if (
-            published_install
-            and metadata.provider_count == 1
-            and metadata.version is not None
-            and not _memory_versions_match(metadata.version, current_version)
-        ):
-            return (
-                _memory_package_row(
-                    requirement,
-                    metadata,
-                    status="error",
-                    readiness="not_required",
-                    reason="memory_package_version_mismatch",
-                    action_class="repairable",
+                    reason=reason,
+                    action_class=action_class,
                     current_version=current_version,
                 ),
                 _memory_runtime_row(requirement, None),

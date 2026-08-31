@@ -104,6 +104,22 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     expect(screen.queryByRole('button', { name: 'settings.dependencies.repair' })).toBeNull();
   });
 
+  it('keeps explicit package repair available while disabled', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'memory-package',
+        status: 'not_required',
+        action_class: 'repairable',
+      })],
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.reinstall' }));
+
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('memory-package'));
+  });
+
   it('shows only dependency repair and the Memory settings link', async () => {
     renderPage();
     expect(await screen.findByRole('button', { name: 'settings.dependencies.repair' })).toBeTruthy();

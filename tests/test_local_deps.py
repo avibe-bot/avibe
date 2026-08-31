@@ -1503,6 +1503,36 @@ def test_required_memory_package_metadata_precedes_optional_imports(
         ),
         pytest.param(
             api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            True,
+            True,
+            ("not_required", "not_required", None, "repairable"),
+            id="not-required-exact-package-keeps-explicit-repair",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(None, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_metadata_unreadable", "operator_only"),
+            id="not-required-unreadable-metadata-stays-operator-only",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(2, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_metadata_ambiguous", "operator_only"),
+            id="not-required-ambiguous-metadata-stays-operator-only",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
             api._MemoryPackageMetadata(0, None),
             "source",
             "3.0.14",
@@ -2649,8 +2679,15 @@ def test_memory_package_reachability_disabled_enable_bootstrap_ready(
     optional_ready, _runtime = api._memory_dependencies_status(offline=True)
     assert (optional_ready["readiness"], optional_ready["action_class"]) == (
         "not_required",
-        "none",
+        "repairable",
     )
+    assert api._memory_package_repair_rejection(allow_optional=True) is None
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda **_kwargs: pytest.fail("disabled startup must remain a no-op"),
+    )
+    assert api.reconcile_memory_package_on_startup()["skipped"] is True
 
     api.save_memory_config(
         {
