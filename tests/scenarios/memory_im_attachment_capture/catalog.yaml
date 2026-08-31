@@ -20,6 +20,12 @@ contract:
   workbench_compatibility: implicit_main_llm_for_one_cycle
 status_legend:
   covered: executable evidence exists
+retired_scenarios:
+  reason: >-
+    Office converter readiness was removed when Memory became limited to
+    EverOS self-contained parser formats.
+  ids:
+    - MEMORY-IM-ATTACH-014
 scenarios:
   - id: MEMORY-IM-ATTACH-001
     name: Bound Slack DM attachments traverse one download, pin, add, flush, and search path

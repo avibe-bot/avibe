@@ -46,7 +46,10 @@ def test_memory_im_attachment_catalog_is_indexed_and_locks_the_approved_contract
     ]
 
     scenario_ids = [row["id"] for row in catalog["scenarios"]]
+    retired_scenario_ids = catalog["retired_scenarios"]["ids"]
     assert len(scenario_ids) == len(set(scenario_ids))
+    assert retired_scenario_ids == ["MEMORY-IM-ATTACH-014"]
+    assert set(retired_scenario_ids).isdisjoint(scenario_ids)
     assert all(
         scenario_id in scenario_ids
         for observation in observations["observations"]
