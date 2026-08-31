@@ -10,7 +10,9 @@ import {
   Navigate,
   Outlet,
   Route,
+  RouterProvider,
   Routes,
+  createMemoryRouter,
   useLocation,
   useNavigate,
 } from 'react-router-dom';
@@ -162,6 +164,27 @@ afterEach(() => {
 });
 
 describe('SettingsOverlayRouteSurface', () => {
+  it('preserves the Chat route with a data router', async () => {
+    const user = userEvent.setup();
+    const router = createMemoryRouter([
+      { path: '*', element: <Harness desktop /> },
+    ], {
+      initialEntries: ['/chat/ses_1'],
+    });
+    render(<RouterProvider router={router} />);
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'shell-settings' }));
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
   it('keeps the background route mounted across Settings navigation and close', async () => {
     const user = userEvent.setup();
     const view = render(
@@ -253,9 +276,9 @@ describe('SettingsOverlayRouteSurface', () => {
 
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
-    const backdrop = document.querySelector<HTMLElement>('[data-dialog-surface-backdrop="true"]');
-    expect(backdrop).not.toBeNull();
-    await user.click(backdrop!);
+    expect(document.body.style.pointerEvents).not.toBe('none');
+    expect(document.querySelector('[data-dialog-surface-backdrop="true"]')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'shell-settings' }));
 
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
