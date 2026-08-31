@@ -9,7 +9,6 @@ import re
 import secrets
 import stat
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -46,7 +45,6 @@ IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset(
 
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MAX_ATTACHMENT_NAME_BYTES = 512
-_OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS = 30.0
 _MAX_FILE_URI_BYTES = 8 * 1024
 _BUNDLE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -201,7 +199,6 @@ class AttachmentPinStore:
         source_root, allowed_records = self._pin_source(source_lease)
         with self._lock:
             self._verify_private_layout()
-            office_conversion_deadline = _office_conversion_deadline(source_items)
             staging_fd = _open_private_directory(self._effective_home, self._staging, "attachment staging root")
             bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             bundle_id: str | None = None
@@ -238,36 +235,6 @@ class AttachmentPinStore:
                                 total_before=total_bytes,
                                 expected_sha256=source_sha256,
                             )
-                            if (
-                                source.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
-                                and not _pinned_office_matches(
-                                    stage_fd,
-                                    filename,
-                                    source.kind,
-                                    source.ext,
-                                    conversion_path=(
-                                        self._staging / stage_name / filename
-                                    ),
-                                    conversion_timeout_seconds=(
-                                        _remaining_office_conversion_seconds(
-                                            office_conversion_deadline
-                                        )
-                                    ),
-                                )
-                            ):
-                                raise AttachmentPinError(
-                                    "memory_invalid_input",
-                                    "Office attachment changed before it was pinned",
-                                )
-                        except AttachmentPinError as error:
-                            if (
-                                source.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
-                                and error.error
-                                in {"memory_invalid_input", "memory_input_too_large"}
-                            ):
-                                _discard_staged_file(stage_fd, filename)
-                                continue
-                            raise
                         finally:
                             if source_fd is not None:
                                 os.close(source_fd)
@@ -380,32 +347,9 @@ class AttachmentPinStore:
                 )
                 try:
                     projected: list[CaptureAttachment] = []
-                    office_conversion_deadline = _office_conversion_deadline(
-                        checked.attachments
-                    )
                     for index, pinned in enumerate(checked.attachments):
                         filename = _bundle_filename(index, pinned.ext)
                         _verify_pinned_file(bundle_fd, filename, pinned)
-                        if (
-                            pinned.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
-                            and not _pinned_office_matches(
-                                bundle_fd,
-                                filename,
-                                pinned.kind,
-                                pinned.ext,
-                                conversion_path=(
-                                    self._bundles
-                                    / checked.bundle_id
-                                    / filename
-                                ),
-                                conversion_timeout_seconds=(
-                                    _remaining_office_conversion_seconds(
-                                        office_conversion_deadline
-                                    )
-                                ),
-                            )
-                        ):
-                            continue
                         projected.append(
                             CaptureAttachment(
                                 kind=pinned.kind,
@@ -670,21 +614,8 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
             # The provider answers an unparseable extension with a permanent
             # rejection, so an upload it cannot read never becomes a capture.
             continue
-        office_classification = None
-        if extension in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS:
-            # EverOS aborts the whole /add batch when soffice is missing or the
-            # bytes are not a convertible Office container.
-            office_classification = memory_modality.classify_pinned_attachment(
-                name,
-                mimetype,
-                path,
-            )
-            if office_classification is None:
-                continue
         normalized_mime = mimetype.lower().split(";", 1)[0].strip()
-        if office_classification is not None:
-            kind, _classified_extension = office_classification
-        elif normalized_mime.startswith("image/"):
+        if normalized_mime.startswith("image/"):
             kind: MemoryContentKind = "image"
         elif normalized_mime.startswith("audio/"):
             kind = "audio"
@@ -941,70 +872,6 @@ def _require_safe_source_file(info: os.stat_result) -> None:
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022:
         raise AttachmentPinError("memory_invalid_input", "attachment source is unsafe")
     _require_current_owner(info, "attachment source", storage=False)
-
-
-def _office_conversion_deadline(
-    attachments: Sequence[CaptureAttachment] | tuple[PinnedAttachment, ...],
-) -> float | None:
-    if not any(
-        attachment.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
-        for attachment in attachments
-    ):
-        return None
-    return time.monotonic() + _OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS
-
-
-def _remaining_office_conversion_seconds(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    return max(0.0, deadline - time.monotonic())
-
-
-def _pinned_office_matches(
-    directory_fd: int,
-    filename: str,
-    kind: MemoryContentKind,
-    extension: str,
-    *,
-    conversion_path: Path | None = None,
-    conversion_timeout_seconds: float | None = None,
-) -> bool:
-    try:
-        descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
-    except OSError as error:
-        raise _storage_failure(error, "pinned Office attachment is unavailable") from error
-    try:
-        _require_private_file(os.fstat(descriptor), "pinned Office attachment")
-        classification = memory_modality.classify_pinned_attachment(
-            filename,
-            "application/octet-stream",
-            Path(filename),
-            file_fd=descriptor,
-        )
-        if classification != (kind, extension):
-            return False
-        if conversion_path is None:
-            return True
-        if (
-            conversion_timeout_seconds is None
-            or conversion_timeout_seconds <= 0
-        ):
-            return False
-        return memory_modality.office_document_conversion_succeeds(
-            conversion_path,
-            timeout_seconds=conversion_timeout_seconds,
-        )
-    finally:
-        os.close(descriptor)
-
-
-def _discard_staged_file(directory_fd: int, filename: str) -> None:
-    try:
-        os.unlink(filename, dir_fd=directory_fd)
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        raise _storage_failure(error, "invalid Office attachment could not be discarded") from error
 
 
 def _copy_source_file(

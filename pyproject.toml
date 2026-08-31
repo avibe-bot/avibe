@@ -70,7 +70,6 @@ dependencies = [
     "packaging>=23.0",
     "uvicorn[standard]>=0.27",
     "imagesize>=1.4.1",
-    "olefile>=0.47",
     "pywebpush>=2.0.3",
     "cryptography>=42.0",
     # keccak256 + ripemd160 for vault signing-key address derivation

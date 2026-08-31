@@ -1135,8 +1135,6 @@
       "dependencyNotReady": "{label} is not ready",
       "memoryRuntimeMissing": "Memory Runtime is missing: {reason}",
       "memoryRuntimeError": "Memory Runtime failed readiness: {reason}",
-      "officeAttachmentsReady": "Office attachment capture is ready through LibreOffice (soffice)",
-      "officeAttachmentsMissing": "LibreOffice (soffice) is missing; Word, Excel, PowerPoint, iWork, ODF, and RTF attachments cannot be captured by Memory",
       "dependencyReachable": "{label} download endpoint is reachable: {url}",
       "dependencyProbeUnsupported": "{label} server does not support a body-free probe",
       "dependencyProbeUnavailable": "{label} archive could not be resolved",

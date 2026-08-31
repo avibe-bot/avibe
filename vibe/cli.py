@@ -11325,30 +11325,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     return items
 
 
-def _office_attachment_doctor_items() -> list[dict]:
-    from core.memory.modality import office_conversion_available
-
-    language = _configured_cli_language()
-    available = office_conversion_available()
-    capability_status = "ready" if available else "missing"
-    items: list[dict] = []
-    _add_doctor_item(
-        items,
-        "pass" if available else "warn",
-        i18n_t(
-            (
-                "doctor.item.officeAttachmentsReady"
-                if available
-                else "doctor.item.officeAttachmentsMissing"
-            ),
-            language,
-        ),
-        code=f"dependencies.office-attachments.{capability_status}",
-        capability_status=capability_status,
-    )
-    return items
-
-
 def _show_runtime_install(payload: dict) -> dict:
     install = payload.get("install")
     return install if isinstance(install, dict) else {}
@@ -12084,7 +12060,6 @@ def _doctor(*, deep: bool = False):
     dependency_items = [
         *_managed_dependencies_doctor_items(deep=deep),
         *_show_runtime_doctor_items(deep=deep),
-        *_office_attachment_doctor_items(),
     ]
     for item in dependency_items:
         status = item.get("status")

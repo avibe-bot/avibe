@@ -1135,8 +1135,6 @@
       "dependencyNotReady": "{label} 尚未就绪",
       "memoryRuntimeMissing": "Memory Runtime 缺失：{reason}",
       "memoryRuntimeError": "Memory Runtime 就绪检查失败：{reason}",
-      "officeAttachmentsReady": "已通过 LibreOffice（soffice）启用 Office 附件记忆采集",
-      "officeAttachmentsMissing": "缺少 LibreOffice（soffice）；Memory 无法采集 Word、Excel、PowerPoint、iWork、ODF 和 RTF 附件",
       "dependencyReachable": "{label} 下载端点可访问：{url}",
       "dependencyProbeUnsupported": "{label} 服务不支持无请求体探测",
       "dependencyProbeUnavailable": "无法解析 {label} 归档",
