@@ -34,6 +34,11 @@ WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
 LEGACY_MEMORY_USER_ID_METADATA = "_memory_user_id"
 LEGACY_MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
 LEGACY_MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
+LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS = (
+    LEGACY_MEMORY_USER_ID_METADATA,
+    LEGACY_MEMORY_ORDINARY_TEXT_METADATA,
+    LEGACY_MEMORY_CLI_ADMITTED_METADATA,
+)
 
 
 def _legacy_memory_metadata(metadata: object) -> dict[str, Any]:
@@ -506,13 +511,10 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
         if "message_kind" in value
         else legacy_message_kind(metadata)
     )
-    legacy_author_fence = (
-        legacy_admitted_user_id(metadata) if not value.get("author_id") else None
-    )
     return (
         *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
         kind,
-        legacy_author_fence,
+        legacy_memory_merge_identity(metadata),
     )
 
 

@@ -891,7 +891,7 @@ def test_core_message_kind_separates_original_and_quick_reply_segments() -> None
     assert _collect_delivery_segment([original, quick_reply]) == [original]
 
 
-def test_legacy_and_new_original_rows_keep_the_same_merge_identity() -> None:
+def test_legacy_and_new_original_rows_do_not_merge_admission_schemas() -> None:
     legacy = {
         "scope_id": "scope",
         "platform": "avibe",
@@ -909,12 +909,12 @@ def test_legacy_and_new_original_rows_keep_the_same_merge_identity() -> None:
         "metadata": {},
     }
 
-    assert delivery_store.message_merge_identity(legacy) == (
+    assert delivery_store.message_merge_identity(legacy) != (
         delivery_store.message_merge_identity(current)
     )
 
 
-def test_raw_legacy_and_new_original_snapshots_keep_the_same_merge_identity() -> None:
+def test_raw_legacy_and_new_original_snapshots_do_not_merge_admission_schemas() -> None:
     common = {
         "scope_id": "scope",
         "platform": "avibe",
@@ -935,9 +935,43 @@ def test_raw_legacy_and_new_original_snapshots_keep_the_same_merge_identity() ->
         "metadata_json": "{}",
     }
 
-    assert delivery_store.message_merge_identity(legacy) == (
+    assert delivery_store.message_merge_identity(legacy) != (
         delivery_store.message_merge_identity(current)
     )
+
+
+@pytest.mark.parametrize("metadata_field", delivery_store.LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS)
+def test_every_released_memory_admission_fact_fences_delivery_segments(
+    metadata_field: str,
+) -> None:
+    metadata = {
+        delivery_store.LEGACY_MEMORY_USER_ID_METADATA: "principal-a",
+        delivery_store.LEGACY_MEMORY_ORDINARY_TEXT_METADATA: True,
+        delivery_store.LEGACY_MEMORY_CLI_ADMITTED_METADATA: True,
+    }
+    common = {
+        "scope_id": "scope",
+        "platform": "avibe",
+        "author": "user",
+        "type": "user",
+        "source": "user",
+        "author_id": "same-core-author",
+        "author_name": "Alice",
+        "parent_native_message_id": None,
+    }
+    first = {**common, "metadata": metadata}
+    changed_metadata = dict(metadata)
+    value = changed_metadata[metadata_field]
+    changed_metadata[metadata_field] = not value if isinstance(value, bool) else f"{value}-other"
+    second = {**common, "metadata": changed_metadata}
+
+    first_identity = delivery_store.message_merge_identity(first)
+    second_identity = delivery_store.message_merge_identity(second)
+
+    assert first_identity[-1] == delivery_store.legacy_memory_merge_identity(metadata)
+    assert second_identity[-1] == delivery_store.legacy_memory_merge_identity(changed_metadata)
+    assert first_identity != second_identity
+    assert _collect_delivery_segment([first, second]) == [first]
 
 
 def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
