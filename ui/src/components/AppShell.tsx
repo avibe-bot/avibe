@@ -32,6 +32,12 @@ import {
   isOwnerOnlyPath,
   settingsLandingPath,
 } from '../lib/adminNavigation';
+import {
+  isSettingsRoutePath,
+  locationPath,
+  settingsOverlayOpenState,
+  useSettingsOverlayOrigin,
+} from '../lib/settingsOverlay';
 
 type ShellNavItem = {
   to?: string;
@@ -171,6 +177,10 @@ export const AppShell: React.FC = () => {
   } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
+  const settingsOverlayOrigin = useSettingsOverlayOrigin(location);
+  const settingsOpen = isSettingsRoutePath(location.pathname);
+  const settingsOverlayOpen = isDesktop && settingsOpen && settingsOverlayOrigin !== null;
+  const surfaceLocation = settingsOverlayOpen ? settingsOverlayOrigin.location : location;
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
   }, [location.pathname]);
@@ -235,7 +245,7 @@ export const AppShell: React.FC = () => {
   // that read it must stay decided for the tab's whole life (see the context doc). The
   // app pages read the same context and mount only on these routes, so for them the two
   // agree anyway.
-  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(surfaceLocation.pathname);
 
   // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
   // (Files → "Open in Editor" / "Open Terminal Here") lands on `/apps/editor` WITHOUT the
@@ -328,11 +338,11 @@ export const AppShell: React.FC = () => {
   // surface (own header + back button), and built-in apps own their toolbars.
   // These mobile surfaces render their own top chrome, so the shell's mobile
   // brand header AND the bottom tab bar are hidden on them.
-  const isChat = location.pathname.startsWith('/chat/');
-  const isSearch = location.pathname === '/search';
-  const isSettings = location.pathname === '/settings' || location.pathname.startsWith('/settings/');
-  const isShowPageApp = location.pathname.startsWith('/apps/show/');
-  const isBuiltinApp = isStandaloneAppRoutePath(location.pathname);
+  const isChat = surfaceLocation.pathname.startsWith('/chat/');
+  const isSearch = surfaceLocation.pathname === '/search';
+  const isSettings = isSettingsRoutePath(surfaceLocation.pathname);
+  const isShowPageApp = surfaceLocation.pathname.startsWith('/apps/show/');
+  const isBuiltinApp = isStandaloneAppRoutePath(surfaceLocation.pathname);
   const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
@@ -398,21 +408,29 @@ export const AppShell: React.FC = () => {
             <div className="flex items-stretch gap-2">
               {canUseApps && <AppsLauncher />}
               <Link
-                to={isSettings
-                  ? '/'
+                to={settingsOpen
+                  ? settingsOverlayOrigin
+                    ? locationPath(settingsOverlayOrigin.location)
+                    : '/'
                   : isDesktop
                     ? settingsLandingPath(capabilities.can_manage_instance)
                     : '/settings'}
+                state={settingsOpen
+                  ? settingsOverlayOrigin?.location.state
+                  : isDesktop
+                    ? settingsOverlayOpenState(location)
+                    : undefined}
+                replace={settingsOpen && settingsOverlayOrigin !== null}
                 title={t('appShell.openControlPanel')}
                 aria-label={t('appShell.openControlPanel')}
                 className={clsx(
                   'group flex w-11 shrink-0 items-center justify-center rounded-lg border text-foreground transition-colors',
-                  isSettings
+                  settingsOpen
                     ? 'border-mint/40 bg-mint/[0.08]'
                     : 'border-border-strong hover:bg-foreground/[0.04]',
                 )}
               >
-                <Settings className={clsx('size-[18px]', isSettings ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
+                <Settings className={clsx('size-[18px]', settingsOpen ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
               </Link>
             </div>
 
@@ -496,7 +514,7 @@ export const AppShell: React.FC = () => {
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
-          <ErrorBoundary variant="page" resetKeys={[location.key]}>
+          <ErrorBoundary variant="page" resetKeys={[surfaceLocation.key]}>
             <Outlet />
           </ErrorBoundary>
         </div>

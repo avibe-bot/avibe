@@ -310,26 +310,32 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.queryByTestId('account-menu')).toBeNull();
   });
 
-  it('uses the Settings button to close an open Settings surface', async () => {
+  it('uses the Settings button to return to the route that opened Settings', async () => {
     viewport.isDesktop = true;
     const user = userEvent.setup();
 
     render(
-      <MemoryRouter initialEntries={['/settings/replies']}>
+      <MemoryRouter initialEntries={['/chat/session-1']}>
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<div data-testid="workbench" />} />
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
             <Route path="settings/replies" element={<div data-testid="settings" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId('settings')).toBeTruthy();
-    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
-    expect(settingsToggle.getAttribute('href')).toBe('/');
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    let settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/replies');
     await user.click(settingsToggle);
-    expect(await screen.findByTestId('workbench')).toBeTruthy();
+
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/chat/session-1');
+    await user.click(settingsToggle);
+    expect(await screen.findByTestId('chat')).toBeTruthy();
   });
 });
 

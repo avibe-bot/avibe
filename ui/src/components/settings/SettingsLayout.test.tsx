@@ -4,7 +4,9 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import type { Location } from 'react-router-dom';
 
+import { settingsOverlayOpenState } from '@/lib/settingsOverlay';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -65,8 +67,13 @@ const SettingsLayoutHarness = () => (
   </>
 );
 
-const renderLayout = (path: string) => render(
-  <MemoryRouter initialEntries={[path]}>
+type SettingsTestEntry = string | {
+  pathname: string;
+  state?: unknown;
+};
+
+const renderLayout = (entry: SettingsTestEntry) => render(
+  <MemoryRouter initialEntries={[entry]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="backends" element={<div>backends-body</div>} />
@@ -79,6 +86,7 @@ const renderLayout = (path: string) => render(
         <Route path="platforms/users" element={<div>users-body</div>} />
         <Route path="platforms/groups" element={<div>groups-body</div>} />
       </Route>
+      <Route path="/chat/:sessionId" element={<div>chat-body</div>} />
     </Routes>
   </MemoryRouter>,
 );
@@ -114,6 +122,28 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
+  it('closes a desktop overlay back to its exact opening route', async () => {
+    media.matches = true;
+    const user = userEvent.setup();
+    const origin: Location = {
+      pathname: '/chat/ses_7',
+      search: '?message=m1',
+      hash: '#tail',
+      state: { source: 'search' },
+      key: 'chat-origin',
+    };
+
+    renderLayout({
+      pathname: '/settings/replies',
+      state: settingsOverlayOpenState(origin),
+    });
+
+    const close = screen.getByRole('link', { name: 'settings.close' });
+    expect(close.getAttribute('href')).toBe('/chat/ses_7?message=m1#tail');
+    await user.click(close);
+    expect(await screen.findByText('chat-body')).toBeTruthy();
+  });
+
   it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
     renderLayout('/settings/replies');
 

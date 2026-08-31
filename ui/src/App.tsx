@@ -36,6 +36,7 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
 import { SettingsLayout } from './components/settings/SettingsLayout';
+import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import type { SessionInfo } from './context/ApiContext';
@@ -671,6 +672,103 @@ const PwaRouteMemory = () => {
   return null;
 };
 
+const settingsRoute = () => (
+  <Route path="/settings" element={<SettingsLayout />}>
+    <Route index element={null} />
+    <Route path="appearance" element={<Navigate to="/settings/replies" replace />} />
+    <Route path="account" element={<Navigate to="/settings/replies" replace />} />
+    <Route path="shortcuts" element={<SettingsShortcutsPage />} />
+    <Route path="service" element={<SettingsServicePage />} />
+    <Route path="platforms" element={<SettingsPlatformsPage />} />
+    <Route path="platforms/groups" element={<ChannelList isPage />} />
+    <Route path="platforms/users" element={<UserList />} />
+    <Route path="remote-access" element={<RemoteAccessPage />} />
+    <Route path="backends" element={<SettingsBackendsPage />} />
+    <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
+    <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
+    <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
+    <Route
+      path="models"
+      element={
+        <ModelHubCapabilityGate>
+          <Suspense fallback={<AppsRouteFallback />}>
+            <SettingsModelsPage />
+          </Suspense>
+        </ModelHubCapabilityGate>
+      }
+    />
+    <Route path="dependencies" element={<SettingsDependenciesPage />} />
+    <Route path="memory" element={<SettingsMemoryPage />} />
+    <Route path="replies" element={<SettingsMessagingPage />} />
+    <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
+    <Route path="diagnostics/logs" element={<SettingsLogsPage />} />
+    <Route path="access" element={<PermissionsPage />} />
+  </Route>
+);
+
+const WorkbenchRouteSurface = () => (
+  <SettingsOverlayRouteSurface
+    fallbackElement={<Navigate to="/" replace />}
+    settingsRoute={settingsRoute()}
+  >
+    <Route path="/setup" element={<Wizard />} />
+
+    {/* Workbench mode — `/` is the canvas root, the five capability
+        entries (Inbox + Agents/Skills/Harness/Vaults) live alongside it. */}
+    <Route path="/" element={<Workbench />} />
+    <Route path="/inbox" element={<InboxPage />} />
+    <Route path="/search" element={<SearchPage />} />
+    <Route path="/agents" element={<AgentsPage />} />
+    <Route path="/skills" element={<SkillsPage />} />
+    <Route path="/harness" element={<HarnessPage />} />
+    <Route path="/vaults" element={<VaultsPage />} />
+    <Route path="/projects" element={<ProjectsPage />} />
+    <Route path="/more" element={<Navigate to="/" replace />} />
+
+    <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
+    <Route
+      path="/apps/files"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <AppsFileBrowserPage />
+        </Suspense>
+      }
+    />
+    <Route
+      path="/apps/terminal"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <AppsTerminalPage />
+        </Suspense>
+      }
+    />
+    <Route
+      path="/apps/editor"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <AppsEditorPage />
+        </Suspense>
+      }
+    />
+    <Route path="/apps/library" element={<LibraryRoute />} />
+    <Route
+      path="/apps/show/:sessionId"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <ShowPageRoute />
+        </Suspense>
+      }
+    />
+    <Route path="/chat/:sessionId" element={<ChatPage />} />
+
+    {settingsRoute()}
+
+    {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
+      <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
+    ))}
+  </SettingsOverlayRouteSurface>
+);
+
 function RouterRoot() {
   return (
     <UnsavedChangesProvider>
@@ -687,107 +785,7 @@ const router = createBrowserRouter(
   createRoutesFromElements(
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>
-        <Route path="/setup" element={<Wizard />} />
-
-        {/* Workbench mode — `/` is the canvas root, the five capability
-            entries (Inbox + Agents/Skills/Harness/Vaults) live alongside
-            it. Commit 02 ships sidebar + placeholder pages; the real
-            module screens land in later commits. */}
-        <Route path="/" element={<Workbench />} />
-        <Route path="/inbox" element={<InboxPage />} />
-        <Route path="/search" element={<SearchPage />} />
-        <Route path="/agents" element={<AgentsPage />} />
-        <Route path="/skills" element={<SkillsPage />} />
-        <Route path="/harness" element={<HarnessPage />} />
-        <Route path="/vaults" element={<VaultsPage />} />
-        <Route path="/projects" element={<ProjectsPage />} />
-        {/* /more retired: the workbench Apps tab now summons the Dock drawer
-            (§7.1b), which absorbed the old More-page content. Redirect any
-            lingering link/bookmark home. */}
-        <Route path="/more" element={<Navigate to="/" replace />} />
-        {/* Apps layer — File Browser (Phase 1) + Terminal (Phase 2). The
-            sidebar Apps launcher opens these; /apps lands on the file browser. */}
-        <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
-        <Route
-          path="/apps/files"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <AppsFileBrowserPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/apps/terminal"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <AppsTerminalPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/apps/editor"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <AppsEditorPage />
-            </Suspense>
-          }
-        />
-        <Route path="/apps/library" element={<LibraryRoute />} />
-        {/* A pinned Show Page opened as an app. Desktop opens a window and hands
-            back to the canvas; mobile frames it full-screen (§7.1b). */}
-        <Route
-          path="/apps/show/:sessionId"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <ShowPageRoute />
-            </Suspense>
-          }
-        />
-        <Route path="/chat/:sessionId" element={<ChatPage />} />
-
-        {/* Settings stays inside the Workbench shell. The section rail is the
-            only second-level navigation; provider/platform routes remain
-            inline detail screens beneath their owning section. */}
-        <Route path="/settings" element={<SettingsLayout />}>
-          <Route index element={null} />
-          <Route path="appearance" element={<Navigate to="/settings/replies" replace />} />
-          <Route path="account" element={<Navigate to="/settings/replies" replace />} />
-          <Route path="shortcuts" element={<SettingsShortcutsPage />} />
-          <Route path="service" element={<SettingsServicePage />} />
-          <Route path="platforms" element={<SettingsPlatformsPage />} />
-          <Route path="platforms/groups" element={<ChannelList isPage />} />
-          <Route path="platforms/users" element={<UserList />} />
-          <Route path="remote-access" element={<RemoteAccessPage />} />
-          <Route path="backends" element={<SettingsBackendsPage />} />
-          <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
-          <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
-          <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
-          <Route
-            path="models"
-            element={
-              <ModelHubCapabilityGate>
-                <Suspense fallback={<AppsRouteFallback />}>
-                  <SettingsModelsPage />
-                </Suspense>
-              </ModelHubCapabilityGate>
-            }
-          />
-          <Route path="dependencies" element={<SettingsDependenciesPage />} />
-          <Route path="memory" element={<SettingsMemoryPage />} />
-          <Route path="replies" element={<SettingsMessagingPage />} />
-          <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
-          <Route path="diagnostics/logs" element={<SettingsLogsPage />} />
-          <Route path="access" element={<PermissionsPage />} />
-        </Route>
-
-        {/* Retired admin and top-level routes only translate old deep links. */}
-        {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
-          <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
-        ))}
-        {/* The server intentionally serves the SPA shell for every extensionless
-            path. Keep stale bookmarks and retired push targets inside AuthGuard,
-            then recover authenticated/local clients to the workbench root. */}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>,
   ),
