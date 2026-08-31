@@ -95,13 +95,16 @@ Forward upgrades preserve the Memory package when Memory is enabled or the
 package is already present. The immutable upgrader in a bundled-Memory release
 can only install the new core on its first split-package upgrade. After that
 core starts, the existing background dependency reconciler sees the persisted
-enabled state, installs the exact same-version companion, and schedules one
-ordinary Avibe restart. Disabled, source, editable, and already-ready installs
-do not trigger that convergence.
+enabled state after the host is ready, installs the exact same-version companion
+under the shared upgrade lock, and schedules one ordinary service
+restart. Automatic attempts are persisted per core version and stop after three
+failures or non-converging restarts. Disabled, source, editable, and already-ready
+installs do not trigger that convergence.
 
 Package resolution, installation, upgrade, or restart failures leave core
 Avibe running and are reported as structured terminal results; a later startup
-or explicit attempt may retry. Avibe performs no automatic package rollback
+may retry within that version's budget, while an explicit attempt remains
+available after exhaustion. Avibe performs no automatic package rollback
 and keeps no rollback plan, lifecycle reservation, quarantine, Gate 5 lifecycle
 verifier, or general recovery bootstrap.
 

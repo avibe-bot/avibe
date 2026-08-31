@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.error
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -1995,7 +1996,8 @@ def test_memory_indep_026_startup_repairs_required_missing_companion_once(monkey
         ),
     )
 
-    def repair() -> dict:
+    def repair(*, automatic: bool = False) -> dict:
+        assert automatic is True
         calls.append(True)
         return {
             "ok": True,
@@ -2299,24 +2301,48 @@ def test_memory_package_server_admission_rejects_nonrepairable_rows(
 
 
 def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) -> None:
-    plan = SimpleNamespace(command=["repair"])
+    plan = SimpleNamespace(
+        command=["repair"],
+        activation=None,
+        method="pip",
+        preflight_error=None,
+    )
     calls: dict[str, object] = {}
+    lock_events: list[str] = []
     monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda: None)
     monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+
+    class _Lock:
+        def __enter__(self):
+            lock_events.append("entered")
+
+        def __exit__(self, *_args):
+            lock_events.append("exited")
+
+    monkeypatch.setattr(api, "atomic_upgrade_lock", _Lock)
 
     def build_plan(**kwargs):
+        lock_events.append("build")
         calls["plan"] = kwargs
         return plan
 
     def execute_plan(actual, **kwargs):
+        lock_events.append("execute")
         calls["execute"] = (actual, kwargs)
         return subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr="")
 
     monkeypatch.setattr(api, "build_upgrade_plan", build_plan)
     monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
     def schedule_restart(**kwargs):
+        lock_events.append("restart")
         calls["restart"] = kwargs
         return {"job_id": "restart"}
 
@@ -2339,7 +2365,7 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
             "run": subprocess.run,
             "capture_output": True,
             "text": True,
-            "timeout": 120,
+            "timeout": api.UPGRADE_INSTALL_TIMEOUT_SECONDS,
             "cwd": "/safe",
         },
     )
@@ -2351,6 +2377,7 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
     }
     assert result["restarting"] is True
     assert result["restart"] == {"job_id": "restart"}
+    assert lock_events == ["entered", "build", "execute", "restart", "exited"]
 
 
 def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_scheduled(
@@ -2360,7 +2387,22 @@ def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_sched
     monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
-    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: object())
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **_kwargs: SimpleNamespace(
+            activation=None,
+            method="pip",
+            preflight_error=None,
+        ),
+    )
     monkeypatch.setattr(
         api,
         "execute_upgrade_plan",
@@ -2383,6 +2425,80 @@ def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_sched
         "reason": "memory_package_restart_failed",
         "restarting": False,
     }
+
+
+def test_memory_indep_026_auto_repair_persists_a_per_version_attempt_budget(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """MEMORY-INDEP-026: restart loops stop after the persisted attempt budget."""
+
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    installs: list[int] = []
+    restarts: list[int] = []
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **_kwargs: SimpleNamespace(
+            activation=None,
+            method="pip",
+            preflight_error=None,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: installs.append(1)
+        or subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr=""),
+    )
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **_kwargs: restarts.append(1) or {"job_id": f"restart-{len(restarts)}"},
+    )
+
+    results = [api._prepare_memory_package_job(automatic=True) for _ in range(4)]
+
+    assert len(installs) == len(restarts) == api._MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS
+    assert all(result.get("restarting") for result in results[:3])
+    assert results[3]["skipped"] is True
+    assert results[3]["reason"] == "memory_package_auto_repair_exhausted"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["core_version"] == "3.0.14"
+    assert state["attempts"] == 3
+    assert state["result"] == "restart_scheduled"
+
+
+def test_memory_auto_repair_budget_resets_only_for_a_new_core_version(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+
+    first = api._reserve_memory_package_auto_repair_attempt("3.0.14")
+    api._finish_memory_package_auto_repair_attempt(
+        "3.0.14",
+        first["token"],
+        result="failed",
+        reason="memory_package_install_failed",
+    )
+    second = api._reserve_memory_package_auto_repair_attempt("3.0.15")
+
+    assert first["attempts"] == 1
+    assert second["attempts"] == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["core_version"] == "3.0.15"
+    assert state["result"] == "running"
 
 
 def test_memory_package_reachability_disabled_enable_bootstrap_ready(

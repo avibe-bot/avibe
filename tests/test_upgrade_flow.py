@@ -25,6 +25,7 @@ from vibe.upgrade import (
     configured_memory_enabled,
     has_newer_version,
     get_current_vibe_bin_dir,
+    get_current_uv_tool_dir,
     get_latest_version_info,
     get_restart_command,
     get_restart_environment,
@@ -926,6 +927,7 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         "--force",
     ]
     assert "--upgrade" not in uv_plan.command
+    assert uv_plan.env["UV_TOOL_DIR"] == "/tmp/.local/share/uv/tools"
 
     pip_plan = build_upgrade_plan(
         python_executable="/usr/bin/python3",
@@ -1111,6 +1113,17 @@ def test_get_current_vibe_bin_dir_resolves_launcher_target(monkeypatch):
     bin_dir = get_current_vibe_bin_dir(vibe_path="/usr/local/bin/vibe")
 
     assert bin_dir == "/home/test/.local/bin"
+
+
+@pytest.mark.parametrize(
+    "executable",
+    (
+        "/home/test/.local/share/uv/tools/avibe-os/bin/python",
+        "/home/test/.avibe/runtime/install-generations/abc/uv/tools/avibe-os/bin/python",
+    ),
+)
+def test_get_current_uv_tool_dir_preserves_the_logical_running_generation(executable):
+    assert get_current_uv_tool_dir(executable) == str(Path(executable).parents[2])
 
 
 def test_get_latest_version_info_uses_override_metadata_url(monkeypatch, tmp_path):

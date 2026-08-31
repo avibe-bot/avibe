@@ -16004,9 +16004,17 @@ app.add_event_handler("startup", _start_terminal_service)
 app.add_event_handler("shutdown", _stop_terminal_service)
 
 
+async def _wait_for_ui_host_ready() -> None:
+    """Do not mutate managed dependencies until Uvicorn accepts traffic."""
+
+    while _server is None or not bool(getattr(_server, "started", False)):
+        await asyncio.sleep(0.05)
+
+
 async def _reconcile_startup_dependencies_task() -> None:
     start = time.monotonic()
     try:
+        await _wait_for_ui_host_ready()
         from vibe import api
 
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)

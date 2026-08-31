@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import (
     CONFIG_LOCK,
     MemoryConfig,
@@ -112,6 +113,7 @@ from core.vibe_agents import (
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
 from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
+from storage.lock import MigrationFileLock, MigrationLockTimeout
 
 
 logger = logging.getLogger(__name__)
@@ -8654,6 +8656,8 @@ _ALLOWED_DEP_INSTALLS = {
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
+_MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
+_MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -9248,82 +9252,227 @@ def _memory_package_repair_rejection() -> dict | None:
     }
 
 
-def _prepare_memory_package_job() -> dict:
+def _memory_package_auto_repair_state_path() -> Path:
+    return paths.get_state_dir() / "memory-package-auto-repair.json"
+
+
+def _reserve_memory_package_auto_repair_attempt(version: str) -> dict:
+    """Persist one automatic attempt before any package mutation begins."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with MigrationFileLock(lock_path, timeout_seconds=5.0):
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            payload = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            logger.warning("Memory package auto-repair state is unreadable: %s", exc)
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+
+        if not isinstance(payload, dict) or (
+            payload and payload.get("state_version") != _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION
+        ):
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+        attempts = payload.get("attempts", 0) if payload.get("core_version") == version else 0
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+        if attempts >= _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS:
+            return {
+                "allowed": False,
+                "attempts": attempts,
+                "reason": "memory_package_auto_repair_exhausted",
+            }
+
+        token = uuid.uuid4().hex
+        attempt = {
+            "state_version": _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION,
+            "core_version": version,
+            "attempts": attempts + 1,
+            "result": "running",
+            "attempt_token": token,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        write_atomic(state_path, json.dumps(attempt, sort_keys=True) + "\n")
+        return {
+            "allowed": True,
+            "attempts": attempts + 1,
+            "token": token,
+        }
+
+
+def _finish_memory_package_auto_repair_attempt(
+    version: str,
+    token: str,
+    *,
+    result: str,
+    reason: str | None,
+) -> None:
+    """Settle only the exact attempt this process reserved."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    try:
+        with MigrationFileLock(lock_path, timeout_seconds=5.0):
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            if payload.get("core_version") != version or payload.get("attempt_token") != token:
+                return
+            payload["result"] = result
+            payload["reason"] = reason
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            write_atomic(state_path, json.dumps(payload, sort_keys=True) + "\n")
+    except (OSError, UnicodeError, json.JSONDecodeError, MigrationLockTimeout):
+        logger.warning("Memory package auto-repair result could not be persisted", exc_info=True)
+
+
+def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
     """Install the matching optional package through the existing dependency job."""
 
-    rejection = _memory_package_repair_rejection()
-    if rejection is not None:
-        return rejection
-
-    current_version = _published_running_version()
-    if current_version is None:
-        reason = "memory_package_unpublished_build"
-        return {
-            "ok": False,
-            "message": reason,
-            "output": None,
-            "reason": reason,
-            "action_class": "operator_only",
-        }
+    reservation: dict | None = None
+    current_version: str | None = None
     try:
-        plan = build_upgrade_plan(
-            version=current_version,
-            package_name=PACKAGE_NAME,
-            memory_package=True,
-            memory_version=current_version,
-            vibe_path=get_running_vibe_path(),
-        )
-        result = execute_upgrade_plan(
-            plan,
-            run=subprocess.run,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=get_safe_cwd(),
-        )
-    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        with atomic_upgrade_lock():
+            rejection = _memory_package_repair_rejection()
+            if rejection is not None:
+                return rejection
+
+            current_version = _published_running_version()
+            if current_version is None:
+                reason = "memory_package_unpublished_build"
+                return {
+                    "ok": False,
+                    "message": reason,
+                    "output": None,
+                    "reason": reason,
+                    "action_class": "operator_only",
+                }
+            current_vibe_path = get_running_vibe_path()
+            plan = build_upgrade_plan(
+                version=current_version,
+                package_name=PACKAGE_NAME,
+                memory_package=True,
+                memory_version=current_version,
+                vibe_path=current_vibe_path,
+            )
+            if plan.preflight_error:
+                return {
+                    "ok": False,
+                    "message": "memory_package_install_unsafe",
+                    "output": plan.preflight_error,
+                    "reason": "memory_package_install_unsafe",
+                }
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "memory_package_upgrade_busy",
+                    "output": None,
+                    "reason": "memory_package_upgrade_busy",
+                }
+            if automatic:
+                reservation = _reserve_memory_package_auto_repair_attempt(current_version)
+                if not reservation.get("allowed"):
+                    return {
+                        "ok": False,
+                        "skipped": True,
+                        "message": reservation.get("reason"),
+                        "output": None,
+                        "reason": reservation.get("reason"),
+                        "action_class": "repairable",
+                        "attempts": reservation.get("attempts"),
+                    }
+
+            install = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
+                capture_output=True,
+                text=True,
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                cwd=get_safe_cwd(),
+            )
+            output = _truncate_install_output(
+                ((install.stdout or "") + (f"\n{install.stderr}" if install.stderr else "")).strip()
+            )
+            if install.returncode != 0:
+                result = {
+                    "ok": False,
+                    "message": "memory_package_install_failed",
+                    "output": output or None,
+                    "reason": "memory_package_install_failed",
+                }
+            else:
+                # Keep the current UI process on its live tool environment so a
+                # service-only restart can immediately observe the companion.
+                # The shared upgrade lock serializes this exact repair with
+                # staged forward upgrades; switching generations here would
+                # strand the still-running UI on stale package metadata.
+                integrity = verify_python_environment(sys.executable)
+                result = (
+                    {"ok": True}
+                    if integrity.ok
+                    else {
+                        "ok": False,
+                        "message": "memory_package_install_failed",
+                        "output": integrity.detail,
+                        "reason": "memory_package_install_failed",
+                    }
+                )
+                if result.get("ok"):
+                    try:
+                        restart = schedule_restart(
+                            delay_seconds=2.0,
+                            vibe_path=current_vibe_path,
+                            trigger="memory-package-repair",
+                            scope="service",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
+                        result = {
+                            "ok": False,
+                            "message": "memory_package_restart_failed",
+                            "output": output or str(exc),
+                            "reason": "memory_package_restart_failed",
+                            "restarting": False,
+                        }
+                    else:
+                        result = {
+                            "ok": True,
+                            "message": "memory_package_ready",
+                            "output": output or None,
+                            "reason": None,
+                            "restarting": True,
+                            "restart": restart,
+                        }
+    except (OSError, subprocess.TimeoutExpired, ValueError, MigrationLockTimeout) as exc:
         logger.warning("Memory package repair failed before completion: %s", exc)
-        return {
+        result = {
             "ok": False,
             "message": "memory_package_install_failed",
             "output": str(exc),
             "reason": "memory_package_install_failed",
         }
-
-    output = _truncate_install_output(
-        ((result.stdout or "") + (f"\n{result.stderr}" if result.stderr else "")).strip()
-    )
-    if result.returncode != 0:
-        return {
-            "ok": False,
-            "message": "memory_package_install_failed",
-            "output": output or None,
-            "reason": "memory_package_install_failed",
-        }
-    try:
-        restart = schedule_restart(
-            delay_seconds=2.0,
-            vibe_path=get_running_vibe_path(),
-            trigger="memory-package-repair",
-            scope="service",
+    if reservation is not None and current_version is not None:
+        _finish_memory_package_auto_repair_attempt(
+            current_version,
+            str(reservation["token"]),
+            result="restart_scheduled" if result.get("restarting") else "failed",
+            reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
-        return {
-            "ok": False,
-            "message": "memory_package_restart_failed",
-            "output": output or str(exc),
-            "reason": "memory_package_restart_failed",
-            "restarting": False,
-        }
-    return {
-        "ok": True,
-        "message": "memory_package_ready",
-        "output": output or None,
-        "reason": None,
-        "restarting": True,
-        "restart": restart,
-    }
+    return result
 
 
 def reconcile_memory_package_on_startup() -> dict:
@@ -9338,7 +9487,7 @@ def reconcile_memory_package_on_startup() -> dict:
 
     package, _runtime = _memory_dependencies_status(offline=True)
     if package.get("required") is True and package.get("action_class") == "repairable":
-        return _prepare_memory_package_job()
+        return _prepare_memory_package_job(automatic=True)
 
     reason = package.get("reason")
     if not isinstance(reason, str) or not reason:

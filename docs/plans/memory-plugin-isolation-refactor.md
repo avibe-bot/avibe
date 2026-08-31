@@ -334,14 +334,17 @@ The package split does not silently disable Memory for existing users.
    continue upgrading without it.
 4. An immutable bundled-Memory upgrader can only install the first split core.
    After the new core starts, the existing UI background dependency reconciler
-   reads the persisted enabled state, reuses the exact-version Memory package
-   install action, and schedules one ordinary restart. Controller startup never
-   installs or downloads Python packages.
+   waits for host readiness, reads the persisted enabled state, and reuses the
+   exact-version Memory package install action under the shared upgrade lock.
+   It persists a three-attempt budget per core version before mutation and
+   schedules one ordinary service restart. Controller startup never installs or
+   downloads Python packages.
 5. Later enabled upgrades fail before replacing the current installation if the
    compatible optional package cannot be resolved. The first-hop convergence
    fails closed with Memory unavailable and core Avibe healthy; it never changes
-   Memory config or provider data and retries only on a later startup or explicit
-   action.
+   Memory config or provider data. A later startup retries only within the
+   persisted per-version budget; an explicit action remains available after
+   exhaustion.
 6. A successful upgrade or first-hop convergence schedules the ordinary Avibe
    restart when the runtime is active. Install, upgrade, or restart failures are
    structured terminal results and do not block a later explicit attempt.

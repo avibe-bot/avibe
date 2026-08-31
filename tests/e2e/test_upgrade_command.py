@@ -132,6 +132,7 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 "apt-get install -y --no-install-recommends curl ca-certificates bash procps >/dev/null",
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",
                 'export PATH="$HOME/.local/bin:$PATH"',
+                'export AVIBE_HOME="$HOME/.avibe-upgrade-test"',
                 "VIBE_INSTALL_SKIP_NODE=1 VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 "
                 f"AVIBE_INSTALL_PACKAGE_SPEC=/fixtures/{initial_wheel_path.name} bash /work/install.sh",
                 'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"',
@@ -139,9 +140,10 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 'initial_python="$(dirname "$initial_vibe")/python"',
                 'printf "%s\\n" "$initial_vibe" | grep "/uv/tools/"',
                 "vibe version",
+                '"$initial_python" -c "from config.v2_config import V2Config; V2Config.default().save()"',
                 f'"$initial_python" -c {shlex.quote(enable_memory)}',
                 '"$initial_python" -c "from config.v2_config import V2Config; assert V2Config.load().memory.enabled"',
-                'printf "preserved\\n" > "$HOME/.avibe/upgrade-state-marker"',
+                'printf "preserved\\n" > "$AVIBE_HOME/upgrade-state-marker"',
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json "
                 f"VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 AVIBE_UPGRADE_PACKAGE_SPEC=/fixtures/{wheel_path.name} vibe check-update",
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json "
@@ -150,7 +152,7 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 'printf "launcher=%s\n" "$(command -v vibe)"',
                 "vibe version",
                 'test -x "$initial_vibe"',
-                'test "$(cat "$HOME/.avibe/upgrade-state-marker")" = "preserved"',
+                'test "$(cat "$AVIBE_HOME/upgrade-state-marker")" = "preserved"',
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json vibe check-update",
                 'upgraded_vibe="$(readlink -f "$(command -v vibe)")"',
                 'upgraded_python="$(dirname "$upgraded_vibe")/python"',
@@ -167,8 +169,11 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 '"$current_python" -c "from config.v2_config import V2Config; '
                 f"from importlib.metadata import version; assert V2Config.load().memory.enabled; assert version('avibe-os') == '{TEST_RELEASE_VERSION}'; "
                 f"assert version('avibe-memory') == '{TEST_RELEASE_VERSION}'\"",
-                "sleep 4",
-                "vibe status",
+                "for attempt in $(seq 1 120); do "
+                'status_output="$(vibe status 2>/dev/null || true)"; '
+                "if printf '%s' \"$status_output\" | grep -q '\"running\": true'; then break; fi; sleep 1; done",
+                "printf '%s\\n' \"$status_output\"",
+                "printf '%s' \"$status_output\" | grep -q '\"running\": true'",
             ]
         )
 
@@ -185,7 +190,7 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                     "-v",
                     f"{fixtures_dir}:/fixtures",
                     "-w",
-                    "/work",
+                    "/tmp",
                     BASE_IMAGE,
                     "bash",
                     "-lc",

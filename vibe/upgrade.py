@@ -1168,6 +1168,16 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
+def get_current_uv_tool_dir(python_executable: str | None = None) -> str | None:
+    """Return the logical uv tool root containing the running interpreter."""
+
+    executable = Path(python_executable or sys.executable).expanduser().absolute()
+    for parent in executable.parents:
+        if parent.name == "tools" and parent.parent.name == "uv":
+            return str(parent)
+    return None
+
+
 def _names_a_published_release(version: str) -> bool:
     """Whether an index could serve `version`, as opposed to it naming this tree.
 
@@ -1342,7 +1352,12 @@ def build_upgrade_plan(
                 env["UV_TOOL_DIR"] = str(tool_dir)
                 env["UV_TOOL_BIN_DIR"] = str(bin_dir)
         else:
+            current_tool_dir = get_current_uv_tool_dir(executable)
             vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
+            if current_tool_dir is None:
+                preflight_error = "Cannot safely repair uv installation: current tool root is unavailable"
+            else:
+                env["UV_TOOL_DIR"] = current_tool_dir
             if vibe_bin_dir:
                 env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
         command = [uv_binary, "tool", "install", package_spec]
