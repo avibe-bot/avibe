@@ -120,8 +120,9 @@ Avibe artifact selects only the version-scoped snapshot derived from its own
 bundled Skill tree. The `builtin-skills` umbrella is not a generic discovery
 root for direct child Skills. The selected snapshot is Avibe-owned runtime
 content, has the highest resolution priority, and contains at most 1,024 direct
-child Skill directories. This keeps every published built-in discoverable
-within the same root cap as compatibility inputs.
+child Skill directories whose bounded frontmatter totals at most 8 MiB. This
+keeps every published built-in discoverable within the same candidate and byte
+budgets as compatibility inputs.
 
 ### 4.3 Project roots
 
@@ -196,12 +197,15 @@ The bounded read happens before decoding or normalizing field values, so a
 large optional field, description, or unterminated frontmatter cannot create
 unbounded per-Turn work. Discovery enumerates at most 1,025 direct child
 entries in any root and omits the entire root if it contains more than 1,024.
-Across accepted roots, one resolution processes at most 1,024 candidate Skill
-directories and 8 MiB of frontmatter bytes. Roots are visited in precedence
-order and each accepted root's candidates in stable name order. Reaching an
-aggregate budget omits the remaining lower-priority roots. These rules make
-omission deterministic without walking the rest of an oversized directory.
-Omission is diagnostic log data, not additional prompt content.
+One resolution gives the built-in root and the combined project/global roots
+independent aggregate budgets of 1,024 candidate Skill directories and 8 MiB
+of frontmatter bytes each. A full built-in root therefore cannot consume the
+capacity reserved for user Skills. Within the compatibility-input budget,
+roots are visited in precedence order and each accepted root's candidates in
+stable name order. Reaching that budget omits the remaining lower-priority
+roots. These rules make omission deterministic without walking the rest of an
+oversized directory. Omission is diagnostic log data, not additional prompt
+content.
 
 These limits do not validate optional frontmatter, require the directory and
 declared name to match, or add compatibility metadata.
@@ -389,7 +393,7 @@ When a backend launches either command, Avibe supplies two internal bindings:
 - `AVIBE_SKILL_WORKING_DIR` is the absolute working directory from which Avibe
   rendered that Session's Catalog. Project discovery always starts there, even
   when the agent runs the command from another directory.
-- `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` selects the immutable built-in snapshot
+- `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` selects the version-scoped built-in snapshot
   retained by the Avibe process that created that backend runtime, even if an
   upgrade has since switched the stable `vibe` launcher to another artifact.
 
@@ -477,17 +481,25 @@ artifact, Avibe publishes a complete runtime snapshot to:
 ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>/<name>/
 ```
 
-`<snapshot-id>` is a lowercase SHA-256 identifier derived deterministically from
-every relative path, file byte sequence, and executable mode bits
-(`st_mode & 0o111` where POSIX mode bits exist) in the authoritative bundled
-Skill tree. It is a directory identifier, not a second persisted manifest or a
-runtime integrity protocol.
+`<snapshot-id>` is lowercase SHA-256 over an unambiguous snapshot-v1 byte
+stream. The stream begins with the ASCII domain separator
+`avibe-builtin-snapshot-v1` followed by NUL. It then contains one record for
+every directory except the source root and every regular file, ordered by the
+UTF-8 bytes of its `/`-separated relative path. A record contains a one-byte
+directory/file tag, the path length as an unsigned 64-bit big-endian integer,
+and the path bytes. A file record additionally contains its byte length in the
+same integer encoding, its exact bytes, and one byte holding
+`st_mode & 0o111` where POSIX executable bits exist (zero otherwise). Release
+packaging requires relative paths to be valid UTF-8 in NFC form. A fixed
+tree-to-digest fixture freezes this encoding without creating a persisted
+manifest. The identifier selects a directory; it is not a runtime integrity
+protocol.
 
 Built-in source paths must be representable without aliases on every supported
 platform. Release packaging rejects absolute or traversal paths, backslashes,
 NUL, drive/UNC prefixes, Windows-reserved components, trailing-dot/space names,
 and case-insensitive path collisions. It also rejects a 1,025th direct child
-Skill directory.
+Skill directory or a built-in tree whose bounded frontmatter exceeds 8 MiB.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -507,11 +519,10 @@ The publisher builds and validates a hidden sibling staging directory, then
 atomically renames it once into the previously absent digest path. A process
 interruption can leave only an undiscoverable staging directory. If the digest
 path already exists, concurrent or later publishers reuse that path without
-mutating it. Because Avibe publication creates the final path only by atomic
-rename, a pre-existing wrong-type, unreadable, or externally changed path is
-treated as unsupported post-publication mutation: list/load fails safely and
-does not repair it from whichever artifact the stable launcher currently
-selects.
+mutating it. A wrong-type or unreadable path fails safely. Readable external
+changes are unsupported post-publication mutation and may affect later
+Catalog/load results; runtime commands neither validate nor repair the path
+from whichever artifact the stable launcher currently selects.
 
 After publication, list/load does not hash the full snapshot, compare it with a
 package source, or repair it. It reads the selected built-in through the same
@@ -621,9 +632,9 @@ at runtime.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
-  most 1,025 entries; one resolution processes at most 1,024 candidates and 8
-  MiB of frontmatter. Budget exhaustion deterministically omits the remaining
-  lower-priority roots without blocking the Turn.
+  most 1,025 entries. Built-ins and combined project/global compatibility
+  inputs each have a separate 1,024-candidate and 8 MiB frontmatter budget, so
+  either class can exhaust its own budget without consuming the other's.
 - Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
   remain within the row budget, and do not expose paths or sources.
 - Oversized descriptions cannot make the Catalog unbounded, and names with
@@ -631,6 +642,9 @@ at runtime.
   are omitted by the parser-backed portable name boundary.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
+- Parser-backed CLI coverage dispatches the canonical
+  `vibe skill load -- pdf-processing` example through the real argument parser
+  and reaches the load handler with `pdf-processing` as its single name.
 - If the selected `SKILL.md` is replaced after discovery, load reparses the
   exact verified bytes it will emit and fails unless they still declare the
   requested name.
@@ -676,15 +690,18 @@ isolation acceptance gates.
 - a fresh installation mirrors all bundled Skills;
 - a real wheel-install fixture proves bundled Skills exist without a source
   tree and preserves executable modes required by helper scripts;
+- a fixed snapshot-v1 fixture proves the canonical tree byte stream and
+  lowercase SHA-256 identifier remain stable;
 - release packaging rejects non-portable, Windows-reserved, trailing-dot/space,
-  or case-insensitively colliding built-in paths and a 1,025th direct Skill;
+  or case-insensitively colliding built-in paths, a 1,025th direct Skill, and a
+  tree whose bounded frontmatter exceeds the built-in 8 MiB budget;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
 - interrupted publication cannot expose a partial snapshot;
-- a wrong-type, unreadable, or externally changed pre-existing digest path
-  fails safely without being traversed, mutated, or rebuilt by runtime commands;
+- a wrong-type or unreadable pre-existing digest path fails safely without
+  being traversed, mutated, or rebuilt by runtime commands;
 - two concurrently running artifacts with different bundled trees resolve
   different version-scoped snapshots;
 - after launcher activation, a command inherited from the older runtime still
