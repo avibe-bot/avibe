@@ -471,9 +471,13 @@ artifact, Avibe publishes a complete runtime snapshot to:
 ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>/<name>/
 ```
 
-`<snapshot-id>` is a stable digest of every relative path, file byte sequence,
-and executable mode bits (`st_mode & 0o111` where POSIX mode bits exist) in the
-authoritative bundled Skill tree.
+`<snapshot-id>` is the digest of a canonical manifest containing every relative
+path, file-content digest, and executable mode bits (`st_mode & 0o111` where
+POSIX mode bits exist) in the authoritative bundled Skill tree. The same
+manifest is stored as snapshot-root runtime metadata at
+`.avibe-snapshot.json`; it is not an entry in its own digest. A command bound to
+an older snapshot can therefore validate it without access to the older package
+artifact.
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
 scripts and references.
@@ -493,22 +497,32 @@ atomically renames it once into the previously absent digest path. A process
 interruption can leave only an undiscoverable staging directory. If a valid
 snapshot for the same digest already exists, concurrent publishers reuse it
 instead of mutating it. Validation recomputes the same path, content, and
-executable-mode digest from the published mirror before reuse.
+executable-mode manifest and verifies that its digest is `<snapshot-id>` before
+reuse.
 
 If the digest path exists but is not a valid snapshot, the lock holder
 atomically renames that entry itself to a unique hidden quarantine sibling,
 publishes the validated staging directory into the now-absent digest path, and
 removes the quarantine only after final validation. A crash before publication
 leaves no selectable digest path; the next lock holder rebuilds it before
-resolution. If quarantine or publication cannot complete, managed resolution
-fails explicitly and never reads the invalid entry.
+resolution. This repair belongs only to an artifact publishing its own bundled
+tree. Runtime list/load commands never attempt to rebuild a retained snapshot
+from whichever newer artifact the stable launcher currently selects.
 
-Initial publication is not a lifetime trust decision. Before every Catalog
-resolution and built-in load, the resolver validates the selected snapshot
-against the running artifact's expected path, content, and executable-mode
-digest under the same per-digest lock. An altered snapshot enters the repair
-path above before any of its Skills are selected. There is no process-local
-"already validated" flag or metadata-only cache that can authorize reuse.
+Runtime integrity is manifest-bound at the bytes each command uses:
+
+- Catalog accepts a built-in candidate only when the verified `SKILL.md` bytes
+  and executable mode match that path's entry in a manifest whose canonical
+  digest is the bound `<snapshot-id>`.
+- Load first verifies the bound manifest, then verifies every path, byte digest,
+  and executable mode in the selected built-in Skill directory against its
+  manifest entries, rejecting missing, changed, or extra content. The body it
+  emits comes from that same verified `SKILL.md` read.
+- A mismatch omits the candidate during Catalog discovery or fails load with
+  empty standard output. It is not repaired by the command.
+
+This avoids a validate-then-open trust gap and lets a new launcher validate an
+older retained snapshot without possessing the old artifact's source bytes.
 
 Every resolver selects the digest computed from the bundled source of its own
 running artifact. Concurrent old and new Avibe processes therefore use
@@ -523,11 +537,11 @@ Backend runtimes inherit this selected digest as
 overlapping upgrade. The digest is validated as an identifier under the
 `builtin-skills` umbrella before use; it cannot select an arbitrary path.
 
-At each resolution or load boundary, the selected snapshot exactly matches the
-running artifact and is never partially updated. A later filesystem write is
-detected at the next boundary; this remains a consistency contract rather than
-a security sandbox. The `builtin-skills` umbrella is Avibe-owned rather than a
-user customization surface.
+Publication never exposes a partial snapshot, and Catalog/load never accepts
+built-in bytes that differ from the bound snapshot manifest. A later filesystem
+write is detected at the next command boundary; this remains a consistency
+contract rather than a security sandbox. The `builtin-skills` umbrella is
+Avibe-owned rather than a user customization surface.
 
 ## 11. Installation Defaults
 
@@ -672,14 +686,17 @@ isolation acceptance gates.
   Skills;
 - interrupted publication cannot expose a partial snapshot;
 - an invalid pre-existing digest path, including a wrong type, changed byte, or
-  changed executable mode, is quarantined and rebuilt before resolution; an
-  interrupted repair resumes without selecting the quarantine;
-- a snapshot altered after a prior successful resolution is revalidated and
-  repaired before the next Catalog resolution or built-in load;
+  changed executable mode, is quarantined and rebuilt by the artifact publishing
+  that digest; an interrupted publication resumes without selecting quarantine;
+- a snapshot altered after publication is omitted by the next Catalog or fails
+  the next load, and the command does not rebuild it from a different artifact;
+- Catalog verifies the exact built-in `SKILL.md` bytes it parses, while load
+  verifies the selected built-in Skill subtree and emits the same verified body;
 - two concurrently running artifacts with different bundled trees resolve
   different immutable snapshots; and
 - after launcher activation, a command inherited from the older runtime still
-  lists and loads that runtime's retained built-in snapshot; and
+  validates, lists, and loads that runtime's retained built-in snapshot using
+  its digest-bound manifest, without the older package source; and
 - every loaded built-in reports an agent-accessible absolute directory.
 
 ## 15. Explicit Non-Goals
