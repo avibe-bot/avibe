@@ -2400,34 +2400,36 @@ def test_memory_package_server_admission_rejects_nonrepairable_rows(
     }
 
 
-#: Where each kind of running version is published, and therefore which install
-#: sources its repair has to name. A preview release is served by its own
-#: GitHub release and by no index, so pinning it by name would resolve against
-#: a PyPI that never had it.
-PUBLISHED_VERSION_SOURCES = {
-    "final": ("3.0.14", None, None),
-    "preview": (
-        "3.0.14rc8",
-        "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc8/avibe_os-3.0.14rc8-py3-none-any.whl",
-        (
-            "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc8/"
-            "avibe_memory-3.0.14rc8-py3-none-any.whl"
-        ),
-    ),
+#: One running version, published two ways. `publish.yml` accepts official
+#: `vX.Y.ZrcN` tags and publishes them to PyPI, while a `gh-v*` build of the
+#: identical version is on no index at all — so the version string cannot pick
+#: the repair sources and only the recorded install origin can. Both rows use
+#: the same version deliberately.
+REPAIR_VERSION = "3.0.14rc8"
+RELEASE_CORE_URL = f"https://github.com/avibe-bot/avibe/releases/download/gh-v{REPAIR_VERSION}/avibe_os-{REPAIR_VERSION}-py3-none-any.whl"
+RELEASE_MEMORY_URL = (
+    f"https://github.com/avibe-bot/avibe/releases/download/gh-v{REPAIR_VERSION}/"
+    f"avibe_memory-{REPAIR_VERSION}-py3-none-any.whl"
+)
+INSTALL_ORIGIN_SOURCES = {
+    "index install": (None, None, None),
+    "release asset install": (RELEASE_CORE_URL, RELEASE_CORE_URL, RELEASE_MEMORY_URL),
 }
 
 
 @pytest.mark.parametrize(
-    ("current_version", "core_spec", "memory_spec"),
-    list(PUBLISHED_VERSION_SOURCES.values()),
-    ids=list(PUBLISHED_VERSION_SOURCES),
+    ("origin", "core_spec", "memory_spec"),
+    list(INSTALL_ORIGIN_SOURCES.values()),
+    ids=list(INSTALL_ORIGIN_SOURCES),
 )
-def test_memory_package_dependency_job_targets_the_running_version_wherever_it_is_published(
+def test_memory_package_dependency_job_targets_the_running_version_wherever_it_came_from(
     monkeypatch,
-    current_version: str,
+    origin: str | None,
     core_spec: str | None,
     memory_spec: str | None,
 ) -> None:
+    current_version = REPAIR_VERSION
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
     plan = SimpleNamespace(
         command=["repair"],
         activation=None,
@@ -2527,8 +2529,9 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     matters is the command an installer would actually run.
     """
 
-    current_version = "3.0.14rc8"
+    current_version = REPAIR_VERSION
     calls: dict[str, object] = {}
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: RELEASE_CORE_URL)
     monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
     monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")

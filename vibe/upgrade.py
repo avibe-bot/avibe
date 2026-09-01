@@ -55,13 +55,13 @@ LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
 MEMORY_EXTRA_NAME = "memory"
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
-# GitHub-only pre-releases publish their wheels as release assets and nothing to
-# PyPI, so a preview install can only be repaired from the release itself. The
-# tag and asset names are a fixed convention (see AGENTS.md "Release Notes"),
-# which makes the download URLs a pure function of the running version — no
-# GitHub API discovery, no manifest asset, nothing to fall out of date.
-PREVIEW_RELEASE_TAG_PREFIX = "gh-v"
-PREVIEW_RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
+# A GitHub-only pre-release publishes its wheels as release assets and nothing
+# to PyPI, so an install taken from one can only be repaired from that same
+# release. Which release that is comes from the installer's own PEP 610 record,
+# never from the version string: `publish.yml` accepts official `vX.Y.ZrcN`
+# tags and publishes them to PyPI, so a pre-release version says nothing about
+# where its wheels live.
+RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
@@ -1283,34 +1283,75 @@ def _wheel_distribution(package_name: str) -> str:
     return canonicalize_name(package_name).replace("-", "_")
 
 
-def preview_release_specs(version: str) -> tuple[str, str] | None:
-    """Where a preview version's own wheels live, or `None` if it has none.
+def _recorded_install_origin(package_name: str) -> str | None:
+    """The URL an installed distribution was taken from, per PEP 610.
 
-    A pre-release is published to a `gh-v*` GitHub release and to no index, so
-    pinning it by name resolves against a PyPI that never served it. This
-    returns the `(core, memory)` asset URLs derived from the release
-    convention instead.
-
-    Only a clean pre-release qualifies. A dev or local version names this tree
-    rather than any release — `_names_a_published_release` already refuses it,
-    and deriving a URL for one would invent a release that was never built. A
-    final version keeps its index pins.
-
-    The tag and both filenames are rendered from one normalized version, so
-    they cannot disagree about how a version is spelled.
+    Installers write `direct_url.json` only when the distribution came from
+    somewhere other than an index, so its absence is itself the answer: this
+    copy was resolved by name and can be repaired the same way.
     """
 
     try:
-        parsed = Version(version)
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        recorded = distribution(package_name).read_text("direct_url.json")
+    except PackageNotFoundError:
+        return None
+    except Exception:
+        logger.warning("Could not read %s install origin; assuming an index install", package_name, exc_info=True)
+        return None
+    if not recorded:
+        return None
+    try:
+        url = json.loads(recorded).get("url")
+    except (ValueError, AttributeError):
+        return None
+    return url if isinstance(url, str) else None
+
+
+def release_asset_specs(version: str) -> tuple[str, str] | None:
+    """The wheel pair this install came from, or `None` if an index serves it.
+
+    A version string cannot answer this. `publish.yml` accepts official
+    `vX.Y.ZrcN` tags and publishes them to PyPI, so a pre-release may well be
+    on an index, while a `gh-v*` build carrying the identical version is on no
+    index at all. Treating every pre-release as GitHub-only would point the
+    official one at a tag that was never created.
+
+    The installer already recorded the answer. When core came from a release
+    asset of this repository, the pair is repaired from that same release —
+    the one it demonstrably came from, rather than one derived from a naming
+    convention. Every other origin, an index install included, returns `None`
+    and keeps its index pins.
+
+    The recorded URL must name this exact running version, so a stale or
+    mismatched record cannot drive the repair to a different pair.
+    """
+
+    origin = _recorded_install_origin(PACKAGE_NAME)
+    if not origin:
+        return None
+    try:
+        normalized = str(Version(version))
     except InvalidVersion:
         return None
-    if not parsed.is_prerelease or parsed.is_devrelease or parsed.local is not None:
+    prefix = f"{RELEASE_DOWNLOAD_BASE_URL}/"
+    if not origin.startswith(prefix):
         return None
-    normalized = str(parsed)
-    release = f"{PREVIEW_RELEASE_DOWNLOAD_BASE_URL}/{PREVIEW_RELEASE_TAG_PREFIX}{normalized}"
+    # Exactly one tag segment and one filename: anything else is not an asset of
+    # this repository's releases, whatever it may resemble.
+    segments = origin[len(prefix) :].split("/")
+    if len(segments) != 2:
+        return None
+    tag, asset = segments
+    if not tag or tag in {".", ".."}:
+        return None
+    if asset != f"{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl":
+        return None
+    # One release directory, so the companion cannot come from another release.
     return (
-        f"{release}/{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
-        f"{release}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
+        origin,
+        f"{prefix}{tag}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
     )
 
 

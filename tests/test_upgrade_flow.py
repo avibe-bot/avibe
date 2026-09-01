@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from contextlib import nullcontext
+import json
 import os
 import stat
 import subprocess
@@ -16,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api, cli, runtime
+from vibe import upgrade as vibe_upgrade
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     AtomicActivation,
@@ -36,7 +38,7 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     pinned_package_spec,
-    preview_release_specs,
+    release_asset_specs,
     execute_upgrade_plan,
     restart_is_pending,
 )
@@ -1029,39 +1031,105 @@ PREVIEW_MEMORY_URL = (
 )
 
 
-def test_preview_release_specs_name_one_release_of_the_running_version():
-    assert preview_release_specs(PREVIEW_VERSION) == (PREVIEW_CORE_URL, PREVIEW_MEMORY_URL)
+def _installed_from(monkeypatch, origin: str | None) -> None:
+    """Record where the installer says this copy of core came from."""
+
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
+
+
+def test_the_companion_comes_from_the_release_core_was_installed_from(monkeypatch):
+    _installed_from(monkeypatch, PREVIEW_CORE_URL)
+
+    assert release_asset_specs(PREVIEW_VERSION) == (PREVIEW_CORE_URL, PREVIEW_MEMORY_URL)
+
+
+def test_an_official_prerelease_on_pypi_keeps_its_index_pins(monkeypatch):
+    # `publish.yml` accepts official `vX.Y.ZrcN` tags and publishes them to
+    # PyPI. Such a build carries a version indistinguishable from a `gh-v*`
+    # one, so only its origin can say that `gh-v3.0.16rc1` was never created.
+    _installed_from(monkeypatch, None)
+
+    assert release_asset_specs(PREVIEW_VERSION) is None
 
 
 @pytest.mark.parametrize(
     "spelling",
     ["3.0.16rc1", "3.0.16RC1", "3.0.16-rc-1", "v3.0.16rc1", "3.0.16.rc.1"],
 )
-def test_one_normalization_spells_the_tag_and_both_filenames(spelling):
-    # The release names its tag and its assets after the same normalized
-    # version, so any disagreement between the two derivations is a 404.
-    specs = preview_release_specs(spelling)
-    assert specs is not None
-    assert {url.split("/download/")[1].split("/")[0] for url in specs} == {"gh-v3.0.16rc1"}
-    assert all(url.endswith("-3.0.16rc1-py3-none-any.whl") for url in specs)
+def test_one_normalization_matches_the_origin_and_names_the_companion(monkeypatch, spelling):
+    # The recorded URL spells the version the way a wheel filename does, so the
+    # match against the running version must normalize both the same way.
+    _installed_from(monkeypatch, PREVIEW_CORE_URL)
+
+    assert release_asset_specs(spelling) == (PREVIEW_CORE_URL, PREVIEW_MEMORY_URL)
 
 
 @pytest.mark.parametrize(
-    "version",
+    ("origin", "version"),
     [
-        "3.0.16",  # a final release: the index serves it
-        "3.1",
-        "3.0.16.post1",
-        "3.0.16.dev0",  # names this tree, not any release
-        "3.0.16rc1.dev2",
-        "3.0.16rc1+g1234567",
-        "3.0.16+local",
-        "",
-        "not-a-version",
+        # An index install records no origin at all: it is repairable by name.
+        (None, PREVIEW_VERSION),
+        ("", PREVIEW_VERSION),
+        # Somewhere that is not a release asset of this repository.
+        ("https://example.com/gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
+        ("https://github.com/other/repo/releases/download/gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
+        ("file:///tmp/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
+        ("https://github.com/avibe-bot/avibe/releases/download/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
+        (
+            "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.16rc1/nested/avibe_os-3.0.16rc1-py3-none-any.whl",
+            PREVIEW_VERSION,
+        ),
+        (
+            "https://github.com/avibe-bot/avibe/releases/download/../gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl",
+            PREVIEW_VERSION,
+        ),
+        # The recorded asset names a different distribution or version than the
+        # one being repaired, so it cannot say where this pair lives.
+        (PREVIEW_MEMORY_URL, PREVIEW_VERSION),
+        (PREVIEW_CORE_URL, "3.0.16rc2"),
+        (PREVIEW_CORE_URL, "3.0.16"),
+        (PREVIEW_CORE_URL, ""),
+        (PREVIEW_CORE_URL, "not-a-version"),
     ],
 )
-def test_preview_release_specs_refuse_a_version_no_preview_release_serves(version):
-    assert preview_release_specs(version) is None
+def test_an_origin_that_cannot_name_this_pair_keeps_index_pins(monkeypatch, origin, version):
+    _installed_from(monkeypatch, origin)
+
+    assert release_asset_specs(version) is None
+
+
+def test_a_missing_or_unreadable_origin_record_reads_as_an_index_install(monkeypatch):
+    class _Distribution:
+        def __init__(self, recorded):
+            self._recorded = recorded
+
+        def read_text(self, _name):
+            return self._recorded
+
+    recorded_values = [None, "", "not json", "[]", "{}", '{"url": 7}']
+    for recorded in recorded_values:
+        monkeypatch.setattr(
+            "importlib.metadata.distribution",
+            lambda _name, recorded=recorded: _Distribution(recorded),
+        )
+        assert vibe_upgrade._recorded_install_origin("avibe-os") is None, recorded
+
+    def _raise(_name):
+        raise RuntimeError("metadata is unreadable")
+
+    monkeypatch.setattr("importlib.metadata.distribution", _raise)
+    assert vibe_upgrade._recorded_install_origin("avibe-os") is None
+
+
+def test_a_recorded_origin_is_read_from_the_installers_own_pep_610_record(monkeypatch):
+    class _Distribution:
+        def read_text(self, name):
+            assert name == "direct_url.json"
+            return json.dumps({"url": PREVIEW_CORE_URL, "archive_info": {}})
+
+    monkeypatch.setattr("importlib.metadata.distribution", lambda _name: _Distribution())
+
+    assert vibe_upgrade._recorded_install_origin("avibe-os") == PREVIEW_CORE_URL
 
 
 def test_an_exact_plan_installs_the_named_sources_instead_of_index_pins(monkeypatch):
