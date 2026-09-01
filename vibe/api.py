@@ -81,6 +81,7 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     launcher_is_current_process,
+    preview_release_specs,
     restart_is_pending,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
@@ -9511,12 +9512,20 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
             if restart_only:
                 result = {"ok": True}
             else:
+                # A preview release publishes its pair as release assets and
+                # nothing to an index, so pinning it by name would resolve
+                # against a PyPI that never served this version and spend an
+                # attempt on an install that cannot succeed. Any other running
+                # version has no such assets and keeps its index pins.
+                preview_specs = preview_release_specs(current_version)
                 plan = build_upgrade_plan(
                     version=current_version,
                     package_name=PACKAGE_NAME,
                     memory_package=True,
                     memory_version=current_version,
                     vibe_path=current_vibe_path,
+                    core_spec=preview_specs[0] if preview_specs else None,
+                    memory_spec=preview_specs[1] if preview_specs else None,
                 )
                 if plan.preflight_error:
                     return {

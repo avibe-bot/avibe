@@ -20,6 +20,7 @@ from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     AtomicActivation,
     MemoryRequirementUnreadableError,
+    PIP_DOWNLOAD_DEST_PLACEHOLDER,
     UpgradePlan,
     build_upgrade_plan,
     configured_memory_enabled,
@@ -35,6 +36,7 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     pinned_package_spec,
+    preview_release_specs,
     execute_upgrade_plan,
     restart_is_pending,
 )
@@ -949,6 +951,200 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
     for plan in (uv_plan, pip_plan):
         assert "--upgrade" not in plan.command
         assert FORCES_THE_INSTALL[plan.method] in plan.command
+
+
+def test_an_exact_memory_plan_names_both_index_pins_when_no_source_is_given(monkeypatch):
+    # The repair reaches an index by default. A caller that names no install
+    # source gets exactly the pins it got before install sources existed.
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    uv_plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/custom/bin/vibe",
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+        package_name="avibe-os",
+        memory_package=True,
+        memory_version="3.0.10",
+    )
+    assert uv_plan.command == [
+        "/usr/local/bin/uv",
+        "tool",
+        "install",
+        "avibe-os==3.0.10",
+        "--with",
+        "avibe-memory==3.0.10",
+        "--force",
+    ]
+    assert uv_plan.preflight_command == [
+        "/usr/local/bin/uv",
+        "pip",
+        "install",
+        "--dry-run",
+        "--python",
+        "/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        "avibe-os==3.0.10",
+        "avibe-memory==3.0.10",
+    ]
+
+    pip_plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+        package_name="avibe-os",
+        memory_package=True,
+        memory_version="3.0.10",
+    )
+    assert pip_plan.command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "avibe-os==3.0.10",
+        "avibe-memory==3.0.10",
+    ]
+    assert pip_plan.preflight_command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "download",
+        "--dest",
+        PIP_DOWNLOAD_DEST_PLACEHOLDER,
+        "--no-deps",
+        "avibe-os==3.0.10",
+        "avibe-memory==3.0.10",
+    ]
+
+
+PREVIEW_VERSION = "3.0.16rc1"
+PREVIEW_CORE_URL = (
+    "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl"
+)
+PREVIEW_MEMORY_URL = (
+    "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.16rc1/avibe_memory-3.0.16rc1-py3-none-any.whl"
+)
+
+
+def test_preview_release_specs_name_one_release_of_the_running_version():
+    assert preview_release_specs(PREVIEW_VERSION) == (PREVIEW_CORE_URL, PREVIEW_MEMORY_URL)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["3.0.16rc1", "3.0.16RC1", "3.0.16-rc-1", "v3.0.16rc1", "3.0.16.rc.1"],
+)
+def test_one_normalization_spells_the_tag_and_both_filenames(spelling):
+    # The release names its tag and its assets after the same normalized
+    # version, so any disagreement between the two derivations is a 404.
+    specs = preview_release_specs(spelling)
+    assert specs is not None
+    assert {url.split("/download/")[1].split("/")[0] for url in specs} == {"gh-v3.0.16rc1"}
+    assert all(url.endswith("-3.0.16rc1-py3-none-any.whl") for url in specs)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "3.0.16",  # a final release: the index serves it
+        "3.1",
+        "3.0.16.post1",
+        "3.0.16.dev0",  # names this tree, not any release
+        "3.0.16rc1.dev2",
+        "3.0.16rc1+g1234567",
+        "3.0.16+local",
+        "",
+        "not-a-version",
+    ],
+)
+def test_preview_release_specs_refuse_a_version_no_preview_release_serves(version):
+    assert preview_release_specs(version) is None
+
+
+def test_an_exact_plan_installs_the_named_sources_instead_of_index_pins(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    shared = {
+        "base_env": {"PATH": "/usr/bin"},
+        "version": PREVIEW_VERSION,
+        "package_name": "avibe-os",
+        "memory_package": True,
+        "memory_version": PREVIEW_VERSION,
+        "core_spec": PREVIEW_CORE_URL,
+        "memory_spec": PREVIEW_MEMORY_URL,
+    }
+    uv_plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/custom/bin/vibe",
+        **shared,
+    )
+    assert uv_plan.command == [
+        "/usr/local/bin/uv",
+        "tool",
+        "install",
+        PREVIEW_CORE_URL,
+        "--with",
+        f"avibe-memory @ {PREVIEW_MEMORY_URL}",
+        "--force",
+    ]
+    pip_plan = build_upgrade_plan(python_executable="/usr/bin/python3", uv_path=None, **shared)
+    assert pip_plan.command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        PREVIEW_CORE_URL,
+        f"avibe-memory @ {PREVIEW_MEMORY_URL}",
+    ]
+
+    # Every command an installer runs has to reach the release. A pin left in
+    # any one of them resolves against an index that never served this version,
+    # which is the failure the sources exist to remove.
+    for plan in (uv_plan, pip_plan):
+        commands = [
+            command
+            for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command)
+            if command
+        ]
+        assert len(commands) >= 2, "an exact Memory plan resolves before it installs"
+        for command in commands:
+            assert PREVIEW_CORE_URL in command
+            assert f"avibe-memory @ {PREVIEW_MEMORY_URL}" in command
+            assert f"avibe-os=={PREVIEW_VERSION}" not in command
+            assert f"avibe-memory=={PREVIEW_VERSION}" not in command
+        assert "--upgrade" not in plan.command
+        assert FORCES_THE_INSTALL[plan.method] in plan.command
+
+
+def test_a_forward_upgrade_keeps_index_pins_and_admits_no_install_source(monkeypatch):
+    # A forward upgrade resolves whichever release is newest, so there is no
+    # known release to name. Ignoring a source here would report an install
+    # from the release that never happened.
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
+    forward = {
+        "python_executable": "/usr/bin/python3",
+        "base_env": {"PATH": "/usr/bin"},
+        "memory_enabled": True,
+        "package_spec": "avibe-os==3.1.0",
+    }
+
+    plan = build_upgrade_plan(**forward)
+    assert "avibe-os[memory]==3.1.0" in plan.command
+    assert "avibe-memory==3.1.0" in plan.command
+
+    for sources in (
+        {"core_spec": PREVIEW_CORE_URL},
+        {"memory_spec": PREVIEW_MEMORY_URL},
+        {"core_spec": PREVIEW_CORE_URL, "memory_spec": PREVIEW_MEMORY_URL},
+    ):
+        with pytest.raises(ValueError):
+            build_upgrade_plan(**forward, **sources)
 
 
 def _metadata_records(monkeypatch, distribution: str, version: str) -> None:

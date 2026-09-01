@@ -25,6 +25,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import (
     InvalidSdistFilename,
     InvalidWheelFilename,
+    canonicalize_name,
     parse_sdist_filename,
     parse_wheel_filename,
 )
@@ -54,6 +55,13 @@ LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
 MEMORY_EXTRA_NAME = "memory"
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
+# GitHub-only pre-releases publish their wheels as release assets and nothing to
+# PyPI, so a preview install can only be repaired from the release itself. The
+# tag and asset names are a fixed convention (see AGENTS.md "Release Notes"),
+# which makes the download URLs a pure function of the running version — no
+# GitHub API discovery, no manifest asset, nothing to fall out of date.
+PREVIEW_RELEASE_TAG_PREFIX = "gh-v"
+PREVIEW_RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
@@ -1269,6 +1277,43 @@ def _memory_target_version(package_spec: str, target_version: str | None) -> str
     return _published_version(str(version))
 
 
+def _wheel_distribution(package_name: str) -> str:
+    """Spell one distribution name the way a wheel filename does."""
+
+    return canonicalize_name(package_name).replace("-", "_")
+
+
+def preview_release_specs(version: str) -> tuple[str, str] | None:
+    """Where a preview version's own wheels live, or `None` if it has none.
+
+    A pre-release is published to a `gh-v*` GitHub release and to no index, so
+    pinning it by name resolves against a PyPI that never served it. This
+    returns the `(core, memory)` asset URLs derived from the release
+    convention instead.
+
+    Only a clean pre-release qualifies. A dev or local version names this tree
+    rather than any release — `_names_a_published_release` already refuses it,
+    and deriving a URL for one would invent a release that was never built. A
+    final version keeps its index pins.
+
+    The tag and both filenames are rendered from one normalized version, so
+    they cannot disagree about how a version is spelled.
+    """
+
+    try:
+        parsed = Version(version)
+    except InvalidVersion:
+        return None
+    if not parsed.is_prerelease or parsed.is_devrelease or parsed.local is not None:
+        return None
+    normalized = str(parsed)
+    release = f"{PREVIEW_RELEASE_DOWNLOAD_BASE_URL}/{PREVIEW_RELEASE_TAG_PREFIX}{normalized}"
+    return (
+        f"{release}/{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
+        f"{release}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
+    )
+
+
 def pinned_package_spec(
     version: str,
     *,
@@ -1303,13 +1348,26 @@ def build_upgrade_plan(
     memory_package: bool | None = None,
     memory_version: str | None = None,
     package_spec: str | None = None,
+    core_spec: str | None = None,
+    memory_spec: str | None = None,
 ) -> UpgradePlan:
     """How to install avibe: the newest release, or `version` exactly.
 
     Exact-version plans support the explicit Memory package install action. They
     replace the ordinary upgrade request and force the installer so the matching
     optional distribution is applied even when core is already satisfied.
+
+    `core_spec` and `memory_spec` name where to fetch that exact pair when it
+    was never published to an index — a preview release's own wheel URLs. They
+    replace the two pins and change nothing else, so the resulting plan is the
+    same operation against a different source. A forward upgrade resolves the
+    newest release rather than a known one and has no such source to name, so
+    passing either without `version` is rejected instead of ignored: a spec that
+    silently does nothing would read as applied.
     """
+
+    if (core_spec or memory_spec) and not version:
+        raise ValueError("Explicit install sources require an exact target version")
 
     executable = python_executable or sys.executable
     # A caller targeting another interpreter (for example a test-owned venv)
@@ -1323,9 +1381,12 @@ def build_upgrade_plan(
         else bool(memory_enabled or memory_package_installed())
     )
     package_spec = (
-        pinned_package_spec(
-            version,
-            package_name=package_name or PACKAGE_NAME,
+        (
+            core_spec
+            or pinned_package_spec(
+                version,
+                package_name=package_name or PACKAGE_NAME,
+            )
         )
         if version
         else (package_spec or get_upgrade_package_spec())
@@ -1338,7 +1399,14 @@ def build_upgrade_plan(
     if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
         package_spec = _with_memory_extra(package_spec)
     memory_target = memory_version if version else target_version
-    pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_target}" if include_memory and memory_target else None
+    # The URL form stays a named requirement so every installer still reads it
+    # as "this distribution, from here" rather than as an anonymous artifact.
+    pinned_memory_spec = None
+    if include_memory:
+        if memory_spec:
+            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_spec}"
+        elif memory_target:
+            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_target}"
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)

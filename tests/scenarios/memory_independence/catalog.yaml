@@ -158,3 +158,9 @@ scenarios:
     kind: compatibility
     layer: scenario
     test: tests/e2e/test_upgrade_command.py::test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation
+  - id: MEMORY-INDEP-027
+    name: A core-only preview install converges to the Memory companion published by its own release
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/test_local_deps.py::test_memory_indep_027_preview_repair_installs_the_release_that_published_it
