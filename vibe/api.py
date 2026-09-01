@@ -8659,6 +8659,8 @@ _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
 _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
+_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
+_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -9650,6 +9652,49 @@ def reconcile_memory_package_on_startup() -> dict:
     }
 
 
+def _reconcile_startup_memory_package_guarded() -> dict:
+    try:
+        return reconcile_memory_package_on_startup()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Startup dependency reconcile failed to repair Memory package: %s",
+            exc,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "reason": "memory_package_install_failed",
+        }
+
+
+def _retry_startup_memory_package_after_restart(result: dict) -> dict:
+    """Retry repair once the restart that launched this process is terminal."""
+
+    if result.get("reason") != "memory_package_upgrade_busy":
+        return result
+
+    logger.info(
+        "Startup Memory package repair is waiting for the active restart to finish"
+    )
+    deadline = time.monotonic() + _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS
+    while result.get("reason") == "memory_package_upgrade_busy":
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Startup Memory package repair remained blocked by an active restart for %.1fs",
+                _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS,
+            )
+            return result
+        if restart_is_pending():
+            time.sleep(
+                min(_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS, remaining)
+            )
+            continue
+        result = _reconcile_startup_memory_package_guarded()
+    return result
+
+
 def _prepare_tmux_job() -> dict:
     try:
         from core.tmux_runtime import ensure_tmux_installed
@@ -9756,15 +9801,7 @@ def reconcile_startup_dependencies() -> dict:
         "tmux": {"ok": False, "status": "unknown"},
     }
     try:
-        try:
-            memory_package = reconcile_memory_package_on_startup()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Startup dependency reconcile failed to repair Memory package: %s", exc, exc_info=True)
-            memory_package = {
-                "ok": False,
-                "message": "memory_package_install_failed",
-                "reason": "memory_package_install_failed",
-            }
+        memory_package = _reconcile_startup_memory_package_guarded()
         result["memory_package"] = memory_package
 
         try:
@@ -9835,6 +9872,9 @@ def reconcile_startup_dependencies() -> dict:
                 logger.warning("Startup dependency reconcile failed to ensure tmux runtime: %s", exc, exc_info=True)
                 result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
+        result["memory_package"] = _retry_startup_memory_package_after_restart(
+            result["memory_package"]
+        )
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
             bool(result["memory_package"].get("ok"))

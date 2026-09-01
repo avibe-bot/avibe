@@ -2154,6 +2154,109 @@ def test_startup_memory_repair_continues_other_dependencies_before_service_resta
     assert result["show_runtime"]["status"] == "failed"
 
 
+def test_memory_indep_027_startup_retries_after_outer_restart_finishes(
+    monkeypatch,
+):
+    """MEMORY-INDEP-027: restart admission cannot strand the companion."""
+
+    events: list[str] = []
+    memory_results = iter(
+        (
+            {
+                "ok": False,
+                "message": "memory_package_upgrade_busy",
+                "reason": "memory_package_upgrade_busy",
+            },
+            {
+                "ok": True,
+                "message": "memory_package_ready",
+                "reason": None,
+                "restarting": True,
+            },
+        )
+    )
+
+    def reconcile_memory_package() -> dict:
+        result = next(memory_results)
+        events.append(str(result["message"]))
+        return result
+
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        reconcile_memory_package,
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda **_kwargs: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda **_kwargs: events.append("avault") or {"ok": True},
+    )
+    restart_pending = iter((True, False))
+    monkeypatch.setattr(api, "restart_is_pending", lambda: next(restart_pending))
+    monkeypatch.setattr(api.time, "sleep", lambda _seconds: events.append("wait"))
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
+            }
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == [
+        "memory_package_upgrade_busy",
+        "askill",
+        "avault",
+        "wait",
+        "memory_package_ready",
+    ]
+    assert result["memory_package"] == {
+        "ok": True,
+        "message": "memory_package_ready",
+        "reason": None,
+        "restarting": True,
+    }
+
+
+def test_startup_memory_retry_stays_bounded_while_restart_remains_pending(
+    monkeypatch,
+):
+    busy = {
+        "ok": False,
+        "message": "memory_package_upgrade_busy",
+        "reason": "memory_package_upgrade_busy",
+    }
+    monotonic = iter((0.0, 0.0, 0.6))
+    sleeps: list[float] = []
+    monkeypatch.setattr(api, "restart_is_pending", lambda: True)
+    monkeypatch.setattr(api.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(api.time, "sleep", sleeps.append)
+    monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS", 0.25)
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: pytest.fail("repair must wait until restart admission is released"),
+    )
+
+    result = api._retry_startup_memory_package_after_restart(busy)
+
+    assert result == busy
+    assert sleeps == [0.25]
+
+
 @pytest.mark.parametrize(
     "package",
     (

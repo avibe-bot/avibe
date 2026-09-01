@@ -44,7 +44,7 @@ def test_memory_indep_021_catalog_points_to_executable_import_fence() -> None:
     assert "test_memory_indep_021_status_import_fence" in test_source
 
 
-def test_memory_indep_027_catalog_points_to_preview_release_convergence() -> None:
+def test_memory_indep_027_catalog_points_to_preview_restart_convergence() -> None:
     catalog = yaml.safe_load(
         (ROOT / "tests/scenarios/memory_independence/catalog.yaml").read_text()
     )
@@ -54,10 +54,10 @@ def test_memory_indep_027_catalog_points_to_preview_release_convergence() -> Non
 
     assert scenario["status"] == "covered"
     assert scenario["test"].endswith(
-        "test_memory_indep_027_preview_repair_installs_the_release_that_published_it"
+        "test_memory_indep_027_startup_retries_after_outer_restart_finishes"
     )
     test_source = (ROOT / "tests/test_local_deps.py").read_text()
-    assert "test_memory_indep_027_preview_repair_installs_the_release_that_published_it" in test_source
+    assert "test_memory_indep_027_startup_retries_after_outer_restart_finishes" in test_source
 
 
 def test_memory_indep_026_catalog_points_to_released_first_hop_upgrade() -> None:
