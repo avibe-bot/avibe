@@ -615,6 +615,24 @@ def test_failed_terminal_supervisor_does_not_accept_followup(
     assert restart_supervisor.restart_mutation_is_pending() is False
 
 
+def test_dead_supervisor_seed_does_not_accept_followup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "state": "running",
+            "job_id": "dead-restart",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 100.0,
+        },
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda _pid: False)
+
+    assert restart_supervisor.restart_owner_is_active() is False
+    assert restart_supervisor.restart_mutation_is_pending() is False
+
+
 def test_restart_mutation_admission_bridges_pending_followup_handoff(
     monkeypatch,
     tmp_path,

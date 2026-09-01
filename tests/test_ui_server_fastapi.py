@@ -2380,6 +2380,27 @@ def test_config_post_schedules_service_restart_when_hot_reconcile_fails(monkeypa
     assert restart_calls == [True]
 
 
+def test_config_restart_fallback_preserves_source_checkout_guard(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+
+    monkeypatch.setattr(
+        "storage.migrations.guard_source_checkout_default_state_bootstrap",
+        lambda: (_ for _ in ()).throw(RuntimeError("unsafe source state")),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_schedule_restart_locked",
+        lambda **_kwargs: pytest.fail("guard must run before restart seeding"),
+    )
+
+    with pytest.raises(RuntimeError, match="unsafe source state"):
+        ui_server._schedule_service_restart_for_config_fallback()
+
+
 def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import restart_supervisor

@@ -97,6 +97,15 @@ def restart_owner_is_active() -> bool:
 
     status_path = runtime.get_restart_status_path()
     status = runtime.read_json(status_path)
+    if isinstance(status, dict):
+        supervisor_pid = status.get("supervisor_pid")
+        if (
+            isinstance(supervisor_pid, int)
+            and not isinstance(supervisor_pid, bool)
+            and supervisor_pid > 0
+            and not runtime.pid_alive(supervisor_pid)
+        ):
+            return False
     if isinstance(status, dict) and restart_record_is_pending(
         status,
         status_path,

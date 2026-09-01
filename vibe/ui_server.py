@@ -6426,6 +6426,7 @@ def _restart_in_flight() -> bool:
 
 
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
     from vibe import runtime
     from vibe.restart_supervisor import (
         _pending_restart_path,
@@ -6434,6 +6435,8 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
         restart_followup_handoff_lock,
     )
     from vibe.upgrade import atomic_upgrade_lock
+
+    guard_source_checkout_default_state_bootstrap()
 
     def _clear_pending_restart() -> None:
         try:
