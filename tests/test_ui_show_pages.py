@@ -11669,6 +11669,65 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
     }
 
 
+def test_memory_indep_027_startup_retries_after_restart_admission(
+    monkeypatch,
+):
+    """MEMORY-INDEP-027: a restart chain cannot strand the companion."""
+
+    from vibe.ui_server import _reconcile_startup_dependencies_task
+
+    busy = {
+        "ok": False,
+        "memory_package": {
+            "ok": False,
+            "message": "memory_package_upgrade_busy",
+            "reason": "memory_package_upgrade_busy",
+        },
+        "askill": {"ok": True},
+        "avault": {"ok": True},
+        "show_runtime": {
+            "ok": True,
+            "status": "skipped",
+            "policy": {"state": "skipped"},
+            "install": {"state": "absent"},
+        },
+    }
+    ready = {
+        **busy,
+        "ok": True,
+        "memory_package": {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+        },
+    }
+    retries: list[str] = []
+
+    def retry(result: dict) -> dict:
+        retries.append(str(result["memory_package"]["message"]))
+        return ready if len(retries) == 3 else result
+
+    monkeypatch.setattr("vibe.api.reconcile_startup_dependencies", lambda: busy)
+    monkeypatch.setattr(
+        "vibe.api.retry_startup_memory_package_after_restart",
+        retry,
+    )
+    monkeypatch.setattr("vibe.ui_server._server", SimpleNamespace(started=True))
+    monkeypatch.setattr(
+        "vibe.ui_server._STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS",
+        0.0,
+    )
+
+    asyncio.run(_reconcile_startup_dependencies_task())
+
+    assert retries == [
+        "memory_package_upgrade_busy",
+        "memory_package_upgrade_busy",
+        "memory_package_upgrade_busy",
+    ]
+
+
 def test_startup_dependency_reconcile_does_not_prewarm_policy_skip(monkeypatch):
     from vibe.ui_server import _reconcile_startup_dependencies_task
 

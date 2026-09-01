@@ -2411,6 +2411,43 @@ def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(mo
     assert pending["scope"] == "service"
 
 
+def test_config_restart_fallback_queues_behind_terminal_live_supervisor(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    restart_status = {
+        "ok": True,
+        "state": "succeeded",
+        "job_id": "job-in-postwork",
+        "supervisor_pid": 4242,
+        "supervisor_started_at": 100.0,
+    }
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 100.0)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal supervisor still owns restart admission")
+        ),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == restart_status
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] == "job-in-postwork"
+    assert pending["trigger"] == "web-ui-config-pending"
+
+
 def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import restart_supervisor

@@ -159,8 +159,8 @@ scenarios:
     layer: scenario
     test: tests/e2e/test_upgrade_command.py::test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation
   - id: MEMORY-INDEP-027
-    name: A core-only preview install converges after the outer restart releases package admission
+    name: A core-only preview install converges after every owning restart releases package admission
     status: covered
     kind: compatibility
     layer: scenario
-    test: tests/test_local_deps.py::test_memory_indep_027_startup_retries_after_outer_restart_finishes
+    test: tests/test_ui_show_pages.py::test_memory_indep_027_startup_retries_after_restart_admission

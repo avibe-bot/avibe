@@ -54,10 +54,10 @@ def test_memory_indep_027_catalog_points_to_preview_restart_convergence() -> Non
 
     assert scenario["status"] == "covered"
     assert scenario["test"].endswith(
-        "test_memory_indep_027_startup_retries_after_outer_restart_finishes"
+        "test_memory_indep_027_startup_retries_after_restart_admission"
     )
-    test_source = (ROOT / "tests/test_local_deps.py").read_text()
-    assert "test_memory_indep_027_startup_retries_after_outer_restart_finishes" in test_source
+    test_source = (ROOT / "tests/test_ui_show_pages.py").read_text()
+    assert "test_memory_indep_027_startup_retries_after_restart_admission" in test_source
 
 
 def test_memory_indep_026_catalog_points_to_released_first_hop_upgrade() -> None:

@@ -558,6 +558,11 @@ def test_restart_mutation_admission_bridges_pending_followup_handoff(
         restart_job_id="outer-restart",
     )
 
+    now["value"] = 99.0
+    assert restart_supervisor.restart_mutation_is_pending() is False
+
+    now["value"] = 100.0
+    assert restart_supervisor.restart_owner_is_active() is False
     assert restart_supervisor.restart_mutation_is_pending() is True
 
     now["value"] += restart_supervisor.PENDING_RESTART_HANDOFF_GRACE_SECONDS + 1
