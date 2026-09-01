@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 from config import paths
-from storage.lock import MigrationFileLock
 
 from vibe import runtime
 from vibe.upgrade import (
@@ -21,16 +20,12 @@ from vibe.upgrade import (
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
-    restart_record_is_pending,
 )
 
 
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
-_RESTART_HANDOFF_LOCK_TIMEOUT_SECONDS = 30.0
-_SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS = 300.0
-PENDING_RESTART_HANDOFF_GRACE_SECONDS = 60.0
 
 
 class StartedRuntime(NamedTuple):
@@ -66,83 +61,6 @@ def _restart_log_path(job_id: str) -> Path:
 
 def _pending_restart_path() -> Path:
     return paths.get_runtime_dir() / "pending_restart.json"
-
-
-def restart_followup_handoff_lock() -> MigrationFileLock:
-    """Serialize pending-marker publication with supervisor consumption."""
-
-    return MigrationFileLock(
-        paths.get_runtime_dir() / ".restart-followup.lock",
-        timeout_seconds=_RESTART_HANDOFF_LOCK_TIMEOUT_SECONDS,
-    )
-
-
-def _restart_supervisor_process_is_active(status: object) -> bool:
-    if not isinstance(status, dict):
-        return False
-    supervisor_pid = status.get("supervisor_pid")
-    if not isinstance(supervisor_pid, int) or supervisor_pid <= 0:
-        return False
-    if not runtime.pid_alive(supervisor_pid):
-        return False
-    started_at = status.get("supervisor_started_at")
-    if started_at is None:
-        return True
-    current_started_at = runtime.process_create_time(supervisor_pid)
-    return current_started_at is None or current_started_at == started_at
-
-
-def restart_owner_is_active() -> bool:
-    """Whether the restart status still names an owner doing lifecycle work."""
-
-    status_path = runtime.get_restart_status_path()
-    status = runtime.read_json(status_path)
-    if isinstance(status, dict):
-        supervisor_pid = status.get("supervisor_pid")
-        if (
-            isinstance(supervisor_pid, int)
-            and not isinstance(supervisor_pid, bool)
-            and supervisor_pid > 0
-            and not runtime.pid_alive(supervisor_pid)
-        ):
-            return False
-    if isinstance(status, dict) and restart_record_is_pending(
-        status,
-        status_path,
-        grace_seconds=PENDING_RESTART_HANDOFF_GRACE_SECONDS,
-    ):
-        return True
-    if not isinstance(status, dict):
-        return False
-    if status.get("followup_handoff_complete") is True:
-        return False
-    try:
-        state = RestartState(status.get("state"))
-    except (TypeError, ValueError):
-        return False
-    if state not in {
-        RestartState.SCHEDULED,
-        RestartState.RUNNING,
-        RestartState.SUCCEEDED,
-    }:
-        return False
-    return _restart_supervisor_process_is_active(status)
-
-
-def restart_mutation_is_pending() -> bool:
-    """Whether a restart owner or its follow-up handoff still excludes mutation."""
-
-    if restart_owner_is_active():
-        return True
-
-    pending = runtime.read_json(_pending_restart_path())
-    if not isinstance(pending, dict):
-        return False
-    created_at = pending.get("created_at_epoch")
-    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
-        return False
-    age = time.time() - created_at
-    return 0 <= age <= PENDING_RESTART_HANDOFF_GRACE_SECONDS
 
 
 def mark_pending_restart(
@@ -428,7 +346,6 @@ def _run_restart_job(
             "error": None,
             "created_at": _now_iso(),
             "stage_durations": stage_durations,
-            "followup_handoff_complete": False,
         }
         _write_status(payload)
         restart_started_at = time.monotonic()
@@ -536,48 +453,36 @@ def _run_restart_job(
                     stderr=subprocess.STDOUT,
                     text=True,
                     check=False,
-                    timeout=_SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS,
+                    timeout=300,
                 )
                 if prepare_result.returncode != 0:
                     write(f"Show Runtime preparation failed with exit code {prepare_result.returncode}")
                 else:
                     write("Show Runtime preparation succeeded")
             except subprocess.TimeoutExpired:
-                write(
-                    "Show Runtime preparation timed out after "
-                    f"{_SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS:.0f} seconds"
-                )
+                write("Show Runtime preparation timed out after 300 seconds")
             except Exception as exc:
                 write(f"Show Runtime preparation skipped: {exc}")
             finally:
                 mark_duration("prepare_show_runtime_seconds", prepare_started_at)
 
-        with atomic_upgrade_lock(), restart_followup_handoff_lock():
-            # Close marker admission while holding the same cross-process lock
-            # config writers need in order to publish one. The activation lock
-            # keeps package repair outside the marker-remove/new-owner gap.
-            payload["followup_handoff_complete"] = True
-            _write_status(payload)
-            pending_restart = _consume_pending_restart_for_job(job_id)
-            if pending_restart is not None:
-                write(
-                    "scheduling pending follow-up restart "
-                    f"trigger={pending_restart.get('trigger')!r} scope={pending_restart.get('scope')!r}"
+        pending_restart = _consume_pending_restart_for_job(job_id)
+        if pending_restart is not None:
+            write(
+                "scheduling pending follow-up restart "
+                f"trigger={pending_restart.get('trigger')!r} scope={pending_restart.get('scope')!r}"
+            )
+            try:
+                schedule_restart(
+                    delay_seconds=0.0,
+                    vibe_path=vibe_path,
+                    trigger=str(pending_restart.get("trigger") or "pending-restart"),
+                    scope=str(pending_restart.get("scope") or "service"),
                 )
-                try:
-                    _schedule_restart_locked(
-                        delay_seconds=0.0,
-                        vibe_path=vibe_path,
-                        trigger=str(pending_restart.get("trigger") or "pending-restart"),
-                        scope=str(pending_restart.get("scope") or "service"),
-                        prepare_show_runtime=False,
-                        memory_ui_secret=None,
-                        python_executable=None,
-                    )
-                except Exception as exc:
-                    payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
-                    _write_status(payload)
-                    write(f"failed to schedule pending follow-up restart: {exc}")
+            except Exception as exc:
+                payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
+                _write_status(payload)
+                write(f"failed to schedule pending follow-up restart: {exc}")
 
         return 0
 

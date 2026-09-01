@@ -165,8 +165,8 @@ scenarios:
     layer: scenario
     test: tests/test_local_deps.py::test_memory_indep_027_preview_repair_installs_the_release_that_published_it
   - id: MEMORY-INDEP-028
-    name: A core-only preview install converges after every owning restart releases package admission
+    name: A core-only preview install retries Memory repair after restart admission clears
     status: covered
     kind: compatibility
     layer: scenario
-    test: tests/test_ui_show_pages.py::test_memory_indep_028_startup_retries_after_restart_admission
+    test: tests/test_local_deps.py::test_memory_indep_028_startup_retries_after_restart_admission

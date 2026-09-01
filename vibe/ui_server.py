@@ -6415,53 +6415,54 @@ def version():
 # could both pass the check before either seeds restart_status.json, scheduling
 # two supervisors that race on the same pid files + lock.
 _RESTART_CONTROL_LOCK = threading.Lock()
+# How long a just-seeded, pid-less "scheduled" status is treated as in flight
+# (its supervisor is still starting up). Past this, a pid-less status is stale
+# (the supervisor died before recording its pid) and must NOT block restarts.
+_RESTART_SEED_GRACE_SECONDS = 60.0
 
 
 def _restart_in_flight() -> bool:
-    """Share the restart owner's full lifecycle decision."""
+    """True only when a restart is genuinely still running, so a stale status
+    can never permanently block Web restarts."""
+    from vibe import runtime
 
-    from vibe.restart_supervisor import restart_owner_is_active
-
-    return restart_owner_is_active()
+    status = runtime.read_json(runtime.get_restart_status_path()) or {}
+    if status.get("state") not in ("scheduled", "running"):
+        return False
+    sup_pid = status.get("supervisor_pid")
+    if isinstance(sup_pid, int):
+        if not runtime.pid_alive(sup_pid):
+            return False
+        # Guard against PID reuse: a dead supervisor's pid can be reclaimed by an
+        # unrelated process (notably across a reboot), which would otherwise keep
+        # blocking restarts until that process exits. The job records its
+        # ``supervisor_started_at`` (process create time), so only treat the pid
+        # as the live supervisor when the create time still matches.
+        started_at = status.get("supervisor_started_at")
+        if started_at is not None:
+            current = runtime.process_create_time(sup_pid)
+            if current is not None and current != started_at:
+                return False
+        return True
+    # No supervisor pid recorded yet: in flight only while the seed is fresh
+    # (the child is still starting). An older pid-less status is stale.
+    try:
+        age = time.time() - runtime.get_restart_status_path().stat().st_mtime
+    except OSError:
+        return False
+    return age < _RESTART_SEED_GRACE_SECONDS
 
 
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
-    from storage.migrations import guard_source_checkout_default_state_bootstrap
     from vibe import runtime
-    from vibe.restart_supervisor import (
-        _pending_restart_path,
-        _schedule_restart_locked,
-        mark_pending_restart,
-        restart_followup_handoff_lock,
-    )
-    from vibe.upgrade import atomic_upgrade_lock
-
-    guard_source_checkout_default_state_bootstrap()
-
-    def _clear_pending_restart() -> None:
-        try:
-            _pending_restart_path().unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to remove stale pending restart marker", exc_info=True)
+    from vibe.restart_supervisor import mark_pending_restart, schedule_restart
 
     def _schedule_restart() -> dict[str, Any]:
         status = runtime.read_status()
         runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
-        return _schedule_restart_locked(
-            delay_seconds=0.0,
-            trigger="web-ui-config",
-            scope="service",
-            vibe_path=None,
-            prepare_show_runtime=False,
-            memory_ui_secret=None,
-            python_executable=None,
-        )
+        return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
 
-    with (
-        _RESTART_CONTROL_LOCK,
-        atomic_upgrade_lock(),
-        restart_followup_handoff_lock(),
-    ):
+    with _RESTART_CONTROL_LOCK:
         if _restart_in_flight():
             restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
             pending = mark_pending_restart(
@@ -6471,7 +6472,12 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
                 restart_job_id=restart_status.get("job_id"),
             )
             if not _restart_in_flight():
-                _clear_pending_restart()
+                try:
+                    from vibe.restart_supervisor import _pending_restart_path
+
+                    _pending_restart_path().unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Failed to remove stale pending restart marker", exc_info=True)
                 restart = _schedule_restart()
                 return {
                     "ok": True,
@@ -6484,7 +6490,6 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
                 "restart": restart_status,
                 "code": "restart_pending_after_in_progress",
             }
-        _clear_pending_restart()
         restart = _schedule_restart()
     return {"ok": True, "restart": restart}
 
@@ -15945,7 +15950,6 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
 
 _inbox_bridge_task: "asyncio.Task | None" = None
 _startup_dependency_reconcile_task: "asyncio.Task | None" = None
-_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
 _terminal_service: TerminalService | None = None
 
 
@@ -16007,34 +16011,6 @@ async def _wait_for_ui_host_ready() -> None:
         await asyncio.sleep(0.05)
 
 
-async def _retry_startup_memory_package_after_restart(result: dict) -> dict:
-    memory_package = (
-        result.get("memory_package")
-        if isinstance(result.get("memory_package"), dict)
-        else {}
-    )
-    if memory_package.get("reason") != "memory_package_upgrade_busy":
-        return result
-
-    from vibe import api
-
-    logger.info(
-        "Startup Memory package repair is waiting for restart mutation admission"
-    )
-    while memory_package.get("reason") == "memory_package_upgrade_busy":
-        await asyncio.sleep(_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS)
-        result = await asyncio.to_thread(
-            api.retry_startup_memory_package_after_restart,
-            result,
-        )
-        memory_package = (
-            result.get("memory_package")
-            if isinstance(result.get("memory_package"), dict)
-            else {}
-        )
-    return result
-
-
 async def _reconcile_startup_dependencies_task() -> None:
     start = time.monotonic()
     try:
@@ -16042,7 +16018,6 @@ async def _reconcile_startup_dependencies_task() -> None:
         from vibe import api
 
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)
-        result = await _retry_startup_memory_package_after_restart(result)
         show_runtime = result.get("show_runtime") if isinstance(result.get("show_runtime"), dict) else {}
         policy = show_runtime.get("policy") if isinstance(show_runtime.get("policy"), dict) else {}
         install = show_runtime.get("install") if isinstance(show_runtime.get("install"), dict) else {}

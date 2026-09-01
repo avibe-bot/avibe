@@ -803,17 +803,6 @@ def test_restart_is_pending_until_the_seed_marker_is_terminal(monkeypatch, tmp_p
     assert not restart_is_pending()
 
 
-def test_future_dated_restart_seed_is_not_pending(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    status = runtime.get_restart_status_path()
-    status.parent.mkdir(parents=True)
-    runtime.write_json(status, {"state": "scheduled", "supervisor_pid": None})
-    future = vibe_upgrade.time.time() + vibe_upgrade.RESTART_PENDING_GRACE_SECONDS
-    os.utime(status, (future, future))
-
-    assert not restart_is_pending()
-
-
 def test_legacy_restart_record_expires_even_when_its_pid_was_reused(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     status = runtime.get_restart_status_path()

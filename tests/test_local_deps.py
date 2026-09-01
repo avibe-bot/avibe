@@ -2154,45 +2154,100 @@ def test_startup_memory_repair_continues_other_dependencies_before_service_resta
     assert result["show_runtime"]["status"] == "failed"
 
 
-def test_startup_memory_retry_enters_repair_only_after_admission_clears(
-    monkeypatch,
-):
-    result = {
-        "ok": False,
-        "memory_package": {
-            "ok": False,
-            "message": "memory_package_upgrade_busy",
-            "reason": "memory_package_upgrade_busy",
-        },
-        "askill": {"ok": True},
-        "avault": {"ok": True},
-        "show_runtime": {"ok": True},
-    }
-    repair = Mock(
-        return_value={
-            "ok": True,
-            "message": "memory_package_ready",
-            "reason": None,
-            "restarting": True,
-        }
+def test_memory_indep_028_startup_retries_after_restart_admission(monkeypatch):
+    """MEMORY-INDEP-028: restart admission cannot strand the companion."""
+
+    events: list[str] = []
+    memory_results = iter(
+        (
+            {
+                "ok": False,
+                "message": "memory_package_upgrade_busy",
+                "reason": "memory_package_upgrade_busy",
+            },
+            {
+                "ok": True,
+                "message": "memory_package_ready",
+                "reason": None,
+                "restarting": True,
+            },
+        )
     )
-    admission = {"pending": True}
+
+    def reconcile_memory_package() -> dict:
+        result = next(memory_results)
+        events.append(str(result["message"]))
+        return result
+
     monkeypatch.setattr(
         api,
-        "restart_mutation_is_pending",
-        lambda: admission["pending"],
+        "reconcile_memory_package_on_startup",
+        reconcile_memory_package,
     )
-    monkeypatch.setattr(api, "_reconcile_startup_memory_package_guarded", repair)
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda **_kwargs: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda **_kwargs: events.append("avault") or {"ok": True},
+    )
+    restart_pending = iter((True, False))
+    monkeypatch.setattr(api, "restart_is_pending", lambda: next(restart_pending))
+    monkeypatch.setattr(api.time, "sleep", lambda _seconds: events.append("wait"))
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
 
-    assert api.retry_startup_memory_package_after_restart(result) is result
-    repair.assert_not_called()
+    import core.show_runtime as srt_mod
 
-    admission["pending"] = False
-    retried = api.retry_startup_memory_package_after_restart(result)
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
+            }
 
-    assert retried["ok"] is True
-    assert retried["memory_package"]["message"] == "memory_package_ready"
-    repair.assert_called_once_with()
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == [
+        "memory_package_upgrade_busy",
+        "askill",
+        "avault",
+        "wait",
+        "memory_package_ready",
+    ]
+    assert result["memory_package"]["message"] == "memory_package_ready"
+
+
+def test_startup_memory_retry_stays_bounded_while_restart_remains_pending(
+    monkeypatch,
+):
+    busy = {
+        "ok": False,
+        "message": "memory_package_upgrade_busy",
+        "reason": "memory_package_upgrade_busy",
+    }
+    monotonic = iter((0.0, 0.0, 0.6))
+    sleeps: list[float] = []
+    monkeypatch.setattr(api, "restart_is_pending", lambda: True)
+    monkeypatch.setattr(api.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(api.time, "sleep", sleeps.append)
+    monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS", 0.25)
+    monkeypatch.setattr(
+        api,
+        "_reconcile_startup_memory_package_guarded",
+        lambda: pytest.fail("repair must wait until restart admission is released"),
+    )
+
+    result = api._retry_startup_memory_package_after_restart(busy)
+
+    assert result == busy
+    assert sleeps == [0.25]
 
 
 @pytest.mark.parametrize(
@@ -2483,7 +2538,7 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
     monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
-    monkeypatch.setattr(api, "restart_mutation_is_pending", lambda: False)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
     monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
     record_result = Mock()
     monkeypatch.setattr(api, "_record_memory_package_repair_result", record_result)
@@ -2577,7 +2632,7 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
-    monkeypatch.setattr(api, "restart_mutation_is_pending", lambda: False)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
     monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
     monkeypatch.setattr(api, "_record_memory_package_repair_result", Mock())
     monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
@@ -2629,7 +2684,7 @@ def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_sched
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
     monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
-    monkeypatch.setattr(api, "restart_mutation_is_pending", lambda: False)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
     monkeypatch.setattr(
         api,
         "verify_python_environment",
@@ -2698,7 +2753,7 @@ def test_memory_indep_026_auto_repair_persists_a_per_version_attempt_budget(
     monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
-    monkeypatch.setattr(api, "restart_mutation_is_pending", lambda: False)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
     monkeypatch.setattr(
         api,
         "build_upgrade_plan",

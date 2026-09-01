@@ -87,7 +87,7 @@ from vibe.upgrade import (
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
     verify_upgrade_candidate,
 )
-from vibe.restart_supervisor import restart_mutation_is_pending, schedule_restart
+from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
@@ -8659,6 +8659,8 @@ _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
 _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
+_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
+_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -9488,7 +9490,7 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                 }
             current_vibe_path = get_running_vibe_path()
             restart_only = _memory_package_restart_retry_required(current_version)
-            if restart_mutation_is_pending():
+            if restart_is_pending():
                 return {
                     "ok": False,
                     "message": "memory_package_upgrade_busy",
@@ -9666,26 +9668,27 @@ def _reconcile_startup_memory_package_guarded() -> dict:
         }
 
 
-def retry_startup_memory_package_after_restart(result: dict) -> dict:
-    """Retry one busy startup repair after restart mutation admission clears."""
+def _retry_startup_memory_package_after_restart(result: dict) -> dict:
+    """Retry one busy startup repair after restart admission clears."""
 
-    memory_package = result.get("memory_package")
-    if not isinstance(memory_package, dict):
-        return result
-    if memory_package.get("reason") != "memory_package_upgrade_busy":
-        return result
-    if restart_mutation_is_pending():
+    if result.get("reason") != "memory_package_upgrade_busy":
         return result
 
-    updated = {
-        **result,
-        "memory_package": _reconcile_startup_memory_package_guarded(),
-    }
-    updated["ok"] = all(
-        bool(updated.get(dependency, {}).get("ok"))
-        for dependency in ("memory_package", "askill", "avault", "show_runtime")
+    logger.info(
+        "Startup Memory package repair is waiting for the active restart to finish"
     )
-    return updated
+    deadline = time.monotonic() + _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS
+    while restart_is_pending():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Startup Memory package repair remained blocked by an active restart for %.1fs",
+                _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS,
+            )
+            return result
+        time.sleep(min(_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS, remaining))
+
+    return _reconcile_startup_memory_package_guarded()
 
 
 def _prepare_tmux_job() -> dict:
@@ -9865,6 +9868,9 @@ def reconcile_startup_dependencies() -> dict:
                 logger.warning("Startup dependency reconcile failed to ensure tmux runtime: %s", exc, exc_info=True)
                 result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
+        result["memory_package"] = _retry_startup_memory_package_after_restart(
+            result["memory_package"]
+        )
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
             bool(result["memory_package"].get("ok"))
