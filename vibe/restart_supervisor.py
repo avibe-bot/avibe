@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from config import paths
+from storage.lock import MigrationFileLock
 
 from vibe import runtime
 from vibe.upgrade import (
@@ -27,6 +28,7 @@ from vibe.upgrade import (
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
+_RESTART_HANDOFF_LOCK_TIMEOUT_SECONDS = 30.0
 _SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS = 300.0
 PENDING_RESTART_HANDOFF_GRACE_SECONDS = 60.0
 
@@ -66,6 +68,15 @@ def _pending_restart_path() -> Path:
     return paths.get_runtime_dir() / "pending_restart.json"
 
 
+def restart_followup_handoff_lock() -> MigrationFileLock:
+    """Serialize pending-marker publication with supervisor consumption."""
+
+    return MigrationFileLock(
+        paths.get_runtime_dir() / ".restart-followup.lock",
+        timeout_seconds=_RESTART_HANDOFF_LOCK_TIMEOUT_SECONDS,
+    )
+
+
 def _restart_supervisor_process_is_active(status: object) -> bool:
     if not isinstance(status, dict):
         return False
@@ -92,6 +103,10 @@ def restart_owner_is_active() -> bool:
         grace_seconds=PENDING_RESTART_HANDOFF_GRACE_SECONDS,
     ):
         return True
+    if not isinstance(status, dict):
+        return False
+    if status.get("followup_handoff_complete") is True:
+        return False
     return _restart_supervisor_process_is_active(status)
 
 
@@ -394,6 +409,7 @@ def _run_restart_job(
             "error": None,
             "created_at": _now_iso(),
             "stage_durations": stage_durations,
+            "followup_handoff_complete": False,
         }
         _write_status(payload)
         restart_started_at = time.monotonic()
@@ -517,23 +533,30 @@ def _run_restart_job(
             finally:
                 mark_duration("prepare_show_runtime_seconds", prepare_started_at)
 
-        pending_restart = _consume_pending_restart_for_job(job_id)
-        if pending_restart is not None:
-            write(
-                "scheduling pending follow-up restart "
-                f"trigger={pending_restart.get('trigger')!r} scope={pending_restart.get('scope')!r}"
-            )
-            try:
-                schedule_restart(
-                    delay_seconds=0.0,
-                    vibe_path=vibe_path,
-                    trigger=str(pending_restart.get("trigger") or "pending-restart"),
-                    scope=str(pending_restart.get("scope") or "service"),
+        with restart_followup_handoff_lock():
+            # Close marker admission while holding the same cross-process lock
+            # config writers need in order to publish one. A writer that ran
+            # first is consumed below; one that runs later sees this completion
+            # bit and schedules the next owner directly.
+            payload["followup_handoff_complete"] = True
+            _write_status(payload)
+            pending_restart = _consume_pending_restart_for_job(job_id)
+            if pending_restart is not None:
+                write(
+                    "scheduling pending follow-up restart "
+                    f"trigger={pending_restart.get('trigger')!r} scope={pending_restart.get('scope')!r}"
                 )
-            except Exception as exc:
-                payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
-                _write_status(payload)
-                write(f"failed to schedule pending follow-up restart: {exc}")
+                try:
+                    schedule_restart(
+                        delay_seconds=0.0,
+                        vibe_path=vibe_path,
+                        trigger=str(pending_restart.get("trigger") or "pending-restart"),
+                        scope=str(pending_restart.get("scope") or "service"),
+                    )
+                except Exception as exc:
+                    payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
+                    _write_status(payload)
+                    write(f"failed to schedule pending follow-up restart: {exc}")
 
         return 0
 

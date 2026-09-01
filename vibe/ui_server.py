@@ -6427,14 +6427,18 @@ def _restart_in_flight() -> bool:
 
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     from vibe import runtime
-    from vibe.restart_supervisor import mark_pending_restart, schedule_restart
+    from vibe.restart_supervisor import (
+        mark_pending_restart,
+        restart_followup_handoff_lock,
+        schedule_restart,
+    )
 
     def _schedule_restart() -> dict[str, Any]:
         status = runtime.read_status()
         runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
         return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
 
-    with _RESTART_CONTROL_LOCK:
+    with _RESTART_CONTROL_LOCK, restart_followup_handoff_lock():
         if _restart_in_flight():
             restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
             pending = mark_pending_restart(

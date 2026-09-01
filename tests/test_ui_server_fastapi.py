@@ -2448,6 +2448,44 @@ def test_config_restart_fallback_queues_behind_terminal_live_supervisor(
     assert pending["trigger"] == "web-ui-config-pending"
 
 
+def test_config_restart_fallback_schedules_after_terminal_handoff_complete(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "ok": True,
+            "state": "succeeded",
+            "job_id": "job-postwork-complete",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 100.0,
+            "followup_handoff_complete": True,
+        },
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 100.0)
+    scheduled: list[dict] = []
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: scheduled.append(kwargs) or {"job_id": "next-owner"},
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result == {"ok": True, "restart": {"job_id": "next-owner"}}
+    assert scheduled == [
+        {"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}
+    ]
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
 def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import restart_supervisor

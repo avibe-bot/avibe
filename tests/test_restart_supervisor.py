@@ -518,6 +518,9 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
         }
     ]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+    assert runtime.read_json(runtime.get_restart_status_path())[
+        "followup_handoff_complete"
+    ] is True
 
 
 def test_restart_mutation_admission_waits_for_terminal_supervisor_postwork(
