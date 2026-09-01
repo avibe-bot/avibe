@@ -87,11 +87,7 @@ from vibe.upgrade import (
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
     verify_upgrade_candidate,
 )
-from vibe.restart_supervisor import (
-    restart_followup_handoff_lock,
-    restart_mutation_is_pending,
-    schedule_restart,
-)
+from vibe.restart_supervisor import restart_mutation_is_pending, schedule_restart
 from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
@@ -9473,7 +9469,7 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
     reservation: dict | None = None
     current_version: str | None = None
     try:
-        with restart_followup_handoff_lock(), atomic_upgrade_lock():
+        with atomic_upgrade_lock():
             rejection = _memory_package_repair_rejection(
                 allow_optional=not automatic,
             )

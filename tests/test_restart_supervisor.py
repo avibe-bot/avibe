@@ -475,6 +475,28 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
     scheduled: list[dict] = []
+    lock_events: list[str] = []
+
+    class _Lock:
+        def __init__(self, name: str):
+            self.name = name
+
+        def __enter__(self):
+            lock_events.append(f"{self.name}-enter")
+
+        def __exit__(self, *_args):
+            lock_events.append(f"{self.name}-exit")
+
+    monkeypatch.setattr(
+        restart_supervisor,
+        "restart_followup_handoff_lock",
+        lambda: _Lock("handoff"),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "atomic_upgrade_lock",
+        lambda: _Lock("atomic"),
+    )
 
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
@@ -483,9 +505,10 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
-    original_schedule_restart = restart_supervisor.schedule_restart
+    original_schedule_restart = restart_supervisor._schedule_restart_locked
 
     def _schedule_restart(**kwargs):
+        assert lock_events == ["atomic-enter", "handoff-enter"]
         scheduled.append(kwargs)
         return {"job_id": "followup"}
 
@@ -495,7 +518,7 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
         reason="restart_in_progress",
         restart_job_id="jobpending",
     )
-    monkeypatch.setattr(restart_supervisor, "schedule_restart", _schedule_restart)
+    monkeypatch.setattr(restart_supervisor, "_schedule_restart_locked", _schedule_restart)
 
     try:
         rc = restart_supervisor._run_restart_job(
@@ -506,15 +529,28 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
             scope="service",
         )
     finally:
-        monkeypatch.setattr(restart_supervisor, "schedule_restart", original_schedule_restart)
+        monkeypatch.setattr(
+            restart_supervisor,
+            "_schedule_restart_locked",
+            original_schedule_restart,
+        )
 
     assert rc == 0
+    assert lock_events == [
+        "atomic-enter",
+        "handoff-enter",
+        "handoff-exit",
+        "atomic-exit",
+    ]
     assert scheduled == [
         {
             "delay_seconds": 0.0,
             "vibe_path": "/bin/vibe",
             "trigger": "web-ui-config-pending",
             "scope": "service",
+            "prepare_show_runtime": False,
+            "memory_ui_secret": None,
+            "python_executable": None,
         }
     ]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
@@ -547,7 +583,35 @@ def test_restart_mutation_admission_waits_for_terminal_supervisor_postwork(
     monkeypatch.setattr(runtime, "process_create_time", lambda pid: None)
     assert restart_supervisor.restart_mutation_is_pending() is True
 
+    status = runtime.read_json(runtime.get_restart_status_path())
+    status["supervisor_started_at"] = None
+    runtime.write_json(runtime.get_restart_status_path(), status)
+    assert restart_supervisor.restart_mutation_is_pending() is True
+
     alive.clear()
+    assert restart_supervisor.restart_mutation_is_pending() is False
+
+
+def test_failed_terminal_supervisor_does_not_accept_followup(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "state": "failed",
+            "job_id": "failed-restart",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 100.0,
+            "followup_handoff_complete": False,
+        },
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 100.0)
+
+    assert restart_supervisor.restart_owner_is_active() is False
     assert restart_supervisor.restart_mutation_is_pending() is False
 
 

@@ -2396,7 +2396,7 @@ def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(mo
     monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
     monkeypatch.setattr(
         restart_supervisor,
-        "schedule_restart",
+        "_schedule_restart_locked",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not overlap restart jobs")),
     )
 
@@ -2432,7 +2432,7 @@ def test_config_restart_fallback_queues_behind_terminal_live_supervisor(
     monkeypatch.setattr(runtime, "process_create_time", lambda pid: 100.0)
     monkeypatch.setattr(
         restart_supervisor,
-        "schedule_restart",
+        "_schedule_restart_locked",
         lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("terminal supervisor still owns restart admission")
         ),
@@ -2473,7 +2473,7 @@ def test_config_restart_fallback_schedules_after_terminal_handoff_complete(
     scheduled: list[dict] = []
     monkeypatch.setattr(
         restart_supervisor,
-        "schedule_restart",
+        "_schedule_restart_locked",
         lambda **kwargs: scheduled.append(kwargs) or {"job_id": "next-owner"},
     )
 
@@ -2481,7 +2481,61 @@ def test_config_restart_fallback_schedules_after_terminal_handoff_complete(
 
     assert result == {"ok": True, "restart": {"job_id": "next-owner"}}
     assert scheduled == [
-        {"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}
+        {
+            "delay_seconds": 0.0,
+            "trigger": "web-ui-config",
+            "scope": "service",
+            "vibe_path": None,
+            "prepare_show_runtime": False,
+            "memory_ui_secret": None,
+            "python_executable": None,
+        }
+    ]
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
+def test_config_restart_fallback_schedules_after_failed_terminal_owner(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "ok": False,
+            "state": "failed",
+            "job_id": "failed-owner",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 100.0,
+            "followup_handoff_complete": False,
+        },
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 100.0)
+    scheduled: list[dict] = []
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_schedule_restart_locked",
+        lambda **kwargs: scheduled.append(kwargs) or {"job_id": "recovery-owner"},
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result == {"ok": True, "restart": {"job_id": "recovery-owner"}}
+    assert scheduled == [
+        {
+            "delay_seconds": 0.0,
+            "trigger": "web-ui-config",
+            "scope": "service",
+            "vibe_path": None,
+            "prepare_show_runtime": False,
+            "memory_ui_secret": None,
+            "python_executable": None,
+        }
     ]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
 
@@ -2503,7 +2557,7 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     scheduled: list[dict] = []
 
     monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
-    monkeypatch.setattr(restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.append(kwargs) or {"job_id": "followup"})
+    monkeypatch.setattr(restart_supervisor, "_schedule_restart_locked", lambda **kwargs: scheduled.append(kwargs) or {"job_id": "followup"})
     monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": 11, "ui_pid": 22})
 
     result = ui_server._schedule_service_restart_for_config_fallback()
@@ -2511,7 +2565,17 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     assert result["ok"] is True
     assert result["code"] == "restart_scheduled_after_in_flight_finished"
     assert result["restart"] == {"job_id": "followup"}
-    assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
+    assert scheduled == [
+        {
+            "delay_seconds": 0.0,
+            "trigger": "web-ui-config",
+            "scope": "service",
+            "vibe_path": None,
+            "prepare_show_runtime": False,
+            "memory_ui_secret": None,
+            "python_executable": None,
+        }
+    ]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
 
 
@@ -2536,14 +2600,24 @@ def test_terminal_restart_failure_does_not_block_config_restart_retry(monkeypatc
     monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": None, "ui_pid": 22})
     monkeypatch.setattr(
         restart_supervisor,
-        "schedule_restart",
+        "_schedule_restart_locked",
         lambda **kwargs: scheduled.append(kwargs) or {"job_id": "retry"},
     )
 
     result = ui_server._schedule_service_restart_for_config_fallback()
 
     assert result == {"ok": True, "restart": {"job_id": "retry"}}
-    assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
+    assert scheduled == [
+        {
+            "delay_seconds": 0.0,
+            "trigger": "web-ui-config",
+            "scope": "service",
+            "vibe_path": None,
+            "prepare_show_runtime": False,
+            "memory_ui_secret": None,
+            "python_executable": None,
+        }
+    ]
 
 
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):

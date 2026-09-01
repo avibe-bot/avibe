@@ -6428,17 +6428,37 @@ def _restart_in_flight() -> bool:
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     from vibe import runtime
     from vibe.restart_supervisor import (
+        _pending_restart_path,
+        _schedule_restart_locked,
         mark_pending_restart,
         restart_followup_handoff_lock,
-        schedule_restart,
     )
+    from vibe.upgrade import atomic_upgrade_lock
+
+    def _clear_pending_restart() -> None:
+        try:
+            _pending_restart_path().unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to remove stale pending restart marker", exc_info=True)
 
     def _schedule_restart() -> dict[str, Any]:
         status = runtime.read_status()
         runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
-        return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
+        return _schedule_restart_locked(
+            delay_seconds=0.0,
+            trigger="web-ui-config",
+            scope="service",
+            vibe_path=None,
+            prepare_show_runtime=False,
+            memory_ui_secret=None,
+            python_executable=None,
+        )
 
-    with _RESTART_CONTROL_LOCK, restart_followup_handoff_lock():
+    with (
+        _RESTART_CONTROL_LOCK,
+        atomic_upgrade_lock(),
+        restart_followup_handoff_lock(),
+    ):
         if _restart_in_flight():
             restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
             pending = mark_pending_restart(
@@ -6448,12 +6468,7 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
                 restart_job_id=restart_status.get("job_id"),
             )
             if not _restart_in_flight():
-                try:
-                    from vibe.restart_supervisor import _pending_restart_path
-
-                    _pending_restart_path().unlink(missing_ok=True)
-                except OSError:
-                    logger.debug("Failed to remove stale pending restart marker", exc_info=True)
+                _clear_pending_restart()
                 restart = _schedule_restart()
                 return {
                     "ok": True,
@@ -6466,6 +6481,7 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
                 "restart": restart_status,
                 "code": "restart_pending_after_in_progress",
             }
+        _clear_pending_restart()
         restart = _schedule_restart()
     return {"ok": True, "restart": restart}
 

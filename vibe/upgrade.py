@@ -264,7 +264,7 @@ def restart_record_is_pending(
         age = time.time() - path.stat().st_mtime
     except OSError:
         return False
-    return age <= grace_seconds
+    return 0 <= age <= grace_seconds
 
 
 def _is_stable_launcher_path(launcher: Path) -> bool:

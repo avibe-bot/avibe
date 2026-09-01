@@ -2493,21 +2493,13 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
         lambda _python: SimpleNamespace(ok=True, detail="ok"),
     )
 
-    class _HandoffLock:
-        def __enter__(self):
-            lock_events.append("handoff-enter")
-
-        def __exit__(self, *_args):
-            lock_events.append("handoff-exit")
-
     class _Lock:
         def __enter__(self):
-            lock_events.append("atomic-enter")
+            lock_events.append("entered")
 
         def __exit__(self, *_args):
-            lock_events.append("atomic-exit")
+            lock_events.append("exited")
 
-    monkeypatch.setattr(api, "restart_followup_handoff_lock", _HandoffLock)
     monkeypatch.setattr(api, "atomic_upgrade_lock", _Lock)
 
     def build_plan(**kwargs):
@@ -2560,15 +2552,7 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
     }
     assert result["restarting"] is True
     assert result["restart"] == {"job_id": "restart"}
-    assert lock_events == [
-        "handoff-enter",
-        "atomic-enter",
-        "build",
-        "execute",
-        "restart",
-        "atomic-exit",
-        "handoff-exit",
-    ]
+    assert lock_events == ["entered", "build", "execute", "restart", "exited"]
     record_result.assert_called_once_with(
         current_version,
         result="restart_scheduled",
@@ -2596,7 +2580,6 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     monkeypatch.setattr(api, "restart_mutation_is_pending", lambda: False)
     monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
     monkeypatch.setattr(api, "_record_memory_package_repair_result", Mock())
-    monkeypatch.setattr(api, "restart_followup_handoff_lock", nullcontext)
     monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
     monkeypatch.setattr(api, "schedule_restart", lambda **_kwargs: {"job_id": "restart"})
     monkeypatch.setattr(
@@ -2645,7 +2628,6 @@ def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_sched
     monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
-    monkeypatch.setattr(api, "restart_followup_handoff_lock", nullcontext)
     monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
     monkeypatch.setattr(api, "restart_mutation_is_pending", lambda: False)
     monkeypatch.setattr(
@@ -2711,7 +2693,6 @@ def test_memory_indep_026_auto_repair_persists_a_per_version_attempt_budget(
     installs: list[int] = []
     restarts: list[int] = []
     monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
-    monkeypatch.setattr(api, "restart_followup_handoff_lock", nullcontext)
     monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
     monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
     monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")

@@ -87,7 +87,7 @@ def _restart_supervisor_process_is_active(status: object) -> bool:
         return False
     started_at = status.get("supervisor_started_at")
     if started_at is None:
-        return False
+        return True
     current_started_at = runtime.process_create_time(supervisor_pid)
     return current_started_at is None or current_started_at == started_at
 
@@ -106,6 +106,16 @@ def restart_owner_is_active() -> bool:
     if not isinstance(status, dict):
         return False
     if status.get("followup_handoff_complete") is True:
+        return False
+    try:
+        state = RestartState(status.get("state"))
+    except (TypeError, ValueError):
+        return False
+    if state not in {
+        RestartState.SCHEDULED,
+        RestartState.RUNNING,
+        RestartState.SUCCEEDED,
+    }:
         return False
     return _restart_supervisor_process_is_active(status)
 
@@ -533,11 +543,10 @@ def _run_restart_job(
             finally:
                 mark_duration("prepare_show_runtime_seconds", prepare_started_at)
 
-        with restart_followup_handoff_lock():
+        with atomic_upgrade_lock(), restart_followup_handoff_lock():
             # Close marker admission while holding the same cross-process lock
-            # config writers need in order to publish one. A writer that ran
-            # first is consumed below; one that runs later sees this completion
-            # bit and schedules the next owner directly.
+            # config writers need in order to publish one. The activation lock
+            # keeps package repair outside the marker-remove/new-owner gap.
             payload["followup_handoff_complete"] = True
             _write_status(payload)
             pending_restart = _consume_pending_restart_for_job(job_id)
@@ -547,11 +556,14 @@ def _run_restart_job(
                     f"trigger={pending_restart.get('trigger')!r} scope={pending_restart.get('scope')!r}"
                 )
                 try:
-                    schedule_restart(
+                    _schedule_restart_locked(
                         delay_seconds=0.0,
                         vibe_path=vibe_path,
                         trigger=str(pending_restart.get("trigger") or "pending-restart"),
                         scope=str(pending_restart.get("scope") or "service"),
+                        prepare_show_runtime=False,
+                        memory_ui_secret=None,
+                        python_executable=None,
                     )
                 except Exception as exc:
                     payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
