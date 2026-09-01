@@ -94,7 +94,10 @@ and `.claude/commands` are not discovery sources.
 ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills
 ```
 
-This is Avibe-owned runtime content and has the highest resolution priority.
+This is logical user-facing notation. Implementations resolve it through
+`config.paths.get_vibe_remote_dir()` so a legacy `~/.vibe_remote` home remains
+authoritative when the compatibility migration cannot move it. This is
+Avibe-owned runtime content and has the highest resolution priority.
 
 ### 4.3 Project roots
 
@@ -144,10 +147,20 @@ Discovery is deliberately permissive:
 - ignore every other field;
 - do not reject a Skill because unrelated frontmatter is unknown or malformed;
 - do not require the declared name to match the directory name; and
-- fold a multiline description into one line for Catalog display.
+- fold whitespace in `name` and `description` into single-line Catalog values.
 
 If either required value cannot be extracted, omit that candidate without
-failing the whole Catalog.
+failing the whole Catalog. To keep every accepted name callable and every
+Catalog bounded, Avibe applies only these output-boundary limits:
+
+- omit a candidate whose normalized name exceeds 256 characters;
+- truncate a normalized description beyond 1,024 characters, adding `...`;
+- render at most 25 entries and 16 KiB of Skill rows per page; and
+- use `--` before the name in load commands so option-like names remain
+  callable without imposing a new name grammar.
+
+These limits do not validate optional frontmatter, require the directory and
+declared name to match, or add compatibility metadata.
 
 ### 5.2 Deduplication
 
@@ -191,7 +204,7 @@ resolved rows substituted:
 ## Skills
 
 Skills provide specialized instructions and workflows for specific tasks.
-When a task matches a skill's description, run `vibe skill load <name>` before proceeding.
+When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.
 If the user requests a skill by name, load it.
 Only load skill names listed here or returned by `vibe skill list`; do not guess names.
 
@@ -200,8 +213,8 @@ Only load skill names listed here or returned by `vibe skill list`; do not guess
 - pdf-processing: Extract text, fill forms, and merge PDF files.
 ```
 
-The system prompt contains page 1 only, with at most 25 Skills. If more entries
-exist, append exactly:
+The system prompt contains page 1 only, within the entry and row budgets in
+Section 5.1. If more entries exist, append exactly:
 
 ```md
 More skills are available. Run `vibe skill list --page 2` to view more.
@@ -234,7 +247,11 @@ and resolution metadata are not printed.
 
 ```text
 vibe skill load <name>
+vibe skill load -- <name>
 ```
+
+The first form covers ordinary names; the second is the canonical form emitted
+in agent instructions and also handles names that begin with an option prefix.
 
 The command resolves the live Catalog, selects the current winner for `name`,
 and writes this structure to standard output:
@@ -252,8 +269,8 @@ Contract details:
   `SKILL.md`.
 - XML attribute values are escaped.
 - Only the body after the leading frontmatter is emitted.
-- The body is otherwise unchanged: no generated title, indentation, summary,
-  or rewrite is added.
+- The body is otherwise unchanged: no generated title, indentation, escaping,
+  summary, or rewrite is added.
 - Relative references to `scripts/`, `references/`, `assets/`, or other files
   resolve from `directory`.
 - There is no protocol/version header, JSON envelope, source label,
@@ -262,9 +279,11 @@ Contract details:
 On failure, standard output is empty, standard error contains a short
 human-readable error, and the process exits non-zero.
 
-The wrapper frames tool output; it does not change instruction precedence. A
-loaded Skill is tool-level context and cannot override Avibe's system prompt,
-permissions, or safety rules.
+The wrapper is XML-like model-facing framing, not an XML document consumed by
+an XML parser. Only its attributes use XML escaping; the Markdown body is an
+opaque, unchanged payload and may itself contain XML-looking text. The wrapper
+does not change instruction precedence. A loaded Skill is tool-level context
+and cannot override Avibe's system prompt, permissions, or safety rules.
 
 ## 8. Freshness and Session Semantics
 
@@ -358,6 +377,12 @@ Built-in Skills are maintained in the source tree at:
 skills/<name>/
 ```
 
+Release artifacts must carry that authoritative tree: wheels force-include it
+under a package-owned resource path and sdists include `skills/**`. Runtime
+code resolves the checkout path during development and the packaged resource
+path after installation; it never assumes the repository root exists in a
+wheel environment.
+
 At installation and upgrade, Avibe publishes a complete runtime mirror to:
 
 ```text
@@ -450,7 +475,9 @@ at runtime.
   unrelated malformed or unknown frontmatter.
 - Invalid candidates do not prevent valid candidates from appearing.
 - Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
-  and do not expose paths or sources.
+  remain within the row budget, and do not expose paths or sources.
+- Oversized descriptions cannot make the Catalog unbounded, and option-like or
+  whitespace-containing names remain single-line and callable.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
 
@@ -483,6 +510,7 @@ isolation acceptance gates.
 ### 14.4 Built-in lifecycle
 
 - a fresh installation mirrors all bundled Skills;
+- a wheel-install fixture proves bundled Skills exist without a source tree;
 - an upgrade replaces changed Skills and removes retired Skills;
 - replacement is atomic; and
 - every loaded built-in reports an agent-accessible absolute directory.
