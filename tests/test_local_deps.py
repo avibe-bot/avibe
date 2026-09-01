@@ -2194,8 +2194,12 @@ def test_memory_indep_028_startup_retries_after_restart_admission(monkeypatch):
         "ensure_avault_installed",
         lambda **_kwargs: events.append("avault") or {"ok": True},
     )
-    restart_pending = iter((True, False))
-    monkeypatch.setattr(api, "restart_is_pending", lambda: next(restart_pending))
+    restart_states = iter(("waiting", "ready"))
+    monkeypatch.setattr(
+        api,
+        "_startup_memory_retry_restart_state",
+        lambda: next(restart_states),
+    )
     monkeypatch.setattr(api.time, "sleep", lambda _seconds: events.append("wait"))
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
 
@@ -2233,7 +2237,11 @@ def test_startup_memory_retry_stays_bounded_while_restart_remains_pending(
     }
     monotonic = iter((0.0, 0.0, 0.6))
     sleeps: list[float] = []
-    monkeypatch.setattr(api, "restart_is_pending", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "_startup_memory_retry_restart_state",
+        lambda: "waiting",
+    )
     monkeypatch.setattr(api.time, "monotonic", lambda: next(monotonic))
     monkeypatch.setattr(api.time, "sleep", sleeps.append)
     monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS", 0.5)
@@ -2248,6 +2256,34 @@ def test_startup_memory_retry_stays_bounded_while_restart_remains_pending(
 
     assert result == busy
     assert sleeps == [0.25]
+
+
+@pytest.mark.parametrize(
+    ("status", "restart_pending", "supervisor_alive", "expected"),
+    (
+        ({"state": "running", "supervisor_pid": 42}, True, True, "waiting"),
+        ({"state": "running", "supervisor_pid": 42}, False, True, "terminal"),
+        ({"state": "succeeded", "supervisor_pid": 42}, False, True, "waiting"),
+        ({"state": "succeeded", "supervisor_pid": 42}, False, False, "ready"),
+        ({"state": "failed", "supervisor_pid": 42}, False, False, "terminal"),
+    ),
+    ids=("running", "stale-running", "postwork", "succeeded", "failed"),
+)
+def test_startup_memory_retry_requires_successful_supervisor_exit(
+    monkeypatch,
+    status,
+    restart_pending,
+    supervisor_alive,
+    expected,
+):
+    from vibe import runtime
+
+    monkeypatch.setattr(runtime, "get_restart_status_path", lambda: Path("restart.json"))
+    monkeypatch.setattr(runtime, "read_json", lambda _path: status)
+    monkeypatch.setattr(runtime, "pid_alive", lambda _pid: supervisor_alive)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: restart_pending)
+
+    assert api._startup_memory_retry_restart_state() == expected
 
 
 @pytest.mark.parametrize(
