@@ -119,7 +119,11 @@ authoritative when the compatibility migration cannot move it. Each running
 Avibe artifact selects only the immutable snapshot derived from its own bundled
 Skill tree; the `builtin-skills` umbrella is not a generic discovery root for
 direct child Skills. The selected snapshot is Avibe-owned runtime content and
-has the highest resolution priority.
+has the highest resolution priority. Its generated `.avibe-snapshot.json` is
+runtime metadata rather than a discovery candidate and is excluded from the
+direct-child budget. Release packaging permits at most 1,024 direct child Skill
+directories, so every published built-in remains discoverable within the same
+root cap as compatibility inputs.
 
 ### 4.3 Project roots
 
@@ -484,6 +488,9 @@ Manifest v1 is a frozen persisted shape:
 - the top-level JSON object contains `schema_version: 1` and `entries`; each
   entry contains a `/`-separated relative `path`, byte `size`, lowercase
   64-hex `sha256`, and integer `executable` bits (`st_mode & 0o111`);
+- those are the only top-level and entry keys; the schema version is exactly the
+  integer `1`, `entries` is a list, `size` is a non-negative integer no larger
+  than 64 MiB, and `executable` is one of the valid `0o111` bit combinations;
 - entries sort by `path`, object keys sort lexically, and serialization is UTF-8
   without BOM or trailing newline using ASCII escapes and separators `,` and
   `:` with no optional whitespace;
@@ -497,7 +504,13 @@ path is at most 1,024 bytes. Release packaging fails rather than publishing a
 built-in tree outside these limits. Runtime opens the manifest with the same
 nonblocking, same-handle regular-file and verified-read contract as `SKILL.md`,
 applies the byte limit before parsing, and rejects duplicate, absolute, empty,
-`.` or `..` path components.
+`.` or `..` path components. A manifest path is portable only when it is
+relative under both POSIX and Windows parsing: backslashes, NUL, drive prefixes,
+UNC roots, and platform separator aliases are rejected. Runtime reconstructs
+accepted paths component-by-component from an open snapshot-root handle,
+without following symlinks, junctions, or other reparse points, and requires
+each intermediate component to remain a directory and each leaf to remain the
+expected regular file beneath that root.
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
 scripts and references.
@@ -710,6 +723,10 @@ isolation acceptance gates.
   fixture validates and loads that retained schema without the older package;
 - a FIFO, non-regular, oversized, malformed, duplicate-path, or traversal-path
   manifest is bounded and rejected before use;
+- manifest fixtures reject backslash traversal, drive/UNC paths, symlinks, and
+  reparse points on every supported platform;
+- packaging rejects a 1,025th direct built-in Skill directory, while 1,024
+  Skills plus the generated root manifest remain discoverable;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
