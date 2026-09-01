@@ -216,8 +216,11 @@ Source-of-truth rule:
 ### PR Delivery
 
 - load and follow the `pr-delivery-loop` skill for every implementation task;
-  it is the single source of truth for branch and worktree policy, contracts,
-  review and CI gates, circuit breaking, managed waits, and close-out
+  it owns the detailed procedure, but cannot weaken the baseline below
+- regardless of Skill resolution, use a task branch/worktree, record the change
+  contract, require an exact-head Codex review, zero unresolved review threads,
+  and passing CI before close-out, apply the review-loop circuit breaker, and
+  never merge without explicit owner instruction
 - use the `background-watch-hook` skill for managed review and CI waits
 - keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
 - only an explicit owner decision may make Codex findings advisory for an

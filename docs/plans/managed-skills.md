@@ -288,8 +288,10 @@ instructions; portable names cannot begin with an option prefix, but the
 end-of-options marker keeps the command contract explicit.
 
 The command resolves live global and project roots together with the caller's
-bound built-in snapshot, selects the current winner for `name`, and writes this
-structure to standard output:
+bound Session working directory and built-in snapshot, selects the current
+winner for `name`, and writes this structure to standard output. A bound
+command never derives project scope from the shell command's own current
+directory:
 
 ```xml
 <skill_content name="pdf-processing" directory="/absolute/path/to/pdf-processing">
@@ -302,6 +304,11 @@ Contract details:
 - `name` is the resolved Skill name.
 - `directory` is the absolute, agent-accessible directory containing
   `SKILL.md`.
+- Load retains an open handle to the selected Skill directory, reads
+  `SKILL.md` relative to that handle, and verifies immediately before output
+  that the reported absolute path still names the same directory identity. If
+  the directory moved, disappeared, or was replaced during load, the command
+  fails instead of pairing one body with another directory.
 - XML attribute values are escaped.
 - Only the body after the leading frontmatter is emitted.
 - The body is otherwise unchanged: no generated title, indentation, escaping,
@@ -311,6 +318,9 @@ Contract details:
   standard output rather than truncating it.
 - Relative references to `scripts/`, `references/`, `assets/`, or other files
   resolve from `directory`.
+- The directory-identity check covers the load operation; it does not make a
+  mutable user Skill immutable after the command returns. Later edits follow
+  ordinary filesystem semantics and become visible to later reads or loads.
 - There is no protocol/version header, JSON envelope, source label,
   compatibility state, or file manifest.
 
@@ -357,13 +367,20 @@ Therefore:
 - changing the body, scripts, or references changes the next load or file
   read.
 
-When a backend launches either command, it inherits
-`AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` from the Avibe process that created that
-backend runtime. The command uses that retained immutable snapshot even if an
-upgrade has since switched the stable `vibe` launcher to another artifact. The
-identifier is an environment binding, not prompt text or an agent-visible
-command argument. A standalone command without that binding uses the snapshot
-bundled with its own executable.
+When a backend launches either command, Avibe supplies two internal bindings:
+
+- `AVIBE_SKILL_WORKING_DIR` is the absolute working directory from which Avibe
+  rendered that Session's Catalog. Project discovery always starts there, even
+  when the agent runs the command from another directory.
+- `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` selects the immutable built-in snapshot
+  retained by the Avibe process that created that backend runtime, even if an
+  upgrade has since switched the stable `vibe` launcher to another artifact.
+
+These values use the existing per-Session shell-environment path for each
+backend: Claude SDK process environment, Codex `shell_environment_policy`, and
+the OpenCode caller-context plugin. They are not prompt text or agent-visible
+command arguments. A standalone command without Avibe bindings uses its own
+current working directory and the snapshot bundled with its own executable.
 
 ### 8.3 Historical context is historical
 
@@ -582,6 +599,11 @@ at runtime.
   are omitted by the parser-backed portable name boundary.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
+- A backend-bound load launched from a different shell directory still uses
+  the Session working directory that produced the advertised Catalog.
+- Replacing, removing, or renaming the selected Skill directory between
+  selection and output produces empty standard output and a non-zero exit; it
+  cannot pair the opened body with a different directory identity.
 - A body over 256 KiB is omitted from discovery, and a body that crosses the
   limit before load produces empty standard output and a non-zero exit.
 
