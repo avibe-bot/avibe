@@ -55,7 +55,7 @@ example-skill/
 `-- assets/
 ```
 
-Avibe requires only two non-empty fields in the leading frontmatter:
+Avibe requires only two fields in the leading frontmatter:
 
 ```yaml
 ---
@@ -69,7 +69,8 @@ They are not presented as formats required by the Agent Skills specification.
 
 Existing Skills are usable by default. There is no Avibe-specific portability
 field, compatibility state, validation state, source namespace, or migration
-requirement.
+requirement. Avibe reuses the portable Agent Skills name grammar rather than
+inventing another identifier format; all other frontmatter remains optional.
 
 ## 4. Discovery
 
@@ -91,13 +92,16 @@ and `.claude/commands` are not discovery sources.
 ### 4.2 Built-in root
 
 ```text
-${AVIBE_HOME:-$HOME/.avibe}/builtin-skills
+${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>
 ```
 
 This is logical user-facing notation. Implementations resolve it through
 `config.paths.get_vibe_remote_dir()` so a legacy `~/.vibe_remote` home remains
-authoritative when the compatibility migration cannot move it. This is
-Avibe-owned runtime content and has the highest resolution priority.
+authoritative when the compatibility migration cannot move it. Each running
+Avibe artifact selects only the immutable snapshot derived from its own bundled
+Skill tree; the `builtin-skills` umbrella is not a generic discovery root for
+direct child Skills. The selected snapshot is Avibe-owned runtime content and
+has the highest resolution priority.
 
 ### 4.3 Project roots
 
@@ -143,26 +147,31 @@ does not scan it, write to it, or assign it any behavior.
 Discovery is deliberately permissive:
 
 - extract `name` and `description` from the leading frontmatter;
-- accept the Skill when both values are present and non-empty;
+- accept the Skill when `description` is non-empty and `name` follows the
+  portable Agent Skills grammar;
 - ignore every other field;
 - do not reject a Skill because unrelated frontmatter is unknown or malformed;
 - do not require the declared name to match the directory name; and
-- fold whitespace in `name` and `description` into single-line Catalog values.
+- fold whitespace in `description` into a single-line Catalog value.
 
 If either required value cannot be extracted, omit that candidate without
-failing the whole Catalog. To keep every accepted name callable and every
-Catalog bounded, Avibe applies only these output-boundary limits:
+failing the whole Catalog. The name grammar is the existing Agent Skills
+boundary: 1-64 lowercase ASCII letters, digits, or hyphens; no leading,
+trailing, or consecutive hyphen. This makes every advertised name one literal
+shell token without Avibe-specific quoting or encoding.
 
-- omit a candidate whose normalized name exceeds 256 characters;
-- omit a candidate whose normalized name contains `:`, the Catalog row
-  delimiter;
+Catalog parsing and rendering are bounded independently:
+
+- read at most 64 KiB of leading frontmatter, including its delimiters, and
+  omit the candidate if the closing delimiter is not found within that budget;
 - truncate a normalized description beyond 1,024 characters, adding `...`;
-- render at most 25 entries and 16 KiB of Skill rows per page; and
-- use `--` before the name in load commands so option-like names remain
-  callable.
+- render at most 25 entries and 16 KiB of Skill rows per page.
 
-These limits do not validate optional frontmatter, require the directory and
-declared name to match, or add compatibility metadata.
+The bounded read happens before decoding or normalizing field values, so a
+large optional field, description, or unterminated frontmatter cannot create
+unbounded per-Turn work. These limits do not validate optional frontmatter,
+require the directory and declared name to match, or add compatibility
+metadata.
 
 ### 5.2 Deduplication
 
@@ -385,39 +394,43 @@ code resolves the checkout path during development and the packaged resource
 path after installation; it never assumes the repository root exists in a
 wheel environment.
 
-At installation and upgrade, Avibe publishes a complete runtime mirror to:
+Before the first managed Skill resolution from an installed or upgraded Avibe
+artifact, Avibe publishes a complete runtime snapshot to:
 
 ```text
-${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<name>/
+${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>/<name>/
 ```
 
+`<snapshot-id>` is a stable digest of the authoritative bundled Skill tree.
 The runtime directory is deliberately separate from user-managed Skills and
-must be directly accessible to the agent so loaded built-ins can use their own
+is directly accessible to the agent so loaded built-ins can use their own
 scripts and references.
 
 ### 10.2 Replacement lifecycle
 
-The source tree is authoritative for each Avibe version. First run and every
-upgrade perform a full replacement of `builtin-skills`:
+The source tree is authoritative for each Avibe artifact. Each snapshot is a
+complete, immutable mirror:
 
 - new built-ins are added;
 - changed built-ins are replaced; and
-- built-ins removed from the release are deleted from the runtime mirror.
+- built-ins removed from the artifact are absent from its snapshot.
 
-The publisher and every Avibe Catalog, list, and load reader use the same
-cross-process lock. Under that lock, the publisher builds and validates a
-complete sibling staging directory, renames the current mirror to a backup,
-renames the staging directory to `builtin-skills`, and then removes the backup.
-If publication fails, it restores the backup before releasing the lock. After
-a process interruption, the next lock holder completes recovery before any
-Skill resolution.
+The publisher builds and validates a hidden sibling staging directory, then
+atomically renames it once into the previously absent digest path. A process
+interruption can leave only an undiscoverable staging directory. If a valid
+snapshot for the same digest already exists, concurrent publishers reuse it
+instead of mutating it.
 
-This is atomic at the Avibe reader boundary without relying on replacing a
-non-empty directory in place: a managed reader observes either the prior
-complete mirror or the new complete mirror, never the rename interval. The
-installed built-in set therefore exactly matches the running Avibe version
-after publication. The directory is Avibe-owned rather than a user
-customization surface.
+Every resolver selects the digest computed from the bundled source of its own
+running artifact. Concurrent old and new Avibe processes therefore use
+different snapshots when their built-ins differ, while identical trees safely
+share one. Other snapshots are not discovery candidates. V1 retains them so a
+running older process and an already loaded Skill directory remain usable;
+garbage collection of unreferenced snapshots is outside this protocol.
+
+The selected snapshot exactly matches the running artifact and is never
+partially updated. The `builtin-skills` umbrella is Avibe-owned rather than a
+user customization surface.
 
 ## 11. Installation Defaults
 
@@ -488,14 +501,16 @@ at runtime.
 - A fixture covering every discovery root resolves one entry per final name.
 - Built-in, project/global, directory depth, and directory-family precedence
   match Section 5.
-- A Skill with extractable `name` and `description` is accepted despite
+- A Skill with a portable name and extractable description is accepted despite
   unrelated malformed or unknown frontmatter.
 - Invalid candidates do not prevent valid candidates from appearing.
+- Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
+  candidate, including for oversized or unterminated input.
 - Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
   remain within the row budget, and do not expose paths or sources.
-- Oversized descriptions cannot make the Catalog unbounded; delimiter-bearing
-  names are omitted; and option-like or whitespace-containing names remain
-  single-line and callable.
+- Oversized descriptions cannot make the Catalog unbounded, and names with
+  whitespace, shell syntax, uppercase characters, or invalid hyphen placement
+  are omitted by the parser-backed portable name boundary.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
 
@@ -529,9 +544,11 @@ isolation acceptance gates.
 
 - a fresh installation mirrors all bundled Skills;
 - a wheel-install fixture proves bundled Skills exist without a source tree;
-- an upgrade replaces changed Skills and removes retired Skills;
-- publication and concurrent managed reads prove the old-or-new atomic reader
-  boundary, including interrupted-publication recovery; and
+- an upgrade's selected snapshot contains changed Skills and omits retired
+  Skills;
+- interrupted publication cannot expose a partial snapshot;
+- two concurrently running artifacts with different bundled trees resolve
+  different immutable snapshots; and
 - every loaded built-in reports an agent-accessible absolute directory.
 
 ## 15. Explicit Non-Goals
@@ -545,5 +562,6 @@ V1 does not include:
 - semantic ranking or filtering of Skills;
 - Skill editing or copy-on-write;
 - semantics for `${AVIBE_HOME:-$HOME/.avibe}/skills`;
+- garbage collection of old built-in snapshots;
 - live filesystem watchers or historical-context invalidation; or
 - a security sandbox preventing direct filesystem access.
