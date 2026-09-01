@@ -6,6 +6,10 @@ import {
   VoiceTranscriptionError,
   type VoiceTranscriptionErrorCode,
 } from './voiceTranscription';
+import {
+  claimVoiceCapture,
+  type VoiceCaptureClaim,
+} from './voiceRecording';
 
 export const ANNOTATION_VOICE_REQUEST_MESSAGE = 'avibe:annotation:voice:request';
 export const ANNOTATION_VOICE_EVENT_MESSAGE = 'avibe:annotation:voice:event';
@@ -78,6 +82,19 @@ export type ShowPageVoiceHostDependencies = {
   createSession?: (input: ShowPageVoiceDictationInput) => ShowPageVoiceSession;
 };
 
+type StartingVoiceSession = {
+  requestId: string;
+  cancelled: boolean;
+  captureClaim: VoiceCaptureClaim;
+  session: ShowPageVoiceSession | null;
+};
+
+type ActiveVoiceSession = {
+  requestId: string;
+  captureClaim: VoiceCaptureClaim;
+  session: ShowPageVoiceSession;
+};
+
 const boundedString = (value: unknown, maxChars: number): string | undefined => (
   typeof value === 'string' && value.length <= maxChars ? value : undefined
 );
@@ -133,8 +150,8 @@ const voiceErrorCode = (error: unknown, starting = false): ShowPageVoiceErrorCod
 /** One voice owner for one mounted Show Page iframe. */
 export class ShowPageVoiceHost {
   private readonly dependencies: Required<ShowPageVoiceHostDependencies>;
-  private active: { requestId: string; session: ShowPageVoiceSession } | null = null;
-  private starting: { requestId: string; cancelled: boolean } | null = null;
+  private active: ActiveVoiceSession | null = null;
+  private starting: StartingVoiceSession | null = null;
   private disposed = false;
 
   constructor(dependencies: ShowPageVoiceHostDependencies) {
@@ -159,10 +176,12 @@ export class ShowPageVoiceHost {
     } else {
       if (this.starting?.requestId === request.requestId) {
         this.starting.cancelled = true;
+        this.starting.captureClaim.release();
         this.starting = null;
       }
       if (this.active?.requestId === request.requestId) {
         this.active.session.abort();
+        this.active.captureClaim.release();
         this.active = null;
       }
     }
@@ -170,9 +189,13 @@ export class ShowPageVoiceHost {
 
   dispose(): void {
     this.disposed = true;
-    if (this.starting) this.starting.cancelled = true;
+    if (this.starting) {
+      this.starting.cancelled = true;
+      this.starting.captureClaim.release();
+    }
     this.starting = null;
     this.active?.session.abort();
+    this.active?.captureClaim.release();
     this.active = null;
   }
 
@@ -204,7 +227,13 @@ export class ShowPageVoiceHost {
       this.postError(request.requestId, 'failed', false);
       return;
     }
-    const pending = { requestId: request.requestId, cancelled: false };
+    const captureClaim = claimVoiceCapture(() => this.finishCapture(request.requestId));
+    const pending: StartingVoiceSession = {
+      requestId: request.requestId,
+      cancelled: false,
+      captureClaim,
+      session: null,
+    };
     this.starting = pending;
     try {
       const availability = await this.dependencies.availability();
@@ -216,6 +245,7 @@ export class ShowPageVoiceHost {
       const session = this.dependencies.createSession({
         before: request.before,
         after: request.after,
+        captureClaim,
         maxFileBytes: availability.maxFileBytes,
         onPreview: (text) => {
           if (this.active?.requestId !== request.requestId || this.disposed) return;
@@ -227,18 +257,24 @@ export class ShowPageVoiceHost {
           });
         },
       });
-      const active = { requestId: request.requestId, session };
+      pending.session = session;
+      const active = { requestId: request.requestId, captureClaim, session };
       this.starting = null;
       this.active = active;
       try {
         await session.start();
       } catch (error) {
-        if (this.active === active) this.active = null;
-        this.postError(request.requestId, voiceErrorCode(error, true), false);
+        const stillActive = this.active === active;
+        if (stillActive) this.active = null;
+        captureClaim.release();
+        if (stillActive) {
+          this.postError(request.requestId, voiceErrorCode(error, true), false);
+        }
         return;
       }
       if (this.disposed || this.active !== active) {
         session.abort();
+        captureClaim.release();
         return;
       }
       this.dependencies.post({
@@ -251,14 +287,28 @@ export class ShowPageVoiceHost {
         (error) => this.postSessionError(active, error),
       );
     } catch (error) {
-      this.postError(request.requestId, voiceErrorCode(error, true), false);
+      if (!pending.cancelled) {
+        this.postError(request.requestId, voiceErrorCode(error, true), false);
+      }
     } finally {
       if (this.starting === pending) this.starting = null;
+      if (!pending.session) captureClaim.release();
     }
   }
 
+  private finishCapture(requestId: string): void {
+    if (this.active?.requestId === requestId) {
+      this.active.session.finish();
+      return;
+    }
+    if (this.starting?.requestId !== requestId) return;
+    this.starting.cancelled = true;
+    this.starting = null;
+    this.postError(requestId, 'cancelled', false);
+  }
+
   private async retry(
-    active: { requestId: string; session: ShowPageVoiceSession },
+    active: ActiveVoiceSession,
     request: Extract<ShowPageVoiceRequest, { action: 'retry' }>,
   ): Promise<void> {
     try {
@@ -270,10 +320,11 @@ export class ShowPageVoiceHost {
   }
 
   private postResult(
-    active: { requestId: string; session: ShowPageVoiceSession },
+    active: ActiveVoiceSession,
     text: string,
   ): void {
     if (this.disposed || this.active !== active) return;
+    active.captureClaim.release();
     this.active = null;
     this.dependencies.post({
       type: ANNOTATION_VOICE_EVENT_MESSAGE,
@@ -284,10 +335,11 @@ export class ShowPageVoiceHost {
   }
 
   private postSessionError(
-    active: { requestId: string; session: ShowPageVoiceSession },
+    active: ActiveVoiceSession,
     error: unknown,
   ): void {
     if (this.disposed || this.active !== active) return;
+    active.captureClaim.release();
     const code = voiceErrorCode(error);
     const retryable = code !== 'cancelled' && code !== 'empty' && active.session.canRetry();
     if (!retryable) this.active = null;

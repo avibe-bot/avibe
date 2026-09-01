@@ -14,8 +14,10 @@ limit and without implementing a second transcription stack in Show Runtime.
   segmentation, HTTP fallback, retry, and cleanup through the same modules used
   by Chat.
 - One client-wide capture claim prevents hidden Chat and Show Page recorders from
-  running concurrently. A newer explicit voice action finishes the previous
-  capture before taking ownership, so recorded speech is preserved.
+  running concurrently. The host transfers ownership synchronously when it
+  accepts an explicit start, before asynchronous availability or capture setup.
+  A newer explicit voice action finishes the previous capture, and a capture
+  stopped during setup still completes its buffered-audio finalization.
 - The existing same-origin annotation `postMessage` boundary carries lifecycle
   commands and results. No server API or backend behavior changes are required.
 
@@ -31,6 +33,15 @@ An unanswered start handshake times out and aborts without imposing any limit on
 recording duration. Reloading the iframe disposes its old voice host, and ASR
 availability is shared only while a request is in flight so later requests see
 configuration changes and transient recovery.
+
+## Known By Design
+
+Unlimited recordings retain minute-sized browser Blob segments in the
+in-session retry batch until transcription succeeds or the user explicitly
+discards it. This matches Chat and permits re-upload when the server rejects a
+previous segment receipt. The bridge does not persist voice audio to browser
+storage and does not add a duration or aggregate-size cap, so memory use grows
+with the audio that remains eligible for retry.
 
 ## Verification
 

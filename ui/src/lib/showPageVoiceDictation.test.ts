@@ -5,6 +5,19 @@ import { claimVoiceCapture, type VoiceRecordingPipelineOptions } from './voiceRe
 import type { VoiceRealtimeOptions } from './voiceRealtime';
 import { VoiceTranscriptionError, type VoiceTranscriptionSegment } from './voiceTranscription';
 
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+};
+
+const deferred = <T>(): Deferred<T> => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+};
+
 const fakeStream = () => {
   const stop = vi.fn();
   return {
@@ -101,6 +114,50 @@ describe('ShowPageVoiceDictation', () => {
     nextSurface.release();
     dictation.abort();
     expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it('preserves finalization when ownership changes during capture startup', async () => {
+    const { stream } = fakeStream();
+    const captureStarted = deferred<boolean>();
+    const pipelineReady = deferred<void>();
+    const realtimeAbort = vi.fn();
+    const pipelineFinish = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: 'buffered words', cleanup: 'success' as const }),
+        abort: realtimeAbort,
+      }),
+      createPipeline: (options) => {
+        pipelineReady.resolve(undefined);
+        return {
+          start: () => captureStarted.promise,
+          abort: vi.fn(),
+          finish: () => {
+            pipelineFinish();
+            options.onSegment(new Blob(['tail'], { type: 'audio/wav' }), {
+              durationMs: 2_000,
+              final: true,
+            });
+            options.onStopped('finish', { pendingSegmentCount: 1 });
+          },
+        };
+      },
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    const starting = dictation.start();
+    await pipelineReady.promise;
+    const nextSurface = claimVoiceCapture(vi.fn());
+    expect(pipelineFinish).toHaveBeenCalledOnce();
+
+    captureStarted.resolve(false);
+    await expect(starting).resolves.toBeUndefined();
+    await expect(dictation.done).resolves.toBe('buffered words');
+    expect(realtimeAbort).not.toHaveBeenCalled();
+    nextSurface.release();
   });
 
   it('falls back through the existing segment queue and finalizer', async () => {

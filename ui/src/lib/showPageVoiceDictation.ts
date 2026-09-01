@@ -30,6 +30,7 @@ type VoiceQueue = Pick<VoiceTranscriptionQueue, 'enqueue'>;
 export type ShowPageVoiceDictationInput = {
   before: string;
   after: string;
+  captureClaim?: VoiceCaptureClaim;
   maxFileBytes?: number | null;
   onPreview?: (text: string) => void;
 };
@@ -114,7 +115,7 @@ export class ShowPageVoiceDictation {
 
   async start(): Promise<void> {
     if (this.pipeline || this.stream) throw new Error('show page voice dictation already started');
-    const captureClaim = claimVoiceCapture(() => {
+    const captureClaim = this.input.captureClaim ?? claimVoiceCapture(() => {
       try {
         if (this.pipeline) this.pipeline.finish();
         else this.abortController.abort();
@@ -186,8 +187,10 @@ export class ShowPageVoiceDictation {
       });
       this.pipeline = pipeline;
       const active = await pipeline.start();
-      if (!captureClaim.isCurrent()) throw cancelledError();
-      if (!active && !this.stopped) throw new Error('voice capture did not start');
+      if (!active) return;
+      if (!captureClaim.isCurrent()) {
+        pipeline.finish();
+      }
     } catch (error) {
       this.abortController.abort();
       this.realtime?.abort();

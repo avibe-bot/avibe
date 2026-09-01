@@ -8,6 +8,7 @@ import {
   type ShowPageVoiceEvent,
   type ShowPageVoiceSession,
 } from './showPageVoiceBridge';
+import { claimVoiceCapture } from './voiceRecording';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -93,6 +94,7 @@ describe('ShowPageVoiceHost', () => {
       availability: async () => ({ available: true, maxFileBytes: 1_000_000 }),
       createSession: (input) => {
         preview = input.onPreview;
+        expect(input.captureClaim?.isCurrent()).toBe(true);
         expect(input).toMatchObject({
           before: 'before',
           after: 'after',
@@ -161,11 +163,42 @@ describe('ShowPageVoiceHost', () => {
     });
 
     host.handle({ ...start, action: 'abort' });
-    availability.resolve({ available: true, maxFileBytes: null });
-    await availability.promise;
+    availability.reject(new Error('late availability failure'));
+    await expect(availability.promise).rejects.toThrow('late availability failure');
     await Promise.resolve();
 
     expect(createSession).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.requestId === 'voice-1')).toEqual([]);
+  });
+
+  it('takes microphone ownership before awaiting availability', async () => {
+    const availability = deferred<{ available: boolean; maxFileBytes: null }>();
+    const previousFinish = vi.fn();
+    const previousClaim = claimVoiceCapture(previousFinish);
+    const createSession = vi.fn(() => new FakeVoiceSession());
+    const host = new ShowPageVoiceHost({
+      post: () => undefined,
+      availability: () => availability.promise,
+      createSession,
+    });
+    const start = {
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-1',
+      before: '',
+      after: '',
+    } as const;
+
+    host.handle(start);
+
+    expect(previousFinish).toHaveBeenCalledOnce();
+    expect(createSession).not.toHaveBeenCalled();
+    host.handle({ ...start, action: 'abort' });
+    availability.resolve({ available: true, maxFileBytes: null });
+    await availability.promise;
+    await Promise.resolve();
+    expect(createSession).not.toHaveBeenCalled();
+    previousClaim.release();
   });
 
   it('retains a failed transcription for retry and aborts on disposal', async () => {
