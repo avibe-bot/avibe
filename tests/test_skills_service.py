@@ -132,6 +132,38 @@ def test_list_global_uses_g_no_cwd(monkeypatch):
     assert rec.calls[0]["cwd"] is None
 
 
+def test_runtime_catalog_filter_reuses_backend_specific_listing_acl(monkeypatch) -> None:
+    captured = {}
+
+    def filter_listing(result, **kwargs):
+        captured["result"] = result
+        captured.update(kwargs)
+        return {"ok": True, "skills": [result["skills"][0]]}
+
+    monkeypatch.setattr(skills, "_filter_skill_listing", filter_listing)
+    monkeypatch.setattr(skills, "_project_id_for_skill_directory", lambda project_dir: "project-1")
+
+    allowed = skills.filter_accessible_runtime_skill_names(
+        [
+            {"name": "allowed", "scope": "project"},
+            {"name": "denied", "scope": "global"},
+        ],
+        backend="claude",
+        project_dir="/project",
+        user_context={"sub": "remote-user"},
+    )
+
+    assert allowed == {"allowed"}
+    assert captured["result"]["skills"] == [
+        {"name": "allowed", "scope": "project", "agents": ["claude"]},
+        {"name": "denied", "scope": "global", "agents": ["claude"]},
+    ]
+    assert captured["scope"] == "all"
+    assert captured["project_dir"] == "/project"
+    assert captured["project_id"] == "project-1"
+    assert captured["backends"] == ["claude"]
+
+
 def test_list_project_uses_p_and_cwd_and_agents(monkeypatch):
     rec = _Recorder({"ok": True, "skills": []})
     monkeypatch.setattr(skills, "_run_askill", rec)

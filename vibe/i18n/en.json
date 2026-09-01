@@ -747,6 +747,22 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
+  "skill": {
+    "cli": {
+      "help": {
+        "command": "List and load Skills through Avibe",
+        "list": "List available Skills",
+        "load": "Load one Skill",
+        "page": "Catalog page (default: 1)",
+        "name": "Skill name"
+      },
+      "more": "More skills are available. Run `vibe skill list --page {page}` to view more.",
+      "error": {
+        "invalidPage": "error: page must be a positive integer",
+        "notFound": "Skill not found: {name}"
+      }
+    }
+  },
   "memory": {
     "cli": {
       "help": {

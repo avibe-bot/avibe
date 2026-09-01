@@ -21,10 +21,12 @@ from core.managed_skills import (
     render_skill_catalog_prompt,
     render_skill_content,
     render_skill_list,
+    resolve_accessible_skills,
     resolve_skills,
     snapshot_tree_digest,
 )
 from core.system_prompt_injection import build_system_prompt_injection
+from modules.im import MessageContext
 
 
 def _write_skill(
@@ -156,6 +158,21 @@ def test_global_roots_honor_backend_home_overrides(tmp_path: Path, monkeypatch) 
     assert [skill.name for skill in resolve_skills(cwd)] == ["claude", "codex", "opencode"]
 
 
+def test_empty_backend_home_overrides_fall_back_to_default_roots(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("CODEX_HOME", "")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "")
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+
+    _write_skill(home / ".codex" / "skills", "codex", "codex", "Codex")
+    _write_skill(home / ".config" / "opencode" / "skills", "opencode", "opencode", "OpenCode")
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["codex", "opencode"]
+
+
 def test_final_path_tie_breaker_is_independent_of_enumeration_order(tmp_path: Path, monkeypatch) -> None:
     cwd = tmp_path / "project"
     cwd.mkdir()
@@ -248,6 +265,45 @@ def test_system_prompt_catalog_reflects_add_edit_and_delete_each_render(tmp_path
     assert "## Skills" not in after_delete
 
 
+def test_system_prompt_catalog_forwards_remote_acl_context(tmp_path: Path, monkeypatch) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    resource_context = {
+        "sub": "member-1",
+        "instance_role": "editor",
+        "is_remote": True,
+    }
+    context = MessageContext(
+        user_id="remote:member-1",
+        channel_id="workbench",
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": "sess-runtime",
+            "message_metadata": {"resource_user_context": resource_context},
+        },
+    )
+    captured = {}
+
+    def resolve(catalog_cwd, *, backend, user_context):
+        captured.update(cwd=catalog_cwd, backend=backend, user_context=user_context)
+        return []
+
+    monkeypatch.setattr(managed_skills, "resolve_accessible_skills", resolve)
+
+    build_system_prompt_injection(
+        context=context,
+        fallback_platform="avibe",
+        current_agent_backend="codex",
+        skills_cwd=cwd,
+    )
+
+    assert captured == {
+        "cwd": cwd,
+        "backend": "codex",
+        "user_context": resource_context,
+    }
+
+
 def test_load_emits_body_only_and_agent_accessible_directory(tmp_path: Path, monkeypatch) -> None:
     _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
     skill_file = _write_skill(
@@ -296,6 +352,16 @@ def test_load_reparses_the_selected_file_and_rejects_a_changed_name(tmp_path: Pa
     monkeypatch.setattr(managed_skills, "resolve_skills", lambda _cwd=None: [winner])
 
     assert load_skill("docs", cwd) is None
+
+
+def test_load_does_not_fall_through_to_a_new_unadvertised_winner(tmp_path: Path, monkeypatch) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    project_file = _write_skill(cwd / ".agents" / "skills", "docs", "docs", "Project")
+    _write_skill(home / ".agents" / "skills", "docs", "docs", "Global")
+    advertised = resolve_skills(cwd)
+    project_file.unlink()
+
+    assert load_skill("docs", cwd, resolved_skills=advertised) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows cannot rename an open directory fixture")
@@ -489,6 +555,57 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
     (destination / snapshot_id).write_text("not a directory", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not a directory|unavailable"):
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
+
+
+def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    fake_core = site_packages / "core"
+    fake_core.mkdir(parents=True)
+    unrelated = site_packages / "skills"
+    unrelated.mkdir()
+    package = site_packages / "vibe"
+    packaged_source = package / "builtin_skills_source"
+    packaged_source.mkdir(parents=True)
+    init_file = package / "__init__.py"
+    init_file.write_text("", encoding="utf-8")
+
+    import vibe
+
+    monkeypatch.setattr(managed_skills, "__file__", str(fake_core / "managed_skills.py"))
+    monkeypatch.setattr(vibe, "__file__", str(init_file))
+
+    assert managed_skills.builtin_skills_source() == packaged_source
+
+
+def test_remote_acl_failure_hides_compatibility_skills_but_keeps_builtins(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    avibe_home = home / ".avibe"
+    snapshot_id = "d" * 64
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, snapshot_id)
+    _write_skill(avibe_home / "builtin-skills" / snapshot_id, "builtin", "builtin", "Built-in")
+    _write_skill(cwd / ".agents" / "skills", "project", "project", "Project")
+    monkeypatch.setattr(
+        "core.services.skills.filter_accessible_runtime_skill_names",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+
+    skills = resolve_accessible_skills(
+        cwd,
+        backend="codex",
+        user_context={},
+    )
+
+    assert [skill.name for skill in skills] == ["builtin"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink fixture requires POSIX semantics")

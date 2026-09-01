@@ -771,9 +771,24 @@ def build_system_prompt_injection(
     if include_memory_cli:
         prompt += _MEMORY_CLI_PROMPT
     if skills_cwd is not None:
-        from core.managed_skills import render_skill_catalog_prompt, resolve_skills
+        from core.caller_context import (
+            caller_context_from_platform_payload,
+            caller_resource_user_context,
+        )
+        from core.managed_skills import render_skill_catalog_prompt, resolve_accessible_skills
 
-        prompt += render_skill_catalog_prompt(resolve_skills(skills_cwd))
+        caller = caller_context_from_platform_payload(
+            context.platform_specific if context is not None else None,
+            message=context,
+            fallback_platform=fallback_platform,
+        )
+        prompt += render_skill_catalog_prompt(
+            resolve_accessible_skills(
+                skills_cwd,
+                backend=current_agent_backend,
+                user_context=caller_resource_user_context(caller),
+            )
+        )
     if context is not None:
         prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)
     return prompt

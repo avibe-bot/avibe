@@ -481,7 +481,7 @@ def resolve_skills(
     resolved_codex_home = (
         Path(codex_home).expanduser().resolve()
         if codex_home is not None
-        else Path(os.environ.get("CODEX_HOME", resolved_home / ".codex")).expanduser().resolve()
+        else Path(os.environ.get("CODEX_HOME") or resolved_home / ".codex").expanduser().resolve()
     )
     if claude_home is not None:
         resolved_claude_home = Path(claude_home).expanduser().resolve()
@@ -492,7 +492,7 @@ def resolve_skills(
     resolved_xdg_home = (
         Path(xdg_config_home).expanduser().resolve()
         if xdg_config_home is not None
-        else Path(os.environ.get("XDG_CONFIG_HOME", resolved_home / ".config")).expanduser().resolve()
+        else Path(os.environ.get("XDG_CONFIG_HOME") or resolved_home / ".config").expanduser().resolve()
     )
 
     candidates: list[ManagedSkill] = []
@@ -539,6 +539,50 @@ def resolve_skills(
     return sorted(winners.values(), key=lambda skill: skill.name)
 
 
+def resolve_accessible_skills(
+    cwd: str | Path | None = None,
+    *,
+    backend: str | None,
+    user_context: object | None,
+) -> list[ManagedSkill]:
+    """Resolve the Catalog and enforce remote Workbench Skill ACLs."""
+
+    skills = resolve_skills(cwd)
+    if user_context is None:
+        return skills
+
+    compatibility = [skill for skill in skills if skill.priority[0] != 0]
+    if not compatibility:
+        return skills
+
+    from core.services.skills import filter_accessible_runtime_skill_names
+
+    working_directory = _working_directory(cwd)
+    project_directories = _project_directories(working_directory)
+    project_base = project_directories[-1] if project_directories else working_directory
+    try:
+        allowed_names = filter_accessible_runtime_skill_names(
+            [
+                {
+                    "name": skill.name,
+                    "scope": "project" if skill.priority[0] == 1 else "global",
+                }
+                for skill in compatibility
+            ],
+            backend=backend or "",
+            project_dir=str(project_base),
+            user_context=user_context,
+        )
+    except Exception:
+        logger.warning("Failed to apply remote Skill access policy", exc_info=True)
+        allowed_names = set()
+    return [
+        skill
+        for skill in skills
+        if skill.priority[0] == 0 or skill.name in allowed_names
+    ]
+
+
 def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
     pages: list[list[ManagedSkill]] = []
     current: list[ManagedSkill] = []
@@ -567,11 +611,19 @@ def _page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[ManagedSk
     return pages[page - 1], page + 1 if page < len(pages) else None
 
 
-def render_skill_list(skills: Sequence[ManagedSkill], *, page: int = 1) -> str:
+def render_skill_list(
+    skills: Sequence[ManagedSkill],
+    *,
+    page: int = 1,
+    more_notice: str | None = None,
+) -> str:
     entries, next_page = _page(skills, page)
     lines = [f"- {skill.name}: {skill.description}" for skill in entries]
     if next_page is not None:
-        lines.append(f"More skills are available. Run `vibe skill list --page {next_page}` to view more.")
+        lines.append(
+            more_notice
+            or f"More skills are available. Run `vibe skill list --page {next_page}` to view more."
+        )
     return "\n".join(lines)
 
 
@@ -637,10 +689,16 @@ def _directory_path_still_matches(path: Path, identity: tuple[int, int]) -> bool
     return stat.S_ISDIR(current.st_mode) and _directory_identity(current) == identity
 
 
-def load_skill(name: str, cwd: str | Path | None = None) -> ManagedSkill | None:
+def load_skill(
+    name: str,
+    cwd: str | Path | None = None,
+    *,
+    resolved_skills: Sequence[ManagedSkill] | None = None,
+) -> ManagedSkill | None:
     if _PORTABLE_NAME_RE.fullmatch(name) is None or not 1 <= len(name) <= 64:
         return None
-    winner = next((skill for skill in resolve_skills(cwd) if skill.name == name), None)
+    catalog = resolve_skills(cwd) if resolved_skills is None else resolved_skills
+    winner = next((skill for skill in catalog if skill.name == name), None)
     if winner is None:
         return None
 
@@ -674,8 +732,25 @@ def load_skill(name: str, cwd: str | Path | None = None) -> ManagedSkill | None:
 
 
 def builtin_skills_source() -> Path:
-    checkout_source = Path(__file__).resolve().parents[1] / "skills"
-    if checkout_source.is_dir():
+    checkout_root = Path(__file__).resolve().parents[1]
+    checkout_source = checkout_root / "skills"
+    pyproject = checkout_root / "pyproject.toml"
+    pyproject_fd: int | None = None
+    try:
+        pyproject_fd, _ = _open_regular_file(pyproject)
+        project_header = _read_all(pyproject_fd, limit=64 * 1024)
+    except OSError:
+        project_header = b""
+    except ValueError:
+        project_header = b""
+    finally:
+        if pyproject_fd is not None:
+            os.close(pyproject_fd)
+    if (
+        checkout_source.is_dir()
+        and (checkout_root / "vibe" / "__init__.py").is_file()
+        and re.search(rb"(?m)^name\s*=\s*[\"']avibe-os[\"']\s*$", project_header)
+    ):
         return checkout_source
 
     import vibe

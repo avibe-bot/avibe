@@ -841,27 +841,51 @@ def cmd_memory(args) -> int:
 def cmd_skill(args) -> int:
     """List or load Skills through Avibe's live resolver."""
 
+    from core.caller_context import caller_context_from_env, caller_resource_user_context
     from core.managed_skills import (
         load_skill,
         render_skill_content,
         render_skill_list,
-        resolve_skills,
+        resolve_accessible_skills,
     )
+
+    language = _configured_cli_language()
+    caller = caller_context_from_env()
+    backend = caller.backend if caller is not None else None
+    user_context = caller_resource_user_context(caller)
 
     if args.skill_command == "list":
         try:
-            output = render_skill_list(resolve_skills(), page=args.page)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            output = render_skill_list(
+                resolve_accessible_skills(
+                    backend=backend,
+                    user_context=user_context,
+                ),
+                page=args.page,
+                more_notice=i18n_t(
+                    "skill.cli.more",
+                    language,
+                    page=args.page + 1,
+                ),
+            )
+        except ValueError:
+            print(i18n_t("skill.cli.error.invalidPage", language), file=sys.stderr)
             return 1
         if output:
             print(output)
         return 0
 
     if args.skill_command == "load":
-        skill = load_skill(args.name)
+        allowed = resolve_accessible_skills(
+            backend=backend,
+            user_context=user_context,
+        )
+        if args.name not in {skill.name for skill in allowed}:
+            print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+            return 1
+        skill = load_skill(args.name, resolved_skills=allowed)
         if skill is None:
-            print(f"Skill not found: {args.name}", file=sys.stderr)
+            print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
             return 1
         print(render_skill_content(skill))
         return 0
@@ -15876,19 +15900,34 @@ def build_parser():
         metavar="{status,profile,list,search,remember}",
     )
     memory_subparsers.required = True
+    skill_help_language = _configured_cli_language()
     skill_parser = subparsers.add_parser(
         "skill",
-        help="List and load Skills through Avibe",
+        help=i18n_t("skill.cli.help.command", skill_help_language),
     )
     skill_subparsers = skill_parser.add_subparsers(
         dest="skill_command",
         metavar="{list,load}",
     )
     skill_subparsers.required = True
-    skill_list_parser = skill_subparsers.add_parser("list", help="List available Skills")
-    skill_list_parser.add_argument("--page", type=int, default=1, help="Catalog page (default: 1)")
-    skill_load_parser = skill_subparsers.add_parser("load", help="Load one Skill")
-    skill_load_parser.add_argument("name", help="Skill name")
+    skill_list_parser = skill_subparsers.add_parser(
+        "list",
+        help=i18n_t("skill.cli.help.list", skill_help_language),
+    )
+    skill_list_parser.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help=i18n_t("skill.cli.help.page", skill_help_language),
+    )
+    skill_load_parser = skill_subparsers.add_parser(
+        "load",
+        help=i18n_t("skill.cli.help.load", skill_help_language),
+    )
+    skill_load_parser.add_argument(
+        "name",
+        help=i18n_t("skill.cli.help.name", skill_help_language),
+    )
     memory_status_parser = memory_subparsers.add_parser(
         "status",
         help=i18n_t("memory.cli.help.status", memory_help_language),

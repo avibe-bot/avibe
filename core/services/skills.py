@@ -30,7 +30,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +432,76 @@ def _filter_skill_listing(
         summary["project"] = sum(1 for skill in filtered_skills if skill.get("scope") == "project")
         filtered["summary"] = summary
     return filtered
+
+
+def _project_id_for_skill_directory(project_dir: Optional[str]) -> str | None:
+    """Return the stable Workbench Project id for an installed Skill root."""
+
+    if not project_dir:
+        return None
+
+    from sqlalchemy import select
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import scope_settings, scopes
+
+    resolved_dir = os.path.realpath(os.path.abspath(os.path.expanduser(project_dir)))
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        value = connection.execute(
+            select(scopes.c.native_id)
+            .select_from(scopes.join(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+            .where(
+                scopes.c.platform == "avibe",
+                scopes.c.scope_type == "project",
+                scope_settings.c.workdir == resolved_dir,
+            )
+            .order_by(
+                scope_settings.c.enabled.desc(),
+                scopes.c.last_seen_at.desc(),
+                scopes.c.id.asc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+    return str(value) if value else None
+
+
+def filter_accessible_runtime_skill_names(
+    rows: Sequence[dict[str, str]],
+    *,
+    backend: str,
+    project_dir: Optional[str],
+    user_context: Any,
+) -> set[str]:
+    """Apply the Workbench Skill ACL model to the runtime Catalog."""
+
+    normalized_backend = _backend_from_agent_ref(backend)
+    if normalized_backend is None:
+        return set()
+    listing = {
+        "ok": True,
+        "skills": [
+            {
+                "name": str(row.get("name") or ""),
+                "scope": str(row.get("scope") or ""),
+                "agents": [normalized_backend],
+            }
+            for row in rows
+        ],
+    }
+    filtered = _filter_skill_listing(
+        listing,
+        scope="all",
+        project_dir=project_dir,
+        project_id=_project_id_for_skill_directory(project_dir),
+        backends=[normalized_backend],
+        user_context=user_context,
+    )
+    return {
+        str(row.get("name"))
+        for row in filtered.get("skills", [])
+        if isinstance(row, dict) and row.get("name")
+    }
 
 
 def _remote_safe_skill_payload(skill: dict[str, Any]) -> dict[str, Any]:

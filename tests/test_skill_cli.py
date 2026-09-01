@@ -64,3 +64,14 @@ def test_skill_load_parser_accepts_the_canonical_separator_form():
 
     assert args.skill_command == "load"
     assert args.name == "pdf-processing"
+
+
+def test_skill_cli_localizes_errors(monkeypatch, tmp_path, capsys):
+    _isolate_catalog(monkeypatch, tmp_path)
+    monkeypatch.setattr("vibe.cli._configured_cli_language", lambda: "zh")
+
+    assert cmd_skill(SimpleNamespace(skill_command="load", name="missing")) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "未找到 Skill：missing\n"
