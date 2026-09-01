@@ -95,6 +95,15 @@ between enumeration and open cannot redirect the checked operation to a FIFO,
 socket, device, directory, broken link, or other non-regular target. Load
 repeats the same open-handle contract.
 
+Discovery and load share one verified-read primitive. It records the open
+file's identity, size, high-resolution modification time, and change/version
+metadata available on the platform before the bounded read, queries the same
+handle afterward, and accepts the bytes only when every recorded value remains
+unchanged. An in-place rewrite, truncation, or replacement during the read
+therefore omits the candidate during discovery or fails load with empty standard
+output. This consistency rule is owned once by the resolver rather than
+reimplemented by Catalog and load call sites.
+
 Backend-bundled or system Skills, plugin caches, administrator-only Skills,
 and `.claude/commands` are not discovery sources.
 
@@ -206,6 +215,8 @@ selected by these rules, in order:
    more distant directory.
 4. At the same scope and depth, directory-family priority is:
    `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode.
+5. If every preceding dimension ties, the candidate whose absolute directory
+   path sorts first by Unicode code-point order wins.
 
 The `.avibe` family reserves the highest family slot for future use, but
 `${AVIBE_HOME:-$HOME/.avibe}/skills` is inactive in v1. OpenCode means
@@ -405,10 +416,10 @@ reference measurement of six roots, 20 Skill files, and 242 KB total input
 completed in about 1 ms median on a warm local filesystem. This is not a
 latency guarantee; it shows that correctness can precede caching.
 
-If production measurements later justify a cache, directory enumeration still
-runs every Turn and parsed frontmatter may be reused by file identity, size,
-and nanosecond modification time. Caching must preserve the same freshness
-contract.
+V1 does not cache discovery results. A future parsed-frontmatter cache cannot
+treat file identity, size, or timestamps as proof that content is unchanged: it
+must read and digest the bounded frontmatter on that Turn before reusing a
+parsed value. Any optimization must preserve the same freshness contract.
 
 ## 9. Backend Isolation and Prompt Application
 
@@ -492,6 +503,13 @@ leaves no selectable digest path; the next lock holder rebuilds it before
 resolution. If quarantine or publication cannot complete, managed resolution
 fails explicitly and never reads the invalid entry.
 
+Initial publication is not a lifetime trust decision. Before every Catalog
+resolution and built-in load, the resolver validates the selected snapshot
+against the running artifact's expected path, content, and executable-mode
+digest under the same per-digest lock. An altered snapshot enters the repair
+path above before any of its Skills are selected. There is no process-local
+"already validated" flag or metadata-only cache that can authorize reuse.
+
 Every resolver selects the digest computed from the bundled source of its own
 running artifact. Concurrent old and new Avibe processes therefore use
 different snapshots when their built-ins differ, while identical trees safely
@@ -505,8 +523,10 @@ Backend runtimes inherit this selected digest as
 overlapping upgrade. The digest is validated as an identifier under the
 `builtin-skills` umbrella before use; it cannot select an arbitrary path.
 
-The selected snapshot exactly matches the running artifact and is never
-partially updated. The `builtin-skills` umbrella is Avibe-owned rather than a
+At each resolution or load boundary, the selected snapshot exactly matches the
+running artifact and is never partially updated. A later filesystem write is
+detected at the next boundary; this remains a consistency contract rather than
+a security sandbox. The `builtin-skills` umbrella is Avibe-owned rather than a
 user customization surface.
 
 ## 11. Installation Defaults
@@ -580,12 +600,17 @@ at runtime.
   `XDG_CONFIG_HOME` and resolve from the same homes as their live backends.
 - Built-in, project/global, directory depth, and directory-family precedence
   match Section 5.
+- Two sibling directories declaring the same name resolve by the final absolute
+  path tie-breaker, independent of filesystem enumeration order.
 - A Skill with a portable name and extractable description is accepted despite
   unrelated malformed or unknown frontmatter.
 - Invalid candidates do not prevent valid candidates from appearing.
 - A fixture that replaces a regular `SKILL.md` with a FIFO between enumeration
   and open cannot block discovery: handle-level type validation omits it before
   any read, and load follows the same descriptor-bound contract.
+- An in-place rewrite, truncation, or replacement of `SKILL.md` during the
+  verified read is never accepted: discovery omits it and load exits non-zero
+  with empty standard output.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
@@ -649,6 +674,8 @@ isolation acceptance gates.
 - an invalid pre-existing digest path, including a wrong type, changed byte, or
   changed executable mode, is quarantined and rebuilt before resolution; an
   interrupted repair resumes without selecting the quarantine;
+- a snapshot altered after a prior successful resolution is revalidated and
+  repaired before the next Catalog resolution or built-in load;
 - two concurrently running artifacts with different bundled trees resolve
   different immutable snapshots; and
 - after launcher activation, a command inherited from the older runtime still

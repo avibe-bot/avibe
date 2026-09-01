@@ -215,7 +215,7 @@ Source-of-truth rule:
 
 ### PR Delivery
 
-- load and follow the `pr-delivery-loop` skill for every implementation task;
+- load and follow the `pr-delivery-loop` skill for every PR-producing task;
   it owns the detailed procedure, but cannot weaken the baseline below
 - regardless of Skill resolution, use a task branch/worktree, record the change
   contract, require an exact-head Codex review, zero unresolved review threads,
