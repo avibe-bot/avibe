@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
+import { apiFetch } from '../../lib/apiFetch';
+import { primeCloudToken } from '../../lib/avibeFetch';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
+import {
+  ShowPageVoiceHost,
+  type ShowPageVoiceAvailability,
+  type ShowPageVoiceEvent,
+} from '../../lib/showPageVoiceBridge';
 import { bindFrameChord } from '../apps/windowChords';
 
 // postMessage bridge between the chat host and the annotation overlay running
@@ -67,10 +74,12 @@ function annotationShortcutBlocked(target: Element | null): boolean {
 export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   const routeSurfaceActive = useRouteSurfaceActive();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const voiceHostRef = useRef<ShowPageVoiceHost | null>(null);
   const frameShortcutCleanupRef = useRef<() => void>(() => undefined);
   const [state, setState] = useState<AnnotationState | null>(null);
   const [lastSrc, setLastSrc] = useState(src);
   const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
+  const routeSurfaceActiveRef = useLatestRef(routeSurfaceActive);
   const stateRef = useLatestRef(state);
   const shortcutRef = useLatestRef(annotationShortcut);
 
@@ -94,12 +103,16 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     const data = event.data as
       | { type?: unknown; enabled?: unknown; mode?: unknown; available?: unknown }
       | null;
-    if (!data || data.type !== 'avibe:annotation:state') return;
-    setState({
-      enabled: data.enabled === true,
-      mode: data.mode === 'screenshot' ? 'screenshot' : 'smart',
-      available: data.available === true,
-    });
+    if (!data) return;
+    if (data.type === 'avibe:annotation:state') {
+      setState({
+        enabled: data.enabled === true,
+        mode: data.mode === 'screenshot' ? 'screenshot' : 'smart',
+        available: data.available === true,
+      });
+      return;
+    }
+    voiceHostRef.current?.handle(event.data);
   }, []);
 
   const listeningRef = useRef(false);
@@ -156,6 +169,50 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     if (win) win.postMessage(message, window.location.origin);
   }, []);
 
+  const createVoiceHost = useCallback((iframe: HTMLIFrameElement): ShowPageVoiceHost => {
+    let availability: Promise<ShowPageVoiceAvailability> | null = null;
+    const loadAvailability = async (): Promise<ShowPageVoiceAvailability> => {
+      try {
+        const response = await apiFetch('/api/asr/status');
+        const data = response.ok ? await response.json() : null;
+        const available = data?.available === true;
+        if (available) primeCloudToken();
+        return {
+          available,
+          maxFileBytes: (
+            typeof data?.max_file_bytes === 'number'
+            && Number.isFinite(data.max_file_bytes)
+            && data.max_file_bytes > 0
+          )
+            ? Math.floor(data.max_file_bytes)
+            : null,
+        };
+      } catch {
+        return { available: false, maxFileBytes: null };
+      }
+    };
+    return new ShowPageVoiceHost({
+      post: (event: ShowPageVoiceEvent) => {
+        iframe.contentWindow?.postMessage(event, window.location.origin);
+      },
+      availability: () => {
+        if (availability) return availability;
+        const pending = loadAvailability();
+        availability = pending;
+        void pending.finally(() => {
+          if (availability === pending) availability = null;
+        });
+        return pending;
+      },
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    const iframe = iframeRef.current;
+    voiceHostRef.current?.dispose();
+    voiceHostRef.current = iframe ? createVoiceHost(iframe) : null;
+  }, [createVoiceHost, src]);
+
   const enable = useCallback(
     (mode?: AnnotationMode) =>
       post(
@@ -195,16 +252,19 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     (iframe) => {
       frameShortcutCleanupRef.current();
       frameShortcutCleanupRef.current = () => undefined;
+      voiceHostRef.current?.dispose();
+      voiceHostRef.current = null;
       iframeRef.current = iframe;
       if (!iframe) return;
       startListening();
+      voiceHostRef.current = createVoiceHost(iframe);
       frameShortcutCleanupRef.current = bindFrameChord(
         iframe,
         (event, activeInFrame) => {
           return (
             !event.defaultPrevented
             && !event.repeat
-            && routeSurfaceActive
+            && routeSurfaceActiveRef.current
             && stateRef.current?.available === true
             && stateRef.current.enabled !== true
             && actionShortcutMatches(event, shortcutRef.current)
@@ -216,18 +276,28 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     },
     [
       enableFromShortcut,
-      routeSurfaceActive,
+      createVoiceHost,
+      routeSurfaceActiveRef,
       shortcutRef,
       startListening,
       stateRef,
     ],
   );
 
-  useEffect(() => () => frameShortcutCleanupRef.current(), []);
+  useEffect(() => () => {
+    frameShortcutCleanupRef.current();
+    voiceHostRef.current?.dispose();
+  }, []);
 
   // On (re)load the overlay broadcasts its state on mount, but the parent
   // listener is already attached, so we also query as a backstop (§3).
-  const handleIframeLoad = useCallback(() => post({ type: 'avibe:annotation:query' }), [post]);
+  const handleIframeLoad = useCallback(() => {
+    const iframe = iframeRef.current;
+    voiceHostRef.current?.dispose();
+    voiceHostRef.current = iframe ? createVoiceHost(iframe) : null;
+    setState(null);
+    post({ type: 'avibe:annotation:query' });
+  }, [createVoiceHost, post]);
 
   return {
     state,

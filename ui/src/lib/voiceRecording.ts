@@ -322,6 +322,43 @@ export const deleteMapValueIfCurrent = <Key, Value>(
   return map.delete(key);
 };
 
+export type VoiceCaptureClaim = {
+  isCurrent(): boolean;
+  release(): void;
+};
+
+type ActiveVoiceCapture = {
+  token: symbol;
+  finish: () => void;
+};
+
+let activeVoiceCapture: ActiveVoiceCapture | null = null;
+
+/**
+ * Give the newest explicit voice action sole ownership of the browser mic.
+ * Replacing an owner asks it to finish first, preserving captured speech while
+ * preventing hidden Chat and Show Page recorders from running concurrently.
+ */
+export const claimVoiceCapture = (finish: () => void): VoiceCaptureClaim => {
+  const token = Symbol('voice-capture');
+  const previous = activeVoiceCapture;
+  activeVoiceCapture = { token, finish };
+  try {
+    previous?.finish();
+  } catch {
+    // Ownership has already moved; a stale recorder cannot block the new one.
+  }
+  let released = false;
+  return {
+    isCurrent: () => !released && activeVoiceCapture?.token === token,
+    release: () => {
+      if (released) return;
+      released = true;
+      if (activeVoiceCapture?.token === token) activeVoiceCapture = null;
+    },
+  };
+};
+
 export const isVoiceControlDisabled = (
   disabled: boolean,
   recording: boolean,
