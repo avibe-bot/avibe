@@ -11669,10 +11669,10 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
     }
 
 
-def test_memory_indep_027_startup_retries_after_restart_admission(
+def test_memory_indep_028_startup_retries_after_restart_admission(
     monkeypatch,
 ):
-    """MEMORY-INDEP-027: a restart chain cannot strand the companion."""
+    """MEMORY-INDEP-028: a restart chain cannot strand the companion."""
 
     from vibe.ui_server import _reconcile_startup_dependencies_task
 

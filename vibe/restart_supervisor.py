@@ -89,7 +89,7 @@ def _restart_supervisor_process_is_active(status: object) -> bool:
     if started_at is None:
         return False
     current_started_at = runtime.process_create_time(supervisor_pid)
-    return current_started_at is not None and current_started_at == started_at
+    return current_started_at is None or current_started_at == started_at
 
 
 def restart_owner_is_active() -> bool:

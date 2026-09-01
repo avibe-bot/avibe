@@ -544,6 +544,9 @@ def test_restart_mutation_admission_waits_for_terminal_supervisor_postwork(
 
     assert restart_supervisor.restart_mutation_is_pending() is True
 
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: None)
+    assert restart_supervisor.restart_mutation_is_pending() is True
+
     alive.clear()
     assert restart_supervisor.restart_mutation_is_pending() is False
 
