@@ -11,6 +11,7 @@ afterEach(() => {
   teardown?.();
   teardown = null;
   document.body.replaceChildren();
+  vi.restoreAllMocks();
 });
 
 const mountBridge = (initialSrc: string | null = '/show/session') => {
@@ -74,6 +75,50 @@ const dispatchAnnotationShortcut = (target: EventTarget) => {
   act(() => target.dispatchEvent(event));
   return event;
 };
+
+const dispatchFrameMessage = (
+  iframe: HTMLIFrameElement,
+  data: unknown,
+  origin = window.location.origin,
+  source: MessageEventSource | null = iframe.contentWindow,
+) => {
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data, origin, source }));
+  });
+};
+
+describe('useShowPageAnnotation voice boundary', () => {
+  it('answers voice requests only from the attached same-origin iframe', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ available: false }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const query = {
+      type: 'avibe:annotation:voice:request',
+      action: 'query',
+      requestId: 'voice-probe',
+    };
+
+    dispatchFrameMessage(iframe, query, 'https://foreign.test');
+    dispatchFrameMessage(iframe, query, window.location.origin, null);
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    dispatchFrameMessage(iframe, query);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/asr/status',
+      expect.any(Object),
+    ));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({
+      type: 'avibe:annotation:voice:event',
+      kind: 'availability',
+      requestId: 'voice-probe',
+      available: false,
+    }, window.location.origin));
+  });
+});
 
 describe('useShowPageAnnotation shortcut', () => {
   it('leaves the shortcut to the parent surface outside the Show Page frame', () => {
