@@ -196,8 +196,13 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
         iframe.contentWindow?.postMessage(event, window.location.origin);
       },
       availability: () => {
-        availability ??= loadAvailability();
-        return availability;
+        if (availability) return availability;
+        const pending = loadAvailability();
+        availability = pending;
+        void pending.finally(() => {
+          if (availability === pending) availability = null;
+        });
+        return pending;
       },
     });
   }, []);
@@ -287,8 +292,12 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   // On (re)load the overlay broadcasts its state on mount, but the parent
   // listener is already attached, so we also query as a backstop (§3).
   const handleIframeLoad = useCallback(() => {
+    const iframe = iframeRef.current;
+    voiceHostRef.current?.dispose();
+    voiceHostRef.current = iframe ? createVoiceHost(iframe) : null;
+    setState(null);
     post({ type: 'avibe:annotation:query' });
-  }, [post]);
+  }, [createVoiceHost, post]);
 
   return {
     state,

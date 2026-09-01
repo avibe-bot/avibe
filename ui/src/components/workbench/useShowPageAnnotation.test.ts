@@ -3,6 +3,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { ShowPageVoiceHost } from '../../lib/showPageVoiceBridge';
 import { useShowPageAnnotation } from './useShowPageAnnotation';
 
 let teardown: (() => void) | null = null;
@@ -117,6 +118,46 @@ describe('useShowPageAnnotation voice boundary', () => {
       requestId: 'voice-probe',
       available: false,
     }, window.location.origin));
+  });
+
+  it('deduplicates only in-flight availability and refreshes after it settles', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ available: true, max_file_bytes: 1_000_000 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const statusCalls = () => fetchMock.mock.calls.filter(([url]) => url === '/api/asr/status');
+
+    dispatchFrameMessage(iframe, {
+      type: 'avibe:annotation:voice:request',
+      action: 'query',
+      requestId: 'voice-probe-1',
+    });
+    await vi.waitFor(() => expect(statusCalls()).toHaveLength(1));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'availability', requestId: 'voice-probe-1' }),
+      window.location.origin,
+    ));
+
+    dispatchFrameMessage(iframe, {
+      type: 'avibe:annotation:voice:request',
+      action: 'query',
+      requestId: 'voice-probe-2',
+    });
+    await vi.waitFor(() => expect(statusCalls()).toHaveLength(2));
+  });
+
+  it('replaces the voice host and clears stale state on every iframe load', () => {
+    const dispose = vi.spyOn(ShowPageVoiceHost.prototype, 'dispose');
+    const { iframe, result } = mountBridge();
+    reportState(iframe, true);
+    dispose.mockClear();
+
+    act(() => result.current.handleIframeLoad());
+
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(result.current.state).toBeNull();
   });
 });
 

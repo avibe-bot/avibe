@@ -26,8 +26,15 @@ export type ShowPageVoiceRequest =
     }
   | {
       type: typeof ANNOTATION_VOICE_REQUEST_MESSAGE;
-      action: 'stop' | 'retry' | 'abort';
+      action: 'stop' | 'abort';
       requestId: string;
+    }
+  | {
+      type: typeof ANNOTATION_VOICE_REQUEST_MESSAGE;
+      action: 'retry';
+      requestId: string;
+      before: string;
+      after: string;
     };
 
 export type ShowPageVoiceEvent =
@@ -61,7 +68,7 @@ export type ShowPageVoiceSession = {
   start(): Promise<void>;
   finish(): void;
   canRetry(): boolean;
-  retry(): Promise<string>;
+  retry(context: { before: string; after: string }): Promise<string>;
   abort(): void;
 };
 
@@ -96,7 +103,19 @@ export function showPageVoiceRequestFromPayload(value: unknown): ShowPageVoiceRe
       after,
     };
   }
-  if (payload.action === 'stop' || payload.action === 'retry' || payload.action === 'abort') {
+  if (payload.action === 'retry') {
+    const before = boundedString(payload.before, MAX_CONTEXT_BEFORE_CHARS);
+    const after = boundedString(payload.after, MAX_CONTEXT_AFTER_CHARS);
+    if (before === undefined || after === undefined) return undefined;
+    return {
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'retry',
+      requestId,
+      before,
+      after,
+    };
+  }
+  if (payload.action === 'stop' || payload.action === 'abort') {
     return { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: payload.action, requestId };
   }
   return undefined;
@@ -136,7 +155,7 @@ export class ShowPageVoiceHost {
     } else if (request.action === 'stop') {
       if (this.active?.requestId === request.requestId) this.active.session.finish();
     } else if (request.action === 'retry') {
-      if (this.active?.requestId === request.requestId) void this.retry(this.active);
+      if (this.active?.requestId === request.requestId) void this.retry(this.active, request);
     } else {
       if (this.starting?.requestId === request.requestId) {
         this.starting.cancelled = true;
@@ -238,9 +257,12 @@ export class ShowPageVoiceHost {
     }
   }
 
-  private async retry(active: { requestId: string; session: ShowPageVoiceSession }): Promise<void> {
+  private async retry(
+    active: { requestId: string; session: ShowPageVoiceSession },
+    request: Extract<ShowPageVoiceRequest, { action: 'retry' }>,
+  ): Promise<void> {
     try {
-      const text = await active.session.retry();
+      const text = await active.session.retry({ before: request.before, after: request.after });
       this.postResult(active, text);
     } catch (error) {
       this.postSessionError(active, error);

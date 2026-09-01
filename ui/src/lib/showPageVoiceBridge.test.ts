@@ -32,7 +32,7 @@ class FakeVoiceSession implements ShowPageVoiceSession {
   readonly start = vi.fn(async () => undefined);
   readonly finish = vi.fn();
   readonly canRetry = vi.fn(() => true);
-  readonly retry = vi.fn(() => this.retryResult.promise);
+  readonly retry = vi.fn((_context: { before: string; after: string }) => this.retryResult.promise);
   readonly abort = vi.fn();
 }
 
@@ -193,8 +193,11 @@ describe('ShowPageVoiceHost', () => {
       retryable: true,
     }));
 
-    host.handle({ ...start, action: 'retry' });
-    expect(session.retry).toHaveBeenCalledOnce();
+    host.handle({ ...start, action: 'retry', before: 'latest before', after: 'latest after' });
+    expect(session.retry).toHaveBeenCalledWith({
+      before: 'latest before',
+      after: 'latest after',
+    });
     session.retryResult.resolve('recovered');
     await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
       kind: 'result',

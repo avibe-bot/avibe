@@ -13,21 +13,31 @@ limit and without implementing a second transcription stack in Show Runtime.
 - The Avibe client owns microphone capture, realtime transcription, internal WAV
   segmentation, HTTP fallback, retry, and cleanup through the same modules used
   by Chat.
+- One client-wide capture claim prevents hidden Chat and Show Page recorders from
+  running concurrently. A newer explicit voice action finishes the previous
+  capture before taking ownership, so recorded speech is preserved.
 - The existing same-origin annotation `postMessage` boundary carries lifecycle
-  commands and results. No server API or protocol changes are required.
+  commands and results. No server API or backend behavior changes are required.
 
 ## Contract
 
 The iframe sends `query`, `start`, `stop`, `retry`, and `abort` requests with one
-bounded request id and the existing cleanup context. The owning Chat frame sends
-availability, started, preview, result, and typed error events. Both sides require
-the expected origin and iframe window.
+bounded request id. Start and retry carry the cleanup context that matches the
+current insertion snapshot. The owning Chat frame sends availability, started,
+preview, result, and typed error events. Both sides require the expected origin
+and iframe window.
+
+An unanswered start handshake times out and aborts without imposing any limit on
+recording duration. Reloading the iframe disposes its old voice host, and ASR
+availability is shared only while a request is in flight so later requests see
+configuration changes and transient recovery.
 
 ## Verification
 
 - Show Runtime unit tests cover bridge validation, lifecycle, retry, punctuation
   insertion, and screenshot-comment field identity.
-- Avibe UI tests cover host lifecycle and prove repeated internal minute segments
-  do not end a recording.
-- Existing Chat voice tests remain unchanged and continue to cover the shared
-  recording/transcription implementation.
+- Avibe UI tests cover host lifecycle, availability refresh, retry context, and
+  client-wide capture ownership, and prove repeated internal minute segments do
+  not end a recording.
+- Existing Chat voice behavior continues to use the shared recording and
+  transcription implementation; only cross-surface capture ownership is added.

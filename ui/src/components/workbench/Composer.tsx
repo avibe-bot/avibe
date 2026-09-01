@@ -42,8 +42,10 @@ import {
   type VoiceTelemetryOutcome,
 } from '../../lib/voiceTelemetry';
 import {
+  claimVoiceCapture,
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
+  type VoiceCaptureClaim,
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
 import {
@@ -430,6 +432,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
   const recorderRef = useRef<VoiceRecordingPipeline | null>(null);
+  const voiceCaptureClaimRef = useRef<VoiceCaptureClaim | null>(null);
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
@@ -547,6 +550,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       } catch {
         /* already stopped */
       }
+      voiceCaptureClaimRef.current?.release();
+      voiceCaptureClaimRef.current = null;
       clearRecordingTimers();
     };
   }, [clearRecordingTimers]);
@@ -961,9 +966,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     let stream: MediaStream | null = null;
     let startingPipeline: VoiceRecordingPipeline | null = null;
     let startingSession: VoiceRecordingSession | null = null;
+    const captureClaim = claimVoiceCapture(() => {
+      try {
+        if (startingPipeline) startingPipeline.finish();
+        else stream?.getTracks().forEach((track) => track.stop());
+      } catch {
+        startingPipeline?.abort();
+        stream?.getTracks().forEach((track) => track.stop());
+      }
+    });
+    voiceCaptureClaimRef.current = captureClaim;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (unmountedRef.current || disabledRef.current) {
+      if (!captureClaim.isCurrent() || unmountedRef.current || disabledRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
@@ -1044,6 +1059,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
         },
         onStopped: (reason, metadata) => {
+          captureClaim.release();
+          if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
           if (recorderRef.current === pipeline) recorderRef.current = null;
           if (recordingSessionRef.current === session) recordingSessionRef.current = null;
           clearRecordingTimers();
@@ -1088,6 +1105,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       recorderRef.current = pipeline;
       const captureActive = await pipeline.start();
       if (!captureActive) return;
+      if (!captureClaim.isCurrent()) {
+        pipeline.finish();
+        return;
+      }
       if (unmountedRef.current || disabledRef.current) {
         pipeline.abort();
         return;
@@ -1117,6 +1138,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (startingSession) restoreRealtimePreview(startingSession);
       if (recorderRef.current === startingPipeline) recorderRef.current = null;
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
+      captureClaim.release();
+      if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
       clearRecordingTimers();
       stream?.getTracks().forEach((track) => track.stop());
       if (!unmountedRef.current) {
@@ -1128,6 +1151,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         ), 'error');
       }
     } finally {
+      if (recorderRef.current !== startingPipeline || recordingSessionRef.current !== startingSession) {
+        captureClaim.release();
+        if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
+      }
       recordingStartRef.current = false;
       if (!unmountedRef.current) setRecordingStarting(false);
     }

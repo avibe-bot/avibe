@@ -8,7 +8,9 @@ import {
   type VoiceTranscriptionSegment,
 } from './voiceTranscription';
 import {
+  claimVoiceCapture,
   VoiceRecordingPipeline,
+  type VoiceCaptureClaim,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
 import {
@@ -65,6 +67,8 @@ export class ShowPageVoiceDictation {
   private readonly dictationId: string;
   private readonly segments: PendingVoiceSegment[] = [];
   private readonly queue: VoiceQueue;
+  private cleanupContext: { before: string; after: string };
+  private captureClaim: VoiceCaptureClaim | null = null;
   private pipeline: VoicePipeline | null = null;
   private realtime: VoiceRealtime | null = null;
   private realtimeState: 'connecting' | 'active' | 'failed' = 'connecting';
@@ -81,6 +85,7 @@ export class ShowPageVoiceDictation {
     dependencies: ShowPageVoiceDictationDependencies = {},
   ) {
     this.input = input;
+    this.cleanupContext = { before: input.before, after: input.after };
     this.dependencies = {
       getUserMedia: dependencies.getUserMedia
         ?? (() => navigator.mediaDevices.getUserMedia({ audio: true })),
@@ -109,9 +114,20 @@ export class ShowPageVoiceDictation {
 
   async start(): Promise<void> {
     if (this.pipeline || this.stream) throw new Error('show page voice dictation already started');
+    const captureClaim = claimVoiceCapture(() => {
+      try {
+        if (this.pipeline) this.pipeline.finish();
+        else this.abortController.abort();
+      } catch {
+        this.abortController.abort();
+        this.pipeline?.abort();
+        this.stream?.getTracks().forEach((track) => track.stop());
+      }
+    });
+    this.captureClaim = captureClaim;
     try {
       const stream = await this.dependencies.getUserMedia();
-      if (this.abortController.signal.aborted) {
+      if (this.abortController.signal.aborted || !captureClaim.isCurrent()) {
         stream.getTracks().forEach((track) => track.stop());
         throw cancelledError();
       }
@@ -157,6 +173,7 @@ export class ShowPageVoiceDictation {
         },
         onStopped: (reason) => {
           this.stopped = true;
+          this.releaseCaptureClaim();
           if (reason === 'abort') {
             this.reject(cancelledError());
             return;
@@ -169,12 +186,14 @@ export class ShowPageVoiceDictation {
       });
       this.pipeline = pipeline;
       const active = await pipeline.start();
+      if (!captureClaim.isCurrent()) throw cancelledError();
       if (!active && !this.stopped) throw new Error('voice capture did not start');
     } catch (error) {
       this.abortController.abort();
       this.realtime?.abort();
       this.stream?.getTracks().forEach((track) => track.stop());
       this.stream = null;
+      this.releaseCaptureClaim();
       throw error;
     }
   }
@@ -189,6 +208,7 @@ export class ShowPageVoiceDictation {
     this.realtime?.abort();
     this.pipeline?.abort();
     this.stream?.getTracks().forEach((track) => track.stop());
+    this.releaseCaptureClaim();
     this.reject(cancelledError());
   }
 
@@ -198,10 +218,11 @@ export class ShowPageVoiceDictation {
       && !this.abortController.signal.aborted;
   }
 
-  async retry(): Promise<string> {
+  async retry(context: { before: string; after: string }): Promise<string> {
     if (!this.canRetry()) {
       throw this.captureError ?? cancelledError();
     }
+    this.cleanupContext = context;
     await this.dependencies.transcribeSegments(this.segments, {
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
       signal: this.abortController.signal,
@@ -275,8 +296,8 @@ export class ShowPageVoiceDictation {
     if (this.captureError !== undefined) throw this.captureError;
     const result = await this.dependencies.finalize(this.segments, {
       dictationId: this.dictationId,
-      before: this.input.before,
-      after: this.input.after,
+      before: this.cleanupContext.before,
+      after: this.cleanupContext.after,
     }, {
       signal: this.abortController.signal,
     });
@@ -293,5 +314,10 @@ export class ShowPageVoiceDictation {
     if (this.settled) return;
     this.settled = true;
     this.rejectDone(error);
+  }
+
+  private releaseCaptureClaim(): void {
+    this.captureClaim?.release();
+    this.captureClaim = null;
   }
 }

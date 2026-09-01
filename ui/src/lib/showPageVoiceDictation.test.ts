@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { ShowPageVoiceDictation } from './showPageVoiceDictation';
-import type { VoiceRecordingPipelineOptions } from './voiceRecording';
+import { claimVoiceCapture, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
-import type { VoiceTranscriptionSegment } from './voiceTranscription';
+import { VoiceTranscriptionError, type VoiceTranscriptionSegment } from './voiceTranscription';
 
 const fakeStream = () => {
   const stop = vi.fn();
@@ -78,6 +78,31 @@ describe('ShowPageVoiceDictation', () => {
     expect(realtimeFinish).toHaveBeenCalledOnce();
   });
 
+  it('finishes capture when another client surface takes microphone ownership', async () => {
+    const { stream } = fakeStream();
+    const finish = vi.fn();
+    const abort = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: 'done', cleanup: 'success' as const }),
+        abort: vi.fn(),
+      }),
+      createPipeline: () => ({ start: async () => true, finish, abort }),
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    await dictation.start();
+    const nextSurface = claimVoiceCapture(vi.fn());
+
+    expect(finish).toHaveBeenCalledOnce();
+    nextSurface.release();
+    dictation.abort();
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
   it('falls back through the existing segment queue and finalizer', async () => {
     const { stream } = fakeStream();
     const queued: number[] = [];
@@ -128,5 +153,54 @@ describe('ShowPageVoiceDictation', () => {
     await expect(dictation.done).resolves.toBe('HTTP fallback words');
     expect(queued).toEqual([0]);
     expect(finalize).toHaveBeenCalledOnce();
+  });
+
+  it('uses the latest draft context when retrying retained audio', async () => {
+    const { stream } = fakeStream();
+    const finalize = vi.fn()
+      .mockRejectedValueOnce(new VoiceTranscriptionError('timeout'))
+      .mockResolvedValueOnce({ text: 'recovered', cleanup: 'success' as const });
+    const dictation = new ShowPageVoiceDictation({
+      before: 'original before',
+      after: 'original after',
+    }, {
+      getUserMedia: async () => stream,
+      createRealtime: (options) => ({
+        start: async () => {
+          options.onError?.(new Error('realtime unavailable'));
+          throw new Error('realtime unavailable');
+        },
+        sendPcm: vi.fn(() => false),
+        finish: async () => { throw new Error('realtime unavailable'); },
+        abort: vi.fn(),
+      }),
+      createQueue: () => ({ enqueue: async () => undefined }),
+      createPipeline: (options) => ({
+        start: async () => true,
+        abort: vi.fn(),
+        finish: () => {
+          options.onSegment(new Blob(['tail'], { type: 'audio/wav' }), {
+            durationMs: 4_000,
+            final: true,
+          });
+          options.onStopped('finish', { pendingSegmentCount: 1 });
+        },
+      }),
+      finalize,
+      transcribeSegments: async () => undefined,
+    });
+
+    await dictation.start();
+    dictation.finish();
+    await expect(dictation.done).rejects.toMatchObject({ code: 'timeout' });
+    await expect(dictation.retry({
+      before: 'latest before',
+      after: 'latest after',
+    })).resolves.toBe('recovered');
+
+    expect(finalize.mock.calls.map(([, context]) => context)).toEqual([
+      expect.objectContaining({ before: 'original before', after: 'original after' }),
+      expect.objectContaining({ before: 'latest before', after: 'latest after' }),
+    ]);
   });
 });
