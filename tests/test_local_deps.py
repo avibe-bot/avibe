@@ -2400,7 +2400,36 @@ def test_memory_package_server_admission_rejects_nonrepairable_rows(
     }
 
 
-def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) -> None:
+#: One running version, published two ways. `publish.yml` accepts official
+#: `vX.Y.ZrcN` tags and publishes them to PyPI, while a `gh-v*` build of the
+#: identical version is on no index at all — so the version string cannot pick
+#: the repair sources and only the recorded install origin can. Both rows use
+#: the same version deliberately.
+REPAIR_VERSION = "3.0.14rc8"
+RELEASE_CORE_URL = f"https://github.com/avibe-bot/avibe/releases/download/gh-v{REPAIR_VERSION}/avibe_os-{REPAIR_VERSION}-py3-none-any.whl"
+RELEASE_MEMORY_URL = (
+    f"https://github.com/avibe-bot/avibe/releases/download/gh-v{REPAIR_VERSION}/"
+    f"avibe_memory-{REPAIR_VERSION}-py3-none-any.whl"
+)
+INSTALL_ORIGIN_SOURCES = {
+    "index install": (None, None, None),
+    "release asset install": (RELEASE_CORE_URL, RELEASE_CORE_URL, RELEASE_MEMORY_URL),
+}
+
+
+@pytest.mark.parametrize(
+    ("origin", "core_spec", "memory_spec"),
+    list(INSTALL_ORIGIN_SOURCES.values()),
+    ids=list(INSTALL_ORIGIN_SOURCES),
+)
+def test_memory_package_dependency_job_targets_the_running_version_wherever_it_came_from(
+    monkeypatch,
+    origin: str | None,
+    core_spec: str | None,
+    memory_spec: str | None,
+) -> None:
+    current_version = REPAIR_VERSION
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
     plan = SimpleNamespace(
         command=["repair"],
         activation=None,
@@ -2410,7 +2439,7 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
     calls: dict[str, object] = {}
     lock_events: list[str] = []
     monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
-    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
     monkeypatch.setattr(api, "restart_is_pending", lambda: False)
@@ -2456,11 +2485,13 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
     assert result["ok"] is True
     assert result["message"] == "memory_package_ready"
     assert calls["plan"] == {
-        "version": "3.0.14",
+        "version": current_version,
         "package_name": api.PACKAGE_NAME,
         "memory_package": True,
-        "memory_version": "3.0.14",
+        "memory_version": current_version,
         "vibe_path": "/bin/vibe",
+        "core_spec": core_spec,
+        "memory_spec": memory_spec,
     }
     assert calls["execute"] == (
         plan,
@@ -2482,10 +2513,68 @@ def test_memory_package_dependency_job_uses_existing_pinned_plan(monkeypatch) ->
     assert result["restart"] == {"job_id": "restart"}
     assert lock_events == ["entered", "build", "execute", "restart", "exited"]
     record_result.assert_called_once_with(
-        "3.0.14",
+        current_version,
         result="restart_scheduled",
         reason=None,
     )
+
+
+def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
+    monkeypatch,
+) -> None:
+    """MEMORY-INDEP-027: a core-only preview install converges from its own release.
+
+    A `gh-v*` release publishes the wheel pair as release assets and nothing to
+    an index, so this builds the real plan rather than a recorded call: what
+    matters is the command an installer would actually run.
+    """
+
+    current_version = REPAIR_VERSION
+    calls: dict[str, object] = {}
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: RELEASE_CORE_URL)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    monkeypatch.setattr(api, "_record_memory_package_repair_result", Mock())
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "schedule_restart", lambda **_kwargs: {"job_id": "restart"})
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    # Resolve to the pip installer so the plan is built from this interpreter
+    # without consulting any uv tool environment on the host.
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **_kwargs: None)
+
+    def execute_plan(plan, **_kwargs):
+        calls["plan"] = plan
+        return subprocess.CompletedProcess(plan.command, 0, stdout="installed", stderr="")
+
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
+
+    result = api._prepare_memory_package_job(automatic=True)
+
+    assert result["ok"] is True
+    assert result["restarting"] is True
+    plan = calls["plan"]
+    release = f"https://github.com/avibe-bot/avibe/releases/download/gh-v{current_version}/"
+    commands = [
+        command
+        for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command)
+        if command
+    ]
+    assert len(commands) >= 2, "the repair resolves the pair before it installs it"
+    for command in commands:
+        assert f"{release}avibe_os-{current_version}-py3-none-any.whl" in command
+        assert f"avibe-memory @ {release}avibe_memory-{current_version}-py3-none-any.whl" in command
+        # An index pin here is the bug: PyPI never served this version, so the
+        # install fails and spends one of the bounded repair attempts.
+        assert f"{api.PACKAGE_NAME}=={current_version}" not in command
+        assert f"{api.MEMORY_PACKAGE_NAME}=={current_version}" not in command
 
 
 def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_scheduled(
