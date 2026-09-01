@@ -41,6 +41,7 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
         },
         base_env={"PATH": "/usr/bin"},
         working_dir=tmp_path / "workspace",
+        extra_env={"AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace")},
     )
 
     assert ok is True
@@ -52,6 +53,7 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
         "AVIBE_CALLER_SOURCE": "agent_run",
         "AVIBE_CALLER_BACKEND": "opencode",
         "AVIBE_NATIVE_SESSION_ID": "oc-session",
+        "AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace"),
     }
     assert entry["caller_context"]["session_id"] == "ses123"
     assert "expires_at" in entry

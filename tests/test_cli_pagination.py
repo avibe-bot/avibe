@@ -74,6 +74,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         ("task", "list"),
         ("watch", "list"),
     }
+    fixed_page_commands = {("skill", "list")}
     parser = cli.build_parser()
     discovered_list_commands = {
         path
@@ -81,11 +82,16 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         if path[-1] == "list" and path[-1] != "ls"
     }
 
-    assert discovered_list_commands <= collection_commands
+    assert discovered_list_commands <= collection_commands | fixed_page_commands
     for path in collection_commands:
         flags = _parser_flags(_command_parser(path))
         assert "--page" in flags, path
         assert "--limit" in flags, path
+        assert "--all" not in flags, path
+    for path in fixed_page_commands:
+        flags = _parser_flags(_command_parser(path))
+        assert "--page" in flags, path
+        assert "--limit" not in flags, path
         assert "--all" not in flags, path
 
 

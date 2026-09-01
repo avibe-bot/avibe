@@ -34,6 +34,7 @@ from vibe import runtime
 from vibe.opencode_config import (
     get_opencode_custom_provider_adapter,
     load_first_opencode_user_config,
+    parse_jsonc_object,
     read_opencode_provider_auth_entries,
 )
 
@@ -49,6 +50,22 @@ MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
+
+
+def _managed_skill_config_content(content: str | None) -> str:
+    """Overlay OpenCode's native Skill permission without discarding config."""
+
+    config = parse_jsonc_object(content) if content and content.strip() else {}
+    permission = config.get("permission")
+    if isinstance(permission, str):
+        managed_permission: dict[str, Any] = {"*": permission}
+    elif isinstance(permission, dict):
+        managed_permission = dict(permission)
+    else:
+        managed_permission = {}
+    managed_permission["skill"] = "deny"
+    config["permission"] = managed_permission
+    return json.dumps(config, separators=(",", ":"))
 
 
 def _percent_encode_path(path: str) -> str:
@@ -1585,21 +1602,22 @@ class OpenCodeServerManager:
         env = os.environ.copy()
         env["OPENCODE_ENABLE_EXA"] = "1"
         env.update(server_environment())
+        config_content = env.get("OPENCODE_CONFIG_CONTENT")
         if self._model_hub_overlay_path:
             env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
-            content = self._model_hub_overlay_content
-            if content is None:
+            config_content = self._model_hub_overlay_content
+            if config_content is None:
                 try:
                     raw_content = Path(self._model_hub_overlay_path).read_bytes()
                 except OSError as exc:
                     raise RuntimeError("Model Hub OpenCode overlay is unavailable") from exc
                 if hashlib.sha256(raw_content).hexdigest() != self._model_hub_overlay_hash:
                     raise RuntimeError("Model Hub OpenCode overlay content hash changed")
-                content = raw_content.decode("utf-8")
+                config_content = raw_content.decode("utf-8")
             # Inline config is OpenCode's runtime-override tier, loaded after
             # project config. Reasserting the exact overlay here prevents a
             # checked-in opencode.json from replacing Hub provider transport.
-            env["OPENCODE_CONFIG_CONTENT"] = content
+        env["OPENCODE_CONFIG_CONTENT"] = _managed_skill_config_content(config_content)
 
         try:
             self._process = await asyncio.create_subprocess_exec(

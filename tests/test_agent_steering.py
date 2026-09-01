@@ -653,7 +653,7 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
                 "model": {"providerID": "openai", "modelID": "gpt-5"},
                 "reasoning_effort": "high",
                 "system": "primary system prompt",
-                "tools": {"question": False},
+                "tools": {"question": False, "skill": False},
             }
         ]
         assert server.abort_calls == []

@@ -19,6 +19,7 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
+from core.managed_skills import managed_skill_environment
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.services.agent_steering import (
@@ -1797,7 +1798,7 @@ class CodexAgent(BaseAgent):
         # this turn's shell needs in order to record where it came from. This env is
         # the only hop it can travel: the CLI runs as a subprocess of the Codex shell.
         context = getattr(request, "context", None)
-        return caller_env_for_platform_payload(
+        env = caller_env_for_platform_payload(
             getattr(context, "platform_specific", None),
             message=context,
             # Defensively resolved: this is reached from payload-shaping helpers that
@@ -1807,6 +1808,8 @@ class CodexAgent(BaseAgent):
                 getattr(getattr(self, "controller", None), "config", None), "platform", None
             ),
         )
+        env.update(managed_skill_environment(getattr(request, "working_path", None)))
+        return env
 
     def _caller_env_script_path(self, request: AgentRequest) -> Path:
         caller_env = self._caller_env_for_request(request)
@@ -1846,6 +1849,8 @@ class CodexAgent(BaseAgent):
 
         env = self._caller_env_for_request(request)
         config = dict(params.get("config") or {})
+        config["skills.include_instructions"] = False
+        params["config"] = config
         shell_policy = dict(config.get("shell_environment_policy") or {})
         set_env = dict(shell_policy.get("set") or {})
         had_path = "PATH" in set_env
@@ -2304,6 +2309,7 @@ class CodexAgent(BaseAgent):
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
                 current_agent_backend="codex",
+                skills_cwd=getattr(request, "working_path", None),
             )
         )
 

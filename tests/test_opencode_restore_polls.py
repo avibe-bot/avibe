@@ -320,7 +320,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             },
             "reasoning_effort": "high",
             "system": "restored system prompt",
-            "tools": {"question": False},
+            "tools": {"question": False, "skill": False},
         }
     ]
 

@@ -1726,7 +1726,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             agent._inject_caller_env_config(params, request)
 
         set_env = params["config"]["shell_environment_policy"]["set"]
-        self.assertEqual(set_env, {"PATH": "/managed/git/bin"})
+        self.assertEqual(set_env["PATH"], "/managed/git/bin")
+        self.assertEqual(set_env["AVIBE_SKILL_WORKING_DIR"], str(Path("/tmp/workspace").resolve()))
+        self.assertTrue(set_env["BASH_ENV"].endswith("/codex-caller-env/session.sh"))
+        self.assertFalse(params["config"]["skills.include_instructions"])
 
     def test_inject_caller_env_config_merges_shell_environment_policy(self):
         agent = object.__new__(CodexAgent)
@@ -1757,6 +1760,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set_env["AVIBE_NATIVE_SESSION_ID"], "thread-parent")
         self.assertTrue(set_env["BASH_ENV"].endswith("/codex-caller-env/ses-parent.sh"))
         self.assertNotIn("PATH", set_env)
+        self.assertFalse(params["config"]["skills.include_instructions"])
 
     def test_write_caller_env_script_refreshes_reused_thread_run_id(self):
         agent = object.__new__(CodexAgent)

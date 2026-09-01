@@ -176,6 +176,8 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert captured["connected"] is True
     assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
     assert captured["options"].max_buffer_size == CLAUDE_SDK_MAX_BUFFER_SIZE
+    assert captured["options"].skills == []
+    assert captured["options"].env["AVIBE_SKILL_WORKING_DIR"] == str(tmp_path.resolve())
     assert controller.claude_sessions[f"slack_C123:{tmp_path}"] is client
     assert getattr(client, "_vibe_runtime_base_session_id") == "slack_C123"
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"

@@ -117,6 +117,7 @@ exclude = ["vibe/memory_runtime_manifest.json"]
 [tool.hatch.build.targets.wheel.force-include]
 "main.py" = "vibe/service_main.py"
 "ui/dist" = "vibe/ui/dist"
+"skills" = "vibe/builtin_skills_source"
 
 [tool.hatch.build.targets.sdist]
 # Include ui/dist for source distribution
@@ -126,6 +127,7 @@ include = [
     "core/**",
     "modules/**",
     "storage/**",
+    "skills/**",
     "hatch_build.py",
     "hatch_exact_peer.py",
     "main.py",
@@ -140,6 +142,9 @@ include = [
     "LICENSE",
 ]
 exclude = ["vibe/memory_runtime_manifest.json"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"skills" = "skills"
 
 [tool.ruff]
 line-length = 120

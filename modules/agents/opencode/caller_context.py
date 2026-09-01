@@ -143,6 +143,7 @@ def bind_session(
     *,
     base_env: Mapping[str, str],
     working_dir: Path | str | None,
+    extra_env: Mapping[str, str] | None = None,
     ttl_hours: int = BINDING_TTL_HOURS,
     message: object | None = None,
     fallback_platform: object | None = None,
@@ -166,6 +167,12 @@ def bind_session(
         fallback_platform=fallback_platform,
     )
     env = caller.to_env() if caller is not None else {}
+    if extra_env:
+        env.update(
+            (str(key), str(value))
+            for key, value in extra_env.items()
+            if str(key) and str(value)
+        )
     prepend_vendored_git_to_path(
         env,
         base_env=base_env,

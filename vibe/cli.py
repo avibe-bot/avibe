@@ -838,6 +838,37 @@ def cmd_memory(args) -> int:
     return 0
 
 
+def cmd_skill(args) -> int:
+    """List or load Skills through Avibe's live resolver."""
+
+    from core.managed_skills import (
+        load_skill,
+        render_skill_content,
+        render_skill_list,
+        resolve_skills,
+    )
+
+    if args.skill_command == "list":
+        try:
+            output = render_skill_list(resolve_skills(), page=args.page)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if output:
+            print(output)
+        return 0
+
+    if args.skill_command == "load":
+        skill = load_skill(args.name)
+        if skill is None:
+            print(f"Skill not found: {args.name}", file=sys.stderr)
+            return 1
+        print(render_skill_content(skill))
+        return 0
+
+    return 1
+
+
 def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument("--page", type=int, help="Page number to return. Defaults to 1.")
     parser.add_argument(
@@ -15845,6 +15876,19 @@ def build_parser():
         metavar="{status,profile,list,search,remember}",
     )
     memory_subparsers.required = True
+    skill_parser = subparsers.add_parser(
+        "skill",
+        help="List and load Skills through Avibe",
+    )
+    skill_subparsers = skill_parser.add_subparsers(
+        dest="skill_command",
+        metavar="{list,load}",
+    )
+    skill_subparsers.required = True
+    skill_list_parser = skill_subparsers.add_parser("list", help="List available Skills")
+    skill_list_parser.add_argument("--page", type=int, default=1, help="Catalog page (default: 1)")
+    skill_load_parser = skill_subparsers.add_parser("load", help="Load one Skill")
+    skill_load_parser.add_argument("name", help="Skill name")
     memory_status_parser = memory_subparsers.add_parser(
         "status",
         help=i18n_t("memory.cli.help.status", memory_help_language),
@@ -17673,6 +17717,8 @@ def main():
         sys.exit(cmd_status())
     if args.command == "memory":
         sys.exit(cmd_memory(args))
+    if args.command == "skill":
+        sys.exit(cmd_skill(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":

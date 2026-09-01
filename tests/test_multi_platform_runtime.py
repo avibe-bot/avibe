@@ -853,7 +853,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     asyncio.run(_run())
 
     assert calls
-    assert calls[0]["tools"] == {"question": False}
+    assert calls[0]["tools"] == {"question": False, "skill": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
     assert calls[0]["attempt_id"] == ATTEMPT_ID

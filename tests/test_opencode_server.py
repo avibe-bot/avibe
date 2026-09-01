@@ -17,6 +17,23 @@ from modules.agents.opencode.utils import (
     resolve_opencode_allowed_providers,
 )
 
+
+def test_managed_skill_config_denies_native_skill_without_discarding_permissions() -> None:
+    content = SERVER_MODULE._managed_skill_config_content(
+        '{"permission":{"bash":"ask"},"model":"openai/gpt-5"}'
+    )
+
+    assert json.loads(content) == {
+        "permission": {"bash": "ask", "skill": "deny"},
+        "model": "openai/gpt-5",
+    }
+
+
+def test_managed_skill_config_expands_string_permission() -> None:
+    content = SERVER_MODULE._managed_skill_config_content('{"permission":"allow"}')
+
+    assert json.loads(content)["permission"] == {"*": "allow", "skill": "deny"}
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
 

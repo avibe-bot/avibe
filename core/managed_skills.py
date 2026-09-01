@@ -1,0 +1,882 @@
+"""Avibe-owned Skill discovery, catalog rendering, loading, and built-ins."""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import html
+import logging
+import os
+import re
+import shutil
+import stat
+import struct
+import tempfile
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+from config import paths
+
+
+logger = logging.getLogger(__name__)
+
+SKILL_WORKING_DIR_ENV = "AVIBE_SKILL_WORKING_DIR"
+BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
+
+CATALOG_PAGE_SIZE = 25
+CATALOG_PAGE_MAX_BYTES = 16 * 1024
+CATALOG_DESCRIPTION_MAX_CHARS = 1024
+FRONTMATTER_MAX_BYTES = 64 * 1024
+SKILL_BODY_MAX_BYTES = 256 * 1024
+DISCOVERY_ROOT_MAX_CHILDREN = 1024
+DISCOVERY_CLASS_MAX_CANDIDATES = 1024
+DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES = 8 * 1024 * 1024
+
+_SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
+_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_REQUIRED_FIELD_RE = re.compile(r"^[ \t]*(name|description)[ \t]*:[ \t]*(.*)$")
+_TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
+_BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
+_WINDOWS_RESERVED = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
+_WINDOWS_INVALID_CHARS = frozenset('<>:"\\|?*')
+_GENERATED_BYTECODE_SUFFIXES = (".pyc", ".pyo")
+_PROJECT_FAMILIES = (
+    (Path(".agents/skills"), 1),
+    (Path(".codex/skills"), 2),
+    (Path(".claude/skills"), 3),
+    (Path(".opencode/skills"), 4),
+)
+
+
+@dataclass(frozen=True)
+class ManagedSkill:
+    name: str
+    description: str
+    directory: Path
+    priority: tuple[object, ...]
+    body: str | None = None
+    directory_identity: tuple[int, int] | None = None
+    frontmatter_bytes: int = 0
+
+
+@dataclass
+class _DiscoveryBudget:
+    candidates: int = 0
+    frontmatter_bytes: int = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return (
+            self.candidates >= DISCOVERY_CLASS_MAX_CANDIDATES
+            or self.frontmatter_bytes >= DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES
+        )
+
+    @property
+    def remaining_frontmatter(self) -> int:
+        return max(0, DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES - self.frontmatter_bytes)
+
+
+@dataclass(frozen=True)
+class _SnapshotEntry:
+    path: Path
+    relative: str
+    relative_bytes: bytes
+    is_directory: bool
+
+
+def _decode_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        quote = value[0]
+        value = value[1:-1]
+        if quote == "'":
+            value = value.replace("''", "'")
+        else:
+            value = value.replace(r"\n", "\n").replace(r"\"", '"').replace("\\\\", "\\")
+    return value.strip()
+
+
+def _normalize_description(value: str) -> str:
+    without_controls = "".join(" " if unicodedata.category(char).startswith("C") else char for char in value)
+    return " ".join(without_controls.split())
+
+
+def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        match = _REQUIRED_FIELD_RE.match(lines[index].rstrip("\r\n"))
+        if match is None:
+            index += 1
+            continue
+
+        field, raw_value = match.groups()
+        if field in fields:
+            index += 1
+            continue
+
+        value = raw_value.strip()
+        if _BLOCK_SCALAR_RE.match(value):
+            continuation: list[str] = []
+            index += 1
+            while index < len(lines):
+                line = lines[index].rstrip("\r\n")
+                if line and not line[0].isspace() and _TOP_LEVEL_FIELD_RE.match(line):
+                    break
+                continuation.append(line.strip())
+                index += 1
+            value = " ".join(part for part in continuation if part)
+        elif not value:
+            continuation = []
+            index += 1
+            while index < len(lines):
+                line = lines[index].rstrip("\r\n")
+                if line and not line[0].isspace():
+                    break
+                continuation.append(line.strip())
+                index += 1
+            value = " ".join(part for part in continuation if part)
+        else:
+            index += 1
+
+        decoded = _decode_scalar(value)
+        if field == "description":
+            decoded = _normalize_description(decoded)
+        else:
+            decoded = decoded.strip()
+        if decoded:
+            fields[field] = decoded
+
+    return fields
+
+
+def _stat_token(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(getattr(value, "st_mtime_ns", int(value.st_mtime * 1_000_000_000))),
+        int(getattr(value, "st_ctime_ns", int(value.st_ctime * 1_000_000_000))),
+    )
+
+
+def _directory_identity(value: os.stat_result) -> tuple[int, int]:
+    return int(value.st_dev), int(value.st_ino)
+
+
+def _absolute_path(path: str | Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _regular_open_flags() -> int:
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_CLOEXEC", "O_NONBLOCK", "O_NOFOLLOW"):
+        flags |= int(getattr(os, name, 0))
+    return flags
+
+
+def _open_regular_file(path: str | Path, *, dir_fd: int | None = None) -> tuple[int, os.stat_result]:
+    raw_path = os.fspath(path)
+    follow_guard = int(getattr(os, "O_NOFOLLOW", 0))
+    before_path: os.stat_result | None = None
+    if not follow_guard:
+        try:
+            before_path = os.stat(raw_path, dir_fd=dir_fd, follow_symlinks=False)
+        except (OSError, TypeError, NotImplementedError):
+            before_path = None
+        if before_path is not None and not stat.S_ISREG(before_path.st_mode):
+            raise OSError(errno.EINVAL, "Skill file is not a regular file", raw_path)
+
+    try:
+        fd = os.open(raw_path, _regular_open_flags(), dir_fd=dir_fd)
+    except (TypeError, NotImplementedError):
+        if dir_fd is not None:
+            raise
+        fd = os.open(raw_path, _regular_open_flags())
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.EINVAL, "Skill file is not a regular file", raw_path)
+        if before_path is not None and _directory_identity(before_path) != _directory_identity(opened):
+            raise OSError(errno.ESTALE, "Skill file changed while opening", raw_path)
+        return fd, opened
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _frontmatter_bounds(data: bytes, *, complete: bool) -> tuple[int, int, int] | None:
+    start = 3 if data.startswith(b"\xef\xbb\xbf") else 0
+    opening_end = data.find(b"\n", start)
+    if opening_end < 0:
+        return None
+    if data[start:opening_end].rstrip(b"\r") != b"---":
+        return None
+
+    position = opening_end + 1
+    while position <= len(data):
+        line_end = data.find(b"\n", position)
+        if line_end < 0:
+            if not complete:
+                return None
+            line_end = len(data)
+            next_position = line_end
+        else:
+            next_position = line_end + 1
+        if data[position:line_end].rstrip(b"\r") == b"---":
+            return opening_end + 1, position, next_position
+        if line_end >= len(data):
+            return None
+        position = next_position
+    return None
+
+
+def _read_prefix(fd: int, *, limit: int, file_size: int) -> bytes:
+    data = bytearray()
+    while len(data) < limit:
+        chunk = os.read(fd, min(4096, limit - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+        if _frontmatter_bounds(bytes(data), complete=len(data) >= file_size) is not None:
+            break
+    return bytes(data)
+
+
+def _read_all(fd: int, *, limit: int) -> bytes:
+    data = bytearray()
+    while len(data) <= limit:
+        chunk = os.read(fd, min(64 * 1024, limit + 1 - len(data)))
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+    raise ValueError("Skill file exceeds the load limit")
+
+
+def _read_skill_path(
+    skill_file: Path,
+    *,
+    priority: tuple[object, ...],
+    include_body: bool,
+    frontmatter_limit: int = FRONTMATTER_MAX_BYTES,
+    dir_fd: int | None = None,
+) -> tuple[ManagedSkill | None, int]:
+    fd: int | None = None
+    try:
+        fd, before = _open_regular_file(
+            "SKILL.md" if dir_fd is not None else skill_file,
+            dir_fd=dir_fd,
+        )
+        if before.st_size > FRONTMATTER_MAX_BYTES + SKILL_BODY_MAX_BYTES:
+            return None, 0
+        if include_body:
+            data = _read_all(fd, limit=FRONTMATTER_MAX_BYTES + SKILL_BODY_MAX_BYTES)
+        else:
+            data = _read_prefix(
+                fd,
+                limit=min(FRONTMATTER_MAX_BYTES, max(0, frontmatter_limit)),
+                file_size=int(before.st_size),
+            )
+        after = os.fstat(fd)
+        if _stat_token(before) != _stat_token(after):
+            return None, len(data)
+    except (OSError, ValueError):
+        return None, 0
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+    bounds = _frontmatter_bounds(data, complete=include_body or len(data) >= before.st_size)
+    if bounds is None:
+        return None, min(len(data), frontmatter_limit)
+    frontmatter_start, frontmatter_end, body_start = bounds
+    if body_start > FRONTMATTER_MAX_BYTES or body_start > frontmatter_limit:
+        return None, min(body_start, frontmatter_limit)
+    if before.st_size - body_start > SKILL_BODY_MAX_BYTES:
+        return None, body_start
+
+    frontmatter = data[frontmatter_start:frontmatter_end].decode("utf-8", errors="replace")
+    fields = _frontmatter_fields(frontmatter.splitlines(keepends=True))
+    name = fields.get("name", "")
+    description = fields.get("description", "")
+    if not description or not 1 <= len(name) <= 64 or _PORTABLE_NAME_RE.fullmatch(name) is None:
+        return None, body_start
+    if len(description) > CATALOG_DESCRIPTION_MAX_CHARS:
+        description = description[: CATALOG_DESCRIPTION_MAX_CHARS - 3].rstrip() + "..."
+
+    body: str | None = None
+    if include_body:
+        try:
+            body = data[body_start:].decode("utf-8")
+        except UnicodeDecodeError:
+            return None, body_start
+
+    try:
+        directory_stat = skill_file.parent.stat(follow_symlinks=False)
+    except OSError:
+        return None, body_start
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        return None, body_start
+
+    return (
+        ManagedSkill(
+            name=name,
+            description=description,
+            directory=_absolute_path(skill_file.parent),
+            priority=priority,
+            body=body,
+            directory_identity=_directory_identity(directory_stat),
+            frontmatter_bytes=body_start,
+        ),
+        body_start,
+    )
+
+
+def parse_skill_file(
+    skill_file: Path,
+    *,
+    priority: tuple[object, ...],
+    include_body: bool = True,
+) -> ManagedSkill | None:
+    """Parse one Skill through the same bounded regular-file path as discovery."""
+
+    normalized_priority = tuple(priority)
+    if len(normalized_priority) == 3:
+        normalized_priority = (*normalized_priority, str(_absolute_path(skill_file.parent)))
+    skill, _ = _read_skill_path(
+        skill_file,
+        priority=normalized_priority,
+        include_body=include_body,
+    )
+    return skill
+
+
+def _root_children(root: Path) -> list[tuple[str, Path, os.stat_result]] | None:
+    children: list[tuple[str, Path, os.stat_result]] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if len(children) >= DISCOVERY_ROOT_MAX_CHILDREN:
+                    return None
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                children.append((entry.name, Path(entry.path), entry_stat))
+    except OSError:
+        return []
+    children.sort(key=lambda item: item[0])
+    return children
+
+
+def _scan_root(
+    root: Path,
+    *,
+    priority: tuple[int, int, int],
+    budget: _DiscoveryBudget,
+) -> list[ManagedSkill]:
+    children = _root_children(root)
+    if children is None:
+        logger.info("Omitting oversized Skill root: %s", root)
+        return []
+
+    skills: list[ManagedSkill] = []
+    for _, child, child_stat in children:
+        if budget.exhausted:
+            break
+        if not stat.S_ISDIR(child_stat.st_mode):
+            continue
+        budget.candidates += 1
+        skill_file = child / "SKILL.md"
+        path_priority: tuple[object, ...] = (*priority, str(_absolute_path(child)))
+        skill, consumed = _read_skill_path(
+            skill_file,
+            priority=path_priority,
+            include_body=False,
+            frontmatter_limit=min(FRONTMATTER_MAX_BYTES, budget.remaining_frontmatter),
+        )
+        budget.frontmatter_bytes += consumed
+        if skill is not None:
+            skills.append(skill)
+    return skills
+
+
+def _project_directories(cwd: Path) -> list[Path]:
+    current = cwd.expanduser().resolve()
+    if not current.is_dir():
+        return []
+    project_root = next(
+        (directory for directory in (current, *current.parents) if (directory / ".git").exists()),
+        None,
+    )
+    if project_root is None:
+        return [current]
+
+    directories: list[Path] = []
+    directory = current
+    while True:
+        directories.append(directory)
+        if directory == project_root:
+            return directories
+        directory = directory.parent
+
+
+def _working_directory(cwd: str | Path | None) -> Path:
+    if cwd is not None:
+        return Path(cwd).expanduser().resolve()
+    bound = os.environ.get(SKILL_WORKING_DIR_ENV)
+    return Path(bound or Path.cwd()).expanduser().resolve()
+
+
+def _selected_builtin_root(
+    avibe_home: Path,
+    *,
+    snapshot_id: str | None = None,
+) -> Path | None:
+    selected = snapshot_id if snapshot_id is not None else os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV)
+    if selected is None:
+        try:
+            selected = publish_builtin_skills(destination_root=avibe_home / "builtin-skills")
+        except Exception:
+            logger.warning("Failed to publish Avibe built-in Skills", exc_info=True)
+            return None
+    if _SNAPSHOT_ID_RE.fullmatch(selected or "") is None:
+        return None
+    root = avibe_home / "builtin-skills" / selected
+    try:
+        root_stat = root.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    return root if stat.S_ISDIR(root_stat.st_mode) else None
+
+
+def resolve_skills(
+    cwd: str | Path | None = None,
+    *,
+    home: str | Path | None = None,
+    avibe_home: str | Path | None = None,
+    codex_home: str | Path | None = None,
+    claude_home: str | Path | None = None,
+    xdg_config_home: str | Path | None = None,
+    builtin_snapshot_id: str | None = None,
+) -> list[ManagedSkill]:
+    """Resolve the live Skill catalog using Avibe's v1 precedence rules."""
+
+    resolved_home = Path(home).expanduser().resolve() if home is not None else Path.home().resolve()
+    resolved_avibe_home = (
+        Path(avibe_home).expanduser().resolve()
+        if avibe_home is not None
+        else paths.get_vibe_remote_dir().expanduser().resolve()
+    )
+    resolved_codex_home = (
+        Path(codex_home).expanduser().resolve()
+        if codex_home is not None
+        else Path(os.environ.get("CODEX_HOME", resolved_home / ".codex")).expanduser().resolve()
+    )
+    if claude_home is not None:
+        resolved_claude_home = Path(claude_home).expanduser().resolve()
+    else:
+        from vibe.claude_config import get_claude_home
+
+        resolved_claude_home = get_claude_home(resolved_home if home is not None else None).expanduser().resolve()
+    resolved_xdg_home = (
+        Path(xdg_config_home).expanduser().resolve()
+        if xdg_config_home is not None
+        else Path(os.environ.get("XDG_CONFIG_HOME", resolved_home / ".config")).expanduser().resolve()
+    )
+
+    candidates: list[ManagedSkill] = []
+    builtin_budget = _DiscoveryBudget()
+    builtin_root = _selected_builtin_root(
+        resolved_avibe_home,
+        snapshot_id=builtin_snapshot_id,
+    )
+    if builtin_root is not None:
+        candidates.extend(_scan_root(builtin_root, priority=(0, 0, 0), budget=builtin_budget))
+
+    compatibility_budget = _DiscoveryBudget()
+    working_directory = _working_directory(cwd)
+    for depth, directory in enumerate(_project_directories(working_directory)):
+        for relative_root, family_rank in _PROJECT_FAMILIES:
+            if compatibility_budget.exhausted:
+                break
+            candidates.extend(
+                _scan_root(
+                    directory / relative_root,
+                    priority=(1, depth, family_rank),
+                    budget=compatibility_budget,
+                )
+            )
+        if compatibility_budget.exhausted:
+            break
+
+    global_roots = (
+        (resolved_home / ".agents" / "skills", 1),
+        (resolved_codex_home / "skills", 2),
+        (resolved_claude_home / "skills", 3),
+        (resolved_xdg_home / "opencode" / "skills", 4),
+    )
+    for root, family_rank in global_roots:
+        if compatibility_budget.exhausted:
+            break
+        candidates.extend(_scan_root(root, priority=(2, 0, family_rank), budget=compatibility_budget))
+
+    winners: dict[str, ManagedSkill] = {}
+    for candidate in candidates:
+        current = winners.get(candidate.name)
+        if current is None or candidate.priority < current.priority:
+            winners[candidate.name] = candidate
+    return sorted(winners.values(), key=lambda skill: skill.name)
+
+
+def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
+    pages: list[list[ManagedSkill]] = []
+    current: list[ManagedSkill] = []
+    current_bytes = 0
+    for skill in skills:
+        row = f"- {skill.name}: {skill.description}"
+        row_bytes = len(row.encode("utf-8")) + (1 if current else 0)
+        if current and (len(current) >= CATALOG_PAGE_SIZE or current_bytes + row_bytes > CATALOG_PAGE_MAX_BYTES):
+            pages.append(current)
+            current = []
+            current_bytes = 0
+            row_bytes = len(row.encode("utf-8"))
+        current.append(skill)
+        current_bytes += row_bytes
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[ManagedSkill], int | None]:
+    if isinstance(page, bool) or page < 1:
+        raise ValueError("page must be a positive integer")
+    pages = _catalog_pages(skills)
+    if page > len(pages):
+        return (), None
+    return pages[page - 1], page + 1 if page < len(pages) else None
+
+
+def render_skill_list(skills: Sequence[ManagedSkill], *, page: int = 1) -> str:
+    entries, next_page = _page(skills, page)
+    lines = [f"- {skill.name}: {skill.description}" for skill in entries]
+    if next_page is not None:
+        lines.append(f"More skills are available. Run `vibe skill list --page {next_page}` to view more.")
+    return "\n".join(lines)
+
+
+def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
+    rows = render_skill_list(skills, page=1)
+    if not rows:
+        return ""
+    return (
+        "\n\n## Skills\n\n"
+        "Skills provide specialized instructions and workflows for specific tasks.\n"
+        "When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.\n"
+        "If the user requests a skill by name, load it.\n"
+        "Only load skill names listed here or returned by `vibe skill list`; do not guess names.\n\n"
+        "### Available skills\n"
+        f"{rows}"
+    )
+
+
+def render_skill_content(skill: ManagedSkill) -> str:
+    if skill.body is None:
+        raise ValueError("Skill body was not loaded")
+    name = html.escape(skill.name, quote=True)
+    directory = html.escape(str(skill.directory), quote=True)
+    directory = "".join(
+        f"&#x{ord(char):X};" if unicodedata.category(char).startswith("C") else char
+        for char in directory
+    )
+    return f'<skill_content name="{name}" directory="{directory}">\n{skill.body}</skill_content>'
+
+
+def _open_selected_directory(skill: ManagedSkill) -> tuple[int | None, tuple[int, int]]:
+    try:
+        before = skill.directory.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise OSError(errno.ESTALE, "Selected Skill directory disappeared") from exc
+    if not stat.S_ISDIR(before.st_mode):
+        raise OSError(errno.ENOTDIR, "Selected Skill path is not a directory")
+    identity = _directory_identity(before)
+    if skill.directory_identity is not None and identity != skill.directory_identity:
+        raise OSError(errno.ESTALE, "Selected Skill directory changed")
+
+    flags = os.O_RDONLY
+    for name in ("O_CLOEXEC", "O_NONBLOCK", "O_NOFOLLOW", "O_DIRECTORY"):
+        flags |= int(getattr(os, name, 0))
+    try:
+        fd = os.open(skill.directory, flags)
+    except OSError:
+        if os.name != "nt":
+            raise
+        return None, identity
+    opened = os.fstat(fd)
+    if not stat.S_ISDIR(opened.st_mode) or _directory_identity(opened) != identity:
+        os.close(fd)
+        raise OSError(errno.ESTALE, "Selected Skill directory changed while opening")
+    return fd, identity
+
+
+def _directory_path_still_matches(path: Path, identity: tuple[int, int]) -> bool:
+    try:
+        current = path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISDIR(current.st_mode) and _directory_identity(current) == identity
+
+
+def load_skill(name: str, cwd: str | Path | None = None) -> ManagedSkill | None:
+    if _PORTABLE_NAME_RE.fullmatch(name) is None or not 1 <= len(name) <= 64:
+        return None
+    winner = next((skill for skill in resolve_skills(cwd) if skill.name == name), None)
+    if winner is None:
+        return None
+
+    directory_fd: int | None = None
+    try:
+        directory_fd, identity = _open_selected_directory(winner)
+        loaded, _ = _read_skill_path(
+            winner.directory / "SKILL.md",
+            priority=winner.priority,
+            include_body=True,
+            dir_fd=directory_fd,
+        )
+        if loaded is None or loaded.name != name:
+            return None
+        if not _directory_path_still_matches(winner.directory, identity):
+            return None
+        return ManagedSkill(
+            name=loaded.name,
+            description=loaded.description,
+            directory=winner.directory,
+            priority=winner.priority,
+            body=loaded.body,
+            directory_identity=identity,
+            frontmatter_bytes=loaded.frontmatter_bytes,
+        )
+    except OSError:
+        return None
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def builtin_skills_source() -> Path:
+    checkout_source = Path(__file__).resolve().parents[1] / "skills"
+    if checkout_source.is_dir():
+        return checkout_source
+
+    import vibe
+
+    packaged_source = Path(vibe.__file__).resolve().parent / "builtin_skills_source"
+    if packaged_source.is_dir():
+        return packaged_source
+    raise RuntimeError("Avibe built-in Skills are missing from this installation")
+
+
+def _validate_portable_component(component: str) -> None:
+    if not component or component in {".", ".."}:
+        raise RuntimeError("Built-in Skill paths must be relative")
+    if unicodedata.normalize("NFC", component) != component:
+        raise RuntimeError(f"Built-in Skill path is not NFC: {component!r}")
+    if component[-1] in {".", " "}:
+        raise RuntimeError(f"Built-in Skill path has a trailing dot or space: {component!r}")
+    if any(ord(char) < 32 or char in _WINDOWS_INVALID_CHARS or char == "\x00" for char in component):
+        raise RuntimeError(f"Built-in Skill path is not portable: {component!r}")
+    basename = component.split(".", 1)[0].casefold()
+    if basename in _WINDOWS_RESERVED:
+        raise RuntimeError(f"Built-in Skill path uses a Windows-reserved name: {component!r}")
+
+
+def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
+    entries: list[_SnapshotEntry] = []
+    aliases: set[str] = set()
+
+    def visit(directory: Path, relative_parts: tuple[str, ...]) -> None:
+        try:
+            with os.scandir(directory) as scanned:
+                children = sorted(scanned, key=lambda item: item.name)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read built-in Skill source: {directory}") from exc
+        for child in children:
+            # Installers may compile Skill scripts in place; bytecode is not part of the bundled tree.
+            if child.name == "__pycache__" or child.name.endswith(_GENERATED_BYTECODE_SUFFIXES):
+                continue
+            _validate_portable_component(child.name)
+            child_parts = (*relative_parts, child.name)
+            relative = "/".join(child_parts)
+            relative_bytes = relative.encode("utf-8")
+            alias = relative.casefold()
+            if alias in aliases:
+                raise RuntimeError(f"Built-in Skill paths collide case-insensitively: {relative}")
+            aliases.add(alias)
+            try:
+                child_stat = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"Cannot inspect built-in Skill path: {relative}") from exc
+            file_attributes = int(getattr(child_stat, "st_file_attributes", 0))
+            reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+            if reparse_flag and file_attributes & reparse_flag:
+                raise RuntimeError(f"Built-in Skill path is a reparse point: {relative}")
+            if stat.S_ISDIR(child_stat.st_mode):
+                entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, True))
+                visit(Path(child.path), child_parts)
+            elif stat.S_ISREG(child_stat.st_mode):
+                entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, False))
+            else:
+                raise RuntimeError(f"Built-in Skill path is not a directory or regular file: {relative}")
+
+    visit(root, ())
+    entries.sort(key=lambda entry: entry.relative_bytes)
+    return entries
+
+
+def _update_digest_with_file(digest: object, entry: _SnapshotEntry) -> None:
+    fd: int | None = None
+    try:
+        fd, before = _open_regular_file(entry.path)
+        digest.update(struct.pack(">Q", int(before.st_size)))
+        remaining = int(before.st_size)
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"Built-in Skill file changed while hashing: {entry.relative}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise RuntimeError(f"Built-in Skill file grew while hashing: {entry.relative}")
+        after = os.fstat(fd)
+        if _stat_token(before) != _stat_token(after):
+            raise RuntimeError(f"Built-in Skill file changed while hashing: {entry.relative}")
+        executable = int(before.st_mode & 0o111) if os.name != "nt" else 0
+        digest.update(bytes((executable,)))
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def snapshot_tree_digest(root: str | Path) -> str:
+    """Return the frozen snapshot-v1 identifier for a validated tree."""
+
+    source = Path(root).resolve()
+    if not source.is_dir():
+        raise RuntimeError(f"Built-in Skills source does not exist: {source}")
+    digest = hashlib.sha256(_SNAPSHOT_DOMAIN)
+    for entry in _snapshot_entries(source):
+        digest.update(b"d" if entry.is_directory else b"f")
+        digest.update(struct.pack(">Q", len(entry.relative_bytes)))
+        digest.update(entry.relative_bytes)
+        if not entry.is_directory:
+            _update_digest_with_file(digest, entry)
+    return digest.hexdigest()
+
+
+def _validate_builtin_catalog(root: Path) -> None:
+    children = _root_children(root)
+    if children is None:
+        raise RuntimeError("Avibe packages at most 1,024 built-in Skills")
+    frontmatter_bytes = 0
+    for name, child, child_stat in children:
+        if not stat.S_ISDIR(child_stat.st_mode):
+            raise RuntimeError(f"Built-in Skill root entry is not a directory: {name}")
+        skill, consumed = _read_skill_path(
+            child / "SKILL.md",
+            priority=(0, 0, 0, str(_absolute_path(child))),
+            include_body=False,
+        )
+        if skill is None:
+            raise RuntimeError(f"Built-in Skill is invalid: {name}")
+        frontmatter_bytes += consumed
+        if frontmatter_bytes > DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES:
+            raise RuntimeError("Built-in Skill frontmatter exceeds the 8 MiB catalog budget")
+
+
+def publish_builtin_skills(
+    *,
+    source_root: str | Path | None = None,
+    destination_root: str | Path | None = None,
+) -> str:
+    """Publish this artifact's built-ins to one content-addressed snapshot."""
+
+    source = Path(source_root).resolve() if source_root is not None else builtin_skills_source()
+    umbrella = (
+        Path(destination_root).expanduser().resolve()
+        if destination_root is not None
+        else (paths.get_vibe_remote_dir() / "builtin-skills").expanduser().resolve()
+    )
+    _snapshot_entries(source)
+    _validate_builtin_catalog(source)
+    snapshot_id = snapshot_tree_digest(source)
+    destination = umbrella / snapshot_id
+
+    from storage.lock import MigrationFileLock
+
+    umbrella.mkdir(parents=True, exist_ok=True)
+    lock_path = umbrella / f".publish-{snapshot_id}.lock"
+    with MigrationFileLock(lock_path, timeout_seconds=None):
+        if os.path.lexists(destination):
+            try:
+                destination_stat = destination.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}") from exc
+            if not stat.S_ISDIR(destination_stat.st_mode):
+                raise RuntimeError(f"Built-in Skill snapshot is not a directory: {destination}")
+            try:
+                with os.scandir(destination):
+                    pass
+            except OSError as exc:
+                raise RuntimeError(f"Built-in Skill snapshot is unreadable: {destination}") from exc
+            return snapshot_id
+        staging = Path(tempfile.mkdtemp(prefix=f".snapshot-{snapshot_id}-", dir=umbrella))
+        try:
+            shutil.copytree(
+                source,
+                staging,
+                dirs_exist_ok=True,
+                copy_function=shutil.copy2,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            _validate_builtin_catalog(staging)
+            if snapshot_tree_digest(staging) != snapshot_id:
+                raise RuntimeError("Built-in Skill source changed during publication")
+            try:
+                os.rename(staging, destination)
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
+        finally:
+            if os.path.lexists(staging):
+                shutil.rmtree(staging)
+    return snapshot_id
+
+
+def prepare_builtin_skills() -> str:
+    """Publish and bind the running artifact's built-in snapshot."""
+
+    snapshot_id = publish_builtin_skills()
+    os.environ[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
+    return snapshot_id
+
+
+def managed_skill_environment(working_directory: str | Path | None) -> dict[str, str]:
+    """Return the per-backend shell bindings consumed by ``vibe skill``."""
+
+    env: dict[str, str] = {}
+    if working_directory is not None:
+        env[SKILL_WORKING_DIR_ENV] = str(Path(working_directory).expanduser().resolve())
+    snapshot_id = os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    if _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+        env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
+    return env

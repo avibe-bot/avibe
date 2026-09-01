@@ -20,6 +20,7 @@ import aiohttp
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
+from core.managed_skills import managed_skill_environment
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.native_dispatch_phase import (
     mark_backend_dispatch_attempted,
@@ -1304,6 +1305,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
                 current_agent_backend="opencode",
+                skills_cwd=request.working_path,
             )
             if request.vibe_agent_system_prompt:
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
@@ -1314,6 +1316,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     request.context.platform_specific or {},
                     base_env=os.environ,
                     working_dir=request.working_path,
+                    extra_env=managed_skill_environment(request.working_path),
                     # The creation origin travels with the identity: an OpenCode shell
                     # command running ``vibe task add`` sources this binding, and it is
                     # the only place the conversation behind the definition is visible.
@@ -1391,7 +1394,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model=model_dict,
                 reasoning_effort=reasoning_effort,
                 system=system_prompt_injection,
-                tools={"question": False},
+                tools={"question": False, "skill": False},
             )
             try:
                 read_prompt_started_at = getattr(server, "get_last_prompt_started_at", None)
@@ -1762,7 +1765,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         "model": state.model,
                         "reasoning_effort": state.reasoning_effort,
                         "system": state.system,
-                        "tools": {"question": False},
+                        "tools": {"question": False, "skill": False},
                     }
                     if request.attempt_id:
                         prompt_kwargs["attempt_id"] = request.attempt_id

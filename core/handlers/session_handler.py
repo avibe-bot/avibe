@@ -44,6 +44,7 @@ from core.agent_tool_policy import (
 from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
+from core.managed_skills import managed_skill_environment
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -483,6 +484,7 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            working_path=working_path,
         )
         cached_system_prompt = self.claude_system_prompts.get(composite_key)
         if cached_system_prompt != next_system_prompt:
@@ -589,6 +591,7 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=next_agent_system_prompt,
+            working_path=working_path,
         )
         if self.claude_system_prompts.get(composite_key) != next_system_prompt:
             logger.info(
@@ -1470,6 +1473,7 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            working_path=working_path,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1502,6 +1506,7 @@ class SessionHandler(BaseHandler):
         if model_hub_launch is not None:
             claude_env = build_claude_hub_env(claude_env, model_hub_launch)
         claude_env.update(self._caller_env_for_context(context))
+        claude_env.update(managed_skill_environment(working_path))
         prepend_vendored_git_to_path(
             claude_env,
             base_env=os.environ,
@@ -1524,6 +1529,7 @@ class SessionHandler(BaseHandler):
             "extra_args": extra_args,
             "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
             "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
+            "skills": [],
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
             # cannot answer programmatically, plus any session-only background
@@ -1667,6 +1673,7 @@ class SessionHandler(BaseHandler):
         agent_name: str,
         session_anchor: str,
         agent_system_prompt: Optional[str],
+        working_path: Optional[str] = None,
     ) -> str | Dict[str, str]:
         base_prompt = agent_system_prompt or self.config.claude.system_prompt
         quick_replies_on = getattr(self.config, "reply_enhancements", True)
@@ -1693,6 +1700,7 @@ class SessionHandler(BaseHandler):
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
             current_agent_backend="claude",
+            skills_cwd=working_path,
         )
 
         if base_prompt:

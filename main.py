@@ -159,6 +159,14 @@ def main():
         setup_logging(config.runtime.log_level)
         logger = logging.getLogger(__name__)
 
+        from core.managed_skills import BUILTIN_SKILLS_SNAPSHOT_ENV, prepare_builtin_skills
+
+        try:
+            prepare_builtin_skills()
+        except Exception:
+            os.environ[BUILTIN_SKILLS_SNAPSHOT_ENV] = ""
+            logger.warning("Avibe built-in Skills are unavailable", exc_info=True)
+
         apply_claude_sdk_patches()
         from vibe.sentry_integration import init_sentry
 
