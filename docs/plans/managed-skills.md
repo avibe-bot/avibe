@@ -164,14 +164,25 @@ Catalog parsing and rendering are bounded independently:
 
 - read at most 64 KiB of leading frontmatter, including its delimiters, and
   omit the candidate if the closing delimiter is not found within that budget;
+- accept a body of at most 256 KiB of encoded bytes, measured from the closing
+  frontmatter delimiter to end of file without reading the body during Catalog
+  discovery;
 - truncate a normalized description beyond 1,024 characters, adding `...`;
 - render at most 25 entries and 16 KiB of Skill rows per page.
 
 The bounded read happens before decoding or normalizing field values, so a
 large optional field, description, or unterminated frontmatter cannot create
-unbounded per-Turn work. These limits do not validate optional frontmatter,
-require the directory and declared name to match, or add compatibility
-metadata.
+unbounded per-Turn work. Discovery enumerates at most 1,025 direct child
+entries in any root and omits the entire root if it contains more than 1,024.
+Across accepted roots, one resolution processes at most 1,024 candidate Skill
+directories and 8 MiB of frontmatter bytes. Roots are visited in precedence
+order and each accepted root's candidates in stable name order. Reaching an
+aggregate budget omits the remaining lower-priority roots. These rules make
+omission deterministic without walking the rest of an oversized directory.
+Omission is diagnostic log data, not additional prompt content.
+
+These limits do not validate optional frontmatter, require the directory and
+declared name to match, or add compatibility metadata.
 
 ### 5.2 Deduplication
 
@@ -261,11 +272,13 @@ vibe skill load <name>
 vibe skill load -- <name>
 ```
 
-The first form covers ordinary names; the second is the canonical form emitted
-in agent instructions and also handles names that begin with an option prefix.
+Both forms are accepted. The second is the canonical form emitted in agent
+instructions; portable names cannot begin with an option prefix, but the
+end-of-options marker keeps the command contract explicit.
 
-The command resolves the live Catalog, selects the current winner for `name`,
-and writes this structure to standard output:
+The command resolves live global and project roots together with the caller's
+bound built-in snapshot, selects the current winner for `name`, and writes this
+structure to standard output:
 
 ```xml
 <skill_content name="pdf-processing" directory="/absolute/path/to/pdf-processing">
@@ -282,6 +295,9 @@ Contract details:
 - Only the body after the leading frontmatter is emitted.
 - The body is otherwise unchanged: no generated title, indentation, escaping,
   summary, or rewrite is added.
+- A body larger than 256 KiB is not advertised and cannot be loaded. If a file
+  grows beyond the limit between discovery and load, load fails with empty
+  standard output rather than truncating it.
 - Relative references to `scripts/`, `references/`, `assets/`, or other files
   resolve from `directory`.
 - There is no protocol/version header, JSON envelope, source label,
@@ -298,21 +314,27 @@ and cannot override Avibe's system prompt, permissions, or safety rules.
 
 ## 8. Freshness and Session Semantics
 
-### 8.1 New Turn snapshot
+### 8.1 Avibe-dispatched Turn snapshot
 
-Immediately before each actual new backend Turn, Avibe:
+Immediately before each new Turn that Avibe dispatches to a backend, Avibe:
 
 1. resolves the Catalog from the current filesystem state;
 2. renders the current system prompt with page 1 of that Catalog; and
 3. dispatches the Turn to the existing backend Session.
 
 This gives an existing Avibe Session newly installed, renamed, edited, or
-removed Skills on its next Turn. No Avibe restart and no new Session are
-required.
+removed Skills on its next Avibe-dispatched Turn. No Avibe restart and no new
+Session are required.
 
 A message steered into a backend Turn that is already active is part of that
 same Turn and does not trigger another Catalog refresh. Changes become visible
-on the next actual Turn.
+on the next Avibe-dispatched Turn.
+
+A backend-native continuation that starts without an Avibe dispatch, such as a
+Claude background-tool completion or native wakeup, cannot be intercepted
+before it begins and may use the prompt snapshot already held by that backend
+client. It does not weaken the next Avibe-dispatched Turn guarantee and is not
+part of the v1 freshness contract.
 
 ### 8.2 Live commands
 
@@ -323,6 +345,14 @@ Therefore:
 - changing `name` or `description` changes the next Catalog resolution; and
 - changing the body, scripts, or references changes the next load or file
   read.
+
+When a backend launches either command, it inherits
+`AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` from the Avibe process that created that
+backend runtime. The command uses that retained immutable snapshot even if an
+upgrade has since switched the stable `vibe` launcher to another artifact. The
+identifier is an environment binding, not prompt text or an agent-visible
+command argument. A standalone command without that binding uses the snapshot
+bundled with its own executable.
 
 ### 8.3 Historical context is historical
 
@@ -341,11 +371,11 @@ patch, or long-lived per-Session Catalog. Turn-time rendering is already the
 correct consistency boundary, so a second refresh mechanism would add state
 without improving the user-visible contract.
 
-The initial implementation performs a full scan of the fixed roots and reads
-only enough of each `SKILL.md` to extract frontmatter. A reference measurement
-of six roots, 20 Skill files, and 242 KB total input completed in about 1 ms
-median on a warm local filesystem. This is not a latency guarantee; it shows
-that correctness can precede caching.
+The initial implementation scans the fixed roots within the candidate and byte
+budgets and reads only enough of each `SKILL.md` to extract frontmatter. A
+reference measurement of six roots, 20 Skill files, and 242 KB total input
+completed in about 1 ms median on a warm local filesystem. This is not a
+latency guarantee; it shows that correctness can precede caching.
 
 If production measurements later justify a cache, directory enumeration still
 runs every Turn and parsed frontmatter may be reused by file identity, size,
@@ -428,6 +458,12 @@ share one. Other snapshots are not discovery candidates. V1 retains them so a
 running older process and an already loaded Skill directory remain usable;
 garbage collection of unreferenced snapshots is outside this protocol.
 
+Backend runtimes inherit this selected digest as
+`AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID`, so `vibe skill list` and
+`vibe skill load` remain bound to the advertising runtime's built-ins across an
+overlapping upgrade. The digest is validated as an identifier under the
+`builtin-skills` umbrella before use; it cannot select an arbitrary path.
+
 The selected snapshot exactly matches the running artifact and is never
 partially updated. The `builtin-skills` umbrella is Avibe-owned rather than a
 user customization surface.
@@ -506,6 +542,10 @@ at runtime.
 - Invalid candidates do not prevent valid candidates from appearing.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
+- A root with more than 1,024 direct children is omitted after enumerating at
+  most 1,025 entries; one resolution processes at most 1,024 candidates and 8
+  MiB of frontmatter. Budget exhaustion deterministically omits the remaining
+  lower-priority roots without blocking the Turn.
 - Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
   remain within the row budget, and do not expose paths or sources.
 - Oversized descriptions cannot make the Catalog unbounded, and names with
@@ -513,19 +553,24 @@ at runtime.
   are omitted by the parser-backed portable name boundary.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
+- A body over 256 KiB is omitted from discovery, and a body that crosses the
+  limit before load produces empty standard output and a non-zero exit.
 
 ### 14.2 Live Session behavior
 
-For each supported backend, using one existing Avibe Session:
+For each supported backend, using one existing Avibe Session and
+Avibe-dispatched Turns:
 
-- installing a Skill makes it available on the next actual Turn;
-- changing its name or description changes the next Turn's Catalog;
+- installing a Skill makes it available on the next Avibe-dispatched Turn;
+- changing its name or description changes the next Avibe-dispatched Turn's
+  Catalog;
 - changing its body changes the next load;
 - deleting it removes it from the next Turn's Catalog; and
 - none of these operations requires a restart or new Session.
 
 Previously loaded content remains in conversation history without forcing a
-reload or rewriting the Session.
+reload or rewriting the Session. Backend-native continuations that Avibe does
+not dispatch are outside this acceptance boundary.
 
 ### 14.3 Backend isolation
 
@@ -549,6 +594,8 @@ isolation acceptance gates.
 - interrupted publication cannot expose a partial snapshot;
 - two concurrently running artifacts with different bundled trees resolve
   different immutable snapshots; and
+- after launcher activation, a command inherited from the older runtime still
+  lists and loads that runtime's retained built-in snapshot; and
 - every loaded built-in reports an agent-accessible absolute directory.
 
 ## 15. Explicit Non-Goals
