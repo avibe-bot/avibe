@@ -154,10 +154,12 @@ failing the whole Catalog. To keep every accepted name callable and every
 Catalog bounded, Avibe applies only these output-boundary limits:
 
 - omit a candidate whose normalized name exceeds 256 characters;
+- omit a candidate whose normalized name contains `:`, the Catalog row
+  delimiter;
 - truncate a normalized description beyond 1,024 characters, adding `...`;
 - render at most 25 entries and 16 KiB of Skill rows per page; and
 - use `--` before the name in load commands so option-like names remain
-  callable without imposing a new name grammar.
+  callable.
 
 These limits do not validate optional frontmatter, require the directory and
 declared name to match, or add compatibility metadata.
@@ -396,15 +398,26 @@ scripts and references.
 ### 10.2 Replacement lifecycle
 
 The source tree is authoritative for each Avibe version. First run and every
-upgrade perform an atomic full replacement of `builtin-skills`:
+upgrade perform a full replacement of `builtin-skills`:
 
 - new built-ins are added;
 - changed built-ins are replaced; and
 - built-ins removed from the release are deleted from the runtime mirror.
 
-This guarantees that the installed built-in set exactly matches the running
-Avibe version and never exposes a partially updated set. The directory is
-Avibe-owned rather than a user customization surface.
+The publisher and every Avibe Catalog, list, and load reader use the same
+cross-process lock. Under that lock, the publisher builds and validates a
+complete sibling staging directory, renames the current mirror to a backup,
+renames the staging directory to `builtin-skills`, and then removes the backup.
+If publication fails, it restores the backup before releasing the lock. After
+a process interruption, the next lock holder completes recovery before any
+Skill resolution.
+
+This is atomic at the Avibe reader boundary without relying on replacing a
+non-empty directory in place: a managed reader observes either the prior
+complete mirror or the new complete mirror, never the rename interval. The
+installed built-in set therefore exactly matches the running Avibe version
+after publication. The directory is Avibe-owned rather than a user
+customization surface.
 
 ## 11. Installation Defaults
 
@@ -417,8 +430,12 @@ $HOME/.agents/skills/<name>
 An explicitly project-scoped installation targets:
 
 ```text
-$PROJECT_ROOT/.agents/skills/<name>
+$PROJECT_BASE/.agents/skills/<name>
 ```
+
+`$PROJECT_BASE` is the Git project root when one exists and the active working
+directory otherwise. This matches the project-scope fallback used by
+discovery.
 
 Installing a Skill does not need to copy it into each backend's native
 directory. Existing native directories remain discovery inputs for backward
@@ -476,8 +493,9 @@ at runtime.
 - Invalid candidates do not prevent valid candidates from appearing.
 - Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
   remain within the row budget, and do not expose paths or sources.
-- Oversized descriptions cannot make the Catalog unbounded, and option-like or
-  whitespace-containing names remain single-line and callable.
+- Oversized descriptions cannot make the Catalog unbounded; delimiter-bearing
+  names are omitted; and option-like or whitespace-containing names remain
+  single-line and callable.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
 
@@ -512,7 +530,8 @@ isolation acceptance gates.
 - a fresh installation mirrors all bundled Skills;
 - a wheel-install fixture proves bundled Skills exist without a source tree;
 - an upgrade replaces changed Skills and removes retired Skills;
-- replacement is atomic; and
+- publication and concurrent managed reads prove the old-or-new atomic reader
+  boundary, including interrupted-publication recovery; and
 - every loaded built-in reports an agent-accessible absolute directory.
 
 ## 15. Explicit Non-Goals
