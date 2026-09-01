@@ -478,6 +478,26 @@ manifest is stored as snapshot-root runtime metadata at
 `.avibe-snapshot.json`; it is not an entry in its own digest. A command bound to
 an older snapshot can therefore validate it without access to the older package
 artifact.
+
+Manifest v1 is a frozen persisted shape:
+
+- the top-level JSON object contains `schema_version: 1` and `entries`; each
+  entry contains a `/`-separated relative `path`, byte `size`, lowercase
+  64-hex `sha256`, and integer `executable` bits (`st_mode & 0o111`);
+- entries sort by `path`, object keys sort lexically, and serialization is UTF-8
+  without BOM or trailing newline using ASCII escapes and separators `,` and
+  `:` with no optional whitespace;
+- `<snapshot-id>` is lowercase SHA-256 of those exact manifest bytes; and
+- newer launchers retain decoders for every released manifest schema. An
+  unknown or malformed schema is omitted by Catalog and fails load safely; it
+  is never guessed or rewritten by a runtime command.
+
+The manifest is at most 1 MiB, contains at most 4,096 entries, and each encoded
+path is at most 1,024 bytes. Release packaging fails rather than publishing a
+built-in tree outside these limits. Runtime opens the manifest with the same
+nonblocking, same-handle regular-file and verified-read contract as `SKILL.md`,
+applies the byte limit before parsing, and rejects duplicate, absolute, empty,
+`.` or `..` path components.
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
 scripts and references.
@@ -518,6 +538,12 @@ Runtime integrity is manifest-bound at the bytes each command uses:
   and executable mode in the selected built-in Skill directory against its
   manifest entries, rejecting missing, changed, or extra content. The body it
   emits comes from that same verified `SKILL.md` read.
+- A selected built-in Skill may contain at most 1,024 manifest files and 64 MiB
+  of expected file bytes. Verification compares the same-handle file size with
+  the manifest before hashing, reads at most that expected size, and visits at
+  most 2,049 filesystem entries while checking for extras. Exceeding any bound
+  fails before further traversal or content reads; release packaging enforces
+  the same limits on authoritative built-ins.
 - A mismatch omits the candidate during Catalog discovery or fails load with
   empty standard output. It is not repaired by the command.
 
@@ -680,6 +706,10 @@ isolation acceptance gates.
 - a fresh installation mirrors all bundled Skills;
 - a real wheel-install fixture proves bundled Skills exist without a source
   tree and preserves executable modes required by helper scripts;
+- released manifest-v1 bytes have a fixed digest fixture, and a newer-launcher
+  fixture validates and loads that retained schema without the older package;
+- a FIFO, non-regular, oversized, malformed, duplicate-path, or traversal-path
+  manifest is bounded and rejected before use;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
@@ -692,6 +722,8 @@ isolation acceptance gates.
   the next load, and the command does not rebuild it from a different artifact;
 - Catalog verifies the exact built-in `SKILL.md` bytes it parses, while load
   verifies the selected built-in Skill subtree and emits the same verified body;
+- built-in verification rejects a size mismatch before hashing, and its file,
+  byte, and visited-entry bounds cannot be exceeded by corrupted snapshot data;
 - two concurrently running artifacts with different bundled trees resolve
   different immutable snapshots; and
 - after launcher activation, a command inherited from the older runtime still
