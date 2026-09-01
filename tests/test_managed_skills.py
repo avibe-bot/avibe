@@ -566,6 +566,10 @@ def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(
     fake_core.mkdir(parents=True)
     unrelated = site_packages / "skills"
     unrelated.mkdir()
+    (site_packages / "pyproject.toml").write_text(
+        '[tool.unrelated]\nname = "avibe-os"\n',
+        encoding="utf-8",
+    )
     package = site_packages / "vibe"
     packaged_source = package / "builtin_skills_source"
     packaged_source.mkdir(parents=True)

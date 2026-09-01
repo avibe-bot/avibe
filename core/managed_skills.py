@@ -12,6 +12,7 @@ import shutil
 import stat
 import struct
 import tempfile
+import tomllib
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -739,17 +740,17 @@ def builtin_skills_source() -> Path:
     try:
         pyproject_fd, _ = _open_regular_file(pyproject)
         project_header = _read_all(pyproject_fd, limit=64 * 1024)
-    except OSError:
-        project_header = b""
-    except ValueError:
-        project_header = b""
+        project_metadata = tomllib.loads(project_header.decode("utf-8"))
+        project_name = str(project_metadata.get("project", {}).get("name") or "")
+    except (OSError, UnicodeDecodeError, ValueError):
+        project_name = ""
     finally:
         if pyproject_fd is not None:
             os.close(pyproject_fd)
     if (
         checkout_source.is_dir()
         and (checkout_root / "vibe" / "__init__.py").is_file()
-        and re.search(rb"(?m)^name\s*=\s*[\"']avibe-os[\"']\s*$", project_header)
+        and project_name == "avibe-os"
     ):
         return checkout_source
 
