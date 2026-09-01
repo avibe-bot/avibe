@@ -86,6 +86,11 @@ Avibe does not recursively treat arbitrary nested `SKILL.md` files as separate
 Skills. Directories such as `scripts/`, `references/`, and `assets/` remain
 part of their parent Skill.
 
+Before parsing or loading, Avibe resolves the `SKILL.md` target and requires it
+to be a regular file. FIFOs, sockets, devices, directories, broken links, and
+links to non-regular targets are omitted without opening them. Load repeats the
+file-type check so a candidate changed after discovery cannot bypass it.
+
 Backend-bundled or system Skills, plugin caches, administrator-only Skills,
 and `.claude/commands` are not discovery sources.
 
@@ -124,12 +129,14 @@ is considered project scope.
 ```text
 $HOME/.agents/skills
 ${CODEX_HOME:-$HOME/.codex}/skills
-$HOME/.claude/skills
+${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills
 ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills
 ```
 
 Native locations are compatibility inputs. Avibe reads them in place and does
-not migrate, rename, or annotate their Skills.
+not migrate, rename, or annotate their Skills. Implementations resolve the
+Claude root through the existing `vibe.claude_config.get_claude_home()` helper
+so discovery and the live Claude backend honor the same override semantics.
 
 ### 4.5 Reserved root
 
@@ -422,7 +429,8 @@ Release artifacts must carry that authoritative tree: wheels force-include it
 under a package-owned resource path and sdists include `skills/**`. Runtime
 code resolves the checkout path during development and the packaged resource
 path after installation; it never assumes the repository root exists in a
-wheel environment.
+wheel environment. Built-in trees contain only directories and regular files;
+release packaging and publication preserve whether each file is executable.
 
 Before the first managed Skill resolution from an installed or upgraded Avibe
 artifact, Avibe publishes a complete runtime snapshot to:
@@ -431,7 +439,9 @@ artifact, Avibe publishes a complete runtime snapshot to:
 ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>/<name>/
 ```
 
-`<snapshot-id>` is a stable digest of the authoritative bundled Skill tree.
+`<snapshot-id>` is a stable digest of every relative path, file byte sequence,
+and executable mode bits (`st_mode & 0o111` where POSIX mode bits exist) in the
+authoritative bundled Skill tree.
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
 scripts and references.
@@ -449,7 +459,8 @@ The publisher builds and validates a hidden sibling staging directory, then
 atomically renames it once into the previously absent digest path. A process
 interruption can leave only an undiscoverable staging directory. If a valid
 snapshot for the same digest already exists, concurrent publishers reuse it
-instead of mutating it.
+instead of mutating it. Validation recomputes the same path, content, and
+executable-mode digest from the published mirror before reuse.
 
 Every resolver selects the digest computed from the bundled source of its own
 running artifact. Concurrent old and new Avibe processes therefore use
@@ -535,11 +546,15 @@ at runtime.
 ### 14.1 Resolver and protocol
 
 - A fixture covering every discovery root resolves one entry per final name.
+- Global-root fixtures override `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
+  `XDG_CONFIG_HOME` and resolve from the same homes as their live backends.
 - Built-in, project/global, directory depth, and directory-family precedence
   match Section 5.
 - A Skill with a portable name and extractable description is accepted despite
   unrelated malformed or unknown frontmatter.
 - Invalid candidates do not prevent valid candidates from appearing.
+- A FIFO, socket, device, directory, broken link, or link to a non-regular
+  `SKILL.md` target is omitted without opening it; load rechecks the target.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
@@ -565,7 +580,7 @@ Avibe-dispatched Turns:
 - changing its name or description changes the next Avibe-dispatched Turn's
   Catalog;
 - changing its body changes the next load;
-- deleting it removes it from the next Turn's Catalog; and
+- deleting it removes it from the next Avibe-dispatched Turn's Catalog; and
 - none of these operations requires a restart or new Session.
 
 Previously loaded content remains in conversation history without forcing a
@@ -588,7 +603,10 @@ isolation acceptance gates.
 ### 14.4 Built-in lifecycle
 
 - a fresh installation mirrors all bundled Skills;
-- a wheel-install fixture proves bundled Skills exist without a source tree;
+- a real wheel-install fixture proves bundled Skills exist without a source
+  tree and preserves executable modes required by helper scripts;
+- a mode-only built-in change produces a different snapshot and published
+  digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
 - interrupted publication cannot expose a partial snapshot;
