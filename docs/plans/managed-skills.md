@@ -116,14 +116,12 @@ ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>
 This is logical user-facing notation. Implementations resolve it through
 `config.paths.get_vibe_remote_dir()` so a legacy `~/.vibe_remote` home remains
 authoritative when the compatibility migration cannot move it. Each running
-Avibe artifact selects only the immutable snapshot derived from its own bundled
-Skill tree; the `builtin-skills` umbrella is not a generic discovery root for
-direct child Skills. The selected snapshot is Avibe-owned runtime content and
-has the highest resolution priority. Its generated `.avibe-snapshot.json` is
-runtime metadata rather than a discovery candidate and is excluded from the
-direct-child budget. Release packaging permits at most 1,024 direct child Skill
-directories, so every published built-in remains discoverable within the same
-root cap as compatibility inputs.
+Avibe artifact selects only the version-scoped snapshot derived from its own
+bundled Skill tree. The `builtin-skills` umbrella is not a generic discovery
+root for direct child Skills. The selected snapshot is Avibe-owned runtime
+content, has the highest resolution priority, and contains at most 1,024 direct
+child Skill directories. This keeps every published built-in discoverable
+within the same root cap as compatibility inputs.
 
 ### 4.3 Project roots
 
@@ -324,6 +322,10 @@ Contract details:
   that the reported absolute path still names the same directory identity. If
   the directory moved, disappeared, or was replaced during load, the command
   fails instead of pairing one body with another directory.
+- The required frontmatter and bounded body are parsed from one verified
+  `SKILL.md` read after selection. Load confirms that those exact bytes still
+  declare the requested portable name before emitting; it never combines a
+  name retained from an earlier discovery read with newly opened content.
 - XML attribute values are escaped.
 - Only the body after the leading frontmatter is emitted.
 - The body is otherwise unchanged: no generated title, indentation, escaping,
@@ -475,42 +477,18 @@ artifact, Avibe publishes a complete runtime snapshot to:
 ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>/<name>/
 ```
 
-`<snapshot-id>` is the digest of a canonical manifest containing every relative
-path, file-content digest, and executable mode bits (`st_mode & 0o111` where
-POSIX mode bits exist) in the authoritative bundled Skill tree. The same
-manifest is stored as snapshot-root runtime metadata at
-`.avibe-snapshot.json`; it is not an entry in its own digest. A command bound to
-an older snapshot can therefore validate it without access to the older package
-artifact.
+`<snapshot-id>` is a lowercase SHA-256 identifier derived deterministically from
+every relative path, file byte sequence, and executable mode bits
+(`st_mode & 0o111` where POSIX mode bits exist) in the authoritative bundled
+Skill tree. It is a directory identifier, not a second persisted manifest or a
+runtime integrity protocol.
 
-Manifest v1 is a frozen persisted shape:
+Built-in source paths must be representable without aliases on every supported
+platform. Release packaging rejects absolute or traversal paths, backslashes,
+NUL, drive/UNC prefixes, Windows-reserved components, trailing-dot/space names,
+and case-insensitive path collisions. It also rejects a 1,025th direct child
+Skill directory.
 
-- the top-level JSON object contains `schema_version: 1` and `entries`; each
-  entry contains a `/`-separated relative `path`, byte `size`, lowercase
-  64-hex `sha256`, and integer `executable` bits (`st_mode & 0o111`);
-- those are the only top-level and entry keys; the schema version is exactly the
-  integer `1`, `entries` is a list, `size` is a non-negative integer no larger
-  than 64 MiB, and `executable` is one of the valid `0o111` bit combinations;
-- entries sort by `path`, object keys sort lexically, and serialization is UTF-8
-  without BOM or trailing newline using ASCII escapes and separators `,` and
-  `:` with no optional whitespace;
-- `<snapshot-id>` is lowercase SHA-256 of those exact manifest bytes; and
-- newer launchers retain decoders for every released manifest schema. An
-  unknown or malformed schema is omitted by Catalog and fails load safely; it
-  is never guessed or rewritten by a runtime command.
-
-The manifest is at most 1 MiB, contains at most 4,096 entries, and each encoded
-path is at most 1,024 bytes. Release packaging fails rather than publishing a
-built-in tree outside these limits. Runtime opens the manifest with the same
-nonblocking, same-handle regular-file and verified-read contract as `SKILL.md`,
-applies the byte limit before parsing, and rejects duplicate, absolute, empty,
-`.` or `..` path components. A manifest path is portable only when it is
-relative under both POSIX and Windows parsing: backslashes, NUL, drive prefixes,
-UNC roots, and platform separator aliases are rejected. Runtime reconstructs
-accepted paths component-by-component from an open snapshot-root handle,
-without following symlinks, junctions, or other reparse points, and requires
-each intermediate component to remain a directory and each leaf to remain the
-expected regular file beneath that root.
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
 scripts and references.
@@ -518,7 +496,7 @@ scripts and references.
 ### 10.2 Replacement lifecycle
 
 The source tree is authoritative for each Avibe artifact. Each snapshot is a
-complete, immutable mirror:
+complete mirror that Avibe itself never mutates:
 
 - new built-ins are added;
 - changed built-ins are replaced; and
@@ -527,41 +505,20 @@ complete, immutable mirror:
 Publication is serialized by a cross-process lock keyed by snapshot digest.
 The publisher builds and validates a hidden sibling staging directory, then
 atomically renames it once into the previously absent digest path. A process
-interruption can leave only an undiscoverable staging directory. If a valid
-snapshot for the same digest already exists, concurrent publishers reuse it
-instead of mutating it. Validation recomputes the same path, content, and
-executable-mode manifest and verifies that its digest is `<snapshot-id>` before
-reuse.
+interruption can leave only an undiscoverable staging directory. If the digest
+path already exists, concurrent or later publishers reuse that path without
+mutating it. Because Avibe publication creates the final path only by atomic
+rename, a pre-existing wrong-type, unreadable, or externally changed path is
+treated as unsupported post-publication mutation: list/load fails safely and
+does not repair it from whichever artifact the stable launcher currently
+selects.
 
-If the digest path exists but is not a valid snapshot, the lock holder
-atomically renames that entry itself to a unique hidden quarantine sibling,
-publishes the validated staging directory into the now-absent digest path, and
-removes the quarantine only after final validation. A crash before publication
-leaves no selectable digest path; the next lock holder rebuilds it before
-resolution. This repair belongs only to an artifact publishing its own bundled
-tree. Runtime list/load commands never attempt to rebuild a retained snapshot
-from whichever newer artifact the stable launcher currently selects.
-
-Runtime integrity is manifest-bound at the bytes each command uses:
-
-- Catalog accepts a built-in candidate only when the verified `SKILL.md` bytes
-  and executable mode match that path's entry in a manifest whose canonical
-  digest is the bound `<snapshot-id>`.
-- Load first verifies the bound manifest, then verifies every path, byte digest,
-  and executable mode in the selected built-in Skill directory against its
-  manifest entries, rejecting missing, changed, or extra content. The body it
-  emits comes from that same verified `SKILL.md` read.
-- A selected built-in Skill may contain at most 1,024 manifest files and 64 MiB
-  of expected file bytes. Verification compares the same-handle file size with
-  the manifest before hashing, reads at most that expected size, and visits at
-  most 2,049 filesystem entries while checking for extras. Exceeding any bound
-  fails before further traversal or content reads; release packaging enforces
-  the same limits on authoritative built-ins.
-- A mismatch omits the candidate during Catalog discovery or fails load with
-  empty standard output. It is not repaired by the command.
-
-This avoids a validate-then-open trust gap and lets a new launcher validate an
-older retained snapshot without possessing the old artifact's source bytes.
+After publication, list/load does not hash the full snapshot, compare it with a
+package source, or repair it. It reads the selected built-in through the same
+bounded verified-file contract as every other Skill. The snapshot is an
+Avibe-owned lifecycle surface, not a user customization or security boundary;
+direct post-publication mutation is unsupported and may change or omit a later
+Catalog/load result.
 
 Every resolver selects the digest computed from the bundled source of its own
 running artifact. Concurrent old and new Avibe processes therefore use
@@ -574,13 +531,10 @@ Backend runtimes inherit this selected digest as
 `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID`, so `vibe skill list` and
 `vibe skill load` remain bound to the advertising runtime's built-ins across an
 overlapping upgrade. The digest is validated as an identifier under the
-`builtin-skills` umbrella before use; it cannot select an arbitrary path.
-
-Publication never exposes a partial snapshot, and Catalog/load never accepts
-built-in bytes that differ from the bound snapshot manifest. A later filesystem
-write is detected at the next command boundary; this remains a consistency
-contract rather than a security sandbox. The `builtin-skills` umbrella is
-Avibe-owned rather than a user customization surface.
+`builtin-skills` umbrella before use; it cannot select an arbitrary path. A
+newer stable launcher needs only that retained path, not the older package
+source. A missing or unreadable retained snapshot fails safely instead of
+falling back to the newer artifact's built-ins.
 
 ## 11. Installation Defaults
 
@@ -677,6 +631,9 @@ at runtime.
   are omitted by the parser-backed portable name boundary.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
+- If the selected `SKILL.md` is replaced after discovery, load reparses the
+  exact verified bytes it will emit and fails unless they still declare the
+  requested name.
 - A backend-bound load launched from a different shell directory still uses
   the Session working directory that produced the advertised Catalog.
 - Replacing, removing, or renaming the selected Skill directory between
@@ -719,33 +676,20 @@ isolation acceptance gates.
 - a fresh installation mirrors all bundled Skills;
 - a real wheel-install fixture proves bundled Skills exist without a source
   tree and preserves executable modes required by helper scripts;
-- released manifest-v1 bytes have a fixed digest fixture, and a newer-launcher
-  fixture validates and loads that retained schema without the older package;
-- a FIFO, non-regular, oversized, malformed, duplicate-path, or traversal-path
-  manifest is bounded and rejected before use;
-- manifest fixtures reject backslash traversal, drive/UNC paths, symlinks, and
-  reparse points on every supported platform;
-- packaging rejects a 1,025th direct built-in Skill directory, while 1,024
-  Skills plus the generated root manifest remain discoverable;
+- release packaging rejects non-portable, Windows-reserved, trailing-dot/space,
+  or case-insensitively colliding built-in paths and a 1,025th direct Skill;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
 - interrupted publication cannot expose a partial snapshot;
-- an invalid pre-existing digest path, including a wrong type, changed byte, or
-  changed executable mode, is quarantined and rebuilt by the artifact publishing
-  that digest; an interrupted publication resumes without selecting quarantine;
-- a snapshot altered after publication is omitted by the next Catalog or fails
-  the next load, and the command does not rebuild it from a different artifact;
-- Catalog verifies the exact built-in `SKILL.md` bytes it parses, while load
-  verifies the selected built-in Skill subtree and emits the same verified body;
-- built-in verification rejects a size mismatch before hashing, and its file,
-  byte, and visited-entry bounds cannot be exceeded by corrupted snapshot data;
+- a wrong-type, unreadable, or externally changed pre-existing digest path
+  fails safely without being traversed, mutated, or rebuilt by runtime commands;
 - two concurrently running artifacts with different bundled trees resolve
-  different immutable snapshots; and
+  different version-scoped snapshots;
 - after launcher activation, a command inherited from the older runtime still
-  validates, lists, and loads that runtime's retained built-in snapshot using
-  its digest-bound manifest, without the older package source; and
+  lists and loads that runtime's retained built-in snapshot path without the
+  older package source and never falls back to the newer snapshot; and
 - every loaded built-in reports an agent-accessible absolute directory.
 
 ## 15. Explicit Non-Goals
@@ -760,5 +704,7 @@ V1 does not include:
 - Skill editing or copy-on-write;
 - semantics for `${AVIBE_HOME:-$HOME/.avibe}/skills`;
 - garbage collection of old built-in snapshots;
+- post-publication tamper detection or self-healing for Avibe-owned built-in
+  snapshots;
 - live filesystem watchers or historical-context invalidation; or
 - a security sandbox preventing direct filesystem access.
