@@ -86,10 +86,14 @@ Avibe does not recursively treat arbitrary nested `SKILL.md` files as separate
 Skills. Directories such as `scripts/`, `references/`, and `assets/` remain
 part of their parent Skill.
 
-Before parsing or loading, Avibe resolves the `SKILL.md` target and requires it
-to be a regular file. FIFOs, sockets, devices, directories, broken links, and
-links to non-regular targets are omitted without opening them. Load repeats the
-file-type check so a candidate changed after discovery cannot bypass it.
+Avibe opens `SKILL.md` with platform nonblocking semantics, immediately uses
+`fstat` or the platform-equivalent handle query to verify that same open handle
+is a regular file, and performs the bounded parse or load through that handle.
+It performs no potentially blocking read before handle-level type verification.
+A path-level check alone never authorizes a read, so replacing a candidate
+between enumeration and open cannot redirect the checked operation to a FIFO,
+socket, device, directory, broken link, or other non-regular target. Load
+repeats the same open-handle contract.
 
 Backend-bundled or system Skills, plugin caches, administrator-only Skills,
 and `.claude/commands` are not discovery sources.
@@ -455,12 +459,21 @@ complete, immutable mirror:
 - changed built-ins are replaced; and
 - built-ins removed from the artifact are absent from its snapshot.
 
+Publication is serialized by a cross-process lock keyed by snapshot digest.
 The publisher builds and validates a hidden sibling staging directory, then
 atomically renames it once into the previously absent digest path. A process
 interruption can leave only an undiscoverable staging directory. If a valid
 snapshot for the same digest already exists, concurrent publishers reuse it
 instead of mutating it. Validation recomputes the same path, content, and
 executable-mode digest from the published mirror before reuse.
+
+If the digest path exists but is not a valid snapshot, the lock holder
+atomically renames that entry itself to a unique hidden quarantine sibling,
+publishes the validated staging directory into the now-absent digest path, and
+removes the quarantine only after final validation. A crash before publication
+leaves no selectable digest path; the next lock holder rebuilds it before
+resolution. If quarantine or publication cannot complete, managed resolution
+fails explicitly and never reads the invalid entry.
 
 Every resolver selects the digest computed from the bundled source of its own
 running artifact. Concurrent old and new Avibe processes therefore use
@@ -553,8 +566,9 @@ at runtime.
 - A Skill with a portable name and extractable description is accepted despite
   unrelated malformed or unknown frontmatter.
 - Invalid candidates do not prevent valid candidates from appearing.
-- A FIFO, socket, device, directory, broken link, or link to a non-regular
-  `SKILL.md` target is omitted without opening it; load rechecks the target.
+- A fixture that replaces a regular `SKILL.md` with a FIFO between enumeration
+  and open cannot block discovery: handle-level type validation omits it before
+  any read, and load follows the same descriptor-bound contract.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
@@ -610,6 +624,9 @@ isolation acceptance gates.
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
 - interrupted publication cannot expose a partial snapshot;
+- an invalid pre-existing digest path, including a wrong type, changed byte, or
+  changed executable mode, is quarantined and rebuilt before resolution; an
+  interrupted repair resumes without selecting the quarantine;
 - two concurrently running artifacts with different bundled trees resolve
   different immutable snapshots; and
 - after launcher activation, a command inherited from the older runtime still
