@@ -9668,34 +9668,8 @@ def _reconcile_startup_memory_package_guarded() -> dict:
         }
 
 
-def _startup_memory_retry_restart_state() -> str:
-    """Classify the restart that blocked startup repair without owning its lifecycle."""
-
-    from vibe import runtime
-
-    status = runtime.read_json(runtime.get_restart_status_path())
-    if not isinstance(status, dict):
-        return "terminal"
-
-    state = status.get("state")
-    if state in {"scheduled", "running"}:
-        return "waiting" if restart_is_pending() else "terminal"
-    if state != "succeeded":
-        return "terminal"
-
-    supervisor_pid = status.get("supervisor_pid")
-    if (
-        isinstance(supervisor_pid, int)
-        and not isinstance(supervisor_pid, bool)
-        and supervisor_pid > 0
-        and runtime.pid_alive(supervisor_pid)
-    ):
-        return "waiting"
-    return "ready"
-
-
 def _retry_startup_memory_package_after_restart(result: dict) -> dict:
-    """Retry one busy startup repair after a successful restart exits."""
+    """Retry one busy startup repair after restart admission clears."""
 
     if result.get("reason") != "memory_package_upgrade_busy":
         return result
@@ -9704,8 +9678,7 @@ def _retry_startup_memory_package_after_restart(result: dict) -> dict:
         "Startup Memory package repair is waiting for the active restart to finish"
     )
     deadline = time.monotonic() + _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS
-    restart_state = _startup_memory_retry_restart_state()
-    while restart_state == "waiting":
+    while restart_is_pending():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             logger.warning(
@@ -9714,13 +9687,7 @@ def _retry_startup_memory_package_after_restart(result: dict) -> dict:
             )
             return result
         time.sleep(min(_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS, remaining))
-        restart_state = _startup_memory_retry_restart_state()
 
-    if restart_state != "ready":
-        logger.warning(
-            "Startup Memory package repair will not retry because the active restart did not succeed"
-        )
-        return result
     return _reconcile_startup_memory_package_guarded()
 
 
