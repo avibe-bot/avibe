@@ -520,6 +520,50 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
 
 
+def test_restart_mutation_admission_waits_for_terminal_supervisor_postwork(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "state": "succeeded",
+            "job_id": "outer-restart",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 100.0,
+        },
+    )
+    alive = {4242}
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in alive)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 100.0)
+
+    assert restart_supervisor.restart_mutation_is_pending() is True
+
+    alive.clear()
+    assert restart_supervisor.restart_mutation_is_pending() is False
+
+
+def test_restart_mutation_admission_bridges_pending_followup_handoff(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    now = {"value": 100.0}
+    monkeypatch.setattr(restart_supervisor.time, "time", lambda: now["value"])
+    restart_supervisor.mark_pending_restart(
+        trigger="web-ui-config-pending",
+        restart_job_id="outer-restart",
+    )
+
+    assert restart_supervisor.restart_mutation_is_pending() is True
+
+    now["value"] += restart_supervisor.PENDING_RESTART_HANDOFF_GRACE_SECONDS + 1
+    assert restart_supervisor.restart_mutation_is_pending() is False
+
+
 def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

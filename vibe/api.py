@@ -87,7 +87,11 @@ from vibe.upgrade import (
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
     verify_upgrade_candidate,
 )
-from vibe.restart_supervisor import schedule_restart
+from vibe.restart_supervisor import (
+    RESTART_MUTATION_WAIT_TIMEOUT_SECONDS,
+    restart_mutation_is_pending,
+    schedule_restart,
+)
 from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
@@ -8660,7 +8664,6 @@ _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
 _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
 _STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
-_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -9490,7 +9493,7 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                 }
             current_vibe_path = get_running_vibe_path()
             restart_only = _memory_package_restart_retry_required(current_version)
-            if restart_is_pending():
+            if restart_mutation_is_pending():
                 return {
                     "ok": False,
                     "message": "memory_package_upgrade_busy",
@@ -9677,16 +9680,16 @@ def _retry_startup_memory_package_after_restart(result: dict) -> dict:
     logger.info(
         "Startup Memory package repair is waiting for the active restart to finish"
     )
-    deadline = time.monotonic() + _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS
+    deadline = time.monotonic() + RESTART_MUTATION_WAIT_TIMEOUT_SECONDS
     while result.get("reason") == "memory_package_upgrade_busy":
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             logger.warning(
                 "Startup Memory package repair remained blocked by an active restart for %.1fs",
-                _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS,
+                RESTART_MUTATION_WAIT_TIMEOUT_SECONDS,
             )
             return result
-        if restart_is_pending():
+        if restart_mutation_is_pending():
             time.sleep(
                 min(_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS, remaining)
             )

@@ -20,12 +20,20 @@ from vibe.upgrade import (
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    restart_is_pending,
 )
 
 
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
+SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS = 300.0
+PENDING_RESTART_HANDOFF_GRACE_SECONDS = 60.0
+RESTART_MUTATION_WAIT_TIMEOUT_SECONDS = (
+    runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+    + SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS
+    + PENDING_RESTART_HANDOFF_GRACE_SECONDS
+)
 
 
 class StartedRuntime(NamedTuple):
@@ -61,6 +69,37 @@ def _restart_log_path(job_id: str) -> Path:
 
 def _pending_restart_path() -> Path:
     return paths.get_runtime_dir() / "pending_restart.json"
+
+
+def _restart_supervisor_process_is_active(status: object) -> bool:
+    if not isinstance(status, dict):
+        return False
+    supervisor_pid = status.get("supervisor_pid")
+    if not isinstance(supervisor_pid, int) or supervisor_pid <= 0:
+        return False
+    if not runtime.pid_alive(supervisor_pid):
+        return False
+    started_at = status.get("supervisor_started_at")
+    if started_at is None:
+        return False
+    current_started_at = runtime.process_create_time(supervisor_pid)
+    return current_started_at is not None and current_started_at == started_at
+
+
+def restart_mutation_is_pending() -> bool:
+    """Whether a restart owner or its follow-up handoff still excludes mutation."""
+
+    status = runtime.read_json(runtime.get_restart_status_path())
+    if restart_is_pending() or _restart_supervisor_process_is_active(status):
+        return True
+
+    pending = runtime.read_json(_pending_restart_path())
+    if not isinstance(pending, dict):
+        return False
+    created_at = pending.get("created_at_epoch")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        return False
+    return time.time() - created_at <= PENDING_RESTART_HANDOFF_GRACE_SECONDS
 
 
 def mark_pending_restart(
@@ -453,14 +492,17 @@ def _run_restart_job(
                     stderr=subprocess.STDOUT,
                     text=True,
                     check=False,
-                    timeout=300,
+                    timeout=SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS,
                 )
                 if prepare_result.returncode != 0:
                     write(f"Show Runtime preparation failed with exit code {prepare_result.returncode}")
                 else:
                     write("Show Runtime preparation succeeded")
             except subprocess.TimeoutExpired:
-                write("Show Runtime preparation timed out after 300 seconds")
+                write(
+                    "Show Runtime preparation timed out after "
+                    f"{SHOW_RUNTIME_PREPARE_TIMEOUT_SECONDS:.0f} seconds"
+                )
             except Exception as exc:
                 write(f"Show Runtime preparation skipped: {exc}")
             finally:
