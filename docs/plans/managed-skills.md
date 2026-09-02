@@ -308,7 +308,8 @@ vibe skill list --page <N>
 ```
 
 The default page is page 1. Each page contains at most 25 entries in the same
-stable name order used by the prompt. Standard output uses only Catalog rows:
+stable name order used by the prompt for the filesystem state observed by that
+invocation. Standard output uses only Catalog rows:
 
 ```text
 - data-analysis: Analyze datasets, generate charts, and create reports.
@@ -318,6 +319,14 @@ stable name order used by the prompt. Standard output uses only Catalog rows:
 When another page exists, the output ends with the same next-page sentence
 used by the prompt, with the appropriate page number. Paths, sources, scopes,
 and resolution metadata are not printed.
+
+Pagination is deliberately live rather than a cross-command snapshot. If the
+filesystem changes between `list --page` invocations, entries can move between
+pages; after installing, editing, renaming, or deleting a Skill while paging,
+the caller restarts at page 1. V1 does not add a hidden per-Session cursor or
+freeze the Catalog merely to linearize an uncommon concurrent scan. With an
+unchanged filesystem, every invocation produces the same order and page
+boundaries.
 
 ## 7. Skill Load Contract
 
@@ -416,7 +425,7 @@ Therefore:
 - changing the body, scripts, or references changes the next load or file
   read.
 
-When a backend launches either command, Avibe supplies two internal bindings:
+When a backend launches either command, Avibe supplies internal bindings:
 
 - `AVIBE_SKILL_WORKING_DIR` is the absolute working directory from which Avibe
   rendered that Session's Catalog. Project discovery always starts there, even
@@ -424,6 +433,12 @@ When a backend launches either command, Avibe supplies two internal bindings:
 - `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` selects the version-scoped built-in snapshot
   retained by the Avibe process that created that backend runtime, even if an
   upgrade has since switched the stable `vibe` launcher to another artifact.
+- `AVIBE_SKILL_HOME`, `AVIBE_SKILL_CODEX_HOME`,
+  `AVIBE_SKILL_CLAUDE_HOME`, and `AVIBE_SKILL_XDG_CONFIG_HOME` are normalized
+  absolute roots resolved by the advertising Avibe process. A relative
+  `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `XDG_CONFIG_HOME` is therefore resolved
+  once at Turn dispatch and cannot select a different compatibility tree merely
+  because the agent launches `vibe skill` from another shell directory.
 
 These values use the existing per-Session shell-environment path for each
 backend: Claude SDK process environment, Codex `shell_environment_policy`, and
@@ -431,14 +446,16 @@ the OpenCode caller-context plugin. They are not prompt text or agent-visible
 command arguments. A standalone command without Avibe bindings uses its own
 current working directory and the snapshot bundled with its own executable.
 
-An OpenCode binding lives for the active Avibe-dispatched Turn rather than for
-a wall-clock TTL. Binding-file updates are serialized across processes, use a
-unique same-directory temporary file and atomic replacement, and cleanup is
-guarded by a per-Turn token so an older Turn cannot remove a newer binding for
-the same native Session. Normal completion removes the binding; after a crash,
-the plugin rejects entries whose owner process is no longer alive. Legacy
-entries with an expiry remain readable until that expiry for upgrade
-compatibility.
+An OpenCode binding normally lives for the active Avibe-dispatched Turn.
+Binding-file updates are serialized across processes, use a unique
+same-directory temporary file and atomic replacement, and cleanup is guarded
+by a per-Turn token so an older Turn cannot remove a newer binding for the same
+native Session. Normal completion removes the binding. Every entry also has a
+bounded 24-hour safety expiry, so an operating-system PID reused after a crash
+cannot make an abandoned binding valid indefinitely; the plugin rejects an
+entry when either its owner process is gone or its expiry has passed. Restoring
+a persisted poll publishes a fresh binding with the current process identity,
+authorization snapshot, absolute Skill roots, and a new expiry.
 
 ### 8.3 Historical context is historical
 
@@ -535,10 +552,11 @@ protocol.
 Built-in source paths must be representable without aliases on every supported
 platform. Release packaging rejects absolute or traversal paths, backslashes,
 NUL, drive/UNC prefixes, Windows-reserved components, trailing-dot/space names,
-and case-insensitive path collisions. It also rejects more than 1,024 total
-direct child entries, any direct child that is not a valid Skill directory,
-any Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over
-256 KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB.
+case-insensitive path collisions, and empty directories. It also rejects more
+than 1,024 total direct child entries, any direct child that is not a valid
+Skill directory, any Skill whose closing frontmatter delimiter exceeds 64 KiB,
+any body over 256 KiB, or a built-in tree whose bounded frontmatter exceeds
+8 MiB.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -555,9 +573,13 @@ complete mirror that Avibe itself never mutates:
 
 Publication is serialized by a cross-process lock keyed by snapshot digest.
 The publisher builds and validates a hidden sibling staging directory, then
-atomically renames it once into the previously absent digest path. A process
-interruption can leave only an undiscoverable staging directory. If the digest
-path already exists, concurrent or later publishers reuse that path without
+recomputes the canonical snapshot-v1 digest from the completed staging tree and
+requires it to equal the target `<snapshot-id>` before atomically renaming it
+once into the previously absent digest path. The staged digest includes every
+file byte and executable mode, so copied bytes cannot diverge from the name
+under which they are published. A process interruption can leave only an
+undiscoverable staging directory. If the digest path already exists,
+concurrent or later publishers reuse that path without
 mutating it. A wrong-type or unreadable path fails safely. Readable external
 changes are unsupported post-publication mutation and may affect later
 Catalog/load results; runtime commands neither validate nor repair the path
@@ -605,9 +627,22 @@ $PROJECT_BASE/.agents/skills/<name>
 installer and resolver share this bounded project-base rule, so an installed
 project Skill is always in a root that the next Turn scans.
 
-Installing a Skill does not need to copy it into each backend's native
-directory. Existing native directories remain discovery inputs for backward
-compatibility.
+The Workbench exposes one installation, not a backend selector or per-backend
+toggle. New installs invoke askill for Claude Code, Codex, and OpenCode
+together. askill keeps the authoritative directory in the backend-neutral
+`.agents/skills` target and may create its normal backend-native compatibility
+links; native presentation is disabled in Avibe's runtime path, so those links
+do not create three product-level copies.
+
+Existing backend-native installs remain in place and are discovered as
+compatibility inputs; Avibe does not move or rewrite user files during this
+migration. Existing backend-specific Workbench access-policy identifiers are
+treated as aliases for one logical Skill: any accessible alias permits the
+logical Skill, new installs create all three aliases, and logical removal
+removes all aliases and askill-managed links. The API may continue accepting a
+legacy `backends` field for compatibility, but validates and ignores narrowing
+requests. The UI removes backend filters, chips, install selectors, and
+availability switches.
 
 Skill editing, adoption, and copy-on-write are outside v1. This protocol owns
 runtime discovery and loading, while the existing Workbench/askill management
@@ -645,9 +680,9 @@ applying a changed Avibe prompt to the same backend Session. Built-in
 installation owns only the versioned source-to-runtime mirror.
 
 The existing [Workbench Skills design](workbench-skills-page.md) remains the
-management surface. This document supersedes only assumptions in that design
-about installing one copy per backend or using backend-native Skill catalogs
-at runtime.
+management surface. This document supersedes its backend selection and
+per-backend availability model as well as assumptions about using native Skill
+Catalogs at runtime.
 
 ## 14. Acceptance Criteria
 
@@ -656,7 +691,9 @@ at runtime.
 - A fixture covering every discovery root, including Codex's `.system`
   container, resolves one entry per final name.
 - Global-root fixtures override `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
-  `XDG_CONFIG_HOME` and resolve from the same homes as their live backends.
+  `XDG_CONFIG_HOME` with relative and absolute values; Turn bindings normalize
+  them to the same absolute homes used by their live backends, independent of
+  the command's later shell directory.
 - Built-in, project/global, directory depth, and directory-family precedence
   match Section 5.
 - Two sibling directories declaring the same name resolve by the final absolute
@@ -682,10 +719,12 @@ at runtime.
   replacing either the alias or target after discovery makes load fail.
 - Unquoted YAML comments after `name` or `description` are ignored while `#`
   inside a quoted scalar remains content.
-- Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
-  remain within the row budget, and do not expose paths or sources. When later
-  pages exist, the prompt tells the agent to inspect them if page 1 has no
-  matching Skill.
+- Prompt and `vibe skill list` pagination are deterministic for an unchanged
+  filesystem, limited to 25 entries, remain within the row budget, and do not
+  expose paths or sources. When later pages exist, the prompt tells the agent
+  to inspect them if page 1 has no matching Skill. A fixture mutating the
+  Catalog between page calls verifies live re-resolution and the documented
+  restart-at-page-1 boundary rather than a hidden snapshot.
 - Oversized descriptions cannot make the Catalog unbounded, and names with
   whitespace, shell syntax, uppercase characters, or invalid hyphen placement
   are omitted by the parser-backed portable name boundary.
@@ -745,12 +784,14 @@ isolation acceptance gates.
 - a fixed snapshot-v1 fixture proves the canonical tree byte stream and
   lowercase SHA-256 identifier remain stable;
 - release packaging rejects non-portable, Windows-reserved, trailing-dot/space,
-  or case-insensitively colliding built-in paths; more than 1,024 total direct
-  child entries; a non-Skill direct child; a Skill whose closing frontmatter
-  delimiter exceeds 64 KiB; a body over 256 KiB; and a tree whose bounded
-  frontmatter exceeds the built-in 8 MiB budget;
+  case-insensitively colliding, or empty built-in paths; more than 1,024 total
+  direct child entries; a non-Skill direct child; a Skill whose closing
+  frontmatter delimiter exceeds 64 KiB; a body over 256 KiB; and a tree whose
+  bounded frontmatter exceeds the built-in 8 MiB budget;
 - a mode-only built-in change produces a different snapshot and published
   digest;
+- publication recomputes the snapshot-v1 digest from the completed staging
+  tree and refuses to rename staging bytes under a different digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
 - interrupted publication cannot expose a partial snapshot;
