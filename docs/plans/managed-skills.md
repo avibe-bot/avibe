@@ -84,7 +84,9 @@ A discovery root contributes only direct child Skill directories:
 
 Avibe does not recursively treat arbitrary nested `SKILL.md` files as separate
 Skills. Directories such as `scripts/`, `references/`, and `assets/` remain
-part of their parent Skill.
+part of their parent Skill. The only nested container exception is the
+explicit Codex `.system` discovery root in Section 4.4; its direct children
+still follow the same candidate shape.
 
 Avibe opens `SKILL.md` with platform nonblocking semantics, immediately uses
 `fstat` or the platform-equivalent handle query to verify that same open handle
@@ -104,8 +106,9 @@ therefore omits the candidate during discovery or fails load with empty standard
 output. This consistency rule is owned once by the resolver rather than
 reimplemented by Catalog and load call sites.
 
-Backend-bundled or system Skills, plugin caches, administrator-only Skills,
-and `.claude/commands` are not discovery sources.
+Backend-bundled or system Skills other than the explicitly listed Codex
+`.system` compatibility root, plugin caches, administrator-only Skills, and
+`.claude/commands` are not discovery sources.
 
 ### 4.2 Built-in root
 
@@ -119,9 +122,11 @@ authoritative when the compatibility migration cannot move it. Each running
 Avibe artifact selects only the version-scoped snapshot derived from its own
 bundled Skill tree. The `builtin-skills` umbrella is not a generic discovery
 root for direct child Skills. The selected snapshot is Avibe-owned runtime
-content, has the highest resolution priority, and contains at most 1,024 direct
-child Skill directories whose bounded frontmatter totals at most 8 MiB. This
-keeps every published built-in discoverable within the same candidate and byte
+content, has the highest resolution priority, and contains at most 1,024 total
+direct child entries, each a valid Skill directory, whose bounded frontmatter
+totals at most 8 MiB. Every closing frontmatter delimiter is within the 64 KiB
+per-candidate bound and every body is at most 256 KiB. This keeps every
+published built-in discoverable within the same root, candidate, and byte
 budgets as compatibility inputs.
 
 ### 4.3 Project roots
@@ -137,8 +142,11 @@ the Git project root, Avibe inspects:
 ```
 
 The nearest directory to the active working directory wins within the same
-directory family. When there is no Git root, only the active working directory
-is considered project scope.
+directory family. Root discovery examines at most 128 directories including
+the active working directory. If no Git root is found within that bound, only
+the active working directory is considered project scope. Thus each Turn
+performs at most 512 project-root probes before the existing candidate and byte
+budgets apply.
 
 ### 4.4 Global roots
 
@@ -506,8 +514,10 @@ protocol.
 Built-in source paths must be representable without aliases on every supported
 platform. Release packaging rejects absolute or traversal paths, backslashes,
 NUL, drive/UNC prefixes, Windows-reserved components, trailing-dot/space names,
-and case-insensitive path collisions. It also rejects a 1,025th direct child
-Skill directory or a built-in tree whose bounded frontmatter exceeds 8 MiB.
+and case-insensitive path collisions. It also rejects more than 1,024 total
+direct child entries, any direct child that is not a valid Skill directory,
+any Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over
+256 KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -702,8 +712,10 @@ isolation acceptance gates.
 - a fixed snapshot-v1 fixture proves the canonical tree byte stream and
   lowercase SHA-256 identifier remain stable;
 - release packaging rejects non-portable, Windows-reserved, trailing-dot/space,
-  or case-insensitively colliding built-in paths, a 1,025th direct Skill, and a
-  tree whose bounded frontmatter exceeds the built-in 8 MiB budget;
+  or case-insensitively colliding built-in paths; more than 1,024 total direct
+  child entries; a non-Skill direct child; a Skill whose closing frontmatter
+  delimiter exceeds 64 KiB; a body over 256 KiB; and a tree whose bounded
+  frontmatter exceeds the built-in 8 MiB budget;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
