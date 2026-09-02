@@ -18,6 +18,7 @@ Out of scope (documented, not dropped silently):
 
 - Runtime: hermetic `AVIBE_HOME` under the test dir; `VIBE_MODEL_HUB_ENABLED=1`. Docker `tests/e2e` service with `command: ["full"]` (controller + UI in one process pair) or an equivalent local hermetic run; whichever the implementing lane proves stable first.
 - Engine binary: no GitHub egress in CI. Use `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH` / `VIBE_MODEL_HUB_ENGINE_OFFLINE` (`vibe/model_hub_runtime/installer.py:105-109`) with the pinned cliproxyapi v7.2.95 assets vendored per platform (linux-amd64/arm64, darwin-arm64/x64).
+- Offline archive seeding: when the selected manifest asset uses `file://`, the harness verifies its declared size and SHA-256, then copies it into the hermetic `$AVIBE_HOME/runtime/model-hub/engine/downloads/` cache before spawning child processes. `VIBE_MODEL_HUB_ENGINE_OFFLINE=1` remains set, and non-file assets are never fetched.
 - **Mock upstream provider** (new test fixture, `tests/e2e/drivers/mock_llm_upstream.py`): implements, per protocol — `POST /v1/messages`, `POST /v1/responses`, `POST /v1/chat/completions`, `GET /v1/models` — with:
   - configurable model inventory (ids only, plus Anthropic-style `display_name` and relay-style `context_length` extensions to prove they are dropped, B-list);
   - auth modes: accept / 401 / 403(banned-pattern) / 402 / 429 / quota-message / 5xx;

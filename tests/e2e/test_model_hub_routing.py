@@ -110,7 +110,7 @@ def _prepare_probe_chain(
     first, _ = _create_source(
         app,
         first_upstream,
-        nonce="scn_dprobe000000001",
+        nonce="scn_dprobe0000000001",
         vendor="anthropic",
         display_name="First probe source",
     )
@@ -124,7 +124,7 @@ def _prepare_probe_chain(
         second, _ = _create_source(
             app,
             second_upstream,
-            nonce="scn_dprobe000000002",
+            nonce="scn_dprobe0000000002",
             vendor="anthropic",
             display_name="Second probe source",
         )
@@ -188,9 +188,15 @@ def test_d2_healthy_hop_is_served_by_the_real_engine_probe(
             if item["path"] == "/v1/messages"
         ]
         assert captured
+        # The engine forwards Anthropic credentials as Bearer; x-api-key is
+        # used only by Avibe's direct discovery probe path.
         assert all(
-            item["headers"].get("x-api-key") == SYNTHETIC_API_KEY
+            item["headers"].get("authorization")
+            == f"Bearer {SYNTHETIC_API_KEY}"
             for item in captured
+        )
+        assert all(
+            item["headers"].get("anthropic-version") for item in captured
         )
 
 
