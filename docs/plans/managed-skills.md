@@ -147,12 +147,17 @@ $HOME/.agents/skills
 ${CODEX_HOME:-$HOME/.codex}/skills
 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills
 ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills
+${CODEX_HOME:-$HOME/.codex}/skills/.system
 ```
 
 Native locations are compatibility inputs. Avibe reads them in place and does
 not migrate, rename, or annotate their Skills. Implementations resolve the
 Claude root through the existing `vibe.claude_config.get_claude_home()` helper
 so discovery and the live Claude backend honor the same override semantics.
+Codex's `.system` directory is an explicit container root rather than a generic
+recursive exception: Avibe inspects only its direct child Skill directories and
+visits it after every user-managed global root. A same-name project or user
+global Skill therefore wins over the Codex-bundled default.
 
 ### 4.5 Reserved root
 
@@ -220,14 +225,16 @@ selected by these rules, in order:
 3. Within project scope, a directory nearer to the working directory over a
    more distant directory.
 4. At the same scope and depth, directory-family priority is:
-   `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode.
+   `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode > Codex system.
 5. If every preceding dimension ties, the candidate whose absolute directory
    path sorts first by Unicode code-point order wins.
 
 The `.avibe` family reserves the highest family slot for future use, but
 `${AVIBE_HOME:-$HOME/.avibe}/skills` is inactive in v1. OpenCode means
 `.opencode` at project scope and `${XDG_CONFIG_HOME:-$HOME/.config}/opencode`
-at global scope.
+at global scope. Codex system means the explicit
+`${CODEX_HOME:-$HOME/.codex}/skills/.system` container; it is last so bundled
+defaults cannot shadow user-managed Skills.
 
 Resolution must be deterministic. After resolution, entries are sorted by
 name for pagination and prompt rendering.
@@ -613,7 +620,8 @@ at runtime.
 
 ### 14.1 Resolver and protocol
 
-- A fixture covering every discovery root resolves one entry per final name.
+- A fixture covering every discovery root, including Codex's `.system`
+  container, resolves one entry per final name.
 - Global-root fixtures override `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
   `XDG_CONFIG_HOME` and resolve from the same homes as their live backends.
 - Built-in, project/global, directory depth, and directory-family precedence
