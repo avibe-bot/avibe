@@ -16127,6 +16127,19 @@ app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)
 
 
+# cloudflared holds idle origin connections in a pool for up to
+# --proxy-keepalive-timeout (default 1m30s) and reuses them for later requests.
+# uvicorn's own default is 5s, so the origin closes connections the tunnel still
+# considers reusable: a request handed to one while it is being torn down loses
+# the race, cloudflared reports "connection reset by peer", and the browser sees
+# a 502 even though the server is healthy. Outliving the upstream pool keeps
+# idle teardown on the proxy side, where it cannot collide with a live request.
+# The same reasoning covers any reverse proxy in front of the UI; nginx's
+# keepalive_timeout default (75s) is also below this value.
+_CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT_SECONDS = 90
+_UI_KEEPALIVE_TIMEOUT_SECONDS = 120
+
+
 def _bind_ui_socket(host: str, port: int) -> socket.socket:
     family = socket.AF_INET6 if host and ":" in host else socket.AF_INET
     sock = socket.socket(family)
@@ -16183,6 +16196,7 @@ def run_ui_server(host: str, port: int) -> None:
                 loop="asyncio",
                 lifespan="on",
                 workers=1,
+                timeout_keep_alive=_UI_KEEPALIVE_TIMEOUT_SECONDS,
             )
             bound_socket = _bind_ui_socket(host, port)
             _server = uvicorn.Server(uvicorn_config)
