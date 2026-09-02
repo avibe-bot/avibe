@@ -607,6 +607,58 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "slack/U456" not in first_client.options.system_prompt["append"]
 
 
+def test_session_handler_recreates_cached_claude_client_when_skill_bindings_change(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+    skill_env = {"AVIBE_SKILL_WORKING_DIR": str(tmp_path)}
+
+    class _PromptSessions(_Sessions):
+        @staticmethod
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
+            return "sesk8m4q2p7x"
+
+        @staticmethod
+        def get_claude_session_id(settings_key, base_session_id):
+            return None
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        session_handler_module,
+        "managed_skill_environment",
+        lambda _working_path: dict(skill_env),
+    )
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager.sessions = _PromptSessions()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    first_client = _run_session(handler, context)
+    skill_env["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] = "a" * 64
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID" not in first_client.options.env
+    assert second_client.options.env["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "a" * 64
+
+
 def test_session_handler_recreates_terminated_cached_client_before_dispatch(
     monkeypatch,
     tmp_path: Path,

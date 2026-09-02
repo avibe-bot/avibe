@@ -509,6 +509,17 @@ class SessionHandler(BaseHandler):
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
+        managed_skills_env = managed_skill_environment(working_path)
+        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because managed Skill bindings changed",
+                composite_key,
+            )
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
+            return None
         git_path_state = self._claude_git_path_state(working_path)
         if getattr(client, "_vibe_git_path_state", None) != git_path_state:
             logger.info(
@@ -607,6 +618,17 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
+            return None
+        managed_skills_env = managed_skill_environment(working_path)
+        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because managed Skill bindings changed",
                 composite_key,
             )
             await self._cleanup_session_locked(
@@ -1577,6 +1599,7 @@ class SessionHandler(BaseHandler):
         client = ClaudeSDKClient(options=options)
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
+        setattr(client, "_vibe_managed_skills_env", managed_skill_environment(working_path))
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(
             client,

@@ -25,7 +25,6 @@ from core.managed_skills import (
     render_skill_catalog_prompt,
     render_skill_content,
     render_skill_list,
-    resolve_accessible_skills,
     resolve_skills,
     snapshot_tree_digest,
 )
@@ -116,6 +115,25 @@ def test_loose_parser_decodes_quoted_name_escapes_and_plain_description_folding(
     assert skill is not None
     assert skill.name == "format-code"
     assert skill.description == "Formats source files and applies repository conventions."
+
+
+def test_loose_parser_accepts_quoted_required_keys(tmp_path: Path) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "\"name\": format-code\n"
+        "'description': Formats source files.\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.name == "format-code"
+    assert skill.description == "Formats source files."
 
 
 def test_loose_parser_ignores_nested_required_field_names(tmp_path: Path) -> None:
@@ -453,9 +471,17 @@ def test_system_prompt_catalog_reflects_add_edit_and_delete_each_render(tmp_path
     assert "## Skills" not in after_delete
 
 
-def test_system_prompt_catalog_forwards_remote_acl_context(tmp_path: Path, monkeypatch) -> None:
+def test_system_prompt_catalog_is_backend_neutral_for_remote_sessions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     cwd = tmp_path / "project"
     cwd.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    _write_skill(cwd / ".agents" / "skills", "shared", "shared", "Shared")
     resource_context = {
         "sub": "member-1",
         "instance_role": "editor",
@@ -470,67 +496,17 @@ def test_system_prompt_catalog_forwards_remote_acl_context(tmp_path: Path, monke
             "message_metadata": {"resource_user_context": resource_context},
         },
     )
-    captured = {}
-
-    def resolve(catalog_cwd, *, backend, user_context):
-        captured.update(cwd=catalog_cwd, backend=backend, user_context=user_context)
-        return []
-
-    monkeypatch.setattr(managed_skills, "resolve_accessible_skills", resolve)
-
-    build_system_prompt_injection(
-        context=context,
-        fallback_platform="avibe",
-        current_agent_backend="codex",
-        skills_cwd=cwd,
-    )
-
-    assert captured == {
-        "cwd": cwd,
-        "backend": "codex",
-        "user_context": resource_context,
+    prompts = {
+        backend: build_system_prompt_injection(
+            context=context,
+            fallback_platform="avibe",
+            current_agent_backend=backend,
+            skills_cwd=cwd,
+        )
+        for backend in ("claude", "codex", "opencode")
     }
 
-
-def test_remote_acl_identity_uses_the_registered_working_directory(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    repository = tmp_path / "repository"
-    working_directory = repository / "registered-subdirectory"
-    working_directory.mkdir(parents=True)
-    (repository / ".git").mkdir()
-    home = tmp_path / "home"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
-    _write_skill(working_directory / ".agents" / "skills", "project", "project", "Project")
-    captured = {}
-
-    def filter_names(rows, *, backend, project_dir, user_context):
-        captured.update(project_dir=project_dir, rows=rows)
-        return {"project"}
-
-    monkeypatch.setattr(
-        "core.services.skills.filter_accessible_runtime_skill_names",
-        filter_names,
-    )
-
-    skills = resolve_accessible_skills(
-        working_directory,
-        backend="codex",
-        user_context={"sub": "member-1"},
-    )
-
-    assert [skill.name for skill in skills] == ["project"]
-    assert captured["project_dir"] == str(working_directory.resolve())
-    assert captured["rows"] == [
-        {
-            "name": "project",
-            "scope": "project",
-            "backends": ("claude", "opencode", "codex"),
-        }
-    ]
+    assert all("- shared: Shared" in prompt for prompt in prompts.values())
 
 
 def test_load_emits_body_only_and_agent_accessible_directory(tmp_path: Path, monkeypatch) -> None:
@@ -758,26 +734,9 @@ def test_compatibility_aliases_share_one_candidate_budget_slot(tmp_path: Path, m
 
     assert [skill.name for skill in skills] == ["shared", "unique"]
     assert skills[0].directory == canonical.parent.resolve()
-    assert skills[0].access_backends == ("claude", "opencode", "codex")
-    assert skills[1].access_backends == ("opencode",)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="directory symlink fixture requires POSIX semantics")
-def test_native_aliases_merge_access_backends_for_one_directory(tmp_path: Path) -> None:
-    cwd = tmp_path / "project"
-    canonical = _write_skill(tmp_path / "shared-source", "shared", "shared", "Shared")
-    for root in (cwd / ".codex" / "skills", cwd / ".claude" / "skills"):
-        root.mkdir(parents=True)
-        (root / "shared").symlink_to(canonical.parent, target_is_directory=True)
-
-    skills = _isolated_resolve(cwd, tmp_path)
-
-    assert len(skills) == 1
-    assert skills[0].directory == canonical.parent.resolve()
-    assert skills[0].access_backends == ("codex", "claude")
-
-
-def test_distinct_same_name_candidates_keep_the_winners_access_backend(tmp_path: Path) -> None:
+def test_distinct_same_name_candidates_keep_precedence_winner(tmp_path: Path) -> None:
     cwd = tmp_path / "project"
     _write_skill(cwd / ".codex" / "skills", "shared", "shared", "Codex")
     _write_skill(cwd / ".claude" / "skills", "shared", "shared", "Claude")
@@ -786,7 +745,6 @@ def test_distinct_same_name_candidates_keep_the_winners_access_backend(tmp_path:
 
     assert len(skills) == 1
     assert skills[0].description == "Codex"
-    assert skills[0].access_backends == ("codex",)
 
 
 def test_snapshot_v1_digest_fixture_is_stable(tmp_path: Path) -> None:
@@ -885,6 +843,20 @@ def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
     assert (destination / ids[0] / "alpha" / "SKILL.md").is_file()
 
 
+def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha")
+    snapshot_id = snapshot_tree_digest(source)
+    staging = destination / f".snapshot-{snapshot_id}.staging"
+    staging.mkdir(parents=True)
+    (staging / "partial").write_text("interrupted", encoding="utf-8")
+
+    assert publish_builtin_skills(source_root=source, destination_root=destination) == snapshot_id
+    assert not staging.exists()
+    assert (destination / snapshot_id / "alpha" / "SKILL.md").is_file()
+
+
 def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) -> None:
     destination = tmp_path / "builtin-skills"
     invalid_source = tmp_path / "invalid"
@@ -899,6 +871,20 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
     (destination / snapshot_id).write_text("not a directory", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not a directory|unavailable"):
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot create forbidden fixture names")
+@pytest.mark.parametrize("component", ["bad?name", "bad*name", 'bad"name', "bad\x01name"])
+def test_publication_rejects_all_windows_forbidden_path_classes(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    source = tmp_path / "source"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    (skill_file.parent / component).write_text("invalid", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not portable"):
+        publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
 
 
 def test_publication_rejects_builtins_outside_runtime_catalog_limits(
@@ -990,9 +976,8 @@ def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(
     assert managed_skills.builtin_skills_source() == packaged_source
 
 
-def test_remote_acl_failure_hides_compatibility_skills_but_keeps_builtins(
-    tmp_path: Path,
-    monkeypatch,
+def test_workbench_management_acl_does_not_narrow_runtime_catalog(
+    tmp_path: Path, monkeypatch
 ) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "project"
@@ -1004,18 +989,9 @@ def test_remote_acl_failure_hides_compatibility_skills_but_keeps_builtins(
     monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, snapshot_id)
     _write_skill(avibe_home / "builtin-skills" / snapshot_id, "builtin", "builtin", "Built-in")
     _write_skill(cwd / ".agents" / "skills", "project", "project", "Project")
-    monkeypatch.setattr(
-        "core.services.skills.filter_accessible_runtime_skill_names",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
-    )
+    skills = resolve_skills(cwd)
 
-    skills = resolve_accessible_skills(
-        cwd,
-        backend="codex",
-        user_context={},
-    )
-
-    assert [skill.name for skill in skills] == ["builtin"]
+    assert [skill.name for skill in skills] == ["builtin", "project"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink fixture requires POSIX semantics")

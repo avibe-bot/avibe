@@ -71,6 +71,22 @@ function ownerIdentity(pid) {
   }
 }
 
+function applyStaleBindingEnv(output, binding) {
+  const env = binding && typeof binding.env === "object" ? binding.env : {}
+  const safe = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (key.startsWith("AVIBE_SKILL_") || key === "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID") {
+      safe[key] = value
+    }
+  }
+  if (env.AVIBE_CALLER_REMOTE === "1" && typeof env.AVIBE_SESSION_ID === "string") {
+    safe.AVIBE_SESSION_ID = env.AVIBE_SESSION_ID
+    safe.AVIBE_CALLER_PLATFORM = "avibe"
+    safe.AVIBE_CALLER_REMOTE = "1"
+  }
+  applyEnv(output, safe)
+}
+
 export const AvibeCallerContextPlugin = async () => ({
   "shell.env": async (input, output) => {
     const sessionID = input && typeof input.sessionID === "string" ? input.sessionID : ""
@@ -78,9 +94,15 @@ export const AvibeCallerContextPlugin = async () => ({
     const binding = readBindings()[sessionID]
     if (!binding || typeof binding !== "object") return
     const ownerPID = Number(binding.owner_pid)
-    if (!Number.isInteger(ownerPID) || ownerPID <= 0) return
+    if (!Number.isInteger(ownerPID) || ownerPID <= 0) {
+      applyStaleBindingEnv(output, binding)
+      return
+    }
     const expectedIdentity = typeof binding.owner_identity === "string" ? binding.owner_identity : ""
-    if (!expectedIdentity || ownerIdentity(ownerPID) !== expectedIdentity) return
+    if (!expectedIdentity || ownerIdentity(ownerPID) !== expectedIdentity) {
+      applyStaleBindingEnv(output, binding)
+      return
+    }
     applyEnv(output, binding.env)
   },
 })
@@ -198,7 +220,9 @@ def _write_bindings(path: Path, data: dict[str, Any]) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     tmp_path = Path(tmp_name)
     try:
-        os.fchmod(fd, 0o600)
+        fchmod = getattr(os, "fchmod", None)
+        if callable(fchmod):
+            fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
             json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)

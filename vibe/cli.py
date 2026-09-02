@@ -841,26 +841,19 @@ def cmd_memory(args) -> int:
 def cmd_skill(args) -> int:
     """List or load Skills through Avibe's live resolver."""
 
-    from core.caller_context import caller_context_from_env, caller_resource_user_context
     from core.managed_skills import (
         load_skill,
         render_skill_content,
         render_skill_list,
-        resolve_accessible_skills,
+        resolve_skills,
     )
 
     language = _configured_cli_language()
-    caller = caller_context_from_env()
-    backend = caller.backend if caller is not None else None
-    user_context = caller_resource_user_context(caller)
 
     if args.skill_command == "list":
         try:
             output = render_skill_list(
-                resolve_accessible_skills(
-                    backend=backend,
-                    user_context=user_context,
-                ),
+                resolve_skills(),
                 page=args.page,
                 more_notice=i18n_t(
                     "skill.cli.more",
@@ -876,10 +869,7 @@ def cmd_skill(args) -> int:
         return 0
 
     if args.skill_command == "load":
-        allowed = resolve_accessible_skills(
-            backend=backend,
-            user_context=user_context,
-        )
+        allowed = resolve_skills()
         if args.name not in {skill.name for skill in allowed}:
             print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
             return 1

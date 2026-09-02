@@ -82,6 +82,22 @@ def test_prune_sessions_keeps_live_owners_and_removes_dead_ones(monkeypatch) -> 
 
 def test_plugin_requires_the_recorded_owner_process_identity() -> None:
     assert "ownerIdentity(ownerPID) !== expectedIdentity" in bridge.PLUGIN_SOURCE
+    assert "applyStaleBindingEnv(output, binding)" in bridge.PLUGIN_SOURCE
+    assert 'safe.AVIBE_CALLER_REMOTE = "1"' in bridge.PLUGIN_SOURCE
+
+
+def test_binding_write_does_not_require_posix_fchmod(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.delattr(bridge.os, "fchmod")
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+
+    assert bridge.bind_session(
+        "oc-session",
+        None,
+        base_env={},
+        working_dir=tmp_path,
+        extra_env={"AVIBE_SKILL_WORKING_DIR": str(tmp_path)},
+    )
 
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:

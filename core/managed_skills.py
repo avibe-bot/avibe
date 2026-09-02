@@ -11,7 +11,6 @@ import re
 import shutil
 import stat
 import struct
-import tempfile
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -52,7 +51,9 @@ BUILTIN_TREE_MAX_BYTES = 32 * 1024 * 1024
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_REQUIRED_FIELD_RE = re.compile(r"^(name|description)[ \t]*:[ \t]*(.*)$")
+_REQUIRED_FIELD_RE = re.compile(
+    r'^(?:"(name|description)"|\'(name|description)\'|(name|description))[ \t]*:[ \t]*(.*)$'
+)
 _TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
 _BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
 _WINDOWS_RESERVED = {
@@ -71,15 +72,6 @@ _PROJECT_FAMILIES = (
     (Path(".claude/skills"), 3),
     (Path(".opencode/skills"), 4),
 )
-_FAMILY_ACCESS_BACKENDS = {
-    1: ("claude", "opencode", "codex"),
-    2: ("codex",),
-    3: ("claude",),
-    4: ("opencode",),
-    5: ("codex",),
-}
-
-
 @dataclass(frozen=True)
 class ManagedSkill:
     name: str
@@ -91,7 +83,6 @@ class ManagedSkill:
     source_directory: Path | None = None
     source_directory_identity: tuple[int, int] | None = None
     frontmatter_bytes: int = 0
-    access_backends: tuple[str, ...] = ()
 
 
 @dataclass
@@ -208,7 +199,44 @@ def _normalize_description(value: str) -> str:
     return " ".join(without_controls.split())
 
 
+class _BoundedSafeLoader(yaml.SafeLoader):
+    """Parse normal YAML first without letting aliases or node count amplify work."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._composed_nodes = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise yaml.YAMLError("frontmatter aliases are not needed for required fields")
+        self._composed_nodes += 1
+        if self._composed_nodes > 1024:
+            raise yaml.YAMLError("frontmatter contains too many YAML nodes")
+        return super().compose_node(parent, index)
+
+
+def _structured_frontmatter_fields(frontmatter: str) -> dict[str, str]:
+    try:
+        parsed = yaml.load(frontmatter, Loader=_BoundedSafeLoader)
+    except (yaml.YAMLError, RecursionError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    name = parsed.get("name")
+    description = parsed.get("description")
+    if not isinstance(name, str) or not isinstance(description, str):
+        return {}
+    return {
+        "name": name.strip(),
+        "description": _normalize_description(description),
+    }
+
+
 def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
+    structured = _structured_frontmatter_fields("".join(lines))
+    if structured.get("name") and structured.get("description"):
+        return structured
+
     fields: dict[str, str] = {}
     index = 0
     while index < len(lines):
@@ -217,7 +245,8 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
             index += 1
             continue
 
-        field, raw_value = match.groups()
+        double_quoted_field, single_quoted_field, plain_field, raw_value = match.groups()
+        field = double_quoted_field or single_quoted_field or plain_field
         if field in fields:
             index += 1
             continue
@@ -576,9 +605,7 @@ def _scan_root(
     priority: tuple[int, int, int],
     budget: _DiscoveryBudget,
     seen_directory_identities: set[tuple[int, int]] | None = None,
-    candidates_by_directory_identity: dict[tuple[int, int], ManagedSkill] | None = None,
     ignored_names: frozenset[str] = frozenset(),
-    access_backends: tuple[str, ...] = (),
 ) -> list[ManagedSkill]:
     children = _root_children(root, ignored_names=ignored_names, budget=budget)
     if children is None:
@@ -595,15 +622,6 @@ def _scan_root(
         directory, source_identity, directory_identity = resolved_directory
         if seen_directory_identities is not None:
             if directory_identity in seen_directory_identities:
-                if candidates_by_directory_identity is not None:
-                    existing = candidates_by_directory_identity.get(directory_identity)
-                    if existing is not None:
-                        candidates_by_directory_identity[directory_identity] = replace(
-                            existing,
-                            access_backends=tuple(
-                                dict.fromkeys((*existing.access_backends, *access_backends))
-                            ),
-                        )
                 continue
             seen_directory_identities.add(directory_identity)
         budget.candidates += 1
@@ -620,11 +638,7 @@ def _scan_root(
         )
         budget.frontmatter_bytes += consumed
         if skill is not None:
-            skill = replace(skill, access_backends=access_backends)
-            if candidates_by_directory_identity is not None:
-                candidates_by_directory_identity[directory_identity] = skill
-            else:
-                skills.append(skill)
+            skills.append(skill)
     return skills
 
 
@@ -739,7 +753,6 @@ def resolve_skills(
 
     compatibility_budget = _DiscoveryBudget()
     compatibility_directory_identities: set[tuple[int, int]] = set()
-    compatibility_candidates_by_identity: dict[tuple[int, int], ManagedSkill] = {}
     working_directory = _working_directory(cwd)
     for depth, directory in enumerate(_project_directories(working_directory)):
         for relative_root, family_rank in _PROJECT_FAMILIES:
@@ -751,8 +764,6 @@ def resolve_skills(
                     priority=(1, depth, family_rank),
                     budget=compatibility_budget,
                     seen_directory_identities=compatibility_directory_identities,
-                    candidates_by_directory_identity=compatibility_candidates_by_identity,
-                    access_backends=_FAMILY_ACCESS_BACKENDS[family_rank],
                 )
             )
         if compatibility_budget.exhausted:
@@ -774,13 +785,9 @@ def resolve_skills(
                 priority=(2, 0, family_rank),
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,
-                candidates_by_directory_identity=compatibility_candidates_by_identity,
                 ignored_names=ignored_names,
-                access_backends=_FAMILY_ACCESS_BACKENDS[family_rank],
             )
         )
-
-    candidates.extend(compatibility_candidates_by_identity.values())
 
     winners: dict[str, ManagedSkill] = {}
     for candidate in candidates:
@@ -788,45 +795,6 @@ def resolve_skills(
         if current is None or candidate.priority < current.priority:
             winners[candidate.name] = candidate
     return sorted(winners.values(), key=lambda skill: skill.name)
-
-
-def resolve_accessible_skills(
-    cwd: str | Path | None = None,
-    *,
-    backend: str | None,
-    user_context: object | None,
-) -> list[ManagedSkill]:
-    """Resolve the Catalog and enforce remote Workbench Skill ACLs."""
-
-    skills = resolve_skills(cwd)
-    if user_context is None:
-        return skills
-
-    compatibility = [skill for skill in skills if skill.priority[0] != 0]
-    if not compatibility:
-        return skills
-
-    from core.services.skills import filter_accessible_runtime_skill_names
-
-    working_directory = _working_directory(cwd)
-    try:
-        allowed_names = filter_accessible_runtime_skill_names(
-            [
-                {
-                    "name": skill.name,
-                    "scope": "project" if skill.priority[0] == 1 else "global",
-                    "backends": skill.access_backends,
-                }
-                for skill in compatibility
-            ],
-            backend=backend or "",
-            project_dir=str(working_directory),
-            user_context=user_context,
-        )
-    except Exception:
-        logger.warning("Failed to apply remote Skill access policy", exc_info=True)
-        allowed_names = set()
-    return [skill for skill in skills if skill.priority[0] == 0 or skill.name in allowed_names]
 
 
 def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
@@ -1009,7 +977,6 @@ def load_skill(
             source_directory=winner.source_directory,
             source_directory_identity=winner.source_directory_identity,
             frontmatter_bytes=loaded.frontmatter_bytes,
-            access_backends=winner.access_backends,
         )
     except OSError:
         return None
@@ -1178,6 +1145,23 @@ def _validate_builtin_catalog(root: Path) -> None:
             raise RuntimeError("Built-in Skill frontmatter exceeds the 8 MiB catalog budget")
 
 
+def _remove_snapshot_staging(path: Path) -> None:
+    try:
+        value = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f"Cannot inspect built-in Skill staging path: {path}") from exc
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    file_attributes = int(getattr(value, "st_file_attributes", 0))
+    if stat.S_ISDIR(value.st_mode) and not (reparse_flag and file_attributes & reparse_flag):
+        shutil.rmtree(path)
+    elif stat.S_ISDIR(value.st_mode):
+        path.rmdir()
+    else:
+        path.unlink()
+
+
 def publish_builtin_skills(
     *,
     source_root: str | Path | None = None,
@@ -1201,6 +1185,8 @@ def publish_builtin_skills(
     umbrella.mkdir(parents=True, exist_ok=True)
     lock_path = umbrella / f".publish-{snapshot_id}.lock"
     with MigrationFileLock(lock_path, timeout_seconds=None):
+        staging = umbrella / f".snapshot-{snapshot_id}.staging"
+        _remove_snapshot_staging(staging)
         if os.path.lexists(destination):
             try:
                 destination_stat = destination.stat(follow_symlinks=False)
@@ -1214,7 +1200,7 @@ def publish_builtin_skills(
             except OSError as exc:
                 raise RuntimeError(f"Built-in Skill snapshot is unreadable: {destination}") from exc
             return snapshot_id
-        staging = Path(tempfile.mkdtemp(prefix=f".snapshot-{snapshot_id}-", dir=umbrella))
+        staging.mkdir(mode=0o700)
         try:
             shutil.copytree(
                 source,
@@ -1233,7 +1219,7 @@ def publish_builtin_skills(
                     raise
         finally:
             if os.path.lexists(staging):
-                shutil.rmtree(staging)
+                _remove_snapshot_staging(staging)
     return snapshot_id
 
 
