@@ -41,9 +41,18 @@ export type Agent = {
    * This is where the agents payload names its models — there is no `models`
    * array on it, and a fixture that reads one silently skips every spec that
    * needs a route.
+   *
+   * Null outside Gateway mode — the server gates it on `mode == "hub"` — so it
+   * answers "what does this backend route" only for a backend that already
+   * routes. `routableModels` below is the question asked of any backend.
    */
-  model_supply?: { model_id: string; chain_length: number; has_runnable_hop: boolean }[];
+  model_supply?: { model_id: string; chain_length: number; has_runnable_hop: boolean }[] | null;
   selected_model_id?: string | null;
+  /** `fixed` for `claude`/`codex`, whose menu is a builtin list; `open` for
+   *  `opencode`, whose menu is whatever the operator has ticked. */
+  menu_kind?: 'fixed' | 'open';
+  builtin_models?: string[] | null;
+  menu?: { checked?: string[] } | null;
   [key: string]: unknown;
 };
 
@@ -78,6 +87,30 @@ export type RouteHop = { source_id: string; model_id: string };
  */
 export const isSuiteSource = (source: Source): boolean =>
   source.display_name.startsWith(E2E_SOURCE_PREFIX);
+
+/**
+ * The models a backend's routes are keyed by — the set `model_supply` holds
+ * once that backend is in Gateway mode.
+ *
+ * An INSTALLED backend is not the same thing as a backend with a route to open,
+ * and the difference is not exotic: `_agent_payload` keys `model_supply` on the
+ * builtin list for a `fixed` menu and on `menu.checked` for an `open` one, so an
+ * `opencode` whose menu nobody has ticked sits in Gateway mode with an empty
+ * supply while a `claude` in Direct mode has a full one.
+ *
+ * `model_supply` is the server's own answer and is preferred wherever it exists
+ * — but it is null outside Gateway mode, so a Direct backend can only be judged
+ * before the switch by the menu that BECOMES it, which is what the fallback
+ * reconstructs.
+ *
+ * Deliberately narrower than the row list the page renders: `listedModelIds`
+ * adds the selected model and existing route keys, so the surface can show a row
+ * for a model `model_supply` does not carry — and `model_supply` is what a route
+ * fixture and its guards read.
+ */
+export const routableModels = (agent: Agent): string[] =>
+  agent.model_supply?.map((entry) => entry.model_id)
+  ?? (agent.menu_kind === 'fixed' ? agent.builtin_models ?? [] : agent.menu?.checked ?? []);
 
 /**
  * The plan a guarded mutation is refused with, read the way the route actually

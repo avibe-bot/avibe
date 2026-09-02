@@ -16,6 +16,7 @@
 // those specs a mode-switch test as well, and would report the mode switch's
 // failures under their names.
 import type { Agent, Source } from './api';
+import { routableModels } from './api';
 import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
 import { expect, requireModelHub, requireMockUpstream, requireRuntimeRunning, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
@@ -118,15 +119,31 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       ];
 
       const agents = await api.agents();
-      // A backend already in Gateway mode is used as found: switching a second
-      // one would change more of the instance than the test needs. But only if
-      // its CLI is still installed — the product's own surface filters those
-      // backends out (`installedAgents`), so its route rows never render, and a
-      // spec handed one fails on missing elements instead of reaching for an
-      // installed backend or the documented no-backend skip.
-      const alreadyHub = agents.find((agent: Agent) => agent.mode === 'hub' && agent.cli_present);
-      const candidate = alreadyHub ?? agents.find((agent: Agent) => agent.cli_present);
-      testInfo.skip(!candidate, 'No agent backend is installed on this instance, so none can be put into Gateway mode.');
+      // What this fixture owes its specs is a backend with a ROUTE to open, and
+      // that is two facts, not one. The CLI has to be installed, because the
+      // product's own surface filters uninstalled backends out
+      // (`installedAgents`) and their route rows never render. And the backend
+      // has to expose a model, because an `opencode` sitting in Gateway mode
+      // with nothing ticked has an empty `model_supply` — so selecting on
+      // installation alone would take that one as found and hand every B, D and
+      // G spec a backend with no route, while an installed `claude` in Direct
+      // mode next to it had a full builtin menu all along.
+      const installed = agents.filter((agent: Agent) => agent.cli_present);
+      const usable = installed.filter((agent: Agent) => routableModels(agent).length > 0);
+      // Still preferred if it qualifies: switching a second backend would change
+      // more of the instance than the test needs.
+      const alreadyHub = usable.find((agent: Agent) => agent.mode === 'hub');
+      const candidate = alreadyHub ?? usable[0];
+      testInfo.skip(!installed.length, 'No agent backend is installed on this instance, so none can be put into Gateway mode.');
+      // Its own skip, and its own sentence: "installed but with an empty menu"
+      // is a different thing to fix than "nothing installed", and a spec that
+      // reported the first as the second would send its reader to reinstall a
+      // backend that is already there.
+      testInfo.skip(
+        !candidate,
+        `No installed backend (${installed.map((agent: Agent) => agent.backend).join(', ')}) exposes a model to route. `
+        + 'Tick at least one model in a backend\'s model menu, or install a backend whose menu is builtin.',
+      );
       if (!alreadyHub) {
         sourcesBeforeSwitch = new Set((await api.sources()).map((source) => source.id));
         // Recorded BEFORE the PATCH is awaited, not after it succeeds: the
@@ -150,9 +167,15 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       const model =
         supply.find((entry) => entry.model_id === live?.selected_model_id)?.model_id
         ?? supply[0]?.model_id;
+      // An assertion, not a skip, and it stays one now that the candidate was
+      // chosen for having a menu: an empty supply here means the backend's menu
+      // said it had models and the Gateway-mode projection of that same menu
+      // says it has none. That is the product contradicting itself, not a
+      // precondition this instance failed to meet.
       expect(
         model,
-        `Backend ${candidate!.backend} lists no models, so it has no route to open.`,
+        `Backend ${candidate!.backend} offered ${routableModels(candidate!).join(', ')} before the `
+        + 'Gateway-mode switch, but lists no models after it, so it has no route to open.',
       ).toBeDefined();
 
       await provide({
