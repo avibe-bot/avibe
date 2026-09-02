@@ -1234,7 +1234,9 @@ def test_avibe_inbound_is_noop(isolated_state):
 # --- Session-list rank (agent output, no user input) ------------------
 
 
-def _seed_ranked_session(session_id: str, *, last_active_at: str, native_id: str) -> str:
+def _seed_ranked_session(
+    session_id: str, *, last_active_at: str, native_id: str, status: str = "active"
+) -> str:
     engine = create_sqlite_engine()
     seeded = "2026-05-30T12:00:00Z"
     with engine.begin() as conn:
@@ -1249,7 +1251,7 @@ def _seed_ranked_session(session_id: str, *, last_active_at: str, native_id: str
                 agent_variant="default",
                 session_anchor=f"anchor_{session_id}",
                 native_session_id="",
-                status="active",
+                status=status,
                 metadata_json="{}",
                 created_at=seeded,
                 updated_at=seeded,
@@ -1273,13 +1275,15 @@ def _freeze_rank_clock(monkeypatch) -> None:
     monkeypatch.setattr(storage_sessions, "_utc_now_iso", lambda: RANK_NOW)
 
 
-def _publish_agent_message(ctx: MessageContext, msg_type: str, text: str) -> dict[str, dict]:
+def _publish_agent_message(
+    ctx: MessageContext, msg_type: str, text: str, **kwargs
+) -> dict[str, dict]:
     from core import inbox_events
 
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
         try:
-            persist_agent_message(ctx, msg_type, text)
+            persist_agent_message(ctx, msg_type, text, **kwargs)
             return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
@@ -1357,6 +1361,50 @@ def test_background_session_output_is_not_ranked(isolated_state):
 
     assert "session.activity" not in published
     engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == sid)).mappings().one()
+    assert row["last_active_at"] == stale
+
+
+def test_replayed_output_that_persisted_nothing_does_not_rank(isolated_state, monkeypatch):
+    """The rank follows what materialized, not what was attempted.
+
+    A retried terminal output keeps its ``native_message_id``, so the append hits
+    the unique constraint and nothing new lands. Ranking there would let a replay
+    of one logical output lift a long-finished session back to the top of the
+    list on no new work at all.
+
+    The seeded stamp is stale, so the throttle would have allowed this write —
+    the only thing that can hold the rank is the materialized-row gate, which is
+    what makes this a test of that gate rather than of the throttle.
+    """
+    _freeze_rank_clock(monkeypatch)
+    sid = "ses_rank_replay"
+    stale = "2020-01-01T00:00:00Z"
+    scope_id = _seed_ranked_session(sid, last_active_at=stale, native_id="p_replay")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=sid,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="done",
+            native_message_id="receipt_1",
+        )
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=sid,
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+
+    published = _publish_agent_message(ctx, "result", "done", native_message_id="receipt_1")
+
+    assert "session.activity" not in published
     with engine.connect() as conn:
         row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == sid)).mappings().one()
     assert row["last_active_at"] == stale

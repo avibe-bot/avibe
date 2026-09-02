@@ -1584,8 +1584,9 @@ def touch_session_agent_activity(conn: Connection, session_id: str) -> bool:
     hold two disagreeing answers and need eviction to boot. A throttled call
     costs one primary-key-keyed UPDATE that matches nothing and dirties no page.
 
-    Returns ``True`` only when the stamp actually moved, so a caller can gate its
-    realtime publish on the same throttle without tracking any state itself.
+    Returns ``True`` only when the stamp actually moved — throttled, archived, and
+    unknown rows all return ``False`` — so a caller can gate its realtime publish
+    on this without tracking any state itself.
 
     Unrelated to ``SessionHandler.touch_session_activity``, which is an
     in-process ``monotonic()`` idle clock for runtime keep-alive.
@@ -1597,6 +1598,17 @@ def touch_session_agent_activity(conn: Connection, session_id: str) -> bool:
         update(agent_sessions)
         .where(
             agent_sessions.c.id == session_id,
+            # Archive is terminal, and this is the one session write with no entry
+            # point to guard: ``touch_session``'s callers reject an archived target
+            # up front (``ui_server`` and ``show_session_events`` both consult
+            # ``is_session_archived``) because a *user* action arrives at a request
+            # boundary. Agent output does not — ``archive_session`` commits the
+            # archive first and cancels the in-flight turn best-effort afterwards,
+            # so a turn keeps emitting into a row that is already archived. The
+            # predicate belongs in the UPDATE for the same reason it does at the
+            # PATCH above: a read-then-write check reserves nothing, and an archive
+            # committing in that window is exactly the case being guarded.
+            agent_sessions.c.status != "archived",
             # A parsed comparison rather than a text one because the column holds
             # more than one ISO shape: second-granularity ``…Z`` from
             # ``_utc_now_iso`` here and in ``agent_session_rows`` alongside

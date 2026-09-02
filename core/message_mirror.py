@@ -455,7 +455,20 @@ def persist_agent_message(
             # background Session: it is absent from all of them, so its rank is
             # dead weight. Rides the open transaction — no extra commit, no extra
             # fsync — and self-throttles in the row (see the storage helper).
-            if row_session_id and not suppress_delivery:
+            #
+            # Gated on a row having materialized rather than on reaching this line:
+            # ``_append_quietly`` returns ``None`` when the same
+            # ``native_message_id`` arrives twice, and the promote path can decline
+            # too, so a retried terminal output persists nothing. The rank asserts
+            # "the agent produced output"; replaying one logical output must not
+            # lift a long-finished session back to the top of the list on nothing
+            # new. The tool-call branch always inserts, so this only ever excludes
+            # the deduplicated chat row.
+            if (
+                row_session_id
+                and not suppress_delivery
+                and (appended_row is not None or tool_event_row is not None)
+            ):
                 activity_ranked = workbench_sessions_service.touch_session_agent_activity(
                     conn, row_session_id
                 )

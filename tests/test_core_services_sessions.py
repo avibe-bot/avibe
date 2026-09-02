@@ -1064,3 +1064,64 @@ def test_agent_activity_rank_lifts_a_session_working_unattended(isolated_state, 
     # The session nobody touched kept its rank — the bump is not a global re-sort.
     with engine.connect() as conn:
         assert sessions_service.get_session(conn, replied)["last_active_at"] == "2026-09-02T11:30:00Z"
+
+
+# Every value the session lifecycle ``status`` column holds. The rank is one more
+# write against a row whose archived state is terminal, and the repository
+# enforces that with a ``status != 'archived'`` predicate on every write rather
+# than a per-caller check, so the property is stated over the whole domain
+# instead of over the one case a reviewer happened to name.
+SESSION_LIFECYCLE_STATUSES = ("active", "archived")
+
+
+def test_agent_activity_rank_never_writes_an_archived_row(isolated_state, monkeypatch):
+    """Archive is terminal, including for late output.
+
+    ``archive_session`` commits the archive first and cancels the in-flight turn
+    best-effort afterwards, so a turn can still be emitting into an
+    already-archived session. Every seeded row carries the same stale stamp, so
+    the throttle would allow all of them and the status predicate is the only
+    thing deciding — and the expectation is derived from the rule, so a lifecycle
+    status added later is covered rather than silently skipped.
+    """
+    stale = "2020-01-01T00:00:00Z"
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        seeded = {
+            status: _seed_session_with_stamp(conn, scope_id, f"s-{status}", stale)
+            for status in SESSION_LIFECYCLE_STATUSES
+        }
+        for status, session_id in seeded.items():
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == session_id)
+                .values(status=status)
+            )
+
+    def archived_row() -> dict:
+        with engine.connect() as conn:
+            return dict(
+                conn.execute(
+                    agent_sessions.select().where(agent_sessions.c.id == seeded["archived"])
+                )
+                .mappings()
+                .one()
+            )
+
+    before = archived_row()
+
+    _freeze_rank_clock(monkeypatch, datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc))
+    with engine.begin() as conn:
+        moved = {
+            status: sessions_service.touch_session_agent_activity(conn, session_id)
+            for status, session_id in seeded.items()
+        }
+    assert moved == {status: status != "archived" for status in SESSION_LIFECYCLE_STATUSES}
+
+    # Nothing on the archived row moved, not merely its rank: the return value is
+    # a claim about the write, and ``updated_at`` shifting would still be a
+    # mutation of terminal metadata. Compared against the row as it was rather
+    # than against a chosen date, so the assertion holds whatever day it runs on.
+    assert archived_row() == before
+    assert before["last_active_at"] == stale
