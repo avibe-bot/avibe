@@ -35,6 +35,7 @@ from core.message_mirror import (
 )
 from modules.im import MessageContext
 from storage import messages_service
+from storage.agent_session_rows import SESSION_VISIBILITIES
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, media_objects, messages, scopes
@@ -46,6 +47,36 @@ def isolated_state(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     yield tmp_path
+
+
+# The topics that fan message CONTENT out to an open browser: the Chat transcript
+# row and the Inbox card preview. Named once as a class so a test can assert "this
+# row did not stream" by naming what must not appear, instead of asserting the bus
+# stayed silent — ``persist_agent_message`` also publishes contentless events on
+# the same path for unrelated concerns (the session-list rank), and a test that
+# reads silence as its property fails on the next one of those to be added while
+# proving nothing more about content.
+CONTENT_TOPICS = frozenset({"message.new", "inbox.session.updated"})
+
+
+async def _drain_published(queue: asyncio.Queue, *, quiet: float = 0.1) -> dict[str, dict]:
+    """Everything published to ``queue``, keyed by topic.
+
+    Drains until the bus goes quiet rather than reading a fixed count: a count
+    silently re-points a test's assertions at whichever events happen to arrive
+    first, so ``for _ in range(2)`` starts failing when an unrelated third topic
+    is published — not because the asserted property broke, but because the test
+    stopped looking at it. ``bus.publish`` enqueues synchronously, so the quiet
+    window is paid once and only after every event is already in the queue.
+    """
+
+    events: dict[str, dict] = {}
+    while True:
+        try:
+            topic, payload = await asyncio.wait_for(queue.get(), timeout=quiet)
+        except asyncio.TimeoutError:
+            return events
+        events[topic] = payload
 
 
 def _slack_ctx(message_id="m_001") -> MessageContext:
@@ -469,10 +500,7 @@ def test_persist_agent_publishes_message_and_inbox_for_avibe(isolated_state):
 
             with patch("core.web_push_notifications.maybe_notify_inbox_message", fake_notify):
                 persist_agent_message(ctx, "result", "final answer")
-            # Drain both events (order: message.new, then inbox.session.updated).
-            for _ in range(2):
-                event_type, data = await asyncio.wait_for(queue.get(), timeout=1.0)
-                events[event_type] = data
+            events = await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
         return events
@@ -541,17 +569,15 @@ def test_persist_agent_intermediate_persisted_but_not_streamed(isolated_state):
 
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
-        seen = []
         try:
             persist_agent_message(ctx, "assistant", "thinking out loud")
-            # No events at all — assistant is process log: not streamed, not inbox.
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(queue.get(), timeout=0.1)
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
-        return seen
 
-    asyncio.run(scenario())
+    published = asyncio.run(scenario())
+    # Assistant is process log: neither streamed to the transcript nor inbox-eligible.
+    assert not (CONTENT_TOPICS & set(published))
     # ...but the row IS still persisted (for history / debugging).
     with engine.connect() as conn:
         every = messages_service.list_session_messages(conn, session_id="ses_noresult", types=("assistant",))
@@ -599,12 +625,12 @@ def test_persist_agent_toolcall_avibe_writes_event_without_streaming(isolated_st
         sub_id, queue = inbox_events.bus.subscribe()
         try:
             persist_agent_message(ctx, "tool_call", "Tool input failed to parse")
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(queue.get(), timeout=0.1)
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
 
-    asyncio.run(scenario())
+    published = asyncio.run(scenario())
+    assert not (CONTENT_TOPICS & set(published))
     with engine.connect() as conn:
         message_row = conn.execute(select(messages).where(messages.c.session_id == "ses_tool")).first()
         event_row = conn.execute(select(agent_events).where(agent_events.c.session_id == "ses_tool")).mappings().one()
@@ -646,17 +672,11 @@ def test_persist_agent_toolcall_publishes_when_activity_enabled(isolated_state, 
 
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
-        events: dict[str, dict] = {}
         try:
             persist_agent_message(ctx, "tool_call", "🔧 `Bash` `{\"command\":\"ls\"}`")
-            evt = await asyncio.wait_for(queue.get(), timeout=1.0)
-            events[evt[0]] = evt[1]
-            # Only ONE event — no inbox bump for a trace row.
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(queue.get(), timeout=0.1)
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
-        return events
 
     events = asyncio.run(scenario())
     assert "message.new" in events and "inbox.session.updated" not in events
@@ -701,16 +721,11 @@ def test_persist_agent_assistant_publishes_when_activity_enabled(isolated_state,
 
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
-        events: dict[str, dict] = {}
         try:
             persist_agent_message(ctx, "assistant", "thinking out loud")
-            evt = await asyncio.wait_for(queue.get(), timeout=1.0)
-            events[evt[0]] = evt[1]
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(queue.get(), timeout=0.1)
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
-        return events
 
     events = asyncio.run(scenario())
     assert "message.new" in events and "inbox.session.updated" not in events
@@ -767,15 +782,11 @@ def test_persist_agent_output_is_visible_without_activity_streaming(
 
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
-        events: dict[str, dict] = {}
         try:
             persist_agent_message(ctx, "output", "primary answer")
-            for _ in range(2):
-                event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                events[event[0]] = event[1]
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
-        return events
 
     events = asyncio.run(scenario())
     assert events["message.new"]["type"] == "output"
@@ -868,15 +879,11 @@ def test_persist_agent_terminal_notify_updates_inbox(isolated_state):
 
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
-        events: dict[str, dict] = {}
         try:
             persist_agent_message(ctx, "notify", "❌ Claude error: boom")
-            for _ in range(2):  # message.new + inbox.session.updated, any order
-                evt = await asyncio.wait_for(queue.get(), timeout=1.0)
-                events[evt[0]] = evt[1]
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
-        return events
 
     events = asyncio.run(scenario())
     assert "inbox.session.updated" in events
@@ -1058,12 +1065,16 @@ def test_background_standalone_persists_full_turn_without_realtime_delivery(isol
         try:
             mirror_harness_inbound(context, "background prompt")
             persist_agent_message(context, "result", "background result")
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(queue.get(), timeout=0.1)
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
 
-    asyncio.run(scenario())
+    published = asyncio.run(scenario())
+    # The property is "persisted but not DELIVERED", so it is asserted over the
+    # named content topics. Asserting the bus stayed silent would have read the
+    # contentless session-list rank event as a delivery while proving nothing
+    # more about content — the reason ``CONTENT_TOPICS`` exists.
+    assert not (CONTENT_TOPICS & set(published))
     with engine.connect() as conn:
         rows = conn.execute(
             select(messages).where(messages.c.session_id == "ses_background").order_by(messages.c.author)
@@ -1223,3 +1234,263 @@ def test_avibe_inbound_is_noop(isolated_state):
     with engine.connect() as conn:
         rows = conn.execute(select(messages).where(messages.c.author == "user")).mappings().all()
     assert rows == []
+
+
+# --- Session-list rank (agent output, no user input) ------------------
+
+
+def _seed_ranked_session(
+    session_id: str,
+    *,
+    last_active_at: str,
+    native_id: str,
+    status: str = "active",
+    visibility: str = "foreground",
+) -> str:
+    engine = create_sqlite_engine()
+    seeded = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="avibe", scope_type="project", native_id=native_id, now=seeded
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor=f"anchor_{session_id}",
+                native_session_id="",
+                status=status,
+                visibility=visibility,
+                metadata_json="{}",
+                created_at=seeded,
+                updated_at=seeded,
+                last_active_at=last_active_at,
+            )
+        )
+    return scope_id
+
+
+RANK_NOW = "2026-09-02T12:00:00Z"
+
+
+def _freeze_rank_clock(monkeypatch) -> None:
+    """Pin the rank helper's clock. Its stamp is both the value written and the
+    one the throttle compares against, so an unfrozen clock lets a second
+    boundary between the write and the assertion decide the result.
+    """
+
+    import storage.workbench_sessions_service as storage_sessions
+
+    monkeypatch.setattr(storage_sessions, "_utc_now_iso", lambda: RANK_NOW)
+
+
+def _publish_agent_message(
+    ctx: MessageContext, msg_type: str, text: str, **kwargs
+) -> dict[str, dict]:
+    from core import inbox_events
+
+    async def scenario():
+        sub_id, queue = inbox_events.bus.subscribe()
+        try:
+            persist_agent_message(ctx, msg_type, text, **kwargs)
+            return await _drain_published(queue)
+        finally:
+            inbox_events.bus.unsubscribe(sub_id)
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("msg_type,text", [("tool_call", "🔧 `Bash`"), ("assistant", "still going")])
+def test_agent_output_ranks_the_session_and_announces_the_reorder(
+    isolated_state, monkeypatch, msg_type, text
+):
+    """Agent output alone moves the session's list rank and tells an open
+    browser to re-sort — the point of the change: nobody replied, and both a
+    chat row and a bare tool-call trace count as the agent working.
+    """
+    _freeze_rank_clock(monkeypatch)
+    sid = f"ses_rank_{msg_type}"
+    scope_id = _seed_ranked_session(sid, last_active_at="2020-01-01T00:00:00Z", native_id=f"p_{msg_type}")
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=sid,
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+
+    published = _publish_agent_message(ctx, msg_type, text)
+
+    assert published["session.activity"] == {
+        "session_id": sid,
+        "scope_id": scope_id,
+        "event": "agent_activity",
+    }
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == sid)).mappings().one()
+    assert row["last_active_at"] == RANK_NOW
+
+
+def test_agent_output_reorder_event_follows_the_rank_throttle(isolated_state, monkeypatch):
+    """The realtime reorder is published exactly when the rank moved, so the
+    burst of messages inside one throttle interval costs no events at all.
+    Gating on the write's own answer is what keeps the two in step without the
+    publisher tracking any state of its own.
+    """
+    _freeze_rank_clock(monkeypatch)
+    sid = "ses_rank_fresh"
+    _seed_ranked_session(sid, last_active_at=RANK_NOW, native_id="p_fresh")
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=sid,
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+
+    published = _publish_agent_message(ctx, "tool_call", "🔧 `Bash`")
+
+    assert "session.activity" not in published
+
+
+def test_agent_output_ranks_a_session_of_every_visibility(isolated_state, monkeypatch):
+    """Visibility is not part of the rank predicate — for every value it holds.
+
+    ``last_active_at`` is row state, and visibility is a MUTABLE display
+    preference where the archive is terminal: the session PATCH moves a row
+    between foreground and background and never backfills the stamp. A
+    background session is also a first-class agent-graph node ordered by this
+    very column, so holding its rank does not save a dead write — it leaves the
+    row mis-ordered for every later reader, including after it is restored.
+
+    Seeded over the whole storage vocabulary rather than over the one case a
+    reviewer named, and the expectation is derived from the rule ("every
+    visibility ranks") instead of written as a skip list, so a fourth visibility
+    is covered by construction. ``suppress_delivery`` is set the way its only
+    producer derives it, so the delivery flag that used to gate this is present
+    and demonstrably no longer decides.
+    """
+    _freeze_rank_clock(monkeypatch)
+    stale = "2020-01-01T00:00:00Z"
+    events: dict[str, dict] = {}
+    for visibility in sorted(SESSION_VISIBILITIES):
+        sid = f"ses_rank_vis_{visibility}"
+        _seed_ranked_session(
+            sid, last_active_at=stale, native_id=f"p_{visibility}", visibility=visibility
+        )
+        ctx = MessageContext(
+            user_id="workbench",
+            channel_id=sid,
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": sid,
+                # Exactly how ``core/internal_server.py`` derives it for this path.
+                "suppress_delivery": visibility == "background",
+            },
+        )
+        events[visibility] = _publish_agent_message(ctx, "result", f"done {visibility}")
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        stamps = {
+            row["visibility"]: row["last_active_at"]
+            for row in conn.execute(select(agent_sessions)).mappings()
+        }
+    assert stamps == {visibility: RANK_NOW for visibility in SESSION_VISIBILITIES}
+    # The reorder announcement follows the rank rather than delivery, so the
+    # hidden row's re-sort reaches the one view that renders it.
+    assert {v: "session.activity" in e for v, e in events.items()} == {
+        visibility: True for visibility in SESSION_VISIBILITIES
+    }
+
+
+def test_replayed_output_that_persisted_nothing_does_not_rank(isolated_state, monkeypatch):
+    """The rank follows what materialized, not what was attempted.
+
+    A retried terminal output keeps its ``native_message_id``, so the append hits
+    the unique constraint and nothing new lands. Ranking there would let a replay
+    of one logical output lift a long-finished session back to the top of the
+    list on no new work at all.
+
+    The seeded stamp is stale, so the throttle would have allowed this write —
+    the only thing that can hold the rank is the materialized-row gate, which is
+    what makes this a test of that gate rather than of the throttle.
+    """
+    _freeze_rank_clock(monkeypatch)
+    sid = "ses_rank_replay"
+    stale = "2020-01-01T00:00:00Z"
+    scope_id = _seed_ranked_session(sid, last_active_at=stale, native_id="p_replay")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=sid,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="done",
+            native_message_id="receipt_1",
+        )
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=sid,
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+
+    published = _publish_agent_message(ctx, "result", "done", native_message_id="receipt_1")
+
+    assert "session.activity" not in published
+    with engine.connect() as conn:
+        row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == sid)).mappings().one()
+    assert row["last_active_at"] == stale
+
+
+def test_im_agent_output_ranks_the_row_without_publishing(isolated_state, monkeypatch):
+    """``vibe session list``, the run graph and the running-agents view read the
+    same rank for every platform, so the row is ranked there too — while the
+    SSE stays avibe-only like every other publish on this path, an IM session
+    having no open browser consumer.
+    """
+    _freeze_rank_clock(monkeypatch)
+    engine = create_sqlite_engine()
+    seeded = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="slack", scope_type="channel", native_id="C_rank", now=seeded
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_rank_im",
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="anchor_ses_rank_im",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=seeded,
+                updated_at=seeded,
+                last_active_at="2020-01-01T00:00:00Z",
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="U_alice",
+        channel_id="C_rank",
+        platform="slack",
+        platform_specific={"agent_session_id": "ses_rank_im"},
+    )
+    published = _publish_agent_message(ctx, "result", "done")
+
+    assert "session.activity" not in published
+    with engine.connect() as conn:
+        row = (
+            conn.execute(select(agent_sessions).where(agent_sessions.c.id == "ses_rank_im"))
+            .mappings()
+            .one()
+        )
+    assert row["last_active_at"] == RANK_NOW

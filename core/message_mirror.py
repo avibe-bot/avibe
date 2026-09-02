@@ -30,6 +30,7 @@ from typing import Any, Optional
 from sqlalchemy.exc import IntegrityError
 
 from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
+from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
@@ -326,6 +327,7 @@ def persist_agent_message(
         appended_row = None
         tool_event_row = None
         message_type = None
+        activity_ranked = False
         is_tool_call = _is_tool_call_type(canonical_type)
         with engine.begin() as conn:
             if context.platform == "avibe":
@@ -445,6 +447,64 @@ def persist_agent_message(
                 # scoped to avibe sessions (IM rows persist but aren't shown there).
                 if context.platform == "avibe" and session_id and not suppress_delivery:
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
+            # Both branches rejoin here: a chat row and a tool-call trace event are
+            # equally proof the agent is working, and the session list ranked on
+            # input alone, so an unattended session sank while it worked. Rides the
+            # open transaction — no extra commit, no extra fsync.
+            #
+            # THE RANK ASSERTS ONE THING: this session's agent persisted output just
+            # now. So it is bounded by exactly the conditions that can make that
+            # claim false, and by nothing else:
+            #   1. a session row to rank (``row_session_id``);
+            #   2. output that actually materialized (below);
+            #   3. the row is not archived — archive is terminal, re-asserted inside
+            #      the UPDATE because this write has no request boundary to guard it;
+            #   4. the throttle, also a predicate on the row (see the storage helper).
+            # Conditions of the surrounding DELIVERY path are deliberately absent,
+            # and borrowing one by proximity is what cost two review rounds.
+            # ``context.platform`` is not a condition: the rank is read by the Web
+            # list, ``vibe session list``, the run graph and the running-agents view
+            # alike, so output ranks on every platform. ``suppress_delivery`` is not
+            # one either — a hidden session is not an unread one. A background
+            # Session is out of the session list but is a first-class agent-graph
+            # node ordered by this very column (``agent_graph`` defaults
+            # ``include_background=True``), and visibility is a MUTABLE preference
+            # where the archive is terminal: the PATCH that restores a session to the
+            # foreground writes ``visibility`` and ``updated_at`` and never backfills
+            # ``last_active_at``. Holding the rank while hidden therefore saves no
+            # dead write; it leaves the row mis-ordered for every later reader.
+            #
+            # (2) is a row having materialized, not merely reaching this line:
+            # ``_append_quietly`` returns ``None`` when the same
+            # ``native_message_id`` arrives twice, and the promote path can decline
+            # too, so a retried terminal output persists nothing. Replaying one
+            # logical output must not lift a long-finished session back to the top of
+            # the list on nothing new. The tool-call branch always inserts, so this
+            # only ever excludes the deduplicated chat row.
+            if row_session_id and (appended_row is not None or tool_event_row is not None):
+                activity_ranked = workbench_sessions_service.touch_session_agent_activity(
+                    conn, row_session_id
+                )
+        # A rank change means the list has to re-sort, so tell an open browser the
+        # same way an accepted user send does. Gated on the bump having actually
+        # landed, which bounds this to one event per minute per session — strictly
+        # cheaper than the per-message ``inbox.session.updated`` below. avibe-only
+        # for the reason the publishes below are: an IM session has no open Chat or
+        # sidebar consumer, so publishing it would be dead traffic.
+        #
+        # It follows the RANK, not delivery, so it fires for a hidden session too —
+        # which is right rather than merely consistent: the surface that orders
+        # background rows by this column is the agent graph, and that is the view
+        # whose consumer refetches on this event. The payload is
+        # ``{session_id, scope_id, event}`` with no content, so a reorder announces
+        # nothing a suppressed message body would have carried.
+        if activity_ranked and context.platform == "avibe":
+            from core.inbox_events import bus
+
+            bus.publish(
+                "session.activity",
+                {"session_id": row_session_id, "scope_id": scope_id, "event": "agent_activity"},
+            )
         # tool_call rows never enter ``messages``/TRANSCRIPT_TYPES; when the Chat
         # activity panel is enabled they fan out here as a synthesized
         # ``message.new`` so an open Chat page shows the step live. Default off →

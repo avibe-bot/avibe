@@ -121,7 +121,16 @@ function removeSessionRow(
   return changed ? next : prev;
 }
 
-const REORDER_ACTIVITY_EVENTS = new Set(['created', 'user_message', 'show_event']);
+// `agent_activity`: the agent produced output with nobody replying, so the row's
+// rank moved on its own. Rate-limited at the source (one per minute per session,
+// see storage.workbench_sessions_service.touch_session_agent_activity), which is
+// why an event that fires on agent output can drive a reconcile at all.
+const REORDER_ACTIVITY_EVENTS = new Set([
+  'created',
+  'user_message',
+  'show_event',
+  'agent_activity',
+]);
 
 // Single source of truth for the workbench projects/sessions tree. The desktop
 // WorkbenchSidebar (always mounted) and the mobile ProjectsPage (route) both

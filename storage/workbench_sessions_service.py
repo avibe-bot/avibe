@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Integer, and_, cast, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from config import paths
@@ -1539,6 +1539,92 @@ def touch_session(conn: Connection, session_id: str) -> None:
         .where(agent_sessions.c.id == session_id)
         .values(last_active_at=_utc_now_iso(), updated_at=_utc_now_iso())
     )
+
+
+# Coarsest stamp the activity-ordered surfaces can't tell apart. They render
+# relative ages ("2 min ago") off a list that re-sorts on whole rows, so a minute
+# of skew is invisible there while it bounds the write rate by the number of
+# ACTIVE sessions instead of by message volume — agent output arrives at
+# tool-call rate, tens of rows per minute per session.
+AGENT_ACTIVITY_RANK_INTERVAL_SECONDS = 60
+
+
+def _epoch_seconds(value: Any) -> Any:
+    """An ISO timestamp as whole seconds since the epoch, or NULL if undatable.
+
+    Takes a column or a literal and returns a SQL expression, so the same
+    conversion applies to both sides of a comparison.
+
+    Integer seconds rather than ``julianday`` arithmetic: julianday returns days
+    as a float near 2.46e6, so subtracting two of them leaves under a millisecond
+    of resolution and an exactly-``interval``-old stamp evaluates to 59.9999996 —
+    the throttle boundary would then depend on float error rather than on the
+    interval. Whole seconds are exact, and one second is far finer than any
+    interval this gates. ``strftime`` is available in every SQLite that can open
+    the database, unlike the ``unixepoch()`` shorthand (3.38+).
+    """
+
+    return cast(func.strftime("%s", value), Integer)
+
+
+def touch_session_agent_activity(conn: Connection, session_id: str) -> bool:
+    """Rank a session as recently active because its own agent produced output.
+
+    ``touch_session`` records *input*: a user send, a Show Page event. Nothing
+    recorded output, so a session whose agent has been working unattended for an
+    hour — genuinely the most active one there is — sank below sessions idle since
+    their last user message.
+
+    Called once per persisted agent message and per tool-call trace event, so it
+    carries its own rate limit rather than asking every caller to remember one:
+    the ``WHERE`` clause matches only when the stored stamp is already older than
+    :data:`AGENT_ACTIVITY_RANK_INTERVAL_SECONDS`. Keeping the throttle in the row
+    is what makes it correct as well as cheap — the controller and the UI server
+    are separate processes (see ``CLAUDE.md`` §2), so a process-local cache would
+    hold two disagreeing answers and need eviction to boot. A throttled call
+    costs one primary-key-keyed UPDATE that matches nothing and dirties no page.
+
+    Returns ``True`` only when the stamp actually moved — throttled, archived, and
+    unknown rows all return ``False`` — so a caller can gate its realtime publish
+    on this without tracking any state itself.
+
+    Unrelated to ``SessionHandler.touch_session_activity``, which is an
+    in-process ``monotonic()`` idle clock for runtime keep-alive.
+    """
+
+    now = _utc_now_iso()
+    stored_epoch = _epoch_seconds(agent_sessions.c.last_active_at)
+    result = conn.execute(
+        update(agent_sessions)
+        .where(
+            agent_sessions.c.id == session_id,
+            # Archive is terminal, and this is the one session write with no entry
+            # point to guard: ``touch_session``'s callers reject an archived target
+            # up front (``ui_server`` and ``show_session_events`` both consult
+            # ``is_session_archived``) because a *user* action arrives at a request
+            # boundary. Agent output does not — ``archive_session`` commits the
+            # archive first and cancels the in-flight turn best-effort afterwards,
+            # so a turn keeps emitting into a row that is already archived. The
+            # predicate belongs in the UPDATE for the same reason it does at the
+            # PATCH above: a read-then-write check reserves nothing, and an archive
+            # committing in that window is exactly the case being guarded.
+            agent_sessions.c.status != "archived",
+            # A parsed comparison rather than a text one because the column holds
+            # more than one ISO shape: second-granularity ``…Z`` from
+            # ``_utc_now_iso`` here and in ``agent_session_rows`` alongside
+            # ``…+00:00`` rows from ``sessions_service``'s ``isoformat()``, which
+            # compare wrongly as text at the same instant. ``strftime('%s')``
+            # yields NULL for a NULL or undatable stamp, and that arm has to bump —
+            # a row we cannot date is a row whose rank would otherwise freeze
+            # forever.
+            or_(
+                stored_epoch.is_(None),
+                _epoch_seconds(now) - stored_epoch >= AGENT_ACTIVITY_RANK_INTERVAL_SECONDS,
+            ),
+        )
+        .values(last_active_at=now, updated_at=now)
+    )
+    return result.rowcount == 1
 
 
 VALID_AGENT_STATUSES = ("idle", "running", "failed")
