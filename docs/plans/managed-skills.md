@@ -292,9 +292,9 @@ resolved rows substituted:
 
 Skills provide specialized instructions and workflows for specific tasks.
 When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.
-If the user requests a skill by name, load it.
-Only load skill names listed here or returned by `vibe skill list`; do not guess names.
-If no Skill on this page matches the task, inspect each subsequent Catalog page in order until a Skill matches or no page remains.
+If the user requests a skill by exact name, load that name directly.
+Otherwise, only load skill names listed here or returned by `vibe skill list`; do not guess names.
+Use `vibe skill list --page 2` only when more discovery is useful; ordinary tasks do not require scanning every page.
 
 ### Available skills
 - data-analysis: Analyze datasets, generate charts, and create reports.
@@ -302,8 +302,9 @@ If no Skill on this page matches the task, inspect each subsequent Catalog page 
 ```
 
 The system prompt contains page 1 only, within the entry and row budgets in
-Section 5.1. The subsequent-page instruction is present only when another page
-exists. If more entries exist, append exactly:
+Section 5.1. The optional subsequent-page guidance is present only when another
+page exists. A user-requested exact name may be loaded directly without first
+finding it in a paged Catalog. If more entries exist, append exactly:
 
 ```md
 More skills are available. Run `vibe skill list --page 2` to view more.
@@ -444,6 +445,9 @@ When a backend launches either command, Avibe supplies internal bindings:
 - `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` selects the version-scoped built-in snapshot
   retained by the Avibe process that created that backend runtime, even if an
   upgrade has since switched the stable `vibe` launcher to another artifact.
+- `AVIBE_BUILTIN_SKILLS_ROOT` is that snapshot's absolute directory. It binds
+  the complete runtime address, so a later launcher or `AVIBE_HOME` change
+  cannot combine the retained snapshot ID with a different Avibe home.
 - `AVIBE_SKILL_HOME`, `AVIBE_SKILL_CODEX_HOME`,
   `AVIBE_SKILL_CLAUDE_HOME`, and `AVIBE_SKILL_XDG_CONFIG_HOME` are normalized
   absolute roots resolved by the advertising Avibe process. A relative
@@ -457,12 +461,14 @@ the OpenCode caller-context plugin. They are not prompt text or agent-visible
 command arguments. A standalone command without Avibe bindings uses its own
 current working directory and the snapshot bundled with its own executable.
 
-An OpenCode binding normally lives for the active Avibe-dispatched Turn and
-retains the released bridge's 24-hour expiry as crash cleanup. Binding-file
-updates are serialized across processes, use a unique same-directory temporary
-file and atomic replacement, and cleanup is guarded by a per-Turn token so an
-older Turn cannot remove a newer binding for the same native Session. Each new
-or restored Turn refreshes the entry. The persisted shape remains readable by
+An OpenCode binding normally lives for the active Avibe-dispatched Turn. Avibe
+renews its released 24-hour expiry throughout active original and restored poll
+loops; after a crash or an ambiguously abandoned poll, the last expiry remains
+the bounded cleanup path. Binding-file updates are serialized across processes,
+use a unique same-directory temporary file and atomic replacement, and cleanup
+is guarded by a per-Turn token so an older Turn cannot refresh or remove a newer
+binding for the same native Session. Each new or restored Turn writes its own
+entry. The persisted shape remains readable by
 an already-running OpenCode server that loaded the released plugin: the
 existing `env`, `updated_at`, and `expires_at` fields are unchanged, while the
 cleanup token and Skill roots are additive. This feature leaves the released
@@ -589,8 +595,9 @@ declared Skill names, more than 4,096 directories and regular files across the
 complete tree, more than 32 MiB of regular-file bytes across the complete tree,
 any Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over 256
 KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB. The aggregate
-entry and byte checks occur before hashing or copying and abort as soon as a
-limit is crossed.
+entry traversal is capped while enumerating. Hashing and publication also charge
+the size of each regular file at the point it is opened and bound every read to
+that size, so growth after enumeration cannot exceed the aggregate byte budget.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -608,7 +615,11 @@ complete mirror that Avibe itself never mutates:
 Publication is serialized by a cross-process lock keyed by snapshot digest.
 The next lock holder first removes the one deterministic hidden staging path
 for that digest, reclaiming any partial tree left by an interrupted publisher.
-It then builds and validates that staging directory and
+It then re-enumerates one bounded, fixed entry set and copies only those entries
+into staging; entries created after that enumeration are neither traversed nor
+copied. Each file is reopened without following its final path component,
+charged against the aggregate byte budget, read to its opened size, and rejected
+if it changes during the read. Avibe then validates that staging directory and
 recomputes the canonical snapshot-v1 digest from the completed staging tree and
 requires it to equal the target `<snapshot-id>` before atomically renaming it
 once into the previously absent digest path. The staged digest includes every
@@ -826,9 +837,10 @@ and verify:
 - OpenCode user permission configuration and released caller-context plugin
   source are not rewritten, concurrent active
   Turn bindings preserve each other, and token-guarded cleanup removes only the
-  binding created by that Turn; a released-shape binding remains usable during
-  an upgrade until its existing expiry, and each restored Turn replaces its own
-  entry without pruning other unexpired Sessions; and
+  binding created by that Turn; active original and restored polls renew their
+  released-shape expiry, an abandoned binding expires without a live renewer,
+  and each restored Turn replaces its own entry without pruning other unexpired
+  Sessions; and
 - a cached Claude client is recreated and resumes the same native Session when
   its bound Skill roots or built-in snapshot change even if page 1 is identical;
   and
@@ -858,6 +870,8 @@ isolation acceptance gates.
   digest;
 - publication recomputes the snapshot-v1 digest from the completed staging
   tree and refuses to rename staging bytes under a different digest;
+- publication ignores entries created after its bounded copy enumeration and
+  rejects aggregate file growth observed at hashing or copy time;
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
 - after an injected interruption leaves partial staging state, the next
@@ -869,7 +883,8 @@ isolation acceptance gates.
   different version-scoped snapshots;
 - after launcher activation, a command inherited from the older runtime still
   lists and loads that runtime's retained built-in snapshot path without the
-  older package source and never falls back to the newer snapshot; and
+  older package source and never falls back to the newer snapshot, even when
+  the active `AVIBE_HOME` changed; and
 - every loaded built-in reports an agent-accessible absolute directory.
 
 ## 15. Explicit Non-Goals
