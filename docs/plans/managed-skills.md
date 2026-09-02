@@ -107,11 +107,15 @@ Discovery and load share one verified-read primitive. It records the open
 file's identity, size, high-resolution modification time, and change/version
 metadata available on the platform before the bounded read, queries the same
 handle afterward, and accepts the bytes only when every recorded value remains
-unchanged. Before accepting, it also queries the `SKILL.md` directory entry
+unchanged. This detects changes observable through the host filesystem; on a
+filesystem whose metadata cannot distinguish a same-size concurrent rewrite,
+consistency is best-effort rather than a locking or immutable-snapshot
+guarantee. Before accepting, it also queries the `SKILL.md` directory entry
 again, relative to the retained directory handle when one is available, and
 requires that path to remain a regular file naming the same file identity as
-the open handle. An in-place rewrite, truncation, or atomic path replacement
-during the read therefore omits the candidate during discovery or fails load
+the open handle. An observable in-place rewrite, truncation, or atomic path
+replacement during the read therefore omits the candidate during discovery or
+fails load
 with empty standard output. This consistency rule is owned once by the resolver
 rather than reimplemented by Catalog and load call sites.
 
@@ -244,6 +248,9 @@ prompt content.
 
 These limits do not validate optional frontmatter, require the directory and
 declared name to match, or add compatibility metadata.
+Catalog discovery also does not read the complete body merely to validate its
+encoding. A successful load requires the bounded body to be valid UTF-8; an
+invalid body can appear in the Catalog but load fails with no standard output.
 
 ### 5.2 Deduplication
 
@@ -381,8 +388,9 @@ Contract details:
   name retained from an earlier discovery read with newly opened content.
 - XML attribute values are escaped.
 - Only the body after the leading frontmatter is emitted.
-- The body is otherwise unchanged: no generated title, indentation, escaping,
-  summary, or rewrite is added.
+- On a successful load, the body is otherwise unchanged: no generated title,
+  indentation, escaping, summary, or rewrite is added. Invalid UTF-8 fails load
+  rather than being replaced or re-encoded.
 - A body larger than 256 KiB is not advertised and cannot be loaded. If a file
   grows beyond the limit between discovery and load, load fails with empty
   standard output rather than truncating it.
@@ -784,8 +792,9 @@ Catalogs at runtime.
   malformed.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
-  expose paths or sources. When later pages exist, the prompt tells the agent
-  to inspect them if page 1 has no matching Skill. A fixture mutating the
+  expose paths or sources. When later pages exist, the prompt makes further
+  discovery optional, while a user-requested exact name may load directly. A
+  fixture mutating the
   Catalog between page calls verifies live re-resolution and the documented
   restart-at-page-1 boundary rather than a hidden snapshot.
 - Oversized descriptions cannot make the Catalog unbounded, and names with
@@ -806,6 +815,8 @@ Catalogs at runtime.
   cannot pair the opened body with a different directory identity.
 - A body over 256 KiB is omitted from discovery, and a body that crosses the
   limit before load produces empty standard output and a non-zero exit.
+- An invalid UTF-8 body may be advertised from its valid frontmatter but load
+  produces empty standard output and a non-zero exit without replacement text.
 - Workbench resource policies continue to govern management operations but do
   not narrow the runtime Catalog or loaded body, matching the ordinary
   filesystem capability of the agent process.
@@ -856,14 +867,11 @@ isolation acceptance gates.
   tree and preserves executable modes required by helper scripts;
 - a fixed snapshot-v1 fixture proves the canonical tree byte stream and
   lowercase SHA-256 identifier remain stable;
-- release packaging rejects all Win32-forbidden component characters and
-  controls (`U+0000`-`U+001F`),
-  Windows-reserved, trailing-dot/space, case-insensitively colliding, or empty
-  built-in paths; more than 1,024 root entries; more than 4,096 total subtree
-  entries; more than 32 MiB of aggregate regular-file bytes; a non-Skill direct
-  child; a Skill whose closing frontmatter delimiter exceeds 64 KiB; a body
-  over 256 KiB; and a tree whose bounded frontmatter exceeds the built-in 8 MiB
-  budget;
+- release packaging accepts only directories and regular files throughout the
+  complete built-in tree, and every relative path has one unambiguous,
+  cross-platform representation. Representative fixtures cover links and
+  special files, Win32-forbidden or aliased components, empty directories, and
+  every declared entry, byte, frontmatter, body, and root-child bound;
 - release packaging rejects duplicate declared Skill names even when their
   directories differ;
 - a mode-only built-in change produces a different snapshot and published
