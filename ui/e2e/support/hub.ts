@@ -31,12 +31,19 @@ import { hub } from './copy';
  * characters by hex — rather than rejecting those ids, because refusing to look
  * at a model the product accepted would be the suite choosing what the product
  * is allowed to contain.
+ *
+ * A per-character walk rather than a character-class replace: the class it
+ * would need is the control characters themselves, and a regex naming them is
+ * the one shape `no-control-regex` exists to stop. Suppressing that rule to
+ * write the escape would leave the codebase carrying a suppression whose
+ * justification is one line long and whose reader has to reconstruct it.
  */
 const attr = (name: string, value: string): string => {
-  const escaped = value
-    .replace(/[\\"]/g, '\\$&')
-    // eslint-disable-next-line no-control-regex -- escaping them is exactly the point
-    .replace(/[\u0000-\u001f\u007f]/g, (ch) => `\\${ch.codePointAt(0)!.toString(16)} `);
+  const escaped = Array.from(value, (ch) => {
+    const code = ch.codePointAt(0)!;
+    if (code <= 0x1f || code === 0x7f) return `\\${code.toString(16)} `;
+    return ch === '"' || ch === '\\' ? `\\${ch}` : ch;
+  }).join('');
   return `[${name}="${escaped}"]`;
 };
 
