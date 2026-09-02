@@ -47,7 +47,14 @@ export class MockUpstream {
   }
 
   async resetRequests(): Promise<void> {
-    await this.request.delete(this.url('/__control/requests'));
+    const response = await this.request.delete(this.url('/__control/requests'));
+    // A refused reset leaves the previous attempt's history in place, and B6
+    // would then read a stale `/v1/` hit as this attempt's — suppressing the
+    // #1818 classification the settle is trying to establish. Failing here
+    // names the mock as the problem, before any verdict is read from it.
+    if (!response.ok()) {
+      throw new Error(`mock upstream refused request-log reset (${response.status()}): ${await response.text()}`);
+    }
   }
 
   async requests(): Promise<CapturedRequest[]> {

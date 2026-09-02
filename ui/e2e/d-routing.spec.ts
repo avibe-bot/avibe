@@ -7,12 +7,11 @@
 // suite runs against a live instance whose routing may be real, and the
 // behaviour under test is what the editor does while you are editing it. The
 // commit path is scenario B7's subject, on a source this suite owns outright.
+import type { RouteHop } from './support/api';
 import { hub as copy, hubOrNull } from './support/copy';
 import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
 import { expect, test } from './support/gateway';
 import { labelledButton } from './support/hub';
-
-const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** The product falls back to the raw backend id for a backend it has no label
  *  for, so this does too rather than throwing on an id the bundle never named. */
@@ -160,26 +159,70 @@ test.describe('D · route chains and priority order', () => {
     );
   });
 
-  test('D · Reorder by Source order restates the chain, and says which it did', async ({ hub, gateway }) => {
-    await hub.goto();
-    await hub.firstRouteRow(gateway.backend).click();
-    const dialog = hub.routeDialog;
-    await expect(dialog).toBeVisible();
-
-    const announcer = dialog.locator('[aria-live="polite"]');
-    await dialog.getByRole('button', { name: copy('routeDialog.reorder.label'), exact: true }).click();
-
-    // Two honest outcomes, and the product distinguishes them: it reordered, or
-    // the chain already matched. A test that accepted either message without
-    // saying so would also accept silence.
-    await expect(announcer).toHaveText(
-      new RegExp(
-        `^(${escapeRegExp(copy('routeDialog.reorder.sorted'))}|${escapeRegExp(copy('routeDialog.reorder.unchanged'))})$`,
-      ),
+  test('D · Reorder by Source order restates the chain, and says which it did', async ({ hub, gateway, api }) => {
+    // Arranged, not hoped for. On a fresh hermetic instance the fixture's
+    // `e2e-route-*` models do not match the backend menu, so this route begins
+    // EMPTY — and an empty chain leaves the button with nothing to sort, so the
+    // `unchanged` branch passes without the sorter ever running. The two hops
+    // below are therefore the actual subject: deliberately opposite to Source
+    // order, so the sort has a real permutation to perform.
+    const supply = gateway.sources.flatMap((source) =>
+      source.models.map((model) => ({ source_id: source.id, model_id: model.id })),
     );
+    test.skip(
+      supply.length < 2,
+      'This instance offers fewer than two source/model pairs, so no unsorted chain can be arranged.',
+    );
+    // The order of `gateway.sources` is the suite's own; the order the instance
+    // routes by is Source order. Arranging route-b before route-a is opposite to
+    // creation order only when creation order became priority order — which the
+    // API call below establishes rather than assumes.
+    const arrangeHops = [
+      { source_id: gateway.sources[1].id, model_id: gateway.sources[1].models[0].id },
+      { source_id: gateway.sources[0].id, model_id: gateway.sources[0].models[0].id },
+    ];
+    const before = (await api.chains(gateway.backend)).find((chain) => chain.model === gateway.model);
+    const original: RouteHop[] = (before?.hops ?? []).map((hop) => ({
+      source_id: hop.source_id,
+      model_id: hop.model_id,
+    }));
+    expect(
+      await api.putAgentChain(gateway.backend, gateway.model, arrangeHops),
+      'The instance refused the arranged route, so there is no chain to sort.',
+    ).toBe(true);
 
-    await labelledButton(dialog, copy('routeDialog.cancel')).click();
-    await expect(dialog).toHaveCount(0);
+    try {
+      await hub.goto();
+      // The row for THIS model, not the card's first: the card collapses its
+      // model list, and the first row it shows is whichever model the supply
+      // ranks first — a different chain than the one arranged above.
+      await hub.routeRow(gateway.backend, gateway.model).click();
+      const dialog = hub.routeDialog;
+      await expect(dialog).toBeVisible();
+
+      const announcer = dialog.locator('[aria-live="polite"]');
+      await dialog.getByRole('button', { name: copy('routeDialog.reorder.label'), exact: true }).click();
+
+      // The announcement must say it sorted — the draft was arranged opposite
+      // to Source order, so "already matches" would be the wrong claim.
+      await expect(announcer).toHaveText(copy('routeDialog.reorder.sorted'));
+      // And the hops must now BE in Source order, asserted by display name: the
+      // name cell carries the id only for unjoined sources, so the display name
+      // is the one observable every rendering shares. Each fixture source
+      // contributes exactly one hop here, so name order IS hop order.
+      const hops = dialog.locator('.model-hub-route-hop-name');
+      await expect(hops).toHaveCount(2);
+      await expect(hops.nth(0)).toHaveText(gateway.sources[0].display_name);
+      await expect(hops.nth(1)).toHaveText(gateway.sources[1].display_name);
+
+      await labelledButton(dialog, copy('routeDialog.cancel')).click();
+      await expect(dialog).toHaveCount(0);
+    } finally {
+      if (original.length) {
+        const restored = await api.putAgentChain(gateway.backend, gateway.model, original);
+        expect(restored, 'Teardown failed to restore the original route chain.').toBe(true);
+      }
+    }
   });
 
   test('D · the priority drawer moves a source by keyboard and can be backed out of', async ({ hub, gateway, page }) => {
