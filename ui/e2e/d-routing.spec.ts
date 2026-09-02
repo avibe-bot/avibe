@@ -42,7 +42,11 @@ test.describe('D · route chains and priority order', () => {
     // candidate, confirm, and removal are all reached without a pointer.
     const addHop = dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true });
     const addOneHop = async (): Promise<void> => {
-      await addHop.click();
+      // The trigger itself is key-activated too. It lives in the dialog, outside
+      // the popover's cmdk panel — so Enter presses it (like the remove buttons
+      // below); the Enter-swallowing rule only begins once the panel is open.
+      await addHop.focus();
+      await addHop.press('Enter');
       // The picker autofocuses its search box; cmdk's list takes ArrowDown to
       // move the selection and Enter to fire `onSelect`, which is the product's
       // own keyboard path for choosing a candidate.

@@ -81,6 +81,12 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
     // that returned early used to leave a backend in Gateway mode and two
     // sources behind for whatever ran next.
     let switched: string | null = null;
+    // The Direct→Gateway switch is not mode-only on a machine whose CLI holds
+    // a native login: `set_agent_mode` appends a `native_cli` subscription
+    // source as part of the transition, and the prefix sweep below would leave
+    // it — with its placement — on the instance for every later spec. The
+    // source ids present BEFORE the switch name the ones the switch added.
+    let sourcesBeforeSwitch: Set<string> | null = null;
     try {
       created = [
         await requireSource(api, `${E2E_SOURCE_PREFIX}route-a`, mockBaseUrl()),
@@ -98,6 +104,7 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       const candidate = alreadyHub ?? agents.find((agent: Agent) => agent.cli_present);
       testInfo.skip(!candidate, 'No agent backend is installed on this instance, so none can be put into Gateway mode.');
       if (!alreadyHub) {
+        sourcesBeforeSwitch = new Set((await api.sources()).map((source) => source.id));
         await api.setAgentMode(candidate!.backend, 'hub');
         switched = candidate!.backend;
       }
@@ -133,6 +140,19 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       try {
         if (switched) await api.setAgentMode(switched, 'direct');
       } finally {
+        // The transition-imported native source (if the switch made one) is
+        // removed by id — before the prefix sweep, because it does not carry
+        // the prefix and the sweep cannot see it. Best-effort per source: a
+        // native source serving a live route refuses until forced, and
+        // deleteSource forces — but one that is already gone is success.
+        if (sourcesBeforeSwitch) {
+          for (const source of await api.sources()) {
+            if (!sourcesBeforeSwitch.has(source.id)
+                && !source.display_name.startsWith(E2E_SOURCE_PREFIX)) {
+              await api.deleteSource(source.id);
+            }
+          }
+        }
         await api.removeSuiteSources();
       }
     }

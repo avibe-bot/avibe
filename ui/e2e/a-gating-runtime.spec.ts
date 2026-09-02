@@ -131,13 +131,18 @@ test.describe('A · capability gate and runtime lifecycle', () => {
       const candidate = (await api.agents()).find((agent) => agent.cli_present);
       test.skip(!candidate, 'No agent backend is present on this instance to put into Gateway mode.');
       await api.setAgentMode(candidate!.backend, 'hub');
+      // Recorded the instant the mutation succeeds, before any verification
+      // read can fail: a transient `/agents` error between the switch and this
+      // line used to exit the spec with the backend stranded in Gateway mode,
+      // which skips the round-trip spec and distorts every later one. The
+      // verification skip below stays — it can no longer outrun the record.
+      restore.push(candidate!.backend);
       const now = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
       test.skip(
         now.length === 0,
         `Backend ${candidate!.backend} could not be switched to Gateway mode — it has no eligible source yet. `
           + 'Add a source first (see ui/e2e/README.md).',
       );
-      restore.push(candidate!.backend);
     }
 
     try {
