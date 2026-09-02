@@ -186,12 +186,17 @@ test.describe('D · route chains and priority order', () => {
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));
-    expect(
-      await api.putAgentChain(gateway.backend, gateway.model, arrangeHops),
-      'The instance refused the arranged route, so there is no chain to sort.',
-    ).toBe(true);
-
     try {
+      // Entered BEFORE the arranged PUT, not after it succeeds: a PUT whose
+      // response is lost or times out rejects that await with the chain
+      // already replaced server-side, and a finally outside it would leave
+      // the user's route swapped for the arrangement — then the fixture's
+      // source sweep empties it entirely.
+      expect(
+        await api.putAgentChain(gateway.backend, gateway.model, arrangeHops),
+        'The instance refused the arranged route, so there is no chain to sort.',
+      ).toBe(true);
+
       await hub.goto();
       // The row for THIS model, not the card's first: the first row a card
       // shows is whichever model the supply ranks first — a different chain

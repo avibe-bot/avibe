@@ -115,8 +115,13 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       testInfo.skip(!candidate, 'No agent backend is installed on this instance, so none can be put into Gateway mode.');
       if (!alreadyHub) {
         sourcesBeforeSwitch = new Set((await api.sources()).map((source) => source.id));
-        await api.setAgentMode(candidate!.backend, 'hub');
+        // Recorded BEFORE the PATCH is awaited, not after it succeeds: the
+        // server commits the mode before the response leaves, so a response
+        // lost to a timeout or disconnect rejects that await with the instance
+        // already mutated. A marker assigned after the await would skip the
+        // Direct restore on exactly that path.
         switched = candidate!.backend;
+        await api.setAgentMode(candidate!.backend, 'hub');
       }
 
       const live = (await api.agents()).find((agent: Agent) => agent.backend === candidate!.backend);

@@ -156,6 +156,11 @@ repository root left the shell there, and `npm run e2e` needs `ui/package.json`:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)/ui"
+# Linux: Chromium must be (re)installed HERE, after the isolated cache exists —
+# `npx playwright install chromium` run before step 2 exported XDG_CACHE_HOME
+# put it in the original cache, which the isolated run no longer reads. Setting
+# PLAYWRIGHT_BROWSERS_PATH to a stable path instead works equally well.
+npx playwright install chromium
 VIBE_E2E_BASE_URL=http://127.0.0.1:5199 \
 VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931 \
 npm run e2e

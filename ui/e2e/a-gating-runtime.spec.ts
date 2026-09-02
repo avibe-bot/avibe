@@ -145,12 +145,15 @@ test.describe('A · capability gate and runtime lifecycle', () => {
         const candidate = (await api.agents()).find((agent: Agent) => agent.cli_present);
         test.skip(!candidate, 'No agent backend is present on this instance to put into Gateway mode.');
         sourcesBeforeSwitch = new Set((await api.sources()).map((source) => source.id));
-        await api.setAgentMode(candidate!.backend, 'hub');
-        // The cleanup boundary is ENTERED the moment the mutation succeeds:
-        // every exit from here — including a throwing verification read or the
-        // assertion below — passes through the finally, so the backend cannot
-        // stay in Gateway mode on any path out of this spec.
+        // Recorded BEFORE the PATCH is awaited: the server commits the mode
+        // before its response leaves, so a lost or timed-out response rejects
+        // the await with the instance already switched — a marker assigned
+        // after the await skips the Direct restore on exactly that path.
+        // (`sourcesBeforeSwitch` above is snapshotted first for the same
+        // reason.) Every exit from here passes through the finally, so the
+        // backend cannot stay in Gateway mode on any path out of this spec.
         restore.push(candidate!.backend);
+        await api.setAgentMode(candidate!.backend, 'hub');
         // An accepted switch that a later read does not show is a persistence
         // or projection regression, not a precondition: the server's
         // `set_agent_mode` commits the requested mode without requiring an

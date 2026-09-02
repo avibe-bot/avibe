@@ -263,112 +263,117 @@ test.describe('B · add an API-key source', () => {
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));
-    await arrange();
-
     try {
-    // `cooldown.server_error` is the one answer that is not an answer: the
-    // gateway engine fails the dry run itself, without the upstream ever
-    // receiving it, and every retry re-arms a fresh thirty-second cooldown on
-    // top of the last — roughly one run in three (#1818). Recreating the source
-    // sometimes clears it; waiting, restarting the engine, and cycling the whole
-    // gateway do not. So a sticky cooldown is retried by rebuilding the
-    // arrangement, bounded to three attempts.
-    //
-    // A defect that survives all three attempts is #1818's exact signature
-    // (5xx + the upstream received nothing + the cooldown re-arming), and the
-    // run then marks ITSELF expected-fail via `test.fail` naming #1818, so an
-    // intermittent defect never burns the suite red. That marker is also the
-    // detector: once #1818 is fixed, this path stops firing, the test passes
-    // while marked should-fail, and Playwright reports "Expected to fail, but
-    // passed" — one loud run, and the marker comes out. Any OTHER verdict still
-    // fails hard below; a wrong classification is what the scenario exists to
-    // catch.
-    // The #1818 signature is TWO facts together, and both are checked before
-    // the marker fires: the source in `cooldown.server_error`, AND the mock
-    // having received no protocol request while it got there. A cooldown with
-    // requests on the log is a different defect — the upstream answered and
-    // something upstream-side classified it badly — and it must fail hard, not
-    // ride #1818's marker to green. `upstreamSawRequest` reads the mock's own
-    // capture, reset before each settle so only that attempt's probes count.
-    const upstreamSawRequest = async (): Promise<boolean> => {
-      const requests = await mock.requests();
-      return requests.some((request) => request.path.startsWith('/v1/'));
-    };
-    await mock.resetRequests();
-    await mock.configure({ auth: '401' });
-    let verdict = await settleKeyVerdict(api, source.id, gateway);
-    let upstreamReceived = await upstreamSawRequest();
-    for (let attempt = 0; attempt < 3 && verdict === 'models.source.cooldown.server_error'; attempt += 1) {
-      // The recreation has to happen against a HEALTHY upstream — the create
-      // probes the source before committing it, and the mock is still set to
-      // 401 for the settle. The rejection is re-armed after the new source
-      // exists, by the same dry run as before.
-      await mock.configure({ auth: 'ok' });
-      await api.deleteSource(source.id);
-      const rebuilt = await api.createApiKeySource(source.display_name, mockBaseUrl());
-      if (!rebuilt) {
-        // The instance that cannot rebuild this arrangement is a product
-        // failure wearing the cooldown's clothes — named, not skipped, and not
-        // #1818 either.
-        throw new Error('The instance refused to recreate the precondition source.');
-      }
-      expect(
-        rebuilt.models.some((model) => model.id === supplied),
-        'The recreated source lost the model the route depends on.',
-      ).toBe(true);
-      source = rebuilt;
+      // The restoration boundary is entered BEFORE the arranged PUT (inside
+      // `arrange` below), not after it returns: a PUT whose response is lost
+      // or times out rejects that await with the chain already replaced
+      // server-side, and a finally outside it would leave the user's route
+      // swapped for the arrangement — then the fixture's source sweep empties
+      // it.
       await arrange();
-      await mock.configure({ auth: '401' });
-      // One cooldown window (plus slack) is enough for a retry attempt: the
-      // defect this loop exists for re-arms the cooldown on EVERY probe, so a
-      // second window after the first re-armed would only burn another 30 s on
-      // the way to the same verdict. The FIRST settle keeps the full budget,
-      // where a genuine one-off transient still gets its chance to clear.
+
+      // `cooldown.server_error` is the one answer that is not an answer: the
+      // gateway engine fails the dry run itself, without the upstream ever
+      // receiving it, and every retry re-arms a fresh thirty-second cooldown on
+      // top of the last — roughly one run in three (#1818). Recreating the source
+      // sometimes clears it; waiting, restarting the engine, and cycling the whole
+      // gateway do not. So a sticky cooldown is retried by rebuilding the
+      // arrangement, bounded to three attempts.
+      //
+      // A defect that survives all three attempts is #1818's exact signature
+      // (5xx + the upstream received nothing + the cooldown re-arming), and the
+      // run then marks ITSELF expected-fail via `test.fail` naming #1818, so an
+      // intermittent defect never burns the suite red. That marker is also the
+      // detector: once #1818 is fixed, this path stops firing, the test passes
+      // while marked should-fail, and Playwright reports "Expected to fail, but
+      // passed" — one loud run, and the marker comes out. Any OTHER verdict still
+      // fails hard below; a wrong classification is what the scenario exists to
+      // catch.
+      // The #1818 signature is TWO facts together, and both are checked before
+      // the marker fires: the source in `cooldown.server_error`, AND the mock
+      // having received no protocol request while it got there. A cooldown with
+      // requests on the log is a different defect — the upstream answered and
+      // something upstream-side classified it badly — and it must fail hard, not
+      // ride #1818's marker to green. `upstreamSawRequest` reads the mock's own
+      // capture, reset before each settle so only that attempt's probes count.
+      const upstreamSawRequest = async (): Promise<boolean> => {
+        const requests = await mock.requests();
+        return requests.some((request) => request.path.startsWith('/v1/'));
+      };
       await mock.resetRequests();
-      verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
-      upstreamReceived = upstreamReceived || (await upstreamSawRequest());
-    }
-    test.fail(
-      verdict === 'models.source.cooldown.server_error' && !upstreamReceived,
-      'Engine 5xx on the routed dry run (#1818): the upstream never received the request and the '
-        + 'cooldown re-armed on every retry, so the replace-key flow was never reachable this run.',
-    );
-    expect(verdict).toBe('models.source.needs_action.credential_revoked');
-    // The replacement has to be a key that works, or the dialog would be
-    // reporting the same failure over again under a different name.
-    await mock.configure({ auth: 'ok' });
+      await mock.configure({ auth: '401' });
+      let verdict = await settleKeyVerdict(api, source.id, gateway);
+      let upstreamReceived = await upstreamSawRequest();
+      for (let attempt = 0; attempt < 3 && verdict === 'models.source.cooldown.server_error'; attempt += 1) {
+        // The recreation has to happen against a HEALTHY upstream — the create
+        // probes the source before committing it, and the mock is still set to
+        // 401 for the settle. The rejection is re-armed after the new source
+        // exists, by the same dry run as before.
+        await mock.configure({ auth: 'ok' });
+        await api.deleteSource(source.id);
+        const rebuilt = await api.createApiKeySource(source.display_name, mockBaseUrl());
+        if (!rebuilt) {
+          // The instance that cannot rebuild this arrangement is a product
+          // failure wearing the cooldown's clothes — named, not skipped, and not
+          // #1818 either.
+          throw new Error('The instance refused to recreate the precondition source.');
+        }
+        expect(
+          rebuilt.models.some((model) => model.id === supplied),
+          'The recreated source lost the model the route depends on.',
+        ).toBe(true);
+        source = rebuilt;
+        await arrange();
+        await mock.configure({ auth: '401' });
+        // One cooldown window (plus slack) is enough for a retry attempt: the
+        // defect this loop exists for re-arms the cooldown on EVERY probe, so a
+        // second window after the first re-armed would only burn another 30 s on
+        // the way to the same verdict. The FIRST settle keeps the full budget,
+        // where a genuine one-off transient still gets its chance to clear.
+        await mock.resetRequests();
+        verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
+        upstreamReceived = upstreamReceived || (await upstreamSawRequest());
+      }
+      test.fail(
+        verdict === 'models.source.cooldown.server_error' && !upstreamReceived,
+        'Engine 5xx on the routed dry run (#1818): the upstream never received the request and the '
+          + 'cooldown re-armed on every retry, so the replace-key flow was never reachable this run.',
+      );
+      expect(verdict).toBe('models.source.needs_action.credential_revoked');
+      // The replacement has to be a key that works, or the dialog would be
+      // reporting the same failure over again under a different name.
+      await mock.configure({ auth: 'ok' });
 
-    await hub.goto();
-    await hub.openSource(source.id);
-    await expect(hub.sourceDetailDialog).toBeVisible();
+      await hub.goto();
+      await hub.openSource(source.id);
+      await expect(hub.sourceDetailDialog).toBeVisible();
 
-    // What a stopped row owes the user is one tap to the fix, not an error
-    // string. The attribute is the product's own statement of where that tap
-    // goes, and the label is what the user reads on it.
-    const repair = hub.sourceDetailDialog.locator('[data-repair-destination="replace_key_dialog"]');
-    await expect(repair).toHaveText(copy('repair.replaceKey'));
-    await repair.click();
+      // What a stopped row owes the user is one tap to the fix, not an error
+      // string. The attribute is the product's own statement of where that tap
+      // goes, and the label is what the user reads on it.
+      const repair = hub.sourceDetailDialog.locator('[data-repair-destination="replace_key_dialog"]');
+      await expect(repair).toHaveText(copy('repair.replaceKey'));
+      await repair.click();
 
-    const dialog = hub.addKeyDialog;
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(copy('repair.replaceTitle', { name: source.display_name }));
+      const dialog = hub.addKeyDialog;
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText(copy('repair.replaceTitle', { name: source.display_name }));
 
-    await dialog.getByLabel(copy('repair.replaceLabel'), { exact: true }).fill('e2e-second-key');
-    await dialog.getByRole('button', { name: copy('repair.replaceSubmit'), exact: true }).click();
+      await dialog.getByLabel(copy('repair.replaceLabel'), { exact: true }).fill('e2e-second-key');
+      await dialog.getByRole('button', { name: copy('repair.replaceSubmit'), exact: true }).click();
 
-    // The upstream still lists the same models, so the new key costs the route
-    // nothing — a plain repair, and the dialog says which of the two it was.
-    await expect(dialog).toContainText(copy('repair.repaired'), { timeout: 30_000 });
-    // And the row it was raised from is no longer stopped. A dialog that
-    // reports a repair over a source still marked blocked has reported a
-    // repair that did not happen.
-    await expect
-      .poll(
-        async () => (await api.sources()).find((s) => s.id === source.id)?.state.detail_key,
-        { timeout: 15_000 },
-      )
-      .toBeNull();
-
+      // The upstream still lists the same models, so the new key costs the route
+      // nothing — a plain repair, and the dialog says which of the two it was.
+      await expect(dialog).toContainText(copy('repair.repaired'), { timeout: 30_000 });
+      // And the row it was raised from is no longer stopped. A dialog that
+      // reports a repair over a source still marked blocked has reported a
+      // repair that did not happen.
+      await expect
+        .poll(
+          async () => (await api.sources()).find((s) => s.id === source.id)?.state.detail_key,
+          { timeout: 15_000 },
+        )
+        .toBeNull();
     } finally {
       // Whatever happened above, the instance's chain for this model goes back
       // to what it was — the arrangement was the scenario's, not the user's.

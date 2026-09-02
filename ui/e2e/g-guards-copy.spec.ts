@@ -36,12 +36,17 @@ test.describe('G · supply guards and failure copy', () => {
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));
-    const arranged = await api.putAgentChain(gateway.backend, gateway.model, [
-      { source_id: source.id, model_id: supplied! },
-    ]);
-    expect(arranged, 'The instance refused the arranged route, so no guard can be raised.').toBe(true);
-
     try {
+      // Entered BEFORE the arranged PUT, not after it succeeds: a response
+      // lost to a timeout or disconnect rejects that await with the chain
+      // already replaced server-side, and a finally outside it would leave
+      // the user's route swapped for the arrangement — then the fixture's
+      // source sweep empties it entirely.
+      const arranged = await api.putAgentChain(gateway.backend, gateway.model, [
+        { source_id: source.id, model_id: supplied! },
+      ]);
+      expect(arranged, 'The instance refused the arranged route, so no guard can be raised.').toBe(true);
+
       await hub.goto();
       await hub.openSource(source.id);
       await expect(hub.sourceDetailDialog).toBeVisible();
