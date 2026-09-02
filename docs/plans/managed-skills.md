@@ -235,14 +235,15 @@ does not scan it, write to it, or assign it any behavior.
 
 Discovery is deliberately permissive:
 
-- extract `name` and `description` from the leading frontmatter;
+- extract `name`, `description`, and the optional existing
+  `disable-model-invocation` policy from the leading frontmatter;
 - accept the Skill when `description` is non-empty and `name` follows the
   portable Agent Skills grammar;
 - ignore every other field;
 - do not reject a Skill because unrelated frontmatter is unknown or malformed;
 - do not require the declared name to match the directory name; and
-- accept quoted or plain required-field keys and decode standard YAML escapes
-  in quoted required values; and
+- accept quoted or plain managed-field keys and decode standard YAML escapes
+  in quoted keys and required values; and
 - fold plain, quoted, or block `description` continuation lines and whitespace
   into a single-line Catalog value.
 
@@ -251,10 +252,17 @@ failing the whole Catalog. The name grammar is the existing Agent Skills
 boundary: 1-64 lowercase ASCII letters, digits, or hyphens; no leading,
 trailing, or consecutive hyphen. This makes every advertised name one literal
 shell token without Avibe-specific quoting or encoding.
-The parser scans only top-level `name` and `description` syntax. It never
-constructs ignored YAML values, expands aliases, or traverses optional nested
-structures; malformed or recursively aliased unrelated metadata therefore
-cannot amplify work or abort Catalog construction.
+For valid YAML, a base loader composes at most 1,024 nodes and 128 alias
+references, then reads only top-level scalar managed fields; it does not run
+typed constructors or recursively materialize aliases. If composition is
+malformed or exceeds either bound, a line scanner extracts only top-level
+managed fields and ignores nested structures. Unrelated metadata therefore
+cannot amplify work beyond the explicit bounds or abort Catalog construction.
+
+An existing `disable-model-invocation: true` declaration remains manual-only:
+the Skill is omitted from the injected Catalog and `vibe skill list`, but an
+explicit `vibe skill load -- <name>` still resolves it. The field is optional;
+Skills declaring only `name` and `description` remain automatically available.
 
 Catalog parsing and rendering are bounded independently:
 
@@ -885,10 +893,12 @@ Catalogs at runtime.
 - Standard escapes in a quoted name are decoded before portable-name
   validation, and indented continuation lines in a plain description remain
   part of its normalized Catalog value.
-- Valid quoted `name` and `description` mapping keys are accepted, while the
-  tolerant scanner still extracts required fields when unrelated metadata is
-  malformed, deeply nested, or recursively aliased, without constructing those
-  ignored values.
+- Valid quoted `name` and `description` mapping keys, including standard escapes
+  in those keys, are accepted. The bounded node parser never constructs typed
+  optional values, while the tolerant scanner still extracts managed fields
+  when unrelated metadata is malformed, deeply nested, or recursively aliased.
+- A Skill declaring `disable-model-invocation: true` is absent from every
+  Catalog page but remains loadable by an explicitly supplied portable name.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
   expose paths or sources. A multibyte-description fixture proves that every
@@ -1026,7 +1036,8 @@ V1 does not include:
 - disabling native `AGENTS.md` or `CLAUDE.md` loading;
 - a new Skill compatibility schema;
 - source namespaces or source disclosure to the agent;
-- semantic ranking or filtering of Skills;
+- Avibe-specific semantic ranking or compatibility filtering beyond preserving
+  an existing manual-only invocation declaration;
 - Skill editing or copy-on-write;
 - semantics for `${AVIBE_HOME:-$HOME/.avibe}/skills`;
 - garbage collection of old built-in snapshots;
