@@ -963,6 +963,7 @@
           "save": "Save",
           "saving": "Saving…",
           "cancel": "Cancel",
+          "saved": "Model list saved.",
           "saveFailed": "The model list was not saved. It was re-read from the server; check it and try again.",
           "saveNotApplied": "The list was stored, but this backend did not load it, so it is not in use yet. Save again once the backend is back.",
           "saveRouted": "A model you removed still has a route. The list was re-read from the server; clear the route first, then remove it.",

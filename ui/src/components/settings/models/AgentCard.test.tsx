@@ -349,6 +349,37 @@ describe('AgentCard', () => {
     expect(screen.getByText(/^Supply paused$|^等待供应商恢复$/i)).toBeTruthy();
   });
 
+  it('reveals a newly saved model that lands beyond the collapsed limit', async () => {
+    const models = Array.from({ length: COLLAPSED_MODEL_LIMIT }, (_, index) => `model-${index + 1}`);
+    const addedModel = 'newly-added-model';
+    const catalogued = (ids: string[]): AgentSupply => ({
+      ...hubAgent,
+      routes: {},
+      model_supply: ids.map((modelId) => ({ model_id: modelId, chain_length: 0, has_runnable_hop: false })),
+      catalog_models: ids.map((id) => ({
+        id, display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+        input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,
+        reasoning_efforts: [], locked: false, routeable: true,
+      })),
+    });
+    const props = {
+      sources: [], chains: {}, pendingBackends: new Set<string>(), switchFailures: new Set<string>(), connectingBackend: null,
+      onConnectHub: vi.fn(), onSwitchDirect: vi.fn(), onOpenOrder: vi.fn(), onOpenRoute: vi.fn(), onProbeSettled: vi.fn(),
+    };
+    const { rerender } = render(
+      <I18nextProvider i18n={i18n}><AgentCard agents={[catalogued(models)]} {...props} /></I18nextProvider>,
+    );
+
+    expect(screen.queryByText(addedModel)).toBeNull();
+    rerender(
+      <I18nextProvider i18n={i18n}><AgentCard agents={[catalogued([...models, addedModel])]} {...props} /></I18nextProvider>,
+    );
+
+    expect(screen.getByText(addedModel)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /^Collapse$|^收起$/i }));
+    expect(screen.queryByText(addedModel)).toBeNull();
+  });
+
   it('keeps a chain reread reachable when a short group is unresolved', async () => {
     const onProbeSettled = vi.fn();
     const key = modelChainKey('claude', 'claude-opus-4-6');

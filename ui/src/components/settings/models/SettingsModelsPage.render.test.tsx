@@ -13,7 +13,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type RuntimeDependency, type Source, type UsageSummary } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type RuntimeDependency, type Source, type UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -154,6 +154,51 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
+    const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
+    const addedId = 'catalog-model-added';
+    const model = (id: string): BackendModel => ({
+      id, display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+      input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,
+      reasoning_efforts: [], locked: false, routeable: true,
+    });
+    const agent = (modelIds: string[]): AgentSupply => ({
+      ...takeoverAgent,
+      selected_model_id: modelIds[0] ?? null,
+      routes: {},
+      model_supply: modelIds.map((modelId) => ({ model_id: modelId, chain_length: 0, has_runnable_hop: false })),
+      builtin_models: modelIds,
+      catalog_models: modelIds.map(model),
+    });
+    const initial = agent(ids);
+    const saved = agent([...ids, addedId]);
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValueOnce([initial]).mockResolvedValue([saved]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(initial);
+    vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(saved);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Manage models$|^管理模型$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.type(screen.getByLabelText(/^Backend model ID$|^后端模型 ID$/i), addedId);
+    await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    expect(await screen.findByText(/^Model list saved\.$|^模型列表已保存。$/i)).toBeTruthy();
+    expect(screen.getByText(addedId)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /^Collapse$|^收起$/i }));
+    expect(screen.queryByText(addedId)).toBeNull();
+  });
+
   it('coalesces the OAuth success landing with its trailing stale-row notification', () => {
     const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
     const start = page.indexOf('const subscriptionAdded');
