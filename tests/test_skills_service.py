@@ -175,7 +175,7 @@ def test_mixed_runtime_catalog_does_not_grant_global_skills_to_project_editor(
             {
                 "ok": True,
                 "skills": [
-                    {"name": "project-skill", "scope": "project", "agents": ["codex"]},
+                    {"name": "project-skill", "scope": "project"},
                     {"name": "global-skill", "scope": "global", "agents": ["codex"]},
                 ],
             },

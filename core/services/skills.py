@@ -393,9 +393,8 @@ def _filter_skill_listing(
         project_id=project_id,
         backends=backends,
     )
-    if not descriptors:
-        filtered_skills: list[dict[str, Any]] = []
-    else:
+    allowed: set[tuple[int, int | None]] = set()
+    if descriptors:
         from storage import resource_access_service
         from storage.db import get_cached_sqlite_engine
 
@@ -408,27 +407,30 @@ def _filter_skill_listing(
                 connection=connection,
             )
         allowed = {(item["skill_index"], item["agent_index"]) for item in accessible}
-        filtered_skills = []
-        for skill_index, skill in enumerate(raw_skills):
-            skill_scope = _skill_scope(skill, scope)
-            if (project_editor and skill_scope == "project") or (
-                instance_editor and skill_scope == "global"
-            ):
-                filtered_skills.append(skill)
+
+    filtered_skills: list[dict[str, Any]] = []
+    for skill_index, skill in enumerate(raw_skills):
+        skill_scope = _skill_scope(skill, scope)
+        if (project_editor and skill_scope == "project") or (
+            instance_editor and skill_scope == "global"
+        ):
+            filtered_skills.append(skill)
+            continue
+        matching = [item for item in descriptors if item["skill_index"] == skill_index]
+        if not matching or not any(
+            (item["skill_index"], item["agent_index"]) in allowed for item in matching
+        ):
+            continue
+        raw_agents = skill.get("agents")
+        if isinstance(raw_agents, list):
+            skill["agents"] = [
+                agent
+                for agent_index, agent in enumerate(raw_agents)
+                if (skill_index, agent_index) in allowed
+            ]
+            if not skill["agents"]:
                 continue
-            matching = [item for item in descriptors if item["skill_index"] == skill_index]
-            if not matching or not any((item["skill_index"], item["agent_index"]) in allowed for item in matching):
-                continue
-            raw_agents = skill.get("agents")
-            if isinstance(raw_agents, list):
-                skill["agents"] = [
-                    agent
-                    for agent_index, agent in enumerate(raw_agents)
-                    if (skill_index, agent_index) in allowed
-                ]
-                if not skill["agents"]:
-                    continue
-            filtered_skills.append(_remote_safe_skill_payload(skill))
+        filtered_skills.append(_remote_safe_skill_payload(skill))
 
     filtered = dict(result)
     filtered["skills"] = filtered_skills
