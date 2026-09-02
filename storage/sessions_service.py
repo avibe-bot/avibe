@@ -1928,7 +1928,12 @@ class SQLiteSessionsService:
                                     "status": stmt.excluded.status,
                                     "metadata_json": stmt.excluded.metadata_json,
                                     "updated_at": stmt.excluded.updated_at,
-                                    "last_active_at": stmt.excluded.last_active_at,
+                                    # ``last_active_at`` is deliberately absent: it is the
+                                    # session-list ranking column and only real activity may
+                                    # move it. ``now`` is computed once per call, so writing it
+                                    # here stamped every reconciled row with one identical
+                                    # value and collapsed the ranking to its tiebreakers.
+                                    # New rows still get their stamp from ``values()`` above.
                                 },
                             )
                         )

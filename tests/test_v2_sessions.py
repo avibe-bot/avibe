@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from config.v2_sessions import SessionsStore
+from config.v2_sessions import SessionState, SessionsStore, migrate_session_state_mappings
 from modules.sessions_facade import SessionsFacade
 
 
@@ -362,3 +362,37 @@ def test_migrate_session_mappings_is_idempotent(tmp_path, monkeypatch):
 
     assert set(store2.state.session_mappings.keys()) == {"slack::C123"}
     assert store2.state.session_mappings["slack::C123"]["opencode"]["slack_123.456"] == "ses_abc"
+
+
+def test_migrate_session_state_mappings_leaves_the_scopeless_empty_key_alone():
+    """The empty key is a Session with no Scope, not a pre-split raw channel ID.
+
+    ``_legacy_scope_key`` collapses a row with no Scope onto ``""``. Prefixing it
+    asserts those Sessions belong to ``default_platform``, and because the rows
+    behind it record no legacy scope key the migration can never actually fix
+    them -- so treating it as legacy made every startup re-run the migration and
+    re-save the whole session state.
+    """
+    state = SessionState(
+        session_mappings={
+            "": {"codex": {"archived:seed": "ses_scopeless"}},
+            "C123": {"opencode": {"slack_123.456:/work": "ses_legacy"}},
+            "slack::C999": {"opencode": {"slack_999.001": "ses_prefixed"}},
+        }
+    )
+
+    migrated, legacy_keys, empty_removed = migrate_session_state_mappings(state, "slack")
+
+    # A real legacy key still migrates; the empty key is not one of them.
+    assert (migrated, legacy_keys, empty_removed) == (1, 1, 0)
+    assert "C123" not in state.session_mappings
+    assert state.session_mappings["slack::C123"] == {"opencode": {"slack_123.456:/work": "ses_legacy"}}
+    assert state.session_mappings[""] == {"codex": {"archived:seed": "ses_scopeless"}}
+
+
+def test_migrate_session_state_mappings_is_a_noop_for_only_the_empty_key():
+    """With nothing but the empty key present, the migration must not save."""
+    state = SessionState(session_mappings={"": {"codex": {"archived:seed": "ses_scopeless"}}})
+
+    assert migrate_session_state_mappings(state, "slack") == (0, 0, 0)
+    assert list(state.session_mappings) == [""]

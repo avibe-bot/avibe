@@ -177,14 +177,18 @@ def migrate_session_state_active_polls(state: SessionState, default_platform: st
 def migrate_session_state_mappings(state: SessionState, default_platform: str) -> tuple[int, int, int]:
     """Migrate legacy raw session keys to platform-prefixed keys.
 
+    A legacy raw key is a *non-empty* key with no platform prefix: it used to
+    hold a channel or user ID. The empty key is not one of those: it is what a
+    Session with no Scope collapses to, and prefixing it would assert those
+    Sessions belong to ``default_platform``. It is also unfixable by this
+    migration, because the rows behind it keep no legacy scope key, so treating
+    it as legacy made every startup re-run the migration and re-save the whole
+    state.
+
     Returns ``(migrated_entries, legacy_keys, empty_keys_removed)``.
     """
     mappings = state.session_mappings
-    old_keys = [
-        k
-        for k in list(mappings.keys())
-        if "::" not in k and mappings[k]
-    ]
+    old_keys = [k for k in list(mappings.keys()) if k and "::" not in k and mappings[k]]
     if not old_keys:
         empty_keys = [k for k in list(mappings.keys()) if not mappings[k]]
         for key in empty_keys:

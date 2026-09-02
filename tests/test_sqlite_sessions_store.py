@@ -7927,3 +7927,206 @@ def test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read(
         "nothing adopted the reservation, so the release must still remove it: a fix that "
         "makes the cleanup stop working is not a fix"
     )
+
+
+def _activity_stamps(service: SQLiteSessionsService) -> dict[str, tuple[str, str]]:
+    """Every row's ranking-relevant timestamps, keyed by session id."""
+
+    with service.engine.connect() as conn:
+        return {
+            str(row["id"]): (str(row["last_active_at"]), str(row["updated_at"]))
+            for row in conn.execute(
+                select(
+                    agent_sessions.c.id,
+                    agent_sessions.c.last_active_at,
+                    agent_sessions.c.updated_at,
+                )
+            ).mappings()
+        }
+
+
+def test_save_state_does_not_move_last_active_at_of_any_existing_row(tmp_path: Path) -> None:
+    """``save_state`` imports legacy mappings; it is not session activity.
+
+    ``now`` is computed once per call, so a row it restamps is not merely wrong
+    by a few microseconds -- every row it touches ends up sharing one identical
+    value, which collapses the session list's ``last_active_at DESC`` ordering
+    onto its tiebreakers. The assertion is therefore that *no* pre-existing row
+    moved, seeded with one row of every shape this loop can reach rather than a
+    list of the shapes it is expected to skip.
+    """
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            adopted_scope = resolve_scope_from_legacy_key(conn, "slack::C_ADOPT", now="2026-07-01T00:00:00Z")
+            archived_scope = resolve_scope_from_legacy_key(conn, "slack::C_ARCHIVED", now="2026-07-01T00:00:00Z")
+            routed_scope = resolve_scope_from_legacy_key(conn, "slack::C_ROUTED", now="2026-07-01T00:00:00Z")
+
+            # Shape 1: the imported mapping matches this row and its backend.
+            adopted_id = create_agent_session_row(
+                conn,
+                scope_id=adopted_scope,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="slack_100.001",
+                native_session_id="codex-native",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C_ADOPT"},
+                now="2026-07-10T00:00:00+00:00",
+                require_workdir=False,
+            )
+            # Shape 2: an archived row owns the anchor, so the import is skipped.
+            archived_id = create_agent_session_row(
+                conn,
+                scope_id=archived_scope,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_200.002",
+                native_session_id="archived-native",
+                status="archived",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C_ARCHIVED"},
+                now="2026-07-11T00:00:00+00:00",
+                require_workdir=False,
+            )
+            # Shape 3: a backend-owned route the import must not relabel.
+            routed_id = create_agent_session_row(
+                conn,
+                scope_id=routed_scope,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_300.003",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C_ROUTED"},
+                now="2026-07-12T00:00:00+00:00",
+                require_workdir=False,
+            )
+            # Shape 4: a Session with no Scope at all.
+            scopeless_id = create_agent_session_row(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="standalone_400.004",
+                native_session_id="scopeless-native",
+                workdir="/tmp",
+                metadata={},
+                now="2026-07-13T00:00:00+00:00",
+                require_workdir=False,
+            )
+
+        before = _activity_stamps(service)
+        assert set(before) == {adopted_id, archived_id, routed_id, scopeless_id}
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C_ADOPT": {"codex": {"slack_100.001": "codex-native"}},
+                    "slack::C_ARCHIVED": {"codex": {"slack_200.002": "codex-native"}},
+                    "slack::C_ROUTED": {"codex": {"slack_300.003": "codex-native"}},
+                    "": {"codex": {"standalone_400.004": "scopeless-native"}},
+                    # A mapping with no row yet: this one must still be stamped.
+                    "slack::C_NEW": {"codex": {"slack_500.005": "new-native"}},
+                }
+            )
+        )
+
+        after = _activity_stamps(service)
+        for session_id, stamps in before.items():
+            assert after[session_id][0] == stamps[0], (
+                f"save_state moved last_active_at of {session_id}: "
+                f"{stamps[0]} -> {after[session_id][0]}"
+            )
+
+        created = set(after) - set(before)
+        assert created, "save_state imported no new row, so the insert path proved nothing"
+        for session_id in created:
+            assert after[session_id][0], f"newly imported row {session_id} has no last_active_at"
+    finally:
+        service.close()
+
+
+def test_startup_mapping_migration_does_not_restamp_sessions_without_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Session with no Scope must not make every startup re-save the state.
+
+    ``_legacy_scope_key`` collapses a row with no Scope and no recorded legacy
+    scope key onto the empty key. Treating that as a legacy raw key made the
+    startup migration "migrate" it on every boot -- and each of those saves
+    rewrote the whole state, so the fix has to hold across restarts, not just
+    once.
+    """
+
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-01T00:00:00Z")
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_171717.123",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                now="2026-07-20T00:00:00+00:00",
+                require_workdir=False,
+            )
+            create_agent_session_row(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="archived:seed",
+                native_session_id="codex-native",
+                status="archived",
+                workdir="/tmp",
+                metadata={},
+                now="2026-07-21T00:00:00+00:00",
+                require_workdir=False,
+            )
+        before = _activity_stamps(store._service)
+    finally:
+        store.close()
+
+    save_calls: list[object] = []
+    original_save_state = SQLiteSessionsService.save_state
+
+    def _spy(self: SQLiteSessionsService, state: SessionState) -> None:
+        save_calls.append(state)
+        return original_save_state(self, state)
+
+    monkeypatch.setattr(SQLiteSessionsService, "save_state", _spy)
+
+    for _ in range(2):
+        restarted = SessionsStore(sessions_path)
+        try:
+            assert "archived:seed" in restarted.state.session_mappings.get("", {}).get("codex", {}), (
+                "the scope-less row no longer loads under the empty key, so this test "
+                f"no longer reproduces the trigger: {restarted.state.session_mappings!r}"
+            )
+            restarted.migrate_session_mappings("slack")
+            assert "slack::" not in restarted.state.session_mappings, (
+                "the empty key was prefixed onto a platform it has no relation to"
+            )
+            assert "archived:seed" in restarted.state.session_mappings.get("", {}).get("codex", {}), (
+                "the migration dropped the scope-less Session's mapping"
+            )
+        finally:
+            restarted.close()
+
+    assert save_calls == [], (
+        f"the startup migration still re-saved the whole session state {len(save_calls)} time(s)"
+    )
+
+    verify = SQLiteSessionsService(sessions_path.with_name("vibe.sqlite"))
+    try:
+        assert _activity_stamps(verify) == before
+    finally:
+        verify.close()
