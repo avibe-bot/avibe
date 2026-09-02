@@ -502,6 +502,13 @@ def test_remote_acl_identity_uses_the_registered_working_directory(
 
     assert [skill.name for skill in skills] == ["project"]
     assert captured["project_dir"] == str(working_directory.resolve())
+    assert captured["rows"] == [
+        {
+            "name": "project",
+            "scope": "project",
+            "backends": ("claude", "opencode", "codex"),
+        }
+    ]
 
 
 def test_load_emits_body_only_and_agent_accessible_directory(tmp_path: Path, monkeypatch) -> None:
@@ -610,6 +617,36 @@ def test_verified_read_rejects_a_file_changed_during_read(tmp_path: Path, monkey
     assert parse_skill_file(skill_file, priority=(1, 0, 1)) is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot replace an open file fixture")
+@pytest.mark.parametrize("include_body", [False, True])
+def test_verified_read_rejects_an_atomic_path_replacement(
+    tmp_path: Path,
+    monkeypatch,
+    include_body: bool,
+) -> None:
+    skill_file = _write_skill(tmp_path, "docs", "docs", "Description", "Original\n")
+    read_name = "_read_all" if include_body else "_read_prefix"
+    original_read = getattr(managed_skills, read_name)
+
+    def replace_after_read(*args, **kwargs):
+        data = original_read(*args, **kwargs)
+        replacement = skill_file.with_suffix(".replacement")
+        replacement.write_text(
+            "---\nname: docs\ndescription: Replacement\n---\nReplacement\n",
+            encoding="utf-8",
+        )
+        os.replace(replacement, skill_file)
+        return data
+
+    monkeypatch.setattr(managed_skills, read_name, replace_after_read)
+
+    assert parse_skill_file(
+        skill_file,
+        priority=(1, 0, 1),
+        include_body=include_body,
+    ) is None
+
+
 def test_frontmatter_body_and_root_limits_omit_candidates(tmp_path: Path) -> None:
     cwd = tmp_path / "project"
     too_much_frontmatter = cwd / ".agents" / "skills" / "frontmatter" / "SKILL.md"
@@ -699,6 +736,20 @@ def test_compatibility_aliases_share_one_candidate_budget_slot(tmp_path: Path, m
 
     assert [skill.name for skill in skills] == ["shared", "unique"]
     assert skills[0].directory == canonical.parent.resolve()
+    assert skills[0].access_backends == ("claude", "opencode", "codex")
+    assert skills[1].access_backends == ("opencode",)
+
+
+def test_distinct_same_name_candidates_keep_the_winners_access_backend(tmp_path: Path) -> None:
+    cwd = tmp_path / "project"
+    _write_skill(cwd / ".codex" / "skills", "shared", "shared", "Codex")
+    _write_skill(cwd / ".claude" / "skills", "shared", "shared", "Claude")
+
+    skills = _isolated_resolve(cwd, tmp_path)
+
+    assert len(skills) == 1
+    assert skills[0].description == "Codex"
+    assert skills[0].access_backends == ("codex",)
 
 
 def test_snapshot_v1_digest_fixture_is_stable(tmp_path: Path) -> None:
@@ -850,6 +901,29 @@ def test_publication_rejects_builtins_outside_runtime_catalog_limits(
     )
     with pytest.raises(RuntimeError, match="invalid"):
         publish_builtin_skills(source_root=oversized_body, destination_root=destination)
+
+
+def test_publication_bounds_the_complete_builtin_tree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    destination = tmp_path / "builtin-skills"
+    too_many_entries = tmp_path / "too-many-tree-entries"
+    skill_file = _write_skill(too_many_entries, "alpha", "alpha", "Alpha")
+    references = skill_file.parent / "references"
+    references.mkdir()
+    (references / "one.md").write_text("one\n", encoding="utf-8")
+    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_ENTRIES", 3)
+    with pytest.raises(RuntimeError, match="3 entries"):
+        publish_builtin_skills(source_root=too_many_entries, destination_root=destination)
+
+    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_ENTRIES", 4096)
+    too_many_bytes = tmp_path / "too-many-tree-bytes"
+    byte_skill = _write_skill(too_many_bytes, "alpha", "alpha", "Alpha")
+    (byte_skill.parent / "reference.md").write_bytes(b"x" * 32)
+    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_BYTES", 64)
+    with pytest.raises(RuntimeError, match="64 bytes"):
+        publish_builtin_skills(source_root=too_many_bytes, destination_root=destination)
 
 
 def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(

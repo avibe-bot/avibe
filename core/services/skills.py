@@ -475,7 +475,7 @@ def _project_id_for_skill_directory(project_dir: Optional[str]) -> str | None:
 
 
 def filter_accessible_runtime_skill_names(
-    rows: Sequence[dict[str, str]],
+    rows: Sequence[dict[str, Any]],
     *,
     backend: str,
     project_dir: Optional[str],
@@ -485,16 +485,28 @@ def filter_accessible_runtime_skill_names(
 
     if _backend_from_agent_ref(backend) is None:
         return set()
-    listing = {
-        "ok": True,
-        "skills": [
+    runtime_rows: list[dict[str, Any]] = []
+    for row in rows:
+        raw_backends = row.get("backends")
+        if not isinstance(raw_backends, (list, tuple)):
+            continue
+        access_backends: list[str] = []
+        for value in raw_backends:
+            normalized = _backend_from_agent_ref(value)
+            if normalized is not None and normalized not in access_backends:
+                access_backends.append(normalized)
+        if not access_backends:
+            continue
+        runtime_rows.append(
             {
                 "name": str(row.get("name") or ""),
                 "scope": str(row.get("scope") or ""),
-                "agents": list(BACKEND_TO_AGENT),
+                "agents": access_backends,
             }
-            for row in rows
-        ],
+        )
+    listing = {
+        "ok": True,
+        "skills": runtime_rows,
     }
     filtered = _filter_skill_listing(
         listing,

@@ -13,7 +13,7 @@ import stat
 import struct
 import tempfile
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -44,6 +44,8 @@ DISCOVERY_CLASS_MAX_CANDIDATES = 1024
 DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES = 8 * 1024 * 1024
 DISCOVERY_CLASS_MAX_CHILDREN = 4096
 PROJECT_ROOT_MAX_DIRECTORIES = 128
+BUILTIN_TREE_MAX_ENTRIES = 4096
+BUILTIN_TREE_MAX_BYTES = 32 * 1024 * 1024
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -67,6 +69,13 @@ _PROJECT_FAMILIES = (
     (Path(".claude/skills"), 3),
     (Path(".opencode/skills"), 4),
 )
+_FAMILY_ACCESS_BACKENDS = {
+    1: ("claude", "opencode", "codex"),
+    2: ("codex",),
+    3: ("claude",),
+    4: ("opencode",),
+    5: ("codex",),
+}
 
 
 @dataclass(frozen=True)
@@ -80,6 +89,7 @@ class ManagedSkill:
     source_directory: Path | None = None
     source_directory_identity: tuple[int, int] | None = None
     frontmatter_bytes: int = 0
+    access_backends: tuple[str, ...] = ()
 
 
 @dataclass
@@ -387,6 +397,19 @@ def _read_skill_path(
         after = os.fstat(fd)
         if _stat_token(before) != _stat_token(after):
             return None, len(data)
+        try:
+            path_after = os.stat(
+                "SKILL.md" if dir_fd is not None else skill_file,
+                dir_fd=dir_fd,
+                follow_symlinks=False,
+            )
+        except (OSError, TypeError, NotImplementedError):
+            return None, len(data)
+        if (
+            not stat.S_ISREG(path_after.st_mode)
+            or _directory_identity(path_after) != _directory_identity(before)
+        ):
+            return None, len(data)
     except (OSError, ValueError):
         return None, 0
     finally:
@@ -538,6 +561,7 @@ def _scan_root(
     budget: _DiscoveryBudget,
     seen_directory_identities: set[tuple[int, int]] | None = None,
     ignored_names: frozenset[str] = frozenset(),
+    access_backends: tuple[str, ...] = (),
 ) -> list[ManagedSkill]:
     children = _root_children(root, ignored_names=ignored_names, budget=budget)
     if children is None:
@@ -570,7 +594,7 @@ def _scan_root(
         )
         budget.frontmatter_bytes += consumed
         if skill is not None:
-            skills.append(skill)
+            skills.append(replace(skill, access_backends=access_backends))
     return skills
 
 
@@ -696,6 +720,7 @@ def resolve_skills(
                     priority=(1, depth, family_rank),
                     budget=compatibility_budget,
                     seen_directory_identities=compatibility_directory_identities,
+                    access_backends=_FAMILY_ACCESS_BACKENDS[family_rank],
                 )
             )
         if compatibility_budget.exhausted:
@@ -718,6 +743,7 @@ def resolve_skills(
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,
                 ignored_names=ignored_names,
+                access_backends=_FAMILY_ACCESS_BACKENDS[family_rank],
             )
         )
 
@@ -754,6 +780,7 @@ def resolve_accessible_skills(
                 {
                     "name": skill.name,
                     "scope": "project" if skill.priority[0] == 1 else "global",
+                    "backends": skill.access_backends,
                 }
                 for skill in compatibility
             ],
@@ -947,6 +974,7 @@ def load_skill(
             source_directory=winner.source_directory,
             source_directory_identity=winner.source_directory_identity,
             frontmatter_bytes=loaded.frontmatter_bytes,
+            access_backends=winner.access_backends,
         )
     except OSError:
         return None
@@ -998,14 +1026,18 @@ def _validate_portable_component(component: str) -> None:
 def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
     entries: list[_SnapshotEntry] = []
     aliases: set[str] = set()
+    file_bytes = 0
+    pending: list[tuple[Path, tuple[str, ...]]] = [(root, ())]
 
-    def visit(directory: Path, relative_parts: tuple[str, ...]) -> None:
+    while pending:
+        directory, relative_parts = pending.pop()
         try:
             with os.scandir(directory) as scanned:
                 children = sorted(scanned, key=lambda item: item.name)
         except OSError as exc:
             raise RuntimeError(f"Cannot read built-in Skill source: {directory}") from exc
         accepted_children = 0
+        child_directories: list[tuple[Path, tuple[str, ...]]] = []
         for child in children:
             # Installers may compile Skill scripts in place; bytecode is not part of the bundled tree.
             if child.name == "__pycache__" or child.name.endswith(_GENERATED_BYTECODE_SUFFIXES):
@@ -1019,6 +1051,10 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
             if alias in aliases:
                 raise RuntimeError(f"Built-in Skill paths collide case-insensitively: {relative}")
             aliases.add(alias)
+            if len(entries) >= BUILTIN_TREE_MAX_ENTRIES:
+                raise RuntimeError(
+                    f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_ENTRIES:,} entries"
+                )
             try:
                 child_stat = child.stat(follow_symlinks=False)
             except OSError as exc:
@@ -1029,15 +1065,20 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
                 raise RuntimeError(f"Built-in Skill path is a reparse point: {relative}")
             if stat.S_ISDIR(child_stat.st_mode):
                 entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, True))
-                visit(Path(child.path), child_parts)
+                child_directories.append((Path(child.path), child_parts))
             elif stat.S_ISREG(child_stat.st_mode):
+                file_bytes += int(child_stat.st_size)
+                if file_bytes > BUILTIN_TREE_MAX_BYTES:
+                    raise RuntimeError(
+                        f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
+                    )
                 entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, False))
             else:
                 raise RuntimeError(f"Built-in Skill path is not a directory or regular file: {relative}")
         if relative_parts and accepted_children == 0:
             raise RuntimeError(f"Built-in Skill directories must not be empty: {'/'.join(relative_parts)}")
+        pending.extend(reversed(child_directories))
 
-    visit(root, ())
     entries.sort(key=lambda entry: entry.relative_bytes)
     return entries
 
