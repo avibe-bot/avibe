@@ -154,12 +154,15 @@ the first project boundary, Avibe inspects:
 <D>/.opencode/skills
 ```
 
-The first project boundary is the nearer of the Git project root and the
-Avibe project base bound to the Session. The latter lets a Workbench project
-whose configured directory has no `.git` marker retain project-level Skills
-when an existing Session works in one of its descendants. A standalone command
-has no Avibe project binding and therefore uses the Git root; if neither
-boundary is found, only its active working directory is project scope.
+When a Session has a bound Avibe project base, that base is the project
+boundary even if the Session works inside a nested Git checkout. The base is
+snapshotted with the Session when the Session is created, so moving the Session
+to another scope does not change which project-level Skills it sees. This also
+lets a Workbench project whose configured directory has no `.git` marker retain
+project-level Skills when an existing Session works in one of its descendants.
+A standalone command has no Avibe project binding and therefore uses the first
+Git root; if neither boundary is found, only its active working directory is
+project scope.
 
 The nearest directory to the active working directory wins within the same
 directory family. Root discovery examines at most 128 directories including
@@ -230,6 +233,8 @@ Catalog parsing and rendering are bounded independently:
   frontmatter delimiter to end of file without reading the body during Catalog
   discovery;
 - truncate a normalized description beyond 1,024 characters, adding `...`;
+- replace decoded Unicode control characters with spaces before collapsing
+  whitespace, so Catalog output cannot carry terminal control sequences; and
 - render at most 25 entries and 16 KiB of Skill rows per page.
 
 The bounded read happens before decoding or normalizing field values, so a
@@ -345,6 +350,10 @@ invocation. Standard output uses only Catalog rows:
 When another page exists, the output ends with the same next-page sentence
 used by the prompt, with the appropriate page number. Paths, sources, scopes,
 and resolution metadata are not printed.
+
+Page boundaries are packed from the stable name order under both limits. Page
+`N+1` starts with the first entry after the last row actually emitted on page
+`N`; the 16 KiB limit never skips entries that did not fit an earlier page.
 
 Pagination is deliberately live rather than a cross-command snapshot. If the
 filesystem changes between `list --page` invocations, entries can move between
@@ -501,11 +510,17 @@ renew, and unbind there until the server is replaced, even when the effective
 `AVIBE_HOME` has changed. A newly started server uses the current runtime path.
 Expired entries are ignored and pruned.
 
+The active-poll record retains the exact built-in snapshot ID and root that the
+Turn's Catalog advertised. A process adopting that poll restores those values,
+not the newer process default, so an overlapping upgrade cannot change a
+same-Turn load.
+
 Binding publication and cleanup run outside the controller event loop. A
-restored poll retries publication three times; if the binding store remains
-unavailable, Avibe restores result delivery without the optional shell binding
-rather than stranding the durable poll. The next ordinary Avibe-dispatched Turn
-gets a fresh binding attempt.
+restored poll makes three immediate publication attempts. If the binding store
+remains unavailable, Avibe restores result delivery without waiting, then keeps
+retrying for the lifetime of that active poll and resumes expiry renewal after
+publication succeeds. This preserves the durable result path without
+permanently dropping the Turn's shell binding after a transient failure.
 
 ### 8.3 Runtime access boundary
 
@@ -821,14 +836,17 @@ Catalogs at runtime.
   malformed.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
-  expose paths or sources. When later pages exist, the prompt makes further
-  discovery optional, while a user-requested exact name may load directly. A
-  fixture mutating the
-  Catalog between page calls verifies live re-resolution and the documented
-  restart-at-page-1 boundary rather than a hidden snapshot.
+  expose paths or sources. A multibyte-description fixture proves that every
+  later page starts after the last row actually emitted, without skipping rows
+  when the byte budget wins before the count limit. When later pages exist, the
+  prompt makes further discovery optional, while a user-requested exact name
+  may load directly. A fixture mutating the Catalog between page calls verifies
+  live re-resolution and the documented restart-at-page-1 boundary rather than
+  a hidden snapshot.
 - Oversized descriptions cannot make the Catalog unbounded, and names with
   whitespace, shell syntax, uppercase characters, or invalid hyphen placement
-  are omitted by the parser-backed portable name boundary.
+  are omitted by the parser-backed portable name boundary. YAML-decoded C0 and
+  C1 control characters cannot reach terminal Catalog output.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
   directory from which supporting files can be read.
 - Parser-backed CLI coverage dispatches the canonical
@@ -888,7 +906,9 @@ and verify:
   and each restored Turn replaces its own entry without pruning other unexpired
   Sessions. When a managed server is adopted across an `AVIBE_HOME` change,
   bind, renew, and unbind operations continue using the absolute binding path
-  recorded by that server; and
+  recorded by that server. Restored polls retain their advertised built-in
+  snapshot and continue retrying a failed binding publication for the poll
+  lifetime; and
 - a cached Claude client is recreated and resumes the same native Session when
   its bound Skill roots or built-in snapshot change even if page 1 is identical;
   and

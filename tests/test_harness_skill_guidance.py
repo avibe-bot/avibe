@@ -201,7 +201,7 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     assert not (ROOT / ".agents/skills/pr-delivery-loop/scripts").exists()
     assert not (ROOT / ".agents/skills/pr-delivery-loop/tests").exists()
 
-    assert "the `pr-delivery-loop` skill for every PR-producing task" in agents
+    assert "the `pr-delivery-loop` skill for every implementation task" in agents
     assert "use the `background-watch-hook` skill" in agents
     assert "one durable `--forever` combined PR/CI Watch" in agents
     assert "one durable `--forever` combined PR watch" in body
