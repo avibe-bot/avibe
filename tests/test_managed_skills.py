@@ -121,6 +121,26 @@ def test_loose_parser_decodes_quoted_name_escapes_and_plain_description_folding(
     assert skill.description == "Formats source files and applies repository conventions."
 
 
+def test_invalid_optional_yaml_type_falls_back_to_required_fields(tmp_path: Path) -> None:
+    skill_file = tmp_path / "typed" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "name: typed\n"
+        "description: Still portable\n"
+        "expires: 2022-99-99\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(0,))
+
+    assert skill is not None
+    assert skill.name == "typed"
+    assert skill.description == "Still portable"
+
+
 def test_loose_parser_accepts_quoted_required_keys(tmp_path: Path) -> None:
     skill_file = tmp_path / "skill" / "SKILL.md"
     skill_file.parent.mkdir()
@@ -409,6 +429,20 @@ def test_project_root_ascent_is_bounded(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(managed_skills, "PROJECT_ROOT_MAX_DIRECTORIES", 3)
 
     assert [skill.name for skill in _isolated_resolve(cwd, tmp_path)] == ["local"]
+
+
+def test_bound_project_base_outside_ascent_limit_is_ignored(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    cwd = project / "a" / "b" / "c"
+    cwd.mkdir(parents=True)
+    _write_skill(project / ".agents" / "skills", "root", "root", "Root")
+    _write_skill(cwd / ".agents" / "skills", "local", "local", "Local")
+    monkeypatch.setattr(managed_skills, "PROJECT_ROOT_MAX_DIRECTORIES", 3)
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(cwd, tmp_path, project_base=project)
+    ] == ["local"]
 
 
 def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -> None:

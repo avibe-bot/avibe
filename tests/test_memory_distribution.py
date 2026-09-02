@@ -479,9 +479,12 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
         assert str(build_requirement.specifier) == ">=0.11.1"
 
 
-def test_core_wheel_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_path: Path) -> None:
-    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
-    environment = tmp_path / "builtin-skills-wheel"
+def _assert_core_distribution_mirrors_builtin_skills(
+    distribution: Path,
+    *,
+    environment: Path,
+    tmp_path: Path,
+) -> None:
     subprocess.run(
         [sys.executable, "-m", "venv", str(environment)],
         check=True,
@@ -495,7 +498,7 @@ def test_core_wheel_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_p
         "pip",
         "install",
         "--disable-pip-version-check",
-        str(core_wheel),
+        str(distribution),
         cwd=tmp_path,
     )
     avibe_home = tmp_path / "avibe-home"
@@ -504,10 +507,15 @@ def test_core_wheel_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_p
             str(python),
             "-c",
             (
-                "from core.managed_skills import builtin_skills_source, prepare_builtin_skills; "
+                "from core.managed_skills import "
+                "builtin_skills_source, load_skill, prepare_builtin_skills; "
                 "source = builtin_skills_source(); "
                 "assert source.name == 'builtin_skills_source'; "
-                "print(prepare_builtin_skills())"
+                "snapshot = prepare_builtin_skills(); "
+                "skill = load_skill('use-avibe'); "
+                "assert skill is not None and skill.body; "
+                "assert skill.directory.name == 'use-avibe'; "
+                "print(snapshot)"
             ),
         ],
         check=True,
@@ -537,6 +545,24 @@ def test_core_wheel_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_p
                 avibe_home / "builtin-skills" / snapshot_id / relative
             ).stat().st_mode & 0o111
             assert mirrored_mode == source_mode
+
+
+def test_core_wheel_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_path: Path) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    _assert_core_distribution_mirrors_builtin_skills(
+        core_wheel,
+        environment=tmp_path / "builtin-skills-wheel",
+        tmp_path=tmp_path,
+    )
+
+
+def test_core_sdist_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_path: Path) -> None:
+    core_sdist = _sdist_path(_wheel_path("AVIBE_CORE_WHEEL"), "avibe_os")
+    _assert_core_distribution_mirrors_builtin_skills(
+        core_sdist,
+        environment=tmp_path / "builtin-skills-sdist",
+        tmp_path=tmp_path,
+    )
 
 
 def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:

@@ -186,6 +186,52 @@ def test_existing_workbench_session_retains_non_git_project_base(tmp_path):
     assert target.project_base == str(project)
 
 
+def test_legacy_workbench_session_uses_current_scope_as_project_base(tmp_path):
+    project = tmp_path / "project"
+    child = project / "packages" / "app"
+    child.mkdir(parents=True)
+    controller = _controller(tmp_path)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_legacy_non_git",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, scope_id, workdir=str(project))
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="codex",
+            agent_name="codex",
+        )
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == session["id"])
+            .values(
+                workdir=str(child),
+                metadata_json=json.dumps({"created_via": "workbench"}),
+            )
+        )
+
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session["id"],
+        platform="avibe",
+        platform_specific={"agent_session_id": session["id"]},
+    )
+
+    target = resolve_agent_run_target(
+        context,
+        controller=controller,
+        base_session_id=session["id"],
+    )
+
+    assert target.workdir == str(child)
+    assert target.project_base == str(project)
+
+
 def test_im_channel_scope_workdir_creates_session_snapshot(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)

@@ -220,7 +220,11 @@ class _BoundedSafeLoader(yaml.SafeLoader):
 def _structured_frontmatter_fields(frontmatter: str) -> dict[str, str]:
     try:
         parsed = yaml.load(frontmatter, Loader=_BoundedSafeLoader)
-    except (yaml.YAMLError, RecursionError):
+    except Exception:
+        # SafeLoader constructors may raise ordinary Python exceptions (for
+        # example ValueError for an invalid timestamp). Structured parsing is
+        # only an optional fast path; the bounded tolerant parser below still
+        # gets a chance to recover name and description.
         return {}
     if not isinstance(parsed, dict):
         return {}
@@ -688,8 +692,10 @@ def _project_base_for_working_directory(
         return None
     resolved = raw.resolve()
     try:
-        working_directory.relative_to(resolved)
+        relative = working_directory.relative_to(resolved)
     except ValueError:
+        return None
+    if len(relative.parts) >= PROJECT_ROOT_MAX_DIRECTORIES:
         return None
     return resolved
 
