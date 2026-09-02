@@ -679,6 +679,28 @@ def test_builtin_and_compatibility_inputs_have_independent_budgets(tmp_path: Pat
     assert [skill.name for skill in skills] == ["builtin", "project"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="directory symlink fixture requires POSIX semantics")
+def test_compatibility_aliases_share_one_candidate_budget_slot(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    canonical = _write_skill(home / ".agents" / "skills", "shared", "shared", "Shared")
+    for root in (
+        tmp_path / "codex-home" / "skills",
+        tmp_path / "claude-home" / "skills",
+        tmp_path / "xdg-home" / "opencode" / "skills",
+    ):
+        root.mkdir(parents=True)
+        (root / "shared").symlink_to(canonical.parent, target_is_directory=True)
+    _write_skill(tmp_path / "xdg-home" / "opencode" / "skills", "unique", "unique", "Unique")
+    monkeypatch.setattr(managed_skills, "DISCOVERY_CLASS_MAX_CANDIDATES", 2)
+
+    skills = _isolated_resolve(cwd, tmp_path)
+
+    assert [skill.name for skill in skills] == ["shared", "unique"]
+    assert skills[0].directory == canonical.parent.resolve()
+
+
 def test_snapshot_v1_digest_fixture_is_stable(tmp_path: Path) -> None:
     root = tmp_path / "source"
     skill_file = root / "alpha" / "SKILL.md"

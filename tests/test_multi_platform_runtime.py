@@ -688,7 +688,7 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
     assert wechat.sent == [("clear_typing", "wechat", "user-1", "ctx-1")]
 
 
-def test_opencode_prompt_disables_question_tool_for_all_platforms():
+def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
     calls = []
     active_polls = []
     active_poll_updates = []
@@ -866,6 +866,33 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
+
+    binding_failures = []
+
+    def fail_binding(*args, **kwargs):
+        raise OSError("binding unavailable")
+
+    async def record_failure(context, error_text):
+        binding_failures.append(error_text)
+
+    async def emit_failure(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        fail_binding,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        emit_failure,
+    )
+    agent.record_model_hub_native_failure = record_failure
+    calls.clear()
+
+    asyncio.run(_run())
+
+    assert calls == []
+    assert binding_failures == ["OSError: binding unavailable"]
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():

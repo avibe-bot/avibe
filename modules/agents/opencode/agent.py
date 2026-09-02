@@ -1331,25 +1331,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if request.vibe_agent_system_prompt:
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
-            try:
-                binding_token = secrets.token_hex(16)
-                if bind_caller_context_session(
-                    session_id,
-                    request.context.platform_specific or {},
-                    base_env=os.environ,
-                    working_dir=request.working_path,
-                    extra_env=managed_skill_environment(request.working_path),
-                    binding_token=binding_token,
-                    # The creation origin travels with the identity: an OpenCode shell
-                    # command running ``vibe task add`` sources this binding, and it is
-                    # the only place the conversation behind the definition is visible.
-                    message=request.context,
-                    fallback_platform=platform,
-                ):
-                    caller_context_binding_session_id = session_id
-                    caller_context_binding_token = binding_token
-            except Exception:
-                logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
+            binding_token = secrets.token_hex(16)
+            if bind_caller_context_session(
+                session_id,
+                request.context.platform_specific or {},
+                base_env=os.environ,
+                working_dir=request.working_path,
+                extra_env=managed_skill_environment(request.working_path),
+                binding_token=binding_token,
+                # The creation origin travels with the identity: an OpenCode shell
+                # command running ``vibe task add`` sources this binding, and it is
+                # the only place the conversation behind the definition is visible.
+                message=request.context,
+                fallback_platform=platform,
+            ):
+                caller_context_binding_session_id = session_id
+                caller_context_binding_token = binding_token
 
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}

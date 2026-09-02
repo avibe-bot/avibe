@@ -536,6 +536,7 @@ def _scan_root(
     *,
     priority: tuple[int, int, int],
     budget: _DiscoveryBudget,
+    seen_directory_identities: set[tuple[int, int]] | None = None,
     ignored_names: frozenset[str] = frozenset(),
 ) -> list[ManagedSkill]:
     children = _root_children(root, ignored_names=ignored_names, budget=budget)
@@ -551,6 +552,10 @@ def _scan_root(
         if resolved_directory is None:
             continue
         directory, source_identity, directory_identity = resolved_directory
+        if seen_directory_identities is not None:
+            if directory_identity in seen_directory_identities:
+                continue
+            seen_directory_identities.add(directory_identity)
         budget.candidates += 1
         skill_file = directory / "SKILL.md"
         path_priority: tuple[object, ...] = (*priority, str(_absolute_path(child)))
@@ -679,6 +684,7 @@ def resolve_skills(
         candidates.extend(_scan_root(builtin_root, priority=(0, 0, 0), budget=builtin_budget))
 
     compatibility_budget = _DiscoveryBudget()
+    compatibility_directory_identities: set[tuple[int, int]] = set()
     working_directory = _working_directory(cwd)
     for depth, directory in enumerate(_project_directories(working_directory)):
         for relative_root, family_rank in _PROJECT_FAMILIES:
@@ -689,6 +695,7 @@ def resolve_skills(
                     directory / relative_root,
                     priority=(1, depth, family_rank),
                     budget=compatibility_budget,
+                    seen_directory_identities=compatibility_directory_identities,
                 )
             )
         if compatibility_budget.exhausted:
@@ -709,6 +716,7 @@ def resolve_skills(
                 root,
                 priority=(2, 0, family_rank),
                 budget=compatibility_budget,
+                seen_directory_identities=compatibility_directory_identities,
                 ignored_names=ignored_names,
             )
         )
