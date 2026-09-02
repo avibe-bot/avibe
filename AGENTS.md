@@ -15,13 +15,19 @@ Current product shape:
 - multi-backend agent routing across OpenCode, Claude Code, and Codex
 - local Incus-based unified regression environment for real cross-platform verification
 
-Default mindset:
-
-- treat the system as **multi-platform, multi-backend** first
-- prefer root-cause fixes over narrow patches
-- preserve user-visible behavior unless the task explicitly changes product behavior
-
 ## 2. Design Philosophy and Architecture
+
+### Product and Technical Decision-Making
+
+- Start from one coherent user mental model. Avibe absorbs backend and
+  implementation differences; users and agents see only what they need to act.
+- Establish hard constraints before choosing scope. Build the smallest complete
+  solution that works within them, and leave concepts undefined until they have
+  a clear responsibility.
+- Prefer compatibility, permissive adoption, and subtraction. Add validation,
+  metadata, state, or isolation only when it protects a demonstrated outcome.
+- Reuse existing ownership and lifecycle before adding mechanisms. Keep the
+  path simple and stateless, then optimize from measured evidence.
 
 ### Core Rule: Fix at the Highest Appropriate Layer
 
@@ -198,12 +204,6 @@ Source-of-truth rule:
 
 ## 5. Development Workflow
 
-### Branching and Scope
-
-- when starting a new feature or bug fix yourself, branch from the latest `master`
-- if the user already put you on an existing branch/worktree, continue there unless asked to move
-- keep commits small and focused; avoid mixing unrelated changes
-
 ### Planning and Documentation
 
 - if the task is complex or ambiguous, create a short plan before large changes
@@ -213,46 +213,24 @@ Source-of-truth rule:
 - update user documentation alongside user-visible features or changed workflows
 - keep project-specific plans, investigations, and summaries under `docs/`, never in the repo root
 
-### Worktrees
+### PR Delivery
 
-- use git worktree for long-running, parallel, or workspace-blocking efforts
-- if detailed worktree workflow is needed, load the dedicated worktree skill
-
-### Review Loop for PRs
-
-- the rules in this section are the self-sufficient baseline for every PR; use
-  the `pr-delivery-loop` skill for every implementation task to apply the fuller
-  standard for roles, authority, contracts, and close-out
-- open PRs non-draft; draft PRs do not trigger the Codex bot review
-- the GitHub Codex bot is the review gate: after every push confirm a review
-  of the new head starts, comment `@codex review` if none appears, and treat a
-  trigger as accepted only once the bot reacts 👀 to that comment
+- load and follow the `pr-delivery-loop` skill for every implementation task;
+  it owns the detailed procedure, but cannot weaken the baseline below
+- regardless of Skill resolution, use a task branch/worktree, record the change
+  contract, require an exact-head Codex review, zero unresolved review threads,
+  and passing CI before close-out, apply the review-loop circuit breaker, and
+  never merge without explicit owner instruction
+- the fallback change contract names the intended behavior, affected boundaries,
+  and validation evidence; pause patching when one root-cause class appears on
+  two reviewed heads, or after three findings-bearing heads following an
+  architecture or data-model rewrite, then diagnose the whole class before
+  continuing
+- use the `background-watch-hook` skill for managed review and CI waits
+- keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
 - only an explicit owner decision may make Codex findings advisory for an
-  architecture/spec-only PR: findings inform owner decision-completeness
-  certification instead of requiring edits until zero findings. This is a
-  per-PR exception; ordinary documentation and every product/test code PR retain
-  the normal exact-head Codex clean/pass, CI, and zero-unresolved-thread gates.
-- a bot pass is either an authenticated Codex-bot issue comment with the pass
-  phrase and exact reviewed commit, or a head-bound Codex-bot `+1` captured as
-  new waiter activity after the prior review was terminal; close-out requires
-  zero unresolved review threads across the entire PR, including earlier and
-  outdated heads, not just a 0-finding latest review
-- after opening a PR, use the `background-watch-hook` skill to keep a
-  review-fix loop running until the review passes; use that skill's bundled PR
-  and Actions waiters rather than hand-rolling one, and create the watch
-  immediately without waiting to be reminded
-- keep one durable `--forever` combined PR/CI Watch for the loop: seed its state
-  once before the first review trigger, let the waiter follow the PR's current
-  head for exact-SHA Actions, disable the Watch's per-cycle timeout, and never
-  rebuild the baseline between rounds
-- PR descriptions must name the changed capability, list affected scenario IDs
-  when a catalog exists, and state which evidence layers were updated: unit,
-  contract, scenario, and residual manual checks
-- do not merge on your own initiative: the orchestrator (or the user) does the
-  final review and merge; an explicit merge instruction from them is carried
-  out directly after a mechanical `mergeStateStatus == CLEAN` check, never by
-  spawning another agent to re-review
-- require the GitHub CI checks to pass before merge
+  architecture/spec-only PR; ordinary documentation and every product or test
+  code PR retain the Skill's normal gates
 
 ### Pre-Push Requirements
 
