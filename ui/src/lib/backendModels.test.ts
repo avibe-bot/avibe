@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { blankBackendModel } from '../components/settings/models/backendCatalog';
 import type { AgentSupply, BackendModel } from '../components/settings/models/types';
 import { ApiError, type ApiContextType } from '../context/ApiContext';
-import { fetchBackendModels, loadBackendModelsWithRefresh } from './backendModels';
+import { fetchBackendModels, loadBackendModelsWithRefresh, modelOptionLabel } from './backendModels';
+import { resolveEffortOptions } from './effortOptions';
 
 /** No Model Hub record to read, which is what every pre-Hub server, unreadable
  *  answer, and disabled engine amounts to for a picker. */
@@ -90,6 +91,10 @@ describe('fetchBackendModels for OpenCode', () => {
 });
 
 describe('fetchBackendModels in gateway mode', () => {
+  it('does not use inherited Object properties as model labels', () => {
+    expect(modelOptionLabel('constructor', {})).toBe('constructor');
+  });
+
   it('offers exactly the models the Model Hub catalog holds', async () => {
     const claudeModels = vi.fn();
     const api = {
@@ -99,7 +104,11 @@ describe('fetchBackendModels in gateway mode', () => {
             // The backend's own selector: visible in the catalog, never a Route
             // key, so it is not a model anything can be pointed at.
             model('default', { locked: true, routeable: false }),
-            model('alpha', { display_name: 'Alpha', reasoning_efforts: ['low', 'high'] }),
+            model('alpha', {
+              display_name: 'Alpha',
+              supports_reasoning: true,
+              reasoning_efforts: ['low', 'high'],
+            }),
             model('beta'),
           ],
         }),
@@ -113,8 +122,73 @@ describe('fetchBackendModels in gateway mode', () => {
     expect(result).toEqual({
       models: ['alpha', 'beta'],
       modelLabels: { alpha: 'Alpha' },
-      reasoningOptions: { alpha: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] },
+      reasoningOptions: {
+        alpha: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }],
+        // Present and empty: `beta` states it does not reason, and only a key
+        // the catalog never wrote may fall back to the generic ladder.
+        beta: [],
+      },
     });
+  });
+
+  it('states "no efforts" for every routeable model the catalog says does not reason', async () => {
+    const api = {
+      readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue(
+        hubAgent('codex', {
+          catalog_models: [
+            // Efforts left behind by an earlier fill: the row now says it does
+            // not reason, and the runtime drops the variants for exactly that
+            // reason, so the picker must not offer them either.
+            model('off-with-leftovers', { supports_reasoning: false, reasoning_efforts: ['low', 'high'] }),
+            // A model that reasons but names no ladder — "omit the parameter".
+            model('on-without-efforts', { supports_reasoning: true, reasoning_efforts: [] }),
+            // Unset stays unset: the row never denies reasoning, so its own
+            // empty list is what the picker reports.
+            model('unset', { supports_reasoning: null, reasoning_efforts: [] }),
+          ],
+        }),
+      ),
+      codexModels: vi.fn(),
+    } as unknown as ApiContextType;
+
+    const result = await fetchBackendModels(api, 'codex');
+
+    expect(result.reasoningOptions).toEqual({
+      'off-with-leftovers': [],
+      'on-without-efforts': [],
+      unset: [],
+    });
+    // And the resolver reads those keys as an answer rather than a gap.
+    for (const id of result.models) {
+      expect(resolveEffortOptions('codex', id, result.reasoningOptions)).toEqual([]);
+    }
+  });
+
+  it('treats model ids as data rather than Object properties', async () => {
+    const api = {
+      readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue(
+        hubAgent('codex', {
+          catalog_models: [
+            model('constructor', {
+              display_name: 'Constructor',
+              supports_reasoning: true,
+              reasoning_efforts: ['high'],
+            }),
+            model('__proto__', { display_name: 'Prototype', reasoning_efforts: [] }),
+          ],
+        }),
+      ),
+      codexModels: vi.fn(),
+    } as unknown as ApiContextType;
+
+    const result = await fetchBackendModels(api, 'codex');
+
+    expect(result.models).toEqual(['constructor', '__proto__']);
+    expect(result.modelLabels.constructor).toBe('Constructor');
+    expect(result.modelLabels.__proto__).toBe('Prototype');
+    expect(Object.prototype.hasOwnProperty.call(result.modelLabels, '__proto__')).toBe(true);
+    expect(resolveEffortOptions('codex', 'constructor', result.reasoningOptions)).toEqual(['high']);
+    expect(resolveEffortOptions('codex', '__proto__', result.reasoningOptions)).toEqual([]);
   });
 
   it('picks up a model the user just added and drops one they removed', async () => {
@@ -163,6 +237,9 @@ describe('fetchBackendModels in gateway mode', () => {
 
     await expect(fetchBackendModels(api, 'opencode')).resolves.toMatchObject({
       models: ['openrouter/anthropic/claude-x'],
+      // OpenCode has no shared default set to fall back to, so its per-model
+      // answer has to arrive as an answer rather than as a missing key.
+      reasoningOptions: { 'openrouter/anthropic/claude-x': [] },
     });
     expect(readOpencodeOptionsForModelPicker).not.toHaveBeenCalled();
   });

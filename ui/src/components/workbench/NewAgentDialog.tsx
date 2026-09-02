@@ -52,7 +52,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [model, setModel] = useState('');
-  const [effort, setEffort] = useState<string>('medium');
+  // null is a real answer, not a missing one: a model whose catalog row states
+  // no efforts is created with the effort parameter omitted.
+  const [effort, setEffort] = useState<string | null>('medium');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -101,8 +103,12 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // change, so handleSubmit never sends an effort the backend would reject
   // (e.g. picking Codex `xhigh` then switching to Claude).
   useEffect(() => {
-    if (effort && !effortOptions.includes(effort)) {
-      setEffort(effortOptions.includes('medium') ? 'medium' : effortOptions[0] ?? 'medium');
+    if (effortOptions.length === 0) {
+      setEffort(null);
+      return;
+    }
+    if (effort === null || !effortOptions.includes(effort)) {
+      setEffort(effortOptions.includes('medium') ? 'medium' : effortOptions[0]);
     }
   }, [effortOptions, effort]);
 
@@ -243,9 +249,12 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         {/* Model + Effort — both rows share a 38px height so the Combobox
             on the left and the segmented control on the right align. The
             segments use rounded-md py-2 (was py-0.5 which collapsed to
-            ~24px and looked stubby next to the model field). */}
+            ~24px and looked stubby next to the model field). A model whose
+            catalog row states no efforts has no field here at all: an empty
+            bordered box would read as a control that failed to load, so the
+            model takes the whole row instead. */}
         <div className="grid grid-cols-2 gap-3">
-          <div className="flex flex-col gap-1.5">
+          <div className={clsx('flex flex-col gap-1.5', effortOptions.length === 0 && 'col-span-2')}>
             <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
               {t('agents.create.model')}
             </div>
@@ -258,29 +267,31 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
               allowCustomValue
             />
           </div>
-          <div className="flex flex-col gap-1.5">
-            <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
-              {t('agents.detail.effort')}
+          {effortOptions.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
+                {t('agents.detail.effort')}
+              </div>
+              <div
+                className="grid h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
+                style={{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }}
+              >
+                {effortOptions.map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setEffort(opt)}
+                    className={clsx(
+                      'truncate rounded px-0.5 text-[11px] capitalize transition',
+                      effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
+                    )}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div
-              className="grid h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
-              style={{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }}
-            >
-              {effortOptions.map((opt) => (
-                <button
-                  key={opt}
-                  type="button"
-                  onClick={() => setEffort(opt)}
-                  className={clsx(
-                    'truncate rounded px-0.5 text-[11px] capitalize transition',
-                    effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
-                  )}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-          </div>
+          )}
         </div>
 
         {/* System prompt — with token estimate + expand-to-editor, mirroring

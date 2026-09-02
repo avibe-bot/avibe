@@ -38,9 +38,18 @@ vi.mock('../../context/ApiContext', async () => {
 
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('./CapabilityTabs', () => ({ CapabilityTabs: () => null }));
+// What the catalog answers for this render. The default is an empty list, which
+// is every test that types its own model; a test about per-model efforts states
+// the entries the Hub catalog would have projected.
+type FakeModelCatalog = {
+  models: string[];
+  reasoningOptions?: Record<string, { value: string; label: string }[]>;
+};
+let modelCatalog: FakeModelCatalog = { models: [] };
+
 vi.mock('../../lib/backendModels', async () => ({
-  loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: { models: string[] }) => void) => {
-    onLoaded({ models: [] });
+  loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
+    onLoaded(modelCatalog);
     return () => {};
   },
 }));
@@ -159,6 +168,7 @@ afterEach(() => {
   apiRef.current = null;
   handlers = null;
   showToast.mockReset();
+  modelCatalog = { models: [] };
 });
 
 describe('AgentsPage load requests follow the rank that can serve them', () => {
@@ -1365,6 +1375,111 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(screen.getByText('description failed')).toBeTruthy();
     expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { system_prompt: 'saved prompt' });
+  });
+
+  it('clears the reasoning effort in the same patch as a model that has none', async () => {
+    // The record must never keep an effort the selected model cannot run, and
+    // "no efforts at all" is the case a fallback-shaped fix misses: there is no
+    // valid value to swap in, so the field has to be cleared instead.
+    modelCatalog = { models: [], reasoningOptions: { 'no-effort-model': [] } };
+    const initial = {
+      ...brief('agent-a', 'description'),
+      model: 'old-model',
+      reasoning_effort: 'medium' as const,
+    };
+    // What the server holds once the patch lands: the new model, and no effort.
+    const cleared = fullAgent({ ...initial, model: 'no-effort-model' }, 'initial prompt');
+    cleared.agent.reasoning_effort = null;
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(initial, 'initial prompt'))
+      .mockResolvedValue(cleared);
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).toContain('bg-mint-soft');
+
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'no-effort-model' } });
+    fireEvent.click(screen.getByText('Use "no-effort-model"'));
+
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', {
+      model: 'no-effort-model',
+      reasoning_effort: null,
+    }));
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+    // The whole field goes, not just its segments: an empty outline under a
+    // heading reads as a control that failed to load.
+    expect(screen.queryByRole('button', { name: 'medium', exact: true })).toBeNull();
+    expect(screen.queryByText('agents.detail.effort')).toBeNull();
+  });
+
+  it('keeps an unset server effort unset instead of lighting a default', async () => {
+    // The reported inconsistency: the panel showed `medium` for an agent the
+    // server held at null, so switching models sent only `model` and the record
+    // stayed effort-less while the UI claimed otherwise.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: {
+        'no-effort-model': [],
+        'reasoning-model': [{ value: 'medium', label: 'Medium' }],
+      },
+    };
+    const initial = {
+      ...brief('agent-a', 'description'),
+      model: 'no-effort-model',
+      reasoning_effort: null,
+    };
+    const full = fullAgent(initial, 'initial prompt');
+    full.agent.reasoning_effort = null;
+    // What the server holds after the patch: the new model, and still no effort.
+    const switched = fullAgent({ ...initial, model: 'reasoning-model' }, 'initial prompt');
+    switched.agent.reasoning_effort = null;
+    const getVibeAgent = vi.fn().mockResolvedValueOnce(full).mockResolvedValue(switched);
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    expect(screen.queryByText('agents.detail.effort')).toBeNull();
+
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'reasoning-model' } });
+    fireEvent.click(screen.getByText('Use "reasoning-model"'));
+
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { model: 'reasoning-model' }));
+    // The column is back because this model has one, but no segment is chosen:
+    // the server holds no effort, and the panel may not invent one.
+    expect(screen.getByText('agents.detail.effort')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
+  });
+
+  it('keeps a still-valid effort untouched when the model changes', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+    };
+    const initial = {
+      ...brief('agent-a', 'description'),
+      model: 'old-model',
+      reasoning_effort: 'medium' as const,
+    };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'reasoning-model' } });
+    fireEvent.click(screen.getByText('Use "reasoning-model"'));
+
+    // A model switch is not an effort edit: only the field the user changed goes.
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { model: 'reasoning-model' }));
+    // A model that has an effort keeps the field, still showing the current one.
+    expect(screen.getByText('agents.detail.effort')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).toContain('bg-mint-soft');
   });
 
   it.each(['model', 'effort'] as const)('restores the authoritative value after a failed %s mutation', async (field) => {

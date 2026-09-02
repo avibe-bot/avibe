@@ -67,6 +67,7 @@ from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
     ResolvedInvocation,
+    project_opencode_public_model,
 )
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
@@ -4732,6 +4733,34 @@ def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disable
         "name": "custom/no-reasoning",
         "reasoning": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("input_modalities", "output_modalities", "expected"),
+    [
+        (["text"], [], {"input": ["text"]}),
+        ([], ["text"], {"output": ["text"]}),
+        (["text", "image"], ["text"], {"input": ["text", "image"], "output": ["text"]}),
+        ([], [], None),
+    ],
+)
+def test_opencode_public_model_omits_unspecified_modality_directions(
+    input_modalities: list[str],
+    output_modalities: list[str],
+    expected: dict[str, list[str]] | None,
+) -> None:
+    model = ModelHubBackendModelConfig(
+        id="custom/modalities",
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
+    )
+
+    projected = project_opencode_public_model(model)
+
+    if expected is None:
+        assert "modalities" not in projected
+    else:
+        assert projected["modalities"] == expected
 
 
 def test_opencode_overlay_private_provider_id_is_credential_scoped(

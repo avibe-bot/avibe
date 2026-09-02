@@ -148,11 +148,13 @@ def project_opencode_public_model(
             )
             if value is not None
         }
-    if model.input_modalities or model.output_modalities:
-        projected["modalities"] = {
-            "input": list(model.input_modalities),
-            "output": list(model.output_modalities),
-        }
+    modalities: dict[str, list[str]] = {}
+    if model.input_modalities:
+        modalities["input"] = list(model.input_modalities)
+    if model.output_modalities:
+        modalities["output"] = list(model.output_modalities)
+    if modalities:
+        projected["modalities"] = modalities
     if model.supports_tools is not None:
         projected["tool_call"] = model.supports_tools
     if model.supports_reasoning is not None:

@@ -17,7 +17,9 @@ const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
 const CATALOG_REFRESH_MAX_RETRIES = 2;
 
 export function modelOptionLabel(model: string, labels?: Record<string, string>): string {
-  return labels?.[model] || model;
+  return labels && Object.prototype.hasOwnProperty.call(labels, model) && labels[model]
+    ? labels[model]
+    : model;
 }
 
 // In Hub mode the persisted catalog is authoritative. A missing catalog uses
@@ -31,15 +33,20 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
   // A backend-owned selector such as Claude Code's Default is not routeable.
   const models = routeableCatalogModelIds(catalog);
   const rows = new Map(catalog.map((model) => [model.id, model]));
-  const modelLabels: Record<string, string> = {};
-  const reasoningOptions: Record<string, { value: string; label: string }[]> = {};
+  // Model ids are user-controlled map keys. A null prototype keeps ids such as
+  // "constructor" and "__proto__" from colliding with Object properties.
+  const modelLabels = Object.create(null) as Record<string, string>;
+  const reasoningOptions = Object.create(null) as Record<string, { value: string; label: string }[]>;
   for (const id of models) {
     const row = rows.get(id);
     if (!row) continue;
     if (row.display_name) modelLabels[id] = row.display_name;
-    if (row.reasoning_efforts.length) {
-      reasoningOptions[id] = row.reasoning_efforts.map((effort) => ({ value: effort, label: effort }));
-    }
+    // Every routeable model gets a key, including an empty one: the catalog is
+    // authoritative here, so "this model does not reason" must be sayable and
+    // must not read as "nobody answered" and fall back to the generic ladder.
+    reasoningOptions[id] = row.supports_reasoning === false
+      ? []
+      : row.reasoning_efforts.map((effort) => ({ value: effort, label: effort }));
   }
   return { models, modelLabels, reasoningOptions };
 };

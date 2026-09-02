@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -90,10 +90,51 @@ describe('BackendModelEditorDialog', () => {
     });
   });
 
-  it('caps the ID at the contract length', () => {
-    renderEditor();
+  it('caps the ID at the contract length while it can still be typed', async () => {
+    const user = userEvent.setup();
+    const { onCommit } = renderEditor();
 
-    expect(screen.getByLabelText('Backend model ID').getAttribute('maxlength')).toBe('256');
+    const id = screen.getByLabelText('Backend model ID');
+    expect(id.getAttribute('maxlength')).toBe('256');
+    // The browser stops at the cap, so reaching the error needs a value the
+    // field never lets a keystroke produce.
+    fireEvent.change(id, { target: { value: 'x'.repeat(257) } });
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(screen.getByText('A model ID may be at most 256 characters.')).toBeTruthy();
+  });
+
+  it('edits a persisted ID that predates the length cap', async () => {
+    // The id is read-only here and the backend still accepts the metadata, so a
+    // ceiling on a field nobody can shorten only locks the row out of every
+    // edit it is allowed to make.
+    const user = userEvent.setup();
+    const legacy: BackendModel = {
+      ...blankBackendModel(),
+      id: `internal/${'x'.repeat(300)}`,
+      origin: 'builtin',
+      context_window: 100000,
+    };
+    const { onCommit } = renderEditor({ model: legacy, takenIds: new Set([legacy.id]) });
+
+    const id = screen.getByLabelText('Backend model ID') as HTMLInputElement;
+    // Shown in full, not clipped: the cap belongs to what can be typed.
+    expect(id.value).toBe(legacy.id);
+    expect(id.getAttribute('maxlength')).toBeNull();
+    expect(screen.queryByText('A model ID may be at most 256 characters.')).toBeNull();
+
+    await user.type(screen.getByLabelText('Display name'), 'Legacy house model');
+    await user.clear(screen.getByLabelText('Maximum output'));
+    await user.type(screen.getByLabelText('Maximum output'), '8192');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: legacy.id,
+      display_name: 'Legacy house model',
+      max_output_tokens: 8192,
+      context_window: 100000,
+    }));
   });
 
   it('keeps the ID read-only in edit mode and commits the edited row', async () => {

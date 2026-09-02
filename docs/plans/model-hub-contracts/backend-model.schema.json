@@ -57,7 +57,8 @@
     "output_modalities": {
       "type": "array",
       "items": { "enum": ["text", "image", "audio", "video"] },
-      "uniqueItems": true
+      "uniqueItems": true,
+      "description": "Explicitly supported output modalities. An empty array leaves native metadata in place when the backend has it and otherwise uses that backend adapter's safe default."
     },
     "supports_tools": {
       "type": ["boolean", "null"],

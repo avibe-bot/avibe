@@ -159,14 +159,20 @@ export const BackendModelEditorDialog: React.FC<{
   const context = parseTokens(contextText);
   const output = parseTokens(outputText);
   const trimmedId = draft.id.trim();
-  const duplicate = creating && takenIds.has(trimmedId);
-  const idError = trimmedId === ''
-    ? 'required'
-    : trimmedId.length > BACKEND_MODEL_ID_MAX_LENGTH
-      ? 'tooLong'
-      : duplicate
-        ? 'duplicate'
-        : null;
+  // Every id rule is a rule about what the user may type, and only add mode lets
+  // them type it — an edit shows the id read-only. Judging a value the dialog
+  // itself locks is what made a persisted row whose id predates the length
+  // ceiling uneditable: its metadata is the part the backend still accepts, yet
+  // Save refused it and pointed at the one field nobody could shorten.
+  const idError = !creating
+    ? null
+    : trimmedId === ''
+      ? 'required'
+      : trimmedId.length > BACKEND_MODEL_ID_MAX_LENGTH
+        ? 'tooLong'
+        : takenIds.has(trimmedId)
+          ? 'duplicate'
+          : null;
   const valid = idError === null && context.ok && output.ok;
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
@@ -312,7 +318,9 @@ export const BackendModelEditorDialog: React.FC<{
                     value={draft.id}
                     readOnly={!creating}
                     aria-invalid={Boolean(idHint)}
-                    maxLength={BACKEND_MODEL_ID_MAX_LENGTH}
+                    // The ceiling belongs to the field that can still be typed
+                    // into; a read-only legacy id is shown in full, not clipped.
+                    maxLength={creating ? BACKEND_MODEL_ID_MAX_LENGTH : undefined}
                     spellCheck={false}
                     autoComplete="off"
                     onChange={(event) => changeId(event.target.value)}

@@ -206,6 +206,8 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
                 target_model=requested_model,
                 runtime_model=requested_model,
                 source_id="src_native01",
+                context_window=128_000,
+                max_output_tokens=32_000,
                 reasoning_efforts=("max",),
             )
 
@@ -228,6 +230,8 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
     _run_session(handler, context)
 
     assert captured["options"].effort == "max"
+    assert captured["options"].env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert captured["options"].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
 
 
 def test_claude_system_prompt_follows_live_memory_enabled_state(tmp_path: Path) -> None:

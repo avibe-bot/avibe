@@ -285,24 +285,31 @@ def build_claude_hub_env(
     base_env: dict[str, str],
     launch: ModelHubLaunch,
 ) -> dict[str, str]:
-    """Return a hub-only Claude environment without inherited auth routing."""
+    """Return Claude environment overrides for the resolved Hub launch."""
 
-    if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
+    if launch.channel == "direct":
         return dict(base_env)
-    result = {
-        key: value
-        for key, value in base_env.items()
-        if not key.startswith("ANTHROPIC_")
-        and key
-        not in {
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    if launch.channel == "hub":
+        if not launch.gateway_base_url or not launch.gateway_token:
+            return dict(base_env)
+        result = {
+            key: value
+            for key, value in base_env.items()
+            if not key.startswith("ANTHROPIC_")
+            and key
+            not in {
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            }
         }
-    }
-    result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
-    result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
-    result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+        result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
+        result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
+        result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+    else:
+        # A native_cli hop keeps the user's official CLI authentication while
+        # applying metadata owned by the selected Hub catalog row.
+        result = dict(base_env)
     if launch.context_window is not None:
         result["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(launch.context_window)
     if launch.max_output_tokens is not None:
