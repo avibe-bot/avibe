@@ -860,8 +860,9 @@ describe('Agent result metrics tail', () => {
     expect(markup.split(displayedFooter)).toHaveLength(2);
     expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
     expect(markup).toContain(
-      'opacity-0 transition-opacity duration-150 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
+      'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
     );
+    expect(markup).not.toContain('transition-opacity');
     expect(markup).toContain('flex-wrap');
   });
 

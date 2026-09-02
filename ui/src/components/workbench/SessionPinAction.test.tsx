@@ -7,7 +7,6 @@ import {
   SESSION_ROW_ACTION_BUTTON_CLASS,
   SESSION_ROW_MENU_POSITION_CLASS,
   SESSION_ROW_PIN_POSITION_CLASS,
-  sessionRowActionPaddingClass,
 } from './sessionRowLayout';
 
 const renderAction = (pinned: boolean, pending = false) =>
@@ -76,21 +75,5 @@ describe('SessionPinAction', () => {
     expect(html).toContain('disabled=""');
     expect(html).toContain('animate-spin');
     expect(html).toContain('cursor-wait');
-  });
-});
-
-describe('sessionRowActionPaddingClass', () => {
-  it('gives the title full width until the two-button rail is revealed', () => {
-    const className = sessionRowActionPaddingClass(false, false);
-
-    expect(className).toContain('pr-2.5');
-    expect(className).toContain('hover:pr-11');
-    expect(className).toContain('focus-within:pr-11');
-    expect(className).toContain('pointer-coarse:pr-11');
-  });
-
-  it('reserves the rail while the menu is open or the pin stays visible', () => {
-    expect(sessionRowActionPaddingClass(true, false)).toBe('pr-11');
-    expect(sessionRowActionPaddingClass(false, true)).toBe('pr-11');
   });
 });
