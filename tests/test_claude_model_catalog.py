@@ -39,6 +39,24 @@ def test_catalog_excludes_dated_4_6_and_later_internal_ids():
     assert "claude-opus-5-20260724" not in sort_catalog_models(["claude-opus-5-20260724"])
 
 
+def test_dateless_model_ids_sort_before_matching_snapshots():
+    models = load_catalog_models()
+    ordered = sort_catalog_models(models)
+    positions = {model: index for index, model in enumerate(ordered)}
+
+    matching_pairs = []
+    for model in models:
+        parts = model.split("-")
+        if len(parts[-1]) != 8 or not parts[-1].isdigit():
+            continue
+        dateless_model = "-".join(parts[:-1])
+        if dateless_model in positions:
+            matching_pairs.append((dateless_model, model))
+
+    assert matching_pairs
+    assert all(positions[dateless] < positions[snapshot] for dateless, snapshot in matching_pairs)
+
+
 def test_fable_sorts_above_other_families():
     ordered = sort_catalog_models(
         [

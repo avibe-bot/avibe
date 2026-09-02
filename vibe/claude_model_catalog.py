@@ -147,4 +147,7 @@ def _int_or_none(value: str) -> int | None:
 
 
 def _model_version(model: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in model.split("-")[2:] if part.isdigit())
+    parts = model.split("-")[2:]
+    if parts and len(parts[-1]) == 8 and parts[-1].isdigit():
+        parts = parts[:-1]
+    return tuple(int(part) for part in parts if part.isdigit())
