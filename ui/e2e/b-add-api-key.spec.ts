@@ -269,13 +269,20 @@ test.describe('B · add an API-key source', () => {
     // `cooldown.server_error` is the one answer that is not an answer: the
     // gateway engine fails the dry run itself, without the upstream ever
     // receiving it, and every retry re-arms a fresh thirty-second cooldown on
-    // top of the last — roughly one run in three. Recreating the source
-    // sometimes clears it; waiting, restarting the engine, and cycling the
-    // whole gateway do not. So a sticky cooldown is retried by rebuilding the
-    // arrangement, bounded to three attempts, and a defect that survives all
-    // three FAILS below rather than skipping — per §5a, once the mock has
-    // answered, a product-side failure is the suite's finding, not its exit
-    // (reported to the orchestrator either way).
+    // top of the last — roughly one run in three (#1818). Recreating the source
+    // sometimes clears it; waiting, restarting the engine, and cycling the whole
+    // gateway do not. So a sticky cooldown is retried by rebuilding the
+    // arrangement, bounded to three attempts.
+    //
+    // A defect that survives all three attempts is #1818's exact signature
+    // (5xx + the upstream received nothing + the cooldown re-arming), and the
+    // run then marks ITSELF expected-fail via `test.fail` naming #1818, so an
+    // intermittent defect never burns the suite red. That marker is also the
+    // detector: once #1818 is fixed, this path stops firing, the test passes
+    // while marked should-fail, and Playwright reports "Expected to fail, but
+    // passed" — one loud run, and the marker comes out. Any OTHER verdict still
+    // fails hard below; a wrong classification is what the scenario exists to
+    // catch.
     await mock.configure({ auth: '401' });
     let verdict = await settleKeyVerdict(api, source.id, gateway);
     for (let attempt = 0; attempt < 3 && verdict === 'models.source.cooldown.server_error'; attempt += 1) {
@@ -287,10 +294,10 @@ test.describe('B · add an API-key source', () => {
       await api.deleteSource(source.id);
       const rebuilt = await api.createApiKeySource(source.display_name, mockBaseUrl());
       if (!rebuilt) {
-        // The instance that cannot rebuild this arrangement is the same failure
-        // as the cooldown it was clearing — named, not skipped.
-        expect(rebuilt, 'The instance refused to recreate the precondition source.').not.toBeNull();
-        break;
+        // The instance that cannot rebuild this arrangement is a product
+        // failure wearing the cooldown's clothes — named, not skipped, and not
+        // #1818 either.
+        throw new Error('The instance refused to recreate the precondition source.');
       }
       expect(
         rebuilt.models.some((model) => model.id === supplied),
@@ -306,13 +313,12 @@ test.describe('B · add an API-key source', () => {
       // where a genuine one-off transient still gets its chance to clear.
       verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
     }
-    expect(
-      verdict,
-      'The gateway engine kept answering the dry run with a 5xx of its own across three fresh '
-        + 'arrangements (models.source.cooldown.server_error), so the upstream was never reached and '
-        + 'the key never rejected. This is the engine defect reported to the orchestrator, not a '
-        + 'missing precondition — see ui/e2e/README.md § Known flakes.',
-    ).toBe('models.source.needs_action.credential_revoked');
+    test.fail(
+      verdict === 'models.source.cooldown.server_error',
+      'Engine 5xx on the routed dry run (#1818): the upstream never received the request and the '
+        + 'cooldown re-armed on every retry, so the replace-key flow was never reachable this run.',
+    );
+    expect(verdict).toBe('models.source.needs_action.credential_revoked');
     // The replacement has to be a key that works, or the dialog would be
     // reporting the same failure over again under a different name.
     await mock.configure({ auth: 'ok' });

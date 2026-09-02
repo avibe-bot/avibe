@@ -58,6 +58,12 @@ test.describe('E · usage and logs', () => {
     test.skip(total < 2, 'This build offers a single usage window, so there is nothing to switch between.');
 
     const note = page.locator('.model-hub-usage-note');
+    // The tab's own loading/unread copy IS the detail text, so a `before`
+    // captured mid-read is indistinguishable from a settled empty report — and
+    // the branch below would skip the only assertion that the selection moved
+    // the reading. Even a successfully loaded empty window renders a range, so
+    // waiting for one is waiting for the read to settle, not for data.
+    await expect(note).toContainText(/–|—|Nothing metered yet/, { timeout: 20_000 });
     const before = (await note.innerText()).trim();
     // Named, not matched on state: `getByRole('radio').and('[aria-checked=false]')`
     // re-resolves on every assertion, so the moment the click lands it stops
@@ -77,10 +83,11 @@ test.describe('E · usage and logs', () => {
     await expect(target).toHaveAttribute('aria-checked', 'true');
     await expect(window.getByRole('radio', { checked: true })).toHaveCount(1);
 
-    // And the reading follows it. On an instance that has never metered a turn
-    // the note is the static explainer rather than a range, and there is nothing
-    // for the window to change — which is a state, not a pass by default, so it
-    // is named here instead of being swept into the assertion.
+    // And the reading follows it. The wait above has already ruled out the
+    // loading text, so a `before` that still reads as the static explainer is a
+    // genuinely empty window: an instance that never metered a turn, where the
+    // range has nothing to restate. That is a state, not a pass by default, so
+    // it is named here instead of being swept into the assertion.
     if (before !== copy('usage.detail')) {
       await expect
         .poll(async () => (await note.innerText()).trim(), { timeout: 15_000 })

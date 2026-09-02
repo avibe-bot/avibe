@@ -36,12 +36,30 @@ test.describe('D · route chains and priority order', () => {
     const hops = dialog.locator('.model-hub-route-hop');
     const before = await hops.count();
 
-    // --- add ---------------------------------------------------------------
+    // --- add (keyboard) -------------------------------------------------------
+    // The whole scenario is a keyboard claim, so every step below drives focus
+    // and keystrokes the way the claim's reader assumes it was driven: trigger,
+    // candidate, confirm, and removal are all reached without a pointer.
     const addHop = dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true });
     const addOneHop = async (): Promise<void> => {
       await addHop.click();
-      await page.locator('.model-hub-route-candidate').first().click();
-      await page.getByRole('button', { name: copy('routeDialog.add.confirm'), exact: true }).click();
+      // The picker autofocuses its search box; cmdk's list takes ArrowDown to
+      // move the selection and Enter to fire `onSelect`, which is the product's
+      // own keyboard path for choosing a candidate.
+      const search = page.getByPlaceholder(copy('routeDialog.add.search'), { exact: true });
+      await expect(search).toBeFocused();
+      await search.press('ArrowDown');
+      await search.press('Enter');
+      // The footer confirm is the next tabbable after the search box, and —
+      // inside a cmdk panel — it answers Space, not Enter: cmdk's root handler
+      // calls preventDefault() on every Enter that reaches it (Enter belongs to
+      // the list there), which suppresses the button's native Enter activation.
+      // Space is the activation that genuinely works, so Space is what a
+      // keyboard user actually presses here.
+      await search.press('Tab');
+      const confirm = page.getByRole('button', { name: copy('routeDialog.add.confirm'), exact: true });
+      await expect(confirm).toBeFocused();
+      await confirm.press(' ');
     };
     test.skip(
       await addHop.isDisabled(),
@@ -89,11 +107,15 @@ test.describe('D · route chains and priority order', () => {
     await expect(announcer).toHaveText(copy('routeDialog.reorder.dropped', { position: 2 }));
     await expect(dialog.locator('[aria-grabbed="true"]')).toHaveCount(0);
 
-    // --- remove -------------------------------------------------------------
+    // --- remove (keyboard) ----------------------------------------------------
     // Back down to what was there before, one row at a time — the editor has to
-    // give back everything it took, not just the last thing.
+    // give back everything it took, not just the last thing. The remove buttons
+    // are roving-tabindex siblings of the grips, so each is focused directly and
+    // pressed rather than clicked.
     for (let remaining = added; remaining > before; remaining -= 1) {
-      await hops.last().getByRole('button', { name: copy('routeDialog.removeHop'), exact: true }).click();
+      const remove = hops.last().getByRole('button', { name: copy('routeDialog.removeHop'), exact: true });
+      await remove.focus();
+      await remove.press('Enter');
       await expect(hops).toHaveCount(remaining - 1);
     }
 
@@ -104,7 +126,7 @@ test.describe('D · route chains and priority order', () => {
   });
 
   // A defect this suite found, not a scenario from §3, and reported rather than
-  // patched (this lane changes no product code).
+  // patched (this lane changes no product code) — filed as #1819.
   //
   // Escape during a keyboard grab is meant to be an undo: `onGripKeyDown` puts
   // the hop back, refocuses it, and announces `reorder.cancelled`. It does all
@@ -115,8 +137,9 @@ test.describe('D · route chains and priority order', () => {
   // twice over: `stopPropagation()` in the row handler AND an `onEscapeKeyDown`
   // guard on the dialog content. The route dialog has neither.
   //
-  // Unfixme once the route dialog carries the same guard; the assertion is the
-  // two lines below, which is exactly what the drawer spec already asserts.
+  // Unfixme once #1819 lands the same guard on the route dialog; the assertion
+  // is the two lines below, which is exactly what the drawer spec already
+  // asserts.
   test.fixme('D · Escape cancels a grab without discarding the chain edit', async ({ hub, gateway, page }) => {
     await hub.goto();
     await hub.firstRouteRow(gateway.backend).click();

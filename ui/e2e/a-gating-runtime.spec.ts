@@ -42,6 +42,16 @@ test.describe('A · capability gate and runtime lifecycle', () => {
       'The gateway is already installed on this instance, so the install entry point is not reachable. '
         + 'Point VIBE_E2E_BASE_URL at a fresh hermetic instance to cover it (see ui/e2e/README.md).',
     );
+    // `not_installed` with an `unsupported` manifest is a different closed
+    // state the product renders on purpose, with the switch disabled: there is
+    // no install to offer on that host, and asserting the install path there
+    // would report the unsupported state as a product failure. The product's
+    // own gate (`runtimeCanAttemptInstall`) decides which of the two it is.
+    test.skip(
+      runtime?.manifest.resolution === 'unsupported',
+      'The runtime manifest resolves to unsupported on this host, so the product offers no install — '
+        + 'that is the closed state it renders, not a defect in the install path.',
+    );
 
     await hub.goto();
     // The closed state has to say the gateway is missing before the switch is
@@ -87,7 +97,15 @@ test.describe('A · capability gate and runtime lifecycle', () => {
       await expect(hub.closedState).toBeVisible();
       expect((await api.runtime())?.enabled).toBe(false);
     } finally {
-      await hub.runtimeToggle.click().catch(() => {});
+      // Conditional, not blind: the first click above may not have taken — the
+      // request refused, or the stop stalled — and the runtime may still be
+      // running. A cleanup click in THAT state performs a real stop and leaves
+      // the shared instance dark for every later spec, which is worse than the
+      // failure already being reported. Only a runtime the API agrees is OFF
+      // gets turned back on.
+      if ((await api.runtime())?.enabled === false) {
+        await hub.runtimeToggle.click().catch(() => {});
+      }
     }
     await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
     await expect(hub.closedState).toHaveCount(0);

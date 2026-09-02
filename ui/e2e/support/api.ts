@@ -190,8 +190,24 @@ export class HubApi {
     return (await this.read<{ runtime?: Runtime }>('/api/models/runtime/status')).runtime ?? null;
   }
 
+  /**
+   * THROWS when the instance refuses the switch, rather than resolving over a
+   * non-2xx answer.
+   *
+   * Both callers are teardown-adjacent (the gateway fixture putting a backend
+   * back to direct, A3 un-arranging its blocked stop), so a swallowed failure
+   * here reports a clean run while leaving the instance in Gateway mode — the
+   * next spec inherits a shape it did not arrange and skips over a surface it
+   * was supposed to check. The dirty state is named where it was made.
+   */
   async setAgentMode(backend: string, mode: 'hub' | 'direct'): Promise<void> {
-    await this.mutate('patch', `/api/models/agents/${backend}/mode`, { mode });
+    const result = await this.mutate('patch', `/api/models/agents/${backend}/mode`, { mode });
+    if (!result.ok) {
+      throw new Error(
+        `Switching backend ${backend} to ${mode} mode failed (${result.status}): `
+          + `${JSON.stringify(result.body)}. The instance may still hold the previous mode.`,
+      );
+    }
   }
 
   async chains(backend: string): Promise<AgentChain[]> {

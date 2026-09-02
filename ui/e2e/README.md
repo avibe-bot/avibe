@@ -107,15 +107,22 @@ json.dump({
 PY
 
 # 2 · the controller (owns Model Hub state) and the UI server are separate
-#     processes; the suite needs both.
+#     processes; the suite needs both. Both run from the REPOSITORY ROOT — the
+#     `cd ui` above is for the browser side only, so return before starting them
+#     (`python main.py` finds no `ui/main.py`, and `vibe` is imported from the
+#     root, not from `ui/`).
+cd "$(git rev-parse --show-toplevel)"
 AVIBE_HOME=$E2E_HOME VIBE_MODEL_HUB_ENABLED=1 python main.py &
 AVIBE_HOME=$E2E_HOME VIBE_MODEL_HUB_ENABLED=1 python -c \
   "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5199)" &
 ```
 
-Then turn the gateway on once — from the UI at
-`http://127.0.0.1:5199/settings/models`, or by letting the A-suite's own toggle
-spec do it. Suite B, D, and G need the runtime **running**; they skip otherwise.
+Then turn the gateway on once, from the UI at
+`http://127.0.0.1:5199/settings/models`. Suite B, D, and G need the runtime
+**running**; they skip otherwise. No spec in the suite starts a stopped gateway
+for you: A2's round-trip spec skips unless the runtime is already running, and
+the install-entry spec opens and cancels the install dialog without ever
+completing an install.
 
 Set `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH` to a local manifest if the machine
 should not fetch the engine archive from the network.
@@ -161,14 +168,18 @@ its own and the mock upstream never receives anything. Avibe classifies it as
 `models.source.cooldown.server_error`, which blocks the chain for thirty seconds;
 the retry after that window fails the same way and re-arms it, so the source
 never reaches a verdict about its key. Recreating the source clears it; waiting,
-restarting the engine, and stopping and starting the whole gateway do not.
+restarting the engine, and stopping and starting the whole gateway do not. It is
+filed as [#1818](https://github.com/avibe-bot/avibe/issues/1818).
 
 B6 retries that sticky state by rebuilding its arrangement (delete the source,
-recreate it, re-chain, re-settle) up to three times, and then **fails** with a
-message naming the engine defect if all three attempts land in the same
-cooldown. Per §5a this is a product-side failure once the mock has answered, so
-it is the suite's finding rather than its exit — it has been reported to the
-orchestrator either way. Any other verdict fails immediately, because a wrong
+recreate it, re-chain, re-settle) up to three times. If all three attempts land
+in the same cooldown, that is #1818's exact signature, and the spec marks itself
+**expected-fail** via a runtime `test.fail` naming #1818 — the run goes green
+with the finding recorded, because an intermittent engine defect does not get to
+burn the suite red on its own schedule. The marker is also the detector: once
+#1818 is fixed, this path stops firing, the test passes while marked should-fail,
+and Playwright reports *"Expected to fail, but passed"* — one loud run, and the
+marker comes out. Any other verdict fails immediately, because a wrong
 classification is exactly what the scenario exists to catch.
 
 ## What this suite cannot reach

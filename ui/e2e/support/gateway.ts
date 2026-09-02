@@ -17,7 +17,7 @@
 // failures under their names.
 import type { Agent, Source } from './api';
 import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
-import { expect, requireSource, test as base } from './fixtures';
+import { expect, requireModelHub, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
 
 export type Gateway = {
@@ -33,6 +33,13 @@ export type Gateway = {
 export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
   hubSurface: [
     async ({ api, mock }, provide, testInfo) => {
+      // First, because this is an auto fixture: it runs before the suite's own
+      // `beforeEach` guards, so it cannot lean on them. A disabled capability
+      // turns every `/api/models/*` read below into the gate's 404 — which
+      // `read()` (correctly) throws on — and reports a skip-with-reason as a
+      // failure in every B, D, and G spec at once. The specs still skip with
+      // their own message; this only keeps the fixture out of their way.
+      await requireModelHub(api);
       const sources = await api.sources();
       const agents = await api.agents();
       // The product's own condition, read the product's own way round: anything
@@ -58,6 +65,7 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
   ],
 
   gateway: async ({ api, mock }, provide, testInfo) => {
+    await requireModelHub(api);
     await mock.configure({
       auth: 'ok',
       protocol: 'anthropic',
