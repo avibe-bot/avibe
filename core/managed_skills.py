@@ -1490,7 +1490,13 @@ def _copy_snapshot_entries(entries: Sequence[_SnapshotEntry], destination: Path)
                     f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
                 )
             consumed_bytes += file_size
-            target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            target_flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+            )
+            target_fd = os.open(target, target_flags, 0o600)
             remaining = file_size
             while remaining:
                 chunk = os.read(source_fd, min(1024 * 1024, remaining))

@@ -1248,6 +1248,37 @@ def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
     assert (destination / new_id / "current" / "SKILL.md").is_file()
 
 
+def test_publication_opens_snapshot_files_in_binary_mode_when_available(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha", "Line one\r\nLine two\n")
+    binary_flag = 1 << 29
+    original_open = os.open
+    destination_flags: list[int] = []
+
+    def tracking_open(path, flags, mode=0o777, *, dir_fd=None):
+        if flags & os.O_CREAT:
+            destination_flags.append(flags)
+        flags &= ~binary_flag
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(managed_skills.os, "O_BINARY", binary_flag, raising=False)
+    monkeypatch.setattr(managed_skills.os, "open", tracking_open)
+
+    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert destination_flags
+    assert all(flags & binary_flag for flags in destination_flags)
+    assert (destination / snapshot_id / "alpha" / "SKILL.md").read_bytes().endswith(
+        b"Line one\r\nLine two\n"
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX executable mode")
 def test_publication_preserves_each_executable_bit(tmp_path: Path) -> None:
     source = tmp_path / "source"
