@@ -157,7 +157,8 @@ so discovery and the live Claude backend honor the same override semantics.
 Codex's `.system` directory is an explicit container root rather than a generic
 recursive exception: Avibe inspects only its direct child Skill directories and
 visits it after every user-managed global root. A same-name project or user
-global Skill therefore wins over the Codex-bundled default.
+global Skill therefore wins over the Codex-bundled default. The container entry
+is excluded when applying the parent user root's child and candidate limits.
 
 ### 4.5 Reserved root
 
