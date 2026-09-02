@@ -283,7 +283,7 @@ Skills provide specialized instructions and workflows for specific tasks.
 When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.
 If the user requests a skill by name, load it.
 Only load skill names listed here or returned by `vibe skill list`; do not guess names.
-If no Skill on this page matches the task, inspect subsequent Catalog pages before proceeding.
+If no Skill on this page matches the task, inspect each subsequent Catalog page in order until a Skill matches or no page remains.
 
 ### Available skills
 - data-analysis: Analyze datasets, generate charts, and create reports.
