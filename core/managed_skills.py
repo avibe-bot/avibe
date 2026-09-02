@@ -38,6 +38,7 @@ SKILL_BODY_MAX_BYTES = 256 * 1024
 DISCOVERY_ROOT_MAX_CHILDREN = 1024
 DISCOVERY_CLASS_MAX_CANDIDATES = 1024
 DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES = 8 * 1024 * 1024
+DISCOVERY_CLASS_MAX_CHILDREN = 4096
 PROJECT_ROOT_MAX_DIRECTORIES = 128
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
@@ -72,6 +73,8 @@ class ManagedSkill:
     priority: tuple[object, ...]
     body: str | None = None
     directory_identity: tuple[int, int] | None = None
+    source_directory: Path | None = None
+    source_directory_identity: tuple[int, int] | None = None
     frontmatter_bytes: int = 0
 
 
@@ -79,9 +82,18 @@ class ManagedSkill:
 class _DiscoveryBudget:
     candidates: int = 0
     frontmatter_bytes: int = 0
+    direct_children: int = 0
 
     @property
     def exhausted(self) -> bool:
+        return (
+            self.candidates >= DISCOVERY_CLASS_MAX_CANDIDATES
+            or self.frontmatter_bytes >= DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES
+            or self.direct_children >= DISCOVERY_CLASS_MAX_CHILDREN
+        )
+
+    @property
+    def parse_exhausted(self) -> bool:
         return (
             self.candidates >= DISCOVERY_CLASS_MAX_CANDIDATES
             or self.frontmatter_bytes >= DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES
@@ -91,6 +103,10 @@ class _DiscoveryBudget:
     def remaining_frontmatter(self) -> int:
         return max(0, DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES - self.frontmatter_bytes)
 
+    @property
+    def remaining_children(self) -> int:
+        return max(0, DISCOVERY_CLASS_MAX_CHILDREN - self.direct_children)
+
 
 @dataclass(frozen=True)
 class _SnapshotEntry:
@@ -98,6 +114,35 @@ class _SnapshotEntry:
     relative: str
     relative_bytes: bytes
     is_directory: bool
+
+
+def _strip_yaml_comment(value: str) -> str:
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if double_quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                double_quoted = False
+        elif single_quoted:
+            if char == "'" and index + 1 < len(value) and value[index + 1] == "'":
+                index += 1
+            elif char == "'":
+                single_quoted = False
+        elif char == "'":
+            single_quoted = True
+        elif char == '"':
+            double_quoted = True
+        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+        index += 1
+    return value.rstrip()
 
 
 def _decode_scalar(value: str) -> str:
@@ -131,7 +176,7 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
             index += 1
             continue
 
-        value = raw_value.strip()
+        value = _strip_yaml_comment(raw_value.strip())
         if _BLOCK_SCALAR_RE.match(value):
             continuation: list[str] = []
             index += 1
@@ -276,6 +321,9 @@ def _read_skill_path(
     include_body: bool,
     frontmatter_limit: int = FRONTMATTER_MAX_BYTES,
     dir_fd: int | None = None,
+    source_directory: Path | None = None,
+    source_directory_identity: tuple[int, int] | None = None,
+    expected_directory_identity: tuple[int, int] | None = None,
 ) -> tuple[ManagedSkill | None, int]:
     fd: int | None = None
     try:
@@ -327,21 +375,34 @@ def _read_skill_path(
         except UnicodeDecodeError:
             return None, body_start
 
+    directory = _absolute_path(skill_file.parent)
+    source = _absolute_path(source_directory or directory)
     try:
-        directory_stat = skill_file.parent.stat(follow_symlinks=False)
+        directory_stat = directory.stat(follow_symlinks=False)
     except OSError:
         return None, body_start
     if not stat.S_ISDIR(directory_stat.st_mode):
+        return None, body_start
+    directory_identity = _directory_identity(directory_stat)
+    if expected_directory_identity is not None and directory_identity != expected_directory_identity:
+        return None, body_start
+    if not _source_directory_still_matches(
+        source,
+        directory,
+        source_directory_identity or directory_identity,
+    ):
         return None, body_start
 
     return (
         ManagedSkill(
             name=name,
             description=description,
-            directory=_absolute_path(skill_file.parent),
+            directory=directory,
             priority=priority,
             body=body,
-            directory_identity=_directory_identity(directory_stat),
+            directory_identity=directory_identity,
+            source_directory=source,
+            source_directory_identity=source_directory_identity or directory_identity,
             frontmatter_bytes=body_start,
         ),
         body_start,
@@ -371,14 +432,24 @@ def _root_children(
     root: Path,
     *,
     ignored_names: frozenset[str] = frozenset(),
+    budget: _DiscoveryBudget | None = None,
 ) -> list[tuple[str, Path, os.stat_result]] | None:
     children: list[tuple[str, Path, os.stat_result]] = []
+    limit = DISCOVERY_ROOT_MAX_CHILDREN
+    if budget is not None:
+        if budget.remaining_children == 0:
+            return None
+        limit = min(limit, budget.remaining_children)
+    enumerated = 0
     try:
         with os.scandir(root) as entries:
             for entry in entries:
                 if entry.name in ignored_names:
                     continue
-                if len(children) >= DISCOVERY_ROOT_MAX_CHILDREN:
+                enumerated += 1
+                if enumerated > limit:
+                    if budget is not None:
+                        budget.direct_children += enumerated
                     return None
                 try:
                     entry_stat = entry.stat(follow_symlinks=False)
@@ -387,8 +458,34 @@ def _root_children(
                 children.append((entry.name, Path(entry.path), entry_stat))
     except OSError:
         return []
+    if budget is not None:
+        budget.direct_children += enumerated
     children.sort(key=lambda item: item[0])
     return children
+
+
+def _resolved_candidate_directory(
+    source: Path,
+    source_stat: os.stat_result,
+) -> tuple[Path, tuple[int, int], tuple[int, int]] | None:
+    source_identity = _directory_identity(source_stat)
+    if stat.S_ISDIR(source_stat.st_mode):
+        return _absolute_path(source), source_identity, source_identity
+    if not stat.S_ISLNK(source_stat.st_mode):
+        return None
+    try:
+        target = source.resolve(strict=True)
+        target_stat = target.stat(follow_symlinks=False)
+        after = source.stat(follow_symlinks=False)
+    except (OSError, RuntimeError):
+        return None
+    if (
+        not stat.S_ISDIR(target_stat.st_mode)
+        or not stat.S_ISLNK(after.st_mode)
+        or _directory_identity(after) != source_identity
+    ):
+        return None
+    return _absolute_path(target), source_identity, _directory_identity(target_stat)
 
 
 def _scan_root(
@@ -398,25 +495,30 @@ def _scan_root(
     budget: _DiscoveryBudget,
     ignored_names: frozenset[str] = frozenset(),
 ) -> list[ManagedSkill]:
-    children = _root_children(root, ignored_names=ignored_names)
+    children = _root_children(root, ignored_names=ignored_names, budget=budget)
     if children is None:
         logger.info("Omitting oversized Skill root: %s", root)
         return []
 
     skills: list[ManagedSkill] = []
     for _, child, child_stat in children:
-        if budget.exhausted:
+        if budget.parse_exhausted:
             break
-        if not stat.S_ISDIR(child_stat.st_mode):
+        resolved_directory = _resolved_candidate_directory(child, child_stat)
+        if resolved_directory is None:
             continue
+        directory, source_identity, directory_identity = resolved_directory
         budget.candidates += 1
-        skill_file = child / "SKILL.md"
+        skill_file = directory / "SKILL.md"
         path_priority: tuple[object, ...] = (*priority, str(_absolute_path(child)))
         skill, consumed = _read_skill_path(
             skill_file,
             priority=path_priority,
             include_body=False,
             frontmatter_limit=min(FRONTMATTER_MAX_BYTES, budget.remaining_frontmatter),
+            source_directory=child,
+            source_directory_identity=source_identity,
+            expected_directory_identity=directory_identity,
         )
         budget.frontmatter_bytes += consumed
         if skill is not None:
@@ -591,11 +693,7 @@ def resolve_accessible_skills(
     except Exception:
         logger.warning("Failed to apply remote Skill access policy", exc_info=True)
         allowed_names = set()
-    return [
-        skill
-        for skill in skills
-        if skill.priority[0] == 0 or skill.name in allowed_names
-    ]
+    return [skill for skill in skills if skill.priority[0] == 0 or skill.name in allowed_names]
 
 
 def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
@@ -636,8 +734,7 @@ def render_skill_list(
     lines = [f"- {skill.name}: {skill.description}" for skill in entries]
     if next_page is not None:
         lines.append(
-            more_notice
-            or f"More skills are available. Run `vibe skill list --page {next_page}` to view more."
+            more_notice or f"More skills are available. Run `vibe skill list --page {next_page}` to view more."
         )
     return "\n".join(lines)
 
@@ -646,12 +743,19 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
     rows = render_skill_list(skills, page=1)
     if not rows:
         return ""
+    _, next_page = _page(skills, 1)
+    later_page_guidance = (
+        "If no Skill on this page matches the task, inspect subsequent Catalog pages before proceeding.\n"
+        if next_page is not None
+        else ""
+    )
     return (
         "\n\n## Skills\n\n"
         "Skills provide specialized instructions and workflows for specific tasks.\n"
         "When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.\n"
         "If the user requests a skill by name, load it.\n"
         "Only load skill names listed here or returned by `vibe skill list`; do not guess names.\n\n"
+        f"{later_page_guidance}"
         "### Available skills\n"
         f"{rows}"
     )
@@ -663,13 +767,18 @@ def render_skill_content(skill: ManagedSkill) -> str:
     name = html.escape(skill.name, quote=True)
     directory = html.escape(str(skill.directory), quote=True)
     directory = "".join(
-        f"&#x{ord(char):X};" if unicodedata.category(char).startswith("C") else char
-        for char in directory
+        f"&#x{ord(char):X};" if unicodedata.category(char).startswith("C") else char for char in directory
     )
     return f'<skill_content name="{name}" directory="{directory}">\n{skill.body}</skill_content>'
 
 
 def _open_selected_directory(skill: ManagedSkill) -> tuple[int | None, tuple[int, int]]:
+    if not _source_directory_still_matches(
+        skill.source_directory or skill.directory,
+        skill.directory,
+        skill.source_directory_identity or skill.directory_identity,
+    ):
+        raise OSError(errno.ESTALE, "Selected Skill source directory changed")
     try:
         before = skill.directory.stat(follow_symlinks=False)
     except OSError as exc:
@@ -704,6 +813,28 @@ def _directory_path_still_matches(path: Path, identity: tuple[int, int]) -> bool
     return stat.S_ISDIR(current.st_mode) and _directory_identity(current) == identity
 
 
+def _source_directory_still_matches(
+    source: Path,
+    target: Path,
+    identity: tuple[int, int] | None,
+) -> bool:
+    try:
+        before = source.stat(follow_symlinks=False)
+        if identity is not None and _directory_identity(before) != identity:
+            return False
+        if source == target:
+            return stat.S_ISDIR(before.st_mode)
+        if not stat.S_ISLNK(before.st_mode):
+            return False
+        resolved = source.resolve(strict=True)
+        after = source.stat(follow_symlinks=False)
+    except (OSError, RuntimeError):
+        return False
+    return (
+        resolved == target and stat.S_ISLNK(after.st_mode) and _directory_identity(after) == _directory_identity(before)
+    )
+
+
 def load_skill(
     name: str,
     cwd: str | Path | None = None,
@@ -728,7 +859,11 @@ def load_skill(
         )
         if loaded is None or loaded.name != name:
             return None
-        if not _directory_path_still_matches(winner.directory, identity):
+        if not _directory_path_still_matches(winner.directory, identity) or not _source_directory_still_matches(
+            winner.source_directory or winner.directory,
+            winner.directory,
+            winner.source_directory_identity or identity,
+        ):
             return None
         return ManagedSkill(
             name=loaded.name,
@@ -737,6 +872,8 @@ def load_skill(
             priority=winner.priority,
             body=loaded.body,
             directory_identity=identity,
+            source_directory=winner.source_directory,
+            source_directory_identity=winner.source_directory_identity,
             frontmatter_bytes=loaded.frontmatter_bytes,
         )
     except OSError:
@@ -761,11 +898,7 @@ def builtin_skills_source() -> Path:
     finally:
         if pyproject_fd is not None:
             os.close(pyproject_fd)
-    if (
-        checkout_source.is_dir()
-        and (checkout_root / "vibe" / "__init__.py").is_file()
-        and project_name == "avibe-os"
-    ):
+    if checkout_source.is_dir() and (checkout_root / "vibe" / "__init__.py").is_file() and project_name == "avibe-os":
         return checkout_source
 
     import vibe

@@ -114,6 +114,21 @@ def test_loose_parser_ignores_nested_required_field_names(tmp_path: Path) -> Non
     assert skill.description == "Top-level description"
 
 
+def test_loose_parser_accepts_yaml_comments_on_required_scalars(tmp_path: Path) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        '---\nname: formatter # local tools\ndescription: "Format # headings" # shown in catalog\n---\nBody\n',
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.name == "formatter"
+    assert skill.description == "Format # headings"
+
+
 @pytest.mark.parametrize(
     "name",
     ["", "Uppercase", "two words", "-leading", "trailing-", "two--hyphens", "shell;word"],
@@ -265,6 +280,31 @@ def test_reserved_root_and_non_git_ancestors_are_not_scanned(tmp_path: Path) -> 
     assert [skill.name for skill in _isolated_resolve(cwd, tmp_path)] == ["local"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="directory symlink fixture requires POSIX semantics")
+def test_compatibility_skill_directory_symlink_is_loaded_and_revalidated(tmp_path: Path) -> None:
+    cwd = tmp_path / "project"
+    root = cwd / ".agents" / "skills"
+    root.mkdir(parents=True)
+    target_file = _write_skill(tmp_path / "shared", "formatter", "formatter", "Format", "Linked\n")
+    linked = root / "formatter"
+    linked.symlink_to(target_file.parent, target_is_directory=True)
+
+    resolved = _isolated_resolve(cwd, tmp_path)
+
+    assert [skill.name for skill in resolved] == ["formatter"]
+    assert resolved[0].directory == target_file.parent.resolve()
+    loaded = load_skill("formatter", resolved_skills=resolved)
+    assert loaded is not None
+    assert loaded.body == "Linked\n"
+
+    target_file.parent.rename(tmp_path / "old-shared")
+    _write_skill(tmp_path / "shared", "formatter", "formatter", "Format", "Replacement\n")
+    assert load_skill("formatter", resolved_skills=resolved) is None
+
+    linked.unlink()
+    assert load_skill("formatter", resolved_skills=resolved) is None
+
+
 def test_project_root_ascent_is_bounded(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "project"
     cwd = project / "a" / "b" / "c"
@@ -295,6 +335,7 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
 
     assert prompt.count("\n- skill-") == CATALOG_PAGE_SIZE
     assert "`vibe skill list --page 2`" in prompt
+    assert "inspect subsequent Catalog pages" in prompt
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
@@ -543,6 +584,30 @@ def test_frontmatter_body_and_root_limits_omit_candidates(tmp_path: Path) -> Non
     for index in range(managed_skills.DISCOVERY_ROOT_MAX_CHILDREN + 1):
         (oversized_root / f"entry-{index:04d}").mkdir(parents=True)
     assert _isolated_resolve(tmp_path / "oversized", tmp_path) == []
+
+
+def test_aggregate_direct_child_budget_bounds_all_roots(tmp_path: Path, monkeypatch) -> None:
+    cwd = tmp_path / "project"
+    root = cwd / ".agents" / "skills"
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("not a Skill\n", encoding="utf-8")
+    (root / "notes.txt").write_text("not a Skill\n", encoding="utf-8")
+    _write_skill(tmp_path / "home" / ".agents" / "skills", "global", "global", "Global")
+    monkeypatch.setattr(managed_skills, "DISCOVERY_CLASS_MAX_CHILDREN", 2)
+
+    assert _isolated_resolve(cwd, tmp_path) == []
+
+
+def test_aggregate_direct_child_budget_keeps_the_root_that_exactly_fills_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cwd = tmp_path / "project"
+    _write_skill(cwd / ".agents" / "skills", "local", "local", "Local")
+    _write_skill(tmp_path / "home" / ".agents" / "skills", "global", "global", "Global")
+    monkeypatch.setattr(managed_skills, "DISCOVERY_CLASS_MAX_CHILDREN", 1)
+
+    assert [skill.name for skill in _isolated_resolve(cwd, tmp_path)] == ["local"]
 
 
 def test_builtin_and_compatibility_inputs_have_independent_budgets(tmp_path: Path, monkeypatch) -> None:

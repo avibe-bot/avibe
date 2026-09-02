@@ -9,10 +9,12 @@ Avibe-managed binding file and injects the AVIBE_* env vars for that call.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import secrets
+import tempfile
 from typing import Any, Mapping
 
 from config import paths
@@ -20,7 +22,6 @@ from core.caller_context import caller_context_from_platform_payload
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
-BINDING_TTL_HOURS = 24
 
 
 PLUGIN_SOURCE = r"""
@@ -54,6 +55,14 @@ export const AvibeCallerContextPlugin = async () => ({
     if (!sessionID) return
     const binding = readBindings()[sessionID]
     if (!binding || typeof binding !== "object") return
+    const ownerPID = Number(binding.owner_pid)
+    if (Number.isInteger(ownerPID) && ownerPID > 0) {
+      try {
+        process.kill(ownerPID, 0)
+      } catch {
+        return
+      }
+    }
     const expiresAt = typeof binding.expires_at === "string" ? Date.parse(binding.expires_at) : 0
     if (expiresAt && Date.now() > expiresAt) return
     applyEnv(output, binding.env)
@@ -132,9 +141,26 @@ def _prune_sessions(sessions: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 def _write_bindings(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
+
+
+def _binding_lock(path: Path):
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_suffix(path.suffix + ".lock"))
 
 
 def bind_session(
@@ -144,7 +170,7 @@ def bind_session(
     base_env: Mapping[str, str],
     working_dir: Path | str | None,
     extra_env: Mapping[str, str] | None = None,
-    ttl_hours: int = BINDING_TTL_HOURS,
+    binding_token: str | None = None,
     message: object | None = None,
     fallback_platform: object | None = None,
 ) -> bool:
@@ -168,11 +194,7 @@ def bind_session(
     )
     env = caller.to_env() if caller is not None else {}
     if extra_env:
-        env.update(
-            (str(key), str(value))
-            for key, value in extra_env.items()
-            if str(key) and str(value)
-        )
+        env.update((str(key), str(value)) for key, value in extra_env.items() if str(key) and str(value))
     prepend_vendored_git_to_path(
         env,
         base_env=base_env,
@@ -180,29 +202,53 @@ def bind_session(
     )
     path = binding_path()
     now = _utc_now()
-    if not env:
+    token = binding_token or secrets.token_hex(16)
+    with _binding_lock(path):
+        if not env:
+            if not path.is_file():
+                return False
+            data = _load_bindings(path)
+            existing_sessions = data.get("sessions", {})
+            sessions = _prune_sessions(existing_sessions, now)
+            sessions.pop(session_id, None)
+            if sessions != existing_sessions:
+                data["sessions"] = sessions
+                _write_bindings(path, data)
+            return False
+
+        data = _load_bindings(path)
+        sessions = _prune_sessions(data.get("sessions", {}), now)
+        entry = {
+            "env": env,
+            "updated_at": now.isoformat(),
+            "binding_token": token,
+            "owner_pid": os.getpid(),
+        }
+        if caller is not None:
+            entry["caller_context"] = caller.to_metadata()
+        sessions[session_id] = entry
+        data["sessions"] = sessions
+        _write_bindings(path, data)
+    return True
+
+
+def unbind_session(opencode_session_id: str, *, binding_token: str) -> bool:
+    """Remove exactly the active-Turn binding created by one caller."""
+
+    session_id = str(opencode_session_id or "").strip()
+    token = str(binding_token or "").strip()
+    if not session_id or not token:
+        return False
+    path = binding_path()
+    with _binding_lock(path):
         if not path.is_file():
             return False
         data = _load_bindings(path)
-        existing_sessions = data.get("sessions", {})
-        sessions = _prune_sessions(existing_sessions, now)
+        sessions = data.get("sessions", {})
+        entry = sessions.get(session_id)
+        if not isinstance(entry, dict) or entry.get("binding_token") != token:
+            return False
         sessions.pop(session_id, None)
-        if sessions != existing_sessions:
-            data["sessions"] = sessions
-            _write_bindings(path, data)
-        return False
-
-    expires_at = now + timedelta(hours=max(1, int(ttl_hours)))
-    data = _load_bindings(path)
-    sessions = _prune_sessions(data.get("sessions", {}), now)
-    entry = {
-        "env": env,
-        "updated_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-    }
-    if caller is not None:
-        entry["caller_context"] = caller.to_metadata()
-    sessions[session_id] = entry
-    data["sessions"] = sessions
-    _write_bindings(path, data)
+        data["sessions"] = sessions
+        _write_bindings(path, data)
     return True

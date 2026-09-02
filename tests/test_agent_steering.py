@@ -1002,9 +1002,20 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         "modules.agents.opencode.agent.build_system_prompt_injection",
         lambda **kwargs: "system prompt",
     )
+    binding_tokens: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        binding_tokens.append(kwargs["binding_token"])
+        return True
+
+    unbound: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
-        lambda *args, **kwargs: None,
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token: unbound.append((session_id, binding_token)),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1040,6 +1051,8 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     assert receipt.outcome is SteerOutcome.ACCEPTED
     assert events == ["primary", "steer", "abort"]
+    assert len(binding_tokens) == 1
+    assert unbound == [("opencode-session", binding_tokens[0])]
     backend_failure.assert_awaited_once()
 
 

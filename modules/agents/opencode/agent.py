@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -60,7 +61,10 @@ from modules.agents.model_hub import (
 )
 from vibe.i18n import t as i18n_t
 
-from .caller_context import bind_session as bind_caller_context_session
+from .caller_context import (
+    bind_session as bind_caller_context_session,
+    unbind_session as unbind_caller_context_session,
+)
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import (
@@ -1014,6 +1018,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         start_attempt_id = ""
         native_start_phase = "before_write"
         activation_identity: RuntimeActivationIdentity | None = None
+        caller_context_binding_session_id: str | None = None
+        caller_context_binding_token: str | None = None
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
@@ -1311,18 +1317,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
             try:
-                bind_caller_context_session(
+                binding_token = secrets.token_hex(16)
+                if bind_caller_context_session(
                     session_id,
                     request.context.platform_specific or {},
                     base_env=os.environ,
                     working_dir=request.working_path,
                     extra_env=managed_skill_environment(request.working_path),
+                    binding_token=binding_token,
                     # The creation origin travels with the identity: an OpenCode shell
                     # command running ``vibe task add`` sources this binding, and it is
                     # the only place the conversation behind the definition is visible.
                     message=request.context,
                     fallback_platform=platform,
-                )
+                ):
+                    caller_context_binding_session_id = session_id
+                    caller_context_binding_token = binding_token
             except Exception:
                 logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
 
@@ -1609,6 +1619,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request=request,
             )
         finally:
+            if caller_context_binding_session_id and caller_context_binding_token:
+                try:
+                    unbind_caller_context_session(
+                        caller_context_binding_session_id,
+                        binding_token=caller_context_binding_token,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to unbind OpenCode caller context for session %s",
+                        caller_context_binding_session_id,
+                        exc_info=True,
+                    )
             if steer_state is not None:
                 async with steer_state.lock:
                     steer_state.closing = True

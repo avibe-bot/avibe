@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
+import threading
 
 from core import git_runtime
 from modules.agents.opencode import caller_context as bridge
@@ -56,19 +59,24 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
         "AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace"),
     }
     assert entry["caller_context"]["session_id"] == "ses123"
-    assert "expires_at" in entry
+    assert entry["owner_pid"] == os.getpid()
+    assert isinstance(entry["binding_token"], str)
+    assert "expires_at" not in entry
 
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
     monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
 
-    assert bridge.bind_session(
-        "oc-session",
-        {"platform": "slack"},
-        base_env={"PATH": "/usr/bin"},
-        working_dir=tmp_path / "workspace",
-    ) is False
+    assert (
+        bridge.bind_session(
+            "oc-session",
+            {"platform": "slack"},
+            base_env={"PATH": "/usr/bin"},
+            working_dir=tmp_path / "workspace",
+        )
+        is False
+    )
     assert not bridge.binding_path().exists()
 
 
@@ -87,12 +95,15 @@ def test_bind_session_writes_vendored_path_without_caller_context(
 
     monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", inject_git)
 
-    assert bridge.bind_session(
-        "oc-session",
-        {"platform": "slack"},
-        base_env={"PATH": ""},
-        working_dir=tmp_path / "workspace",
-    ) is True
+    assert (
+        bridge.bind_session(
+            "oc-session",
+            {"platform": "slack"},
+            base_env={"PATH": ""},
+            working_dir=tmp_path / "workspace",
+        )
+        is True
+    )
     data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
     entry = data["sessions"]["oc-session"]
     assert entry["env"] == {"PATH": "/managed/git/bin"}
@@ -124,3 +135,43 @@ def test_bind_session_clears_stale_path_when_git_override_disappears(
     assert bridge.bind_session("oc-session", {"platform": "slack"}, **kwargs) is False
     data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
     assert "oc-session" not in data["sessions"]
+
+
+def test_unbind_session_removes_only_matching_turn_binding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    kwargs = {
+        "base_env": {"PATH": "/usr/bin"},
+        "working_dir": tmp_path / "workspace",
+        "extra_env": {"AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace")},
+    }
+    assert bridge.bind_session("oc-session", {}, binding_token="new-turn", **kwargs) is True
+
+    assert bridge.unbind_session("oc-session", binding_token="old-turn") is False
+    assert "oc-session" in json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"]
+    assert bridge.unbind_session("oc-session", binding_token="new-turn") is True
+    assert "oc-session" not in json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"]
+
+
+def test_concurrent_bindings_preserve_every_session(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    barrier = threading.Barrier(2)
+
+    def bind(session_id: str) -> bool:
+        barrier.wait()
+        return bridge.bind_session(
+            session_id,
+            {},
+            base_env={"PATH": "/usr/bin"},
+            working_dir=tmp_path / "workspace",
+            extra_env={"AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace")},
+            binding_token=f"token-{session_id}",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(bind, ("session-a", "session-b")))
+
+    assert results == [True, True]
+    data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
+    assert set(data["sessions"]) == {"session-a", "session-b"}

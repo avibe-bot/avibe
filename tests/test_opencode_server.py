@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -17,22 +18,6 @@ from modules.agents.opencode.utils import (
     resolve_opencode_allowed_providers,
 )
 
-
-def test_managed_skill_config_denies_native_skill_without_discarding_permissions() -> None:
-    content = SERVER_MODULE._managed_skill_config_content(
-        '{"permission":{"bash":"ask"},"model":"openai/gpt-5"}'
-    )
-
-    assert json.loads(content) == {
-        "permission": {"bash": "ask", "skill": "deny"},
-        "model": "openai/gpt-5",
-    }
-
-
-def test_managed_skill_config_expands_string_permission() -> None:
-    content = SERVER_MODULE._managed_skill_config_content('{"permission":"allow"}')
-
-    assert json.loads(content)["permission"] == {"*": "allow", "skill": "deny"}
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
@@ -148,17 +133,20 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._clear_pid_file = Mock()  # type: ignore[method-assign]
         manager._apply_resource_governance = Mock()  # type: ignore[method-assign]
         terminate = AsyncMock()
+        create_process = AsyncMock(return_value=process)
+        user_config = '{"permission":"ask"}'
 
         with (
             patch.object(
                 SERVER_MODULE.asyncio,
                 "create_subprocess_exec",
-                AsyncMock(return_value=process),
+                create_process,
             ),
             patch.object(SERVER_MODULE.asyncio, "sleep", AsyncMock()),
             patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 61.0]),
             patch.object(SERVER_MODULE, "server_environment", return_value={}),
             patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
+            patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config}),
         ):
             with self.assertRaisesRegex(RuntimeError, "failed to start within 60s"):
                 await manager._start_server()
@@ -172,6 +160,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._clear_pid_file.call_count, 2)
         self.assertIsNone(manager._process)
         self.assertIsNone(manager._process_loop)
+        self.assertEqual(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"], user_config)
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
