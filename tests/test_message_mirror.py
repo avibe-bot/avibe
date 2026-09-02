@@ -35,6 +35,7 @@ from core.message_mirror import (
 )
 from modules.im import MessageContext
 from storage import messages_service
+from storage.agent_session_rows import SESSION_VISIBILITIES
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, media_objects, messages, scopes
@@ -1064,12 +1065,16 @@ def test_background_standalone_persists_full_turn_without_realtime_delivery(isol
         try:
             mirror_harness_inbound(context, "background prompt")
             persist_agent_message(context, "result", "background result")
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(queue.get(), timeout=0.1)
+            return await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
 
-    asyncio.run(scenario())
+    published = asyncio.run(scenario())
+    # The property is "persisted but not DELIVERED", so it is asserted over the
+    # named content topics. Asserting the bus stayed silent would have read the
+    # contentless session-list rank event as a delivery while proving nothing
+    # more about content — the reason ``CONTENT_TOPICS`` exists.
+    assert not (CONTENT_TOPICS & set(published))
     with engine.connect() as conn:
         rows = conn.execute(
             select(messages).where(messages.c.session_id == "ses_background").order_by(messages.c.author)
@@ -1235,7 +1240,12 @@ def test_avibe_inbound_is_noop(isolated_state):
 
 
 def _seed_ranked_session(
-    session_id: str, *, last_active_at: str, native_id: str, status: str = "active"
+    session_id: str,
+    *,
+    last_active_at: str,
+    native_id: str,
+    status: str = "active",
+    visibility: str = "foreground",
 ) -> str:
     engine = create_sqlite_engine()
     seeded = "2026-05-30T12:00:00Z"
@@ -1252,6 +1262,7 @@ def _seed_ranked_session(
                 session_anchor=f"anchor_{session_id}",
                 native_session_id="",
                 status=status,
+                visibility=visibility,
                 metadata_json="{}",
                 created_at=seeded,
                 updated_at=seeded,
@@ -1343,27 +1354,55 @@ def test_agent_output_reorder_event_follows_the_rank_throttle(isolated_state, mo
     assert "session.activity" not in published
 
 
-def test_background_session_output_is_not_ranked(isolated_state):
-    """A background session is absent from every activity-ordered surface, so
-    ranking it is a write with no reader.
+def test_agent_output_ranks_a_session_of_every_visibility(isolated_state, monkeypatch):
+    """Visibility is not part of the rank predicate — for every value it holds.
+
+    ``last_active_at`` is row state, and visibility is a MUTABLE display
+    preference where the archive is terminal: the session PATCH moves a row
+    between foreground and background and never backfills the stamp. A
+    background session is also a first-class agent-graph node ordered by this
+    very column, so holding its rank does not save a dead write — it leaves the
+    row mis-ordered for every later reader, including after it is restored.
+
+    Seeded over the whole storage vocabulary rather than over the one case a
+    reviewer named, and the expectation is derived from the rule ("every
+    visibility ranks") instead of written as a skip list, so a fourth visibility
+    is covered by construction. ``suppress_delivery`` is set the way its only
+    producer derives it, so the delivery flag that used to gate this is present
+    and demonstrably no longer decides.
     """
-    sid = "ses_rank_bg"
+    _freeze_rank_clock(monkeypatch)
     stale = "2020-01-01T00:00:00Z"
-    _seed_ranked_session(sid, last_active_at=stale, native_id="p_bg")
-    ctx = MessageContext(
-        user_id="workbench",
-        channel_id=sid,
-        platform="avibe",
-        platform_specific={"agent_session_id": sid, "suppress_delivery": True},
-    )
+    events: dict[str, dict] = {}
+    for visibility in sorted(SESSION_VISIBILITIES):
+        sid = f"ses_rank_vis_{visibility}"
+        _seed_ranked_session(
+            sid, last_active_at=stale, native_id=f"p_{visibility}", visibility=visibility
+        )
+        ctx = MessageContext(
+            user_id="workbench",
+            channel_id=sid,
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": sid,
+                # Exactly how ``core/internal_server.py`` derives it for this path.
+                "suppress_delivery": visibility == "background",
+            },
+        )
+        events[visibility] = _publish_agent_message(ctx, "result", f"done {visibility}")
 
-    published = _publish_agent_message(ctx, "result", "done quietly")
-
-    assert "session.activity" not in published
     engine = create_sqlite_engine()
     with engine.connect() as conn:
-        row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == sid)).mappings().one()
-    assert row["last_active_at"] == stale
+        stamps = {
+            row["visibility"]: row["last_active_at"]
+            for row in conn.execute(select(agent_sessions)).mappings()
+        }
+    assert stamps == {visibility: RANK_NOW for visibility in SESSION_VISIBILITIES}
+    # The reorder announcement follows the rank rather than delivery, so the
+    # hidden row's re-sort reaches the one view that renders it.
+    assert {v: "session.activity" in e for v, e in events.items()} == {
+        visibility: True for visibility in SESSION_VISIBILITIES
+    }
 
 
 def test_replayed_output_that_persisted_nothing_does_not_rank(isolated_state, monkeypatch):

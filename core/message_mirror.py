@@ -449,26 +449,39 @@ def persist_agent_message(
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
             # Both branches rejoin here: a chat row and a tool-call trace event are
             # equally proof the agent is working, and the session list ranked on
-            # input alone, so an unattended session sank while it worked. Every
-            # platform, because the rank is read by the Web list, ``vibe session
-            # list``, the run graph, and the running-agents view alike. Not a
-            # background Session: it is absent from all of them, so its rank is
-            # dead weight. Rides the open transaction — no extra commit, no extra
-            # fsync — and self-throttles in the row (see the storage helper).
+            # input alone, so an unattended session sank while it worked. Rides the
+            # open transaction — no extra commit, no extra fsync.
             #
-            # Gated on a row having materialized rather than on reaching this line:
+            # THE RANK ASSERTS ONE THING: this session's agent persisted output just
+            # now. So it is bounded by exactly the conditions that can make that
+            # claim false, and by nothing else:
+            #   1. a session row to rank (``row_session_id``);
+            #   2. output that actually materialized (below);
+            #   3. the row is not archived — archive is terminal, re-asserted inside
+            #      the UPDATE because this write has no request boundary to guard it;
+            #   4. the throttle, also a predicate on the row (see the storage helper).
+            # Conditions of the surrounding DELIVERY path are deliberately absent,
+            # and borrowing one by proximity is what cost two review rounds.
+            # ``context.platform`` is not a condition: the rank is read by the Web
+            # list, ``vibe session list``, the run graph and the running-agents view
+            # alike, so output ranks on every platform. ``suppress_delivery`` is not
+            # one either — a hidden session is not an unread one. A background
+            # Session is out of the session list but is a first-class agent-graph
+            # node ordered by this very column (``agent_graph`` defaults
+            # ``include_background=True``), and visibility is a MUTABLE preference
+            # where the archive is terminal: the PATCH that restores a session to the
+            # foreground writes ``visibility`` and ``updated_at`` and never backfills
+            # ``last_active_at``. Holding the rank while hidden therefore saves no
+            # dead write; it leaves the row mis-ordered for every later reader.
+            #
+            # (2) is a row having materialized, not merely reaching this line:
             # ``_append_quietly`` returns ``None`` when the same
             # ``native_message_id`` arrives twice, and the promote path can decline
-            # too, so a retried terminal output persists nothing. The rank asserts
-            # "the agent produced output"; replaying one logical output must not
-            # lift a long-finished session back to the top of the list on nothing
-            # new. The tool-call branch always inserts, so this only ever excludes
-            # the deduplicated chat row.
-            if (
-                row_session_id
-                and not suppress_delivery
-                and (appended_row is not None or tool_event_row is not None)
-            ):
+            # too, so a retried terminal output persists nothing. Replaying one
+            # logical output must not lift a long-finished session back to the top of
+            # the list on nothing new. The tool-call branch always inserts, so this
+            # only ever excludes the deduplicated chat row.
+            if row_session_id and (appended_row is not None or tool_event_row is not None):
                 activity_ranked = workbench_sessions_service.touch_session_agent_activity(
                     conn, row_session_id
                 )
@@ -478,6 +491,13 @@ def persist_agent_message(
         # cheaper than the per-message ``inbox.session.updated`` below. avibe-only
         # for the reason the publishes below are: an IM session has no open Chat or
         # sidebar consumer, so publishing it would be dead traffic.
+        #
+        # It follows the RANK, not delivery, so it fires for a hidden session too —
+        # which is right rather than merely consistent: the surface that orders
+        # background rows by this column is the agent graph, and that is the view
+        # whose consumer refetches on this event. The payload is
+        # ``{session_id, scope_id, event}`` with no content, so a reorder announces
+        # nothing a suppressed message body would have carried.
         if activity_ranked and context.platform == "avibe":
             from core.inbox_events import bus
 
