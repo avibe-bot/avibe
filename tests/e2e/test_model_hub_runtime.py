@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +19,7 @@ import psutil
 import pytest
 import yaml
 
+from core.managed_runtime import runtime_platform_tag
 from tests.e2e.drivers.model_hub_app import (
     HTTPResult,
     ModelHubTestApp,
@@ -24,6 +28,10 @@ from tests.e2e.drivers.model_hub_app import (
 
 
 pytestmark = pytest.mark.e2e_model_hub
+
+_ENGINE_MANIFEST_PLATFORMS = {
+    "linux-x64": "linux-amd64",
+}
 
 
 def _local_engine_manifest() -> str:
@@ -43,11 +51,51 @@ def _local_engine_manifest() -> str:
 
 def _engine_app(model_hub_app_factory):
     manifest = _local_engine_manifest()
+
+    def seed_archive(app: ModelHubTestApp) -> None:
+        payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        host_platform = runtime_platform_tag()
+        platform = _ENGINE_MANIFEST_PLATFORMS.get(
+            host_platform,
+            host_platform,
+        )
+        archive = next(
+            (
+                item
+                for item in payload["assets"]
+                if item["platform"] == platform
+            ),
+            None,
+        )
+        if archive is None:
+            return
+        parsed = urllib.parse.urlparse(archive["url"])
+        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+            pytest.skip(
+                "managed Model Hub E2E requires a local file archive "
+                "in its offline manifest"
+            )
+        source = Path(urllib.parse.unquote(parsed.path))
+        if not source.is_file():
+            pytest.skip(
+                f"managed Model Hub engine archive does not exist: {source}"
+            )
+        downloads = (
+            app.avibe_home
+            / "runtime"
+            / "model-hub"
+            / "engine"
+            / "downloads"
+        )
+        downloads.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, downloads / source.name)
+
     return model_hub_app_factory(
         extra_env={
             "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest,
             "VIBE_MODEL_HUB_ENGINE_OFFLINE": "1",
-        }
+        },
+        before_start=seed_archive,
     )
 
 
