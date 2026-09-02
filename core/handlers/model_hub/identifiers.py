@@ -10,15 +10,20 @@ import hashlib
 # file an older release wrote must keep loading — so a live, routable identifier
 # is not always within it, and no surface downstream of config may treat this
 # bound as the set of identifiers that exist.
-MODEL_ID_MAX_LENGTH = 200
+MODEL_ID_MAX_LENGTH = 256
 
-# The longest key a usage ledger row can carry, so a persisted row cannot grow
-# without limit. It is also the exact length of a folded key: a head bounded by the
-# admission bound, one separator, one hex digest. Every key the ledger derives is
-# therefore either at most `MODEL_ID_MAX_LENGTH` (stored verbatim) or exactly this
-# long (folded), and those two populations cannot overlap — an identifier long
-# enough to occupy the folded form is itself folded before anything compares it.
-USAGE_LEDGER_KEY_MAX_LENGTH = MODEL_ID_MAX_LENGTH + 1 + 2 * hashlib.sha256().digest_size
+# Usage rows shipped with a 200-character readable head. Keep that threshold
+# stable even when a later API admits longer model identifiers, or one upgrade
+# would start writing a second key for the same model's historical usage.
+USAGE_LEDGER_VERBATIM_MAX_LENGTH = 200
+
+# The longest key a usage ledger row can carry: the stable readable head, one
+# separator, and one hex digest. At 265 characters it remains outside the model
+# identifier admission namespace, so an admitted literal cannot collide with a
+# folded key.
+USAGE_LEDGER_KEY_MAX_LENGTH = (
+    USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1 + 2 * hashlib.sha256().digest_size
+)
 
 
 def normalized_model_id(value: str) -> str:
@@ -78,22 +83,22 @@ def usage_ledger_key(value: object) -> str | None:
     would have every one of its calls dropped, and the tab would report an
     upgraded install as quieter than it actually is.
 
-    The bound therefore folds instead of refusing. A value within the admission
-    bound is its own key; anything longer is keyed by its readable head plus a
-    digest of the whole value, which is bounded, identical across restarts, and
-    separated from other identities by that digest rather than by a prefix an
-    adversary can pad.
+    The bound therefore folds instead of refusing. A value within the ledger's
+    stable verbatim threshold is its own key; anything longer is keyed by its
+    readable head plus a digest of the whole value, which is bounded, identical
+    across restarts, and separated from other identities by that digest rather
+    than by a prefix an adversary can pad.
 
     Where the fold starts is the whole of why two distinct models cannot share one
-    row. It starts at the admission bound, not at the length of a folded key, so a
-    verbatim key is at most `MODEL_ID_MAX_LENGTH` and a folded key is always exactly
-    `USAGE_LEDGER_KEY_MAX_LENGTH`: two populations a length test tells apart. Fold
-    later and they overlap, and the folded form stops being ours — a config may hold
-    any string, including the literal `<head>~<digest>` of another model it also
-    holds, and that second model would then be keyed verbatim onto the first
+    row. A verbatim key is at most `USAGE_LEDGER_VERBATIM_MAX_LENGTH` and a folded
+    key is always exactly `USAGE_LEDGER_KEY_MAX_LENGTH`: two populations a length
+    test tells apart. The folded length also remains above `MODEL_ID_MAX_LENGTH`,
+    so no newly admitted model can occupy it literally. Fold later and the
+    populations overlap, and the folded form stops being ours — a config may hold
+    any legacy string, including the literal `<head>~<digest>` of another model it
+    also holds, and that second model would then be keyed verbatim onto the first
     model's row and billed for its calls. No marker can close that gap, because a
-    legacy identifier can carry any marker too. Only a length no admissible
-    identifier can reach can, and reaching it means being folded.
+    legacy identifier can carry any marker too.
 
     Only a value carrying no identity at all — not text, or empty — has no key,
     and that is exactly the set no config can hold.
@@ -102,10 +107,10 @@ def usage_ledger_key(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     canonical = normalized_model_id(value)
-    if len(canonical) <= MODEL_ID_MAX_LENGTH:
+    if len(canonical) <= USAGE_LEDGER_VERBATIM_MAX_LENGTH:
         return canonical
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"{canonical[:MODEL_ID_MAX_LENGTH]}~{digest}"
+    return f"{canonical[:USAGE_LEDGER_VERBATIM_MAX_LENGTH]}~{digest}"
 
 
 def persisted_ledger_key(value: object) -> str | None:

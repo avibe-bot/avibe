@@ -120,20 +120,52 @@ def test_direct_launch_does_not_inject_provider_credentials():
 
 
 def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
-    launch = hub_launch()
+    launch = hub_launch(context_window=128_000, max_output_tokens=32_000)
     env = build_claude_hub_env(
         {
             "ANTHROPIC_AUTH_TOKEN": "user-token",
             "ANTHROPIC_BASE_URL": "https://user.example",
             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "999999",
             "PATH": "/bin",
         },
         launch,
     )
     assert env["ANTHROPIC_BASE_URL"] == launch.gateway_base_url
     assert env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
+    assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
     assert claude_setting_sources_for_launch(launch) == ["project", "local"]
+
+
+def test_native_cli_launch_keeps_auth_and_applies_catalog_limits():
+    launch = hub_launch(
+        channel="native_cli",
+        gateway_base_url=None,
+        gateway_token=None,
+        context_window=128_000,
+        max_output_tokens=32_000,
+    )
+    base_env = {
+        "ANTHROPIC_AUTH_TOKEN": "user-token",
+        "ANTHROPIC_BASE_URL": "https://user.example",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "999999",
+        "PATH": "/bin",
+    }
+
+    env = build_claude_hub_env(base_env, launch)
+
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "user-token"
+    assert env["ANTHROPIC_BASE_URL"] == "https://user.example"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+    assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in env
 
 
 def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
@@ -211,3 +243,43 @@ def test_fallback_launch_identity_is_stable_for_same_route():
     second = hub_launch(target_model="model-b", runtime_model="model-b", source_id="src_inject02")
     assert first.fingerprint == second.fingerprint
     assert first.source_id != second.source_id
+
+
+@pytest.mark.parametrize("channel", ["hub", "native_cli"])
+def test_claude_launch_fingerprint_covers_process_bound_catalog_metadata(channel):
+    common = {
+        "channel": channel,
+        "gateway_base_url": "http://127.0.0.1:15220" if channel == "hub" else None,
+        "gateway_token": "local-test-token" if channel == "hub" else None,
+        "source_id": "src_inject01",
+    }
+    baseline = hub_launch(
+        **common,
+        context_window=128_000,
+        max_output_tokens=32_000,
+        reasoning_efforts=("high",),
+    )
+
+    for changed in (
+        hub_launch(**common, context_window=256_000, max_output_tokens=32_000, reasoning_efforts=("high",)),
+        hub_launch(**common, context_window=128_000, max_output_tokens=64_000, reasoning_efforts=("high",)),
+        hub_launch(**common, context_window=128_000, max_output_tokens=32_000, reasoning_efforts=()),
+    ):
+        assert changed.fingerprint != baseline.fingerprint
+
+
+def test_codex_launch_fingerprint_ignores_metadata_loaded_by_the_app_server():
+    baseline = hub_launch(
+        backend="codex",
+        context_window=128_000,
+        max_output_tokens=32_000,
+        reasoning_efforts=("high",),
+    )
+    changed = hub_launch(
+        backend="codex",
+        context_window=256_000,
+        max_output_tokens=64_000,
+        reasoning_efforts=(),
+    )
+
+    assert changed.fingerprint == baseline.fingerprint

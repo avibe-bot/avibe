@@ -99,3 +99,53 @@ export const oauthStartFailureKey = (code: string | undefined): string =>
     : code === 'engine_down' || code === 'modelHub.errors.engine_down'
       ? 'settings.models.addSub.error.engineDown'
       : 'settings.models.addSub.error.startFailed';
+
+/**
+ * Why a backend model catalog refused to save.
+ *
+ * Each code names a different next step — fix an id, drop a duplicate, clear a
+ * route, re-read a list the server owns — so collapsing them into one sentence
+ * would leave the user retrying an edit that cannot succeed. The table is the
+ * closed set this UI has copy for; anything else falls to the generic sentence,
+ * because a `modelHub.errors.*` key lives in the backend bundle and would
+ * otherwise render to the user as a machine string.
+ */
+const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, string>> = {
+  'modelHub.errors.backend_model_in_route': 'settings.models.gateway.catalog.saveRouted',
+  'modelHub.errors.backend_model_conflict': 'settings.models.gateway.catalog.saveConflict',
+  'modelHub.errors.backend_model_id_prefix': 'settings.models.gateway.catalog.saveIdPrefix',
+  'modelHub.errors.backend_model_id_invalid': 'settings.models.gateway.catalog.saveIdInvalid',
+  'modelHub.errors.backend_model_duplicate': 'settings.models.gateway.catalog.saveDuplicate',
+  'modelHub.errors.backend_model_locked': 'settings.models.gateway.catalog.saveLocked',
+  'modelHub.errors.backend_model_catalog_invalid': 'settings.models.gateway.catalog.saveInvalid',
+};
+
+export const catalogSaveFailureKey = (detail: string | undefined): string =>
+  CATALOG_SAVE_FAILURE_COPY[detail ?? ''] ?? 'settings.models.gateway.catalog.saveFailed';
+
+/**
+ * Whether a refused save is the one the server can answer AFTER it has already
+ * written.
+ *
+ * `set_agent_models` commits the catalog and only then asks the backend to load
+ * it, so `engine_down` is the single code that arrives with the user's rows on
+ * disk and out of use. Every other code refused the write itself — a re-read
+ * that happens to match the draft only means someone else arrived at the same
+ * list, and reporting THAT as 「stored but not loaded」 would describe a write
+ * this server never made.
+ */
+export const catalogSaveLeftUnloaded = (code: string | undefined, detail: string | undefined): boolean =>
+  code === 'engine_down' || detail === 'modelHub.errors.engine_down';
+
+/**
+ * Why a models.dev fill produced nothing.
+ *
+ * The server names the one cause that is not about this machine: the upstream
+ * catalog is down. That distinction is worth copy of its own, because the user's
+ * way forward is to stop retrying and type the fields in — every one of them is
+ * editable whether or not a fill ever succeeds.
+ */
+export const modelsDevFillFailureKey = (detail: string | undefined): string =>
+  detail === 'modelHub.errors.models_dev_unavailable'
+    ? 'settings.models.gateway.modelEditor.fillUnavailable'
+    : 'settings.models.gateway.modelEditor.fillFailed';

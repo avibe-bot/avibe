@@ -17,6 +17,7 @@ from referencing import Registry, Resource
 
 from config.v2_config import (
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -84,7 +85,11 @@ API_RESPONSE_ROUTES = API_RESPONSE_CONTRACT["x-model-hub-routes"]
 
 def _assert_valid(name: str, payload: dict) -> None:
     errors = sorted(
-        Draft7Validator(_schema(name), format_checker=FormatChecker()).iter_errors(payload),
+        Draft7Validator(
+            _schema(name),
+            registry=_api_response_registry(),
+            format_checker=FormatChecker(),
+        ).iter_errors(payload),
         key=lambda error: list(error.path),
     )
     assert not errors, [error.message for error in errors]
@@ -554,6 +559,7 @@ def _seed_response_conformance_service(tmp_path: Path) -> ModelHubService:
         at=service.now(),
     )
     asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))
+    service.models_dev_matches = lambda _query: []
     return service
 
 
@@ -1882,6 +1888,618 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
 
 
+def test_agents_project_one_shared_backend_catalog_contract(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    claude_models = agents["claude"]["catalog_models"]
+    assert claude_models[0] == {
+        "id": "default",
+        "display_name": None,
+        "origin": "builtin",
+        "models_dev_id": None,
+        "context_window": None,
+        "max_output_tokens": None,
+        "input_modalities": [],
+        "output_modalities": [],
+        "supports_tools": None,
+        "supports_reasoning": None,
+        "reasoning_efforts": [],
+        "locked": True,
+        "routeable": False,
+    }
+    assert all(model["locked"] is False for model in claude_models[1:])
+    assert all(model["routeable"] is True for model in claude_models[1:])
+    assert agents["codex"]["catalog_models"]
+    assert agents["opencode"]["catalog_models"] == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "model_id"),
+    (
+        ("claude", "claude-deepseek-v4"),
+        ("codex", "deepseek-v4"),
+        ("opencode", "aihub/deepseek-v4"),
+    ),
+)
+def test_backend_catalog_add_edit_and_runtime_refresh(
+    tmp_path,
+    backend,
+    model_id,
+):
+    service, store, _adapter = _service(tmp_path)
+    refreshed = []
+
+    async def refresh(changed_backend):
+        refreshed.append(changed_backend)
+
+    service.backend_catalog_changed = refresh
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == backend
+    )
+    added = {
+        "id": model_id,
+        "display_name": "DeepSeek V4",
+        "origin": "models_dev",
+        "models_dev_id": "deepseek/deepseek-v4",
+        "context_window": 1_048_576,
+        "max_output_tokens": 131_072,
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"],
+        "supports_tools": True,
+        "supports_reasoning": True,
+        "reasoning_efforts": ["low", "high"],
+        "locked": False,
+        "routeable": True,
+    }
+
+    response = asyncio.run(
+        service.set_agent_models(backend, baseline, [*baseline, added])
+    )
+
+    assert response["catalog_models"][-1] == added
+    assert store.config.agents[backend].routes[model_id].hops == ()
+    assert refreshed == [backend]
+    if backend == "opencode":
+        assert store.config.agents[backend].menu.checked == [model_id]
+
+    edited = {**added, "display_name": "DeepSeek V4 edited", "context_window": 262_144}
+    desired_catalog = (
+        [response["catalog_models"][0], edited, *response["catalog_models"][1:-1]]
+        if backend == "claude"
+        else [edited, *response["catalog_models"][:-1]]
+    )
+    edited_response = asyncio.run(
+        service.set_agent_models(
+            backend,
+            response["catalog_models"],
+            desired_catalog,
+        )
+    )
+    assert next(
+        model
+        for model in edited_response["catalog_models"]
+        if model["id"] == model_id
+    ) == edited
+    if backend != "claude":
+        assert edited_response["catalog_models"][0] == edited
+    assert refreshed == [backend, backend]
+
+
+def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    backend = "codex"
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == backend
+    )
+    model_id = baseline[0]["id"]
+    source = ModelHubSourceConfig(
+        id="src_catalog01",
+        kind="api_key",
+        vendor="openai",
+        display_name="Catalog source",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="upstream-model", provenance="discovered")],
+        credential_ref="cred_catalog01",
+    )
+    store.config.sources = [source]
+    store.config.agents[backend].sources.order = [source.id]
+    store.config.agents[backend].routes[model_id] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models(
+                backend,
+                baseline,
+                baseline[1:],
+            )
+        )
+
+    assert raised.value.code == "backend_model_in_route"
+    assert raised.value.status == 409
+    assert store.config.agents[backend].models[0].id == model_id
+
+
+def test_backend_catalog_removes_model_with_empty_route(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    removed_id = baseline[0]["id"]
+
+    response = asyncio.run(
+        service.set_agent_models("codex", baseline, baseline[1:])
+    )
+
+    assert removed_id not in {
+        model["id"] for model in response["catalog_models"]
+    }
+    assert removed_id not in store.config.agents["codex"].routes
+
+
+def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    added = {
+        "id": "inserted-model",
+        "display_name": None,
+        "origin": "manual",
+        "models_dev_id": None,
+        "context_window": None,
+        "max_output_tokens": None,
+        "input_modalities": [],
+        "output_modalities": [],
+        "supports_tools": None,
+        "supports_reasoning": None,
+        "reasoning_efforts": [],
+        "locked": False,
+        "routeable": True,
+    }
+
+    response = asyncio.run(
+        service.set_agent_models(
+            "codex",
+            baseline,
+            [added, *baseline],
+        )
+    )
+
+    assert [model["id"] for model in response["catalog_models"]][
+        : len(baseline) + 1
+    ] == ["inserted-model", *(model["id"] for model in baseline)]
+
+
+def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    legacy_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    agent = store.config.agents["codex"]
+    agent.models.append(ModelHubBackendModelConfig(id=legacy_id, origin="manual"))
+    agent.routes[legacy_id] = ModelHubRouteConfig()
+    baseline = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "codex"
+    )
+    desired = copy.deepcopy(baseline)
+    next(model for model in desired if model["id"] == legacy_id)[
+        "display_name"
+    ] = "Persisted legacy model"
+
+    response = asyncio.run(service.set_agent_models("codex", baseline, desired))
+
+    assert next(
+        model for model in response["catalog_models"] if model["id"] == legacy_id
+    )["display_name"] == "Persisted legacy model"
+    _assert_valid("agent-supply.schema.json", response)
+
+
+def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    legacy_id = "legacy-opus-alias"
+    agent = store.config.agents["claude"]
+    agent.models.append(ModelHubBackendModelConfig(id=legacy_id, origin="manual"))
+    agent.routes[legacy_id] = ModelHubRouteConfig()
+    baseline = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "claude"
+    )
+    desired = copy.deepcopy(baseline)
+    desired[1]["display_name"] = "Unrelated edit"
+
+    response = asyncio.run(service.set_agent_models("claude", baseline, desired))
+
+    assert any(model["id"] == legacy_id for model in response["catalog_models"])
+    assert response["catalog_models"][1]["display_name"] == "Unrelated edit"
+
+
+def test_backend_catalog_rejects_a_new_id_past_the_admission_bound(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    added = {
+        **baseline[0],
+        "id": "x" * (MODEL_ID_MAX_LENGTH + 1),
+        "origin": "manual",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("codex", baseline, [*baseline, added]))
+
+    assert raised.value.code == "backend_model_id_invalid"
+
+
+def test_backend_catalog_accepts_a_new_id_at_the_contract_bound(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    model_id = "x" * MODEL_ID_MAX_LENGTH
+    added = {
+        **baseline[0],
+        "id": model_id,
+        "origin": "manual",
+    }
+
+    response = asyncio.run(
+        service.set_agent_models("codex", baseline, [*baseline, added])
+    )
+
+    assert response["catalog_models"][-1]["id"] == model_id
+
+
+def test_backend_catalog_merges_an_unrelated_concurrent_edit(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    assert len(baseline) >= 2
+    desired = copy.deepcopy(baseline)
+    desired[0]["display_name"] = "Caller edit"
+    store.config.agents["codex"].models[1].display_name = "Concurrent edit"
+
+    response = asyncio.run(
+        service.set_agent_models("codex", baseline, desired)
+    )
+
+    assert response["catalog_models"][0]["display_name"] == "Caller edit"
+    assert response["catalog_models"][1]["display_name"] == "Concurrent edit"
+
+
+def test_backend_catalog_rejects_a_concurrent_edit_to_the_same_row(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    desired = copy.deepcopy(baseline)
+    desired[0]["display_name"] = "Caller edit"
+    store.config.agents["codex"].models[0].display_name = "Concurrent edit"
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("codex", baseline, desired))
+
+    assert raised.value.code == "backend_model_conflict"
+    assert raised.value.status == 409
+    assert store.config.agents["codex"].models[0].display_name == "Concurrent edit"
+
+
+def test_backend_catalog_is_editable_in_direct_mode(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].mode = "direct"
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    desired = copy.deepcopy(baseline)
+    desired[0]["display_name"] = "Direct-mode edit"
+
+    response = asyncio.run(
+        service.set_agent_models("codex", baseline, desired)
+    )
+
+    assert response["mode"] == "direct"
+    assert response["routes"] is None
+    assert response["catalog_models"][0]["display_name"] == "Direct-mode edit"
+
+
+def test_backend_catalog_reports_duplicate_ids(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models(
+                "codex",
+                baseline,
+                [*baseline, copy.deepcopy(baseline[0])],
+            )
+        )
+
+    assert raised.value.code == "backend_model_duplicate"
+
+
+def test_codex_catalog_treats_default_as_an_ordinary_model_id(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    added = {
+        **baseline[0],
+        "id": "default",
+        "display_name": "Gateway default",
+        "origin": "manual",
+    }
+
+    created = asyncio.run(
+        service.set_agent_models("codex", baseline, [*baseline, added])
+    )
+    desired = copy.deepcopy(created["catalog_models"])
+    next(model for model in desired if model["id"] == "default")[
+        "display_name"
+    ] = "Edited default"
+    edited = asyncio.run(
+        service.set_agent_models("codex", created["catalog_models"], desired)
+    )
+
+    assert next(
+        model for model in edited["catalog_models"] if model["id"] == "default"
+    )["display_name"] == "Edited default"
+
+
+def test_backend_catalog_rejects_client_claimed_builtin_origin(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    forged = {
+        **baseline[1],
+        "id": "unprefixed-third-party-model",
+        "display_name": "Forged built-in",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, [*baseline, forged]))
+
+    assert raised.value.code == "backend_model_locked"
+
+
+@pytest.mark.parametrize(
+    ("origin", "replacement"),
+    (
+        ("manual", "models_dev"),
+        ("manual", "builtin"),
+        ("models_dev", "manual"),
+        ("models_dev", "builtin"),
+        ("builtin", "manual"),
+        ("builtin", "models_dev"),
+    ),
+)
+def test_backend_catalog_keeps_every_existing_origin_immutable(
+    tmp_path,
+    origin,
+    replacement,
+):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "provenance-model"
+    agent = store.config.agents["codex"]
+    agent.models.append(ModelHubBackendModelConfig(id=model_id, origin=origin))
+    agent.routes[model_id] = ModelHubRouteConfig()
+    baseline = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "codex"
+    )
+    desired = copy.deepcopy(baseline)
+    next(model for model in desired if model["id"] == model_id)[
+        "origin"
+    ] = replacement
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("codex", baseline, desired))
+
+    assert raised.value.code == "backend_model_locked"
+    assert next(model for model in agent.models if model.id == model_id).origin == origin
+
+
+def test_backend_catalog_rejects_an_origin_forged_into_the_baseline(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "manual-provenance-model"
+    agent = store.config.agents["codex"]
+    agent.models.append(ModelHubBackendModelConfig(id=model_id, origin="manual"))
+    agent.routes[model_id] = ModelHubRouteConfig()
+    observed = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "codex"
+    )
+    forged_baseline = copy.deepcopy(observed)
+    forged_desired = copy.deepcopy(observed)
+    for catalog in (forged_baseline, forged_desired):
+        next(model for model in catalog if model["id"] == model_id)[
+            "origin"
+        ] = "models_dev"
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models("codex", forged_baseline, forged_desired)
+        )
+
+    assert raised.value.code == "backend_model_locked"
+    assert next(model for model in agent.models if model.id == model_id).origin == "manual"
+
+
+@pytest.mark.parametrize("model_id", ["opus", "sonnet[1m]"])
+def test_backend_catalog_restores_a_removed_claude_builtin_alias(
+    tmp_path,
+    model_id,
+):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    without_alias = [model for model in baseline if model["id"] != model_id]
+    removed = asyncio.run(
+        service.set_agent_models("claude", baseline, without_alias)
+    )
+    restored = {
+        **next(model for model in baseline if model["id"] == model_id),
+        "origin": "manual",
+    }
+
+    response = asyncio.run(
+        service.set_agent_models(
+            "claude",
+            removed["catalog_models"],
+            [*removed["catalog_models"], restored],
+        )
+    )
+
+    assert response["catalog_models"][-1] == restored
+
+
+def test_backend_catalog_still_rejects_an_unknown_unprefixed_claude_id(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    unknown = {
+        **baseline[1],
+        "id": "deepseek-v4",
+        "origin": "manual",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, [*baseline, unknown]))
+
+    assert raised.value.code == "backend_model_id_prefix"
+
+
+def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline(
+    tmp_path,
+):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    forged = {
+        **baseline[1],
+        "id": "deepseek-v4",
+        "origin": "manual",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models(
+                "claude",
+                [*baseline, forged],
+                [*baseline, forged],
+            )
+        )
+
+    assert raised.value.code == "backend_model_id_prefix"
+
+
+def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, baseline[1:]))
+
+    assert raised.value.code == "backend_model_locked"
+    assert raised.value.status == 409
+
+
+@pytest.mark.parametrize("mutation", ["edit", "duplicate", "reorder"])
+def test_backend_catalog_rejects_any_claude_locked_default_mutation(
+    tmp_path,
+    mutation,
+):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    desired = copy.deepcopy(baseline)
+    if mutation == "edit":
+        desired[0]["display_name"] = "Not the server sentinel"
+    elif mutation == "duplicate":
+        desired.insert(1, copy.deepcopy(desired[0]))
+    else:
+        desired[0], desired[1] = desired[1], desired[0]
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, desired))
+
+    assert raised.value.code == "backend_model_locked"
+    assert raised.value.status == 409
+
+
+def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    invalid = {
+        **baseline[1],
+        "id": "deepseek-v4",
+        "origin": "manual",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, [*baseline, invalid]))
+
+    assert raised.value.code == "backend_model_id_prefix"
+
+
 def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     service.cli_present_override = lambda backend: backend in {"claude", "codex"}
@@ -2208,6 +2826,33 @@ def test_agents_route_requests_deep_presence_only_when_explicit(monkeypatch):
         == 200
     )
     assert calls == [False, True]
+
+
+def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
+    class AgentService:
+        def get_agent_sources(self, backend):
+            return {
+                "backend": backend,
+                "mode": "hub",
+                "catalog_models": [{"id": "catalog-model", "routeable": True}],
+                "routes": {"catalog-model": {"hops": [{"source_id": "secret-source"}]}},
+                "sources": {"order": ["secret-source"]},
+            }
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", AgentService)
+
+    response = app.test_client().get("/api/models/agents/codex/models")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": True,
+        "contract_version": 6,
+        "agent": {
+            "backend": "codex",
+            "mode": "hub",
+            "catalog_models": [{"id": "catalog-model", "routeable": True}],
+        },
+    }
 
 
 def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):

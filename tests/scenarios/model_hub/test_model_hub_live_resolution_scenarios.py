@@ -15,6 +15,7 @@ import pytest
 from config.v2_config import (
     ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -202,6 +203,12 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
                 for source in eligible_sources
             )
         )
+        if backend == "opencode":
+            agent.models = [
+                ModelHubBackendModelConfig(id=_requested_model(backend))
+            ]
+            assert agent.menu is not None
+            agent.menu.checked = [_requested_model(backend)]
     return config
 
 
@@ -279,6 +286,51 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
     asyncio.run(exercise())
 
 
+def test_codex_backend_model_id_survives_until_gateway_resolution(
+    tmp_path: Path,
+) -> None:
+    """Codex selects catalog identity while the gateway invokes its routed target."""
+
+    async def exercise() -> None:
+        source = _source("src_alias_route")
+        source.models.append(ModelHubModelConfig(id="model-b", provenance="manual"))
+        config = _config(source)
+        codex = config.agents["codex"]
+        codex.models.append(ModelHubBackendModelConfig(id="alias-a", origin="manual"))
+        codex.routes["alias-a"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "model-b"),)
+        )
+        adapter = AdapterBoundaryFake(
+            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
+        )
+        service = _service(
+            tmp_path,
+            MemoryStore(config),
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve(
+                "codex",
+                "alias-a",
+                process_scope="/repo",
+                turn_id="turn_alias",
+            )
+            assert launch.runtime_model == "alias-a"
+            assert launch.target_model == "model-b"
+
+            status, body = await _post_turn(launch, endpoint="responses")
+            assert status == 200
+            assert body == b'{"ok":true}'
+            assert adapter.invocations == [(source.id, "model-b", "codex")]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("backend", "requested_model", "endpoint"),
     [
@@ -316,8 +368,6 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             ]
         )
         store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
-        assert store.config.agents["opencode"].menu is not None
-        store.config.agents["opencode"].menu.checked = ["anthropic/model-live"]
         service = _service(tmp_path, store, adapter, now=lambda: clock[0])
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)

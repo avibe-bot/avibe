@@ -4636,6 +4636,52 @@ async def model_hub_agent_mode_patch(backend):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/agents/<backend>/models", methods=["GET"])
+def model_hub_agent_models_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = _model_hub_service().get_agent_sources(backend)
+        picker_agent = {
+            "backend": agent["backend"],
+            "mode": agent["mode"],
+        }
+        if "catalog_models" in agent:
+            picker_agent["catalog_models"] = agent["catalog_models"]
+        return _model_hub_success(agent=picker_agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/models", methods=["PUT"])
+async def model_hub_agent_models_put(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        payload = _model_hub_json_object("mapping_target_unavailable")
+        agent = await _model_hub_service().set_agent_models(
+            backend,
+            payload.get("baseline"),
+            payload.get("models"),
+        )
+        return _model_hub_success(agent=agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/catalog/models-dev", methods=["GET"])
+def model_hub_models_dev_get():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        matches = _model_hub_service().models_dev_matches(
+            request.args.get("query"),
+        )
+        return _model_hub_success(matches=matches)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/agents/opencode/menu", methods=["PUT"])
 async def model_hub_opencode_menu_put():
     from core.handlers.model_hub import ModelHubError

@@ -271,18 +271,16 @@ def normalize_model_hub_vendor_id(value: object) -> str:
 def canonical_opencode_menu_identity(identifier: object) -> tuple[str, str]:
     """Validate and split one persisted OpenCode ``provider/model`` identity."""
 
-    from core.handlers.model_hub.identifiers import (
-        STANDARD_OPENCODE_VENDOR_IDS,
-        parse_opencode_model_id,
-    )
+    from core.handlers.model_hub.identifiers import parse_opencode_model_id
 
     if not isinstance(identifier, str) or identifier != identifier.strip():
         raise ValueError("Invalid OpenCode model identifier")
     provider_id, model_id = parse_opencode_model_id(identifier)
     if (
-        provider_id not in STANDARD_OPENCODE_VENDOR_IDS
-        and provider_id != "custom"
-    ) or provider_id != provider_id.strip() or model_id != model_id.strip():
+        re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", provider_id) is None
+        or provider_id != provider_id.strip()
+        or model_id != model_id.strip()
+    ):
         raise ValueError("Invalid OpenCode model identifier")
     if _contains_model_hub_credential_material(identifier):
         raise ValueError("OpenCode model identifier contains credential material")
@@ -305,9 +303,9 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
 def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
     """Adapt fixed-menu route keys to the current bundled catalog on reload.
 
-    A changed catalog is a one-time structural migration: newly introduced
-    menu ids receive empty routes and removed ids are discarded. Existing hop
-    payloads are copied verbatim; matching and placement never run here.
+    Newly introduced menu ids receive empty routes. Legacy route keys remain
+    intact so the canonical agent loader can preserve them as manual catalog
+    rows; matching and placement never run here.
     """
 
     model_hub = payload.get("model_hub")
@@ -323,6 +321,8 @@ def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
         raw_agent = agents.get(backend)
         if not isinstance(raw_agent, dict):
             continue
+        if "models" in raw_agent:
+            continue
         routes = raw_agent.get("routes")
         expected_menu_ids = model_hub_fixed_menu_ids(backend)
         if not isinstance(routes, dict) or not expected_menu_ids:
@@ -331,6 +331,11 @@ def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
             model_id: routes.get(model_id, {"hops": []})
             for model_id in expected_menu_ids
         }
+        migrated_routes.update(
+            (model_id, route)
+            for model_id, route in routes.items()
+            if model_id not in migrated_routes
+        )
         if migrated_routes == routes:
             continue
         migrated_agent = dict(raw_agent)
@@ -663,6 +668,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             "mappings",
             "routes",
             "menu",
+            "models",
         }:
             return payload, False, ()
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
@@ -819,7 +825,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         allowed_agent = {
             key: value
             for key, value in agent.items()
-            if key in {"backend", "mode", "menu_kind", "menu"}
+            if key in {"backend", "mode", "menu_kind", "menu", "models"}
         }
         allowed_agent["backend"] = backend
         agent_mode = agent.get("mode")
@@ -3151,6 +3157,178 @@ class ModelHubMenuConfig:
         return {"view": self.view, "checked": list(self.checked)}
 
 
+_BACKEND_MODEL_INPUT_MODALITIES = frozenset(
+    {"text", "image", "audio", "video", "pdf"}
+)
+_BACKEND_MODEL_OUTPUT_MODALITIES = frozenset(
+    {"text", "image", "audio", "video"}
+)
+
+
+@dataclass
+class ModelHubBackendModelConfig:
+    id: str
+    origin: Literal["builtin", "models_dev", "manual"] = "manual"
+    display_name: Optional[str] = None
+    models_dev_id: Optional[str] = None
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    input_modalities: list[str] = field(default_factory=list)
+    output_modalities: list[str] = field(default_factory=list)
+    supports_tools: Optional[bool] = None
+    supports_reasoning: Optional[bool] = None
+    reasoning_efforts: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ModelHubBackendModelConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.agents.models' entries must be objects")
+        allowed = {
+            "id",
+            "display_name",
+            "origin",
+            "models_dev_id",
+            "context_window",
+            "max_output_tokens",
+            "input_modalities",
+            "output_modalities",
+            "supports_tools",
+            "supports_reasoning",
+            "reasoning_efforts",
+            # These are read-only API projection fields. Accepting and dropping
+            # them lets a client submit the list it observed without turning
+            # server-owned policy into persisted state.
+            "locked",
+            "routeable",
+        }
+        if set(payload) - allowed:
+            raise ValueError("Config 'model_hub.agents.models' contains unknown fields")
+        model_id = payload.get("id")
+        origin = payload.get("origin", "manual")
+        display_name = payload.get("display_name")
+        models_dev_id = payload.get("models_dev_id")
+        context_window = payload.get("context_window")
+        max_output_tokens = payload.get("max_output_tokens")
+        input_modalities = payload.get("input_modalities", [])
+        output_modalities = payload.get("output_modalities", [])
+        supports_tools = payload.get("supports_tools")
+        supports_reasoning = payload.get("supports_reasoning")
+        reasoning_efforts = payload.get("reasoning_efforts", [])
+
+        if (
+            not isinstance(model_id, str)
+            or not model_id.strip()
+            or _contains_model_hub_credential_material(model_id)
+        ):
+            raise ValueError("Config 'model_hub.agents.models.id' is invalid")
+        if origin not in {"builtin", "models_dev", "manual"}:
+            raise ValueError("Config 'model_hub.agents.models.origin' is invalid")
+        for name, value in (
+            ("display_name", display_name),
+            ("models_dev_id", models_dev_id),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value.strip()
+                or _contains_model_hub_credential_material(value)
+            ):
+                raise ValueError(f"Config 'model_hub.agents.models.{name}' is invalid")
+        for name, value in (
+            ("context_window", context_window),
+            ("max_output_tokens", max_output_tokens),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"Config 'model_hub.agents.models.{name}' is invalid")
+        for name, values, allowed_modalities in (
+            (
+                "input_modalities",
+                input_modalities,
+                _BACKEND_MODEL_INPUT_MODALITIES,
+            ),
+            (
+                "output_modalities",
+                output_modalities,
+                _BACKEND_MODEL_OUTPUT_MODALITIES,
+            ),
+        ):
+            if (
+                not isinstance(values, list)
+                or any(
+                    not isinstance(value, str)
+                    or value not in allowed_modalities
+                    for value in values
+                )
+                or len(set(values)) != len(values)
+            ):
+                raise ValueError(f"Config 'model_hub.agents.models.{name}' is invalid")
+        for name, value in (
+            ("supports_tools", supports_tools),
+            ("supports_reasoning", supports_reasoning),
+        ):
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(f"Config 'model_hub.agents.models.{name}' is invalid")
+        if (
+            not isinstance(reasoning_efforts, list)
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > 64
+                or _contains_model_hub_credential_material(value)
+                for value in reasoning_efforts
+            )
+            or len(set(reasoning_efforts)) != len(reasoning_efforts)
+        ):
+            raise ValueError(
+                "Config 'model_hub.agents.models.reasoning_efforts' is invalid"
+            )
+        return cls(
+            id=model_id.strip(),
+            origin=origin,
+            display_name=display_name.strip() if isinstance(display_name, str) else None,
+            models_dev_id=models_dev_id.strip() if isinstance(models_dev_id, str) else None,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            input_modalities=list(input_modalities),
+            output_modalities=list(output_modalities),
+            supports_tools=supports_tools,
+            supports_reasoning=supports_reasoning,
+            reasoning_efforts=list(reasoning_efforts),
+        )
+
+    def to_payload(self) -> dict:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "origin": self.origin,
+            "models_dev_id": self.models_dev_id,
+            "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
+            "input_modalities": list(self.input_modalities),
+            "output_modalities": list(self.output_modalities),
+            "supports_tools": self.supports_tools,
+            "supports_reasoning": self.supports_reasoning,
+            "reasoning_efforts": list(self.reasoning_efforts),
+        }
+
+
+def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
+    if backend not in {"claude", "codex"}:
+        return []
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+
+    return [
+        ModelHubBackendModelConfig(
+            id=entry["id"],
+            origin="builtin",
+            display_name=entry.get("label"),
+            reasoning_efforts=list(entry.get("reasoning_efforts") or ()),
+        )
+        for entry in backend_model_entries(backend, load_bundled_catalog())
+    ]
+
+
 @dataclass
 class ModelHubAgentSourcesConfig:
     order: list[str] = field(default_factory=list)
@@ -3180,11 +3358,17 @@ class ModelHubAgentSupplyConfig:
     sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
     routes: dict[str, ModelHubRouteConfig] = field(default_factory=dict)
     menu: Optional[ModelHubMenuConfig] = None
+    models: list[ModelHubBackendModelConfig] = field(default_factory=list)
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
         if backend == "opencode":
-            return cls(backend="opencode", mode=mode, menu_kind="open", menu=ModelHubMenuConfig())
+            return cls(
+                backend="opencode",
+                mode=mode,
+                menu_kind="open",
+                menu=ModelHubMenuConfig(),
+            )
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
         return cls(
@@ -3192,6 +3376,7 @@ class ModelHubAgentSupplyConfig:
             mode=mode,
             menu_kind="fixed",
             routes={model_id: ModelHubRouteConfig() for model_id in model_hub_fixed_menu_ids(backend)},
+            models=_default_backend_models(backend),
         )
 
     @classmethod
@@ -3204,7 +3389,15 @@ class ModelHubAgentSupplyConfig:
     ) -> "ModelHubAgentSupplyConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents' entries must be objects")
-        if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
+        if set(payload) - {
+            "backend",
+            "mode",
+            "menu_kind",
+            "sources",
+            "routes",
+            "menu",
+            "models",
+        }:
             raise ValueError("Config 'model_hub.agents' contains unknown fields")
         raw_backend = payload.get("backend")
         backend = expected_backend if raw_backend is None else raw_backend
@@ -3235,11 +3428,43 @@ class ModelHubAgentSupplyConfig:
             for model_id, route in routes_payload.items()
         }
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
+        models_payload = payload.get("models")
+        if models_payload is None:
+            if backend == "opencode":
+                legacy_ids = list(menu.checked if menu else ())
+                legacy_ids.extend(
+                    model_id for model_id in routes if model_id not in legacy_ids
+                )
+                models = [
+                    ModelHubBackendModelConfig(id=model_id, origin="manual")
+                    for model_id in legacy_ids
+                ]
+            else:
+                models = _default_backend_models(backend)
+                known = {model.id for model in models}
+                models.extend(
+                    ModelHubBackendModelConfig(id=model_id, origin="manual")
+                    for model_id in routes
+                    if model_id not in known
+                )
+        else:
+            if not isinstance(models_payload, list):
+                raise ValueError("Config 'model_hub.agents.models' must be an array")
+            models = [
+                ModelHubBackendModelConfig.from_payload(item)
+                for item in models_payload
+            ]
+        if len({model.id for model in models}) != len(models):
+            raise ValueError("Config 'model_hub.agents.models' ids must be unique")
         if any(_contains_model_hub_credential_material(model_id) for model_id in routes):
             raise ValueError("Config 'model_hub.agents.routes' contains an invalid model id")
         if backend == "opencode":
-            for identifier in (*routes, *(menu.checked if menu else ())):
+            for identifier in (*routes, *(model.id for model in models)):
                 canonical_opencode_menu_identity(identifier)
+            menu = ModelHubMenuConfig(
+                view=menu.view if menu else "featured",
+                checked=[model.id for model in models],
+            )
         return cls(
             backend=backend,
             mode=mode,
@@ -3251,10 +3476,11 @@ class ModelHubAgentSupplyConfig:
             ),
             routes=routes,
             menu=menu,
+            models=models,
         )
 
     def to_payload(self) -> dict:
-        return {
+        payload = {
             "backend": self.backend,
             "mode": self.mode,
             "menu_kind": self.menu_kind,
@@ -3265,6 +3491,8 @@ class ModelHubAgentSupplyConfig:
             },
             "menu": self.menu.to_payload() if self.menu else None,
         }
+        payload["models"] = [model.to_payload() for model in self.models]
+        return payload
 
 
 @dataclass
@@ -3368,10 +3596,8 @@ class ModelHubConfig:
                 expected_backend=backend,
                 repairing=repairing,
             )
-            expected_menu_ids = (
-                model_hub_fixed_menu_ids(backend)
-                if backend in {"claude", "codex"}
-                else tuple(agents[backend].menu.checked if agents[backend].menu else ())
+            expected_menu_ids = tuple(
+                model.id for model in agents[backend].models
             )
             missing_route = next(
                 (model_id for model_id in expected_menu_ids if model_id not in agents[backend].routes),
@@ -3381,19 +3607,21 @@ class ModelHubConfig:
                 raise ValueError(
                     f"Config 'model_hub.agents.{backend}.routes' is missing menu model '{missing_route}'"
                 )
-            if backend in {"claude", "codex"}:
-                extra_route = next(
-                    (
-                        model_id
-                        for model_id in agents[backend].routes
-                        if model_id not in expected_menu_ids
-                    ),
-                    None,
+            extra_route = next(
+                (
+                    model_id
+                    for model_id in agents[backend].routes
+                    if model_id not in expected_menu_ids
+                ),
+                None,
+            )
+            # The retained OpenCode menu endpoint can hide a checked model while
+            # preserving its dormant Route for a later re-enable. Fixed-menu
+            # backends have never had that compatibility state.
+            if extra_route is not None and backend != "opencode":
+                raise ValueError(
+                    f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
                 )
-                if extra_route is not None:
-                    raise ValueError(
-                        f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
-                    )
         config = cls(
             enabled=enabled,
             sources=sources,

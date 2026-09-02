@@ -17,6 +17,11 @@
       "description": "Gateway or Direct. Existing installations start Direct until the user switches; fresh installations default Gateway. A native_cli Source is one configured Gateway hop and is distinct from Direct mode."
     },
     "menu_kind": { "enum": ["fixed", "open"] },
+    "catalog_models": {
+      "type": "array",
+      "description": "The ordered backend Agent model catalog. It controls the Agent menu and capability metadata only; Route configuration remains in routes.",
+      "items": { "$ref": "backend-model.schema.json" }
+    },
     "selected_by_agent": {
       "type": ["string", "null"],
       "description": "The Vibe Agent whose explicit `model` produced `selected_model_id`, by name. Model selection does not live at the backend grain: several enabled Vibe Agents can share one backend and each carry a different model. Derived, never persisted; null while mode=direct or when no routed Agent is projected.",
@@ -217,7 +222,7 @@
         ]
       }
     },
-    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): fixed-menu backends only — real built-in model ids, server-populated from vibe/backend_model_catalog.py; null for open-menu backends. UI must not hardcode menus." },
+    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Compatibility projection for older clients. New clients consume catalog_models." },
     "standard_vendors": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): opencode only — server-populated mirror of STANDARD_OPENCODE_VENDOR_IDS (core/handlers/model_hub/identifiers.py) so the UI never hand-mirrors vendor lists; null otherwise." }
   },
   "allOf": [

@@ -19,6 +19,11 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
   useApi: () => ({}),
 }));
 
+// What the catalog answers for this render. A Hub catalog states one entry per
+// model, so a test can say "this model has no efforts" the same way the server
+// does — and an empty default keeps the backend fallback in play.
+let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
+
 // The model column is fetched per backend; serve it synchronously so the test is
 // about the route state, not about the catalog request.
 vi.mock('../../lib/backendModels', async (importOriginal) => ({
@@ -36,7 +41,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
     onLoaded({
       models: ['sonnet', 'opus'],
       modelLabels: {},
-      reasoningOptions: {},
+      reasoningOptions: catalogReasoning,
       catalogRefreshPending: false,
     });
     return () => {};
@@ -116,7 +121,10 @@ const openMenu = async (user: ReturnType<typeof userEvent.setup>) => {
 };
 
 describe('AgentRoutePicker', () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    catalogReasoning = {};
+  });
 
   it('highlights the pick while the owner write is still in flight', async () => {
     const user = userEvent.setup();
@@ -161,6 +169,37 @@ describe('AgentRoutePicker', () => {
     await user.click(screen.getByRole('button', { name: 'opus' }));
 
     expect(screen.getByLabelText('common.saving')).toBeTruthy();
+  });
+
+  it('clears the effort when the catalog says the picked model has none', async () => {
+    // "No efforts" is an answer the catalog gives, not a gap: the effort column
+    // empties, so the route must stop carrying one instead of dispatching an
+    // effort this model cannot run.
+    catalogReasoning = { opus: [], sonnet: [{ value: 'low', label: 'Low' }] };
+    const user = userEvent.setup();
+    const onWrite = vi.fn();
+    render(<OptimisticOwner onWrite={onWrite} />);
+    await openMenu(user);
+
+    await user.click(screen.getByRole('button', { name: 'opus' }));
+
+    expect(onWrite).toHaveBeenCalledExactlyOnceWith({ model: 'opus', reasoning_effort: null });
+    expect(screen.queryByRole('button', { name: 'chat.picker.effortOptions.low' })).toBeNull();
+    // Two-column cascade: a heading with nothing under it would look like a
+    // list that failed to load rather than a model that has no efforts.
+    expect(screen.queryByText('chat.picker.effort')).toBeNull();
+  });
+
+  it('keeps the effort column for a model the catalog gives efforts', async () => {
+    catalogReasoning = { opus: [{ value: 'low', label: 'Low' }] };
+    const user = userEvent.setup();
+    render(<OptimisticOwner onWrite={vi.fn()} />);
+    await openMenu(user);
+
+    await user.click(screen.getByRole('button', { name: 'opus' }));
+
+    expect(screen.getByText('chat.picker.effort')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'chat.picker.effortOptions.low' })).toBeTruthy();
   });
 
   it('pins the whole inherited route when a model is picked on a default route', async () => {

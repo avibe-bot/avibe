@@ -500,6 +500,7 @@ class TurnTrace:
     model_supply_state: Optional[SupplyState] = None
     blockers: list[dict] = field(default_factory=list)
     gateway_source_id: Optional[str] = None
+    gateway_request_model_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
     ambiguous: bool = False
     terminal_outcome: TurnOutcomeProjectionInput | None = None
@@ -520,6 +521,7 @@ class PreparedGatewayRoute:
     requested_model_id: str
     resolved_model_id: str
     source_id: str
+    gateway_request_model_id: str
 
 
 class GatewayTurnTerminalizer:
@@ -885,8 +887,11 @@ class TurnCorrelationRegistry:
                 )
                 self._traces[turn_id] = trace
             elif (
-                trace.gateway_model_id is not None
-                and trace.gateway_model_id != requested_model_id
+                trace.gateway_request_model_id is not None
+                and requested_model_id not in {
+                    trace.gateway_request_model_id,
+                    trace.gateway_model_id,
+                }
             ):
                 trace.ambiguous = True
                 self._scopes[key].ambiguous_turns.add(turn_id)
@@ -903,6 +908,7 @@ class TurnCorrelationRegistry:
         resolved_model_id: str,
         source_id: str,
         via_mapping: bool,
+        gateway_request_model_id: str | None = None,
     ) -> None:
         """Retain routing independently from best-effort provenance attribution."""
 
@@ -921,10 +927,12 @@ class TurnCorrelationRegistry:
                 if exact is None:
                     return
                 route_turn_id = exact[0]
+            request_model_id = gateway_request_model_id or resolved_model_id
             prepared = PreparedGatewayRoute(
                 requested_model_id=requested_model_id,
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
+                gateway_request_model_id=request_model_id,
             )
             existing = scope.prepared_routes.get(route_turn_id)
             if existing is not None and existing != prepared:
@@ -955,6 +963,10 @@ class TurnCorrelationRegistry:
                     and trace.gateway_source_id != source_id
                 )
                 or (
+                    trace.gateway_request_model_id is not None
+                    and trace.gateway_request_model_id != request_model_id
+                )
+                or (
                     trace.gateway_model_id is not None
                     and trace.gateway_model_id != resolved_model_id
                 )
@@ -963,6 +975,7 @@ class TurnCorrelationRegistry:
                 self._scopes[key].ambiguous_turns.add(exact_turn_id)
                 return
             trace.gateway_source_id = source_id
+            trace.gateway_request_model_id = request_model_id
             trace.gateway_model_id = resolved_model_id
 
     def gateway_resolution_model(
@@ -989,13 +1002,23 @@ class TurnCorrelationRegistry:
             matching = [
                 route
                 for route in active_routes
-                if route.resolved_model_id == gateway_model_id
+                if route.gateway_request_model_id == gateway_model_id
             ]
+            # A backend started before this upgrade may still send the resolved
+            # upstream id. Prefer the canonical request id, then accept the old
+            # shape only when it still identifies one prepared route.
+            if not matching:
+                matching = [
+                    route
+                    for route in active_routes
+                    if route.resolved_model_id == gateway_model_id
+                ]
             identities = {
                 (
                     route.requested_model_id,
                     route.resolved_model_id,
                     route.source_id,
+                    route.gateway_request_model_id,
                 )
                 for route in matching
             }

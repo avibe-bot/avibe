@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, listedModelIds, modelChainKey, modelChainRequests, modelSupplyState, visibleModelIds } from './modelRows';
-import type { AgentSupply } from './types';
+import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, modelChainKey, modelChainRequests, modelSupplyState } from './modelRows';
+import type { AgentSupply, BackendModel } from './types';
+
+const baseModel: BackendModel = {
+  id: '', display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+  input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,
+  reasoning_efforts: [], locked: false, routeable: true,
+};
 
 const agent: AgentSupply = {
   backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', sources: { order: [], eligibility: [] },
@@ -10,10 +16,6 @@ const agent: AgentSupply = {
 };
 
 describe('modelRows', () => {
-  it('lists backend menu models and every persisted Route row exactly once', () => {
-    expect(listedModelIds(agent)).toEqual(['builtin', 'route-only']);
-  });
-
   it('requests chains only for hub model rows', () => {
     expect(modelChainRequests([agent])).toEqual([
       { backend: 'claude', modelId: 'builtin' },
@@ -22,13 +24,28 @@ describe('modelRows', () => {
     expect(modelChainKey('claude', 'builtin')).toBe('claude\u0000builtin');
   });
 
+  it('enumerates the catalog order, not the legacy projection, once the server sends one', () => {
+    const catalogued: AgentSupply = {
+      ...agent,
+      catalog_models: [
+        { ...baseModel, id: 'second' },
+        { ...baseModel, id: 'first' },
+        { ...baseModel, id: 'default', locked: true, routeable: false },
+      ],
+    };
+
+    expect(collapsedModelRows(catalogued)).toEqual({ visible: ['second', 'first'], hidden: [] });
+    expect(modelChainRequests([catalogued])).toEqual([
+      { backend: 'claude', modelId: 'second' },
+      { backend: 'claude', modelId: 'first' },
+    ]);
+  });
+
   it('keeps dormant OpenCode routes hidden until their model is selected again', () => {
     const open = { ...agent, backend: 'opencode' as const, menu_kind: 'open' as const, builtin_models: null, menu: { view: 'featured' as const, checked: [] } };
 
-    expect(visibleModelIds(open)).toEqual([]);
     expect(collapsedModelRows(open)).toEqual({ visible: [], hidden: [] });
     expect(modelChainRequests([open])).toEqual([]);
-    expect(visibleModelIds({ ...open, menu: { view: 'featured', checked: ['route-only'] } })).toEqual(['route-only']);
   });
 
 });

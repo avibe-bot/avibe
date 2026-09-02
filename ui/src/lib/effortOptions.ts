@@ -13,26 +13,44 @@ const DEFAULT_EFFORTS = ['low', 'medium', 'high'];
 
 export const effortOptionsFor = (backend: string): string[] => EFFORT_BY_BACKEND[backend] ?? DEFAULT_EFFORTS;
 
-const PER_MODEL_EFFORT_BACKENDS = new Set(['claude', 'codex']);
+/** Backends whose catalog carries a "" entry: the set an inherited or custom
+ *  model inherits when the catalog does not name it. */
+const SHARED_DEFAULT_EFFORT_BACKENDS = new Set(['claude', 'codex']);
 
-// Resolve the selectable effort values for a backend + model. Claude and Codex
-// consult their catalog maps; other backends always use their static superset so
-// stale state cannot leak across backend switches. A known model uses its own
-// set, while an inherited or custom model uses the catalog's "" default set.
-// We do not union across models because that would offer unsupported pairs.
-// ``reasoningOptions`` may be {} before the catalog loads, which yields the
-// backend fallback until the immediate snapshot arrives.
+/** `__default__` is the IM cards' "let the backend choose" sentinel, not an
+ *  effort value, so it never becomes a selectable option here. */
+const selectableEfforts = (entries: { value: string; label: string }[]): string[] =>
+  entries.filter((option) => option.value !== '__default__').map((option) => option.value);
+
+// Resolve the selectable effort values for a backend + model.
+//
+// A model's own entry is the answer, whichever backend it came from: the Hub
+// catalog states one per model for all three, so gating the lookup by backend
+// would silently discard OpenCode's answers. We do not union across models
+// because that would offer unsupported pairs.
+//
+// A missing key and an empty entry are different answers. Missing means nobody
+// has said, so Claude/Codex fall back to their catalog's "" set and every
+// backend then to its static superset — that is also what `{}` means before the
+// catalog loads. An empty entry under this model's own key is a statement —
+// "this model does not reason" — and resolves to no efforts, not to the
+// generic ladder.
 export function resolveEffortOptions(
   backend: string,
   model: string | null | undefined,
   reasoningOptions: Record<string, { value: string; label: string }[]> | undefined,
 ): string[] {
-  if (PER_MODEL_EFFORT_BACKENDS.has(backend) && reasoningOptions) {
-    const perModel = reasoningOptions[model ?? ''] ?? reasoningOptions[''];
-    const values = perModel?.filter((o) => o.value !== '__default__').map((o) => o.value);
-    if (values && values.length) return values;
+  const modelKey = model ?? '';
+  if (reasoningOptions && Object.prototype.hasOwnProperty.call(reasoningOptions, modelKey)) {
+    return selectableEfforts(reasoningOptions[modelKey]);
   }
-  return effortOptionsFor(backend);
+  const shared = SHARED_DEFAULT_EFFORT_BACKENDS.has(backend)
+    && reasoningOptions
+    && Object.prototype.hasOwnProperty.call(reasoningOptions, '')
+    ? reasoningOptions['']
+    : undefined;
+  const values = shared ? selectableEfforts(shared) : [];
+  return values.length ? values : effortOptionsFor(backend);
 }
 
 export function isEffortSupported(

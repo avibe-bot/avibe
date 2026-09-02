@@ -3549,6 +3549,111 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def test_model_hub_filters_every_codex_effort_source_at_the_adapter_boundary(self):
+        from modules.agents.model_hub import ModelHubLaunch, bind_launch
+
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(),
+            model_hub_runtime=object(),
+        )
+        launch = ModelHubLaunch(
+            backend="codex",
+            channel="hub",
+            requested_model="no-reasoning-model",
+            target_model="upstream-model",
+            runtime_model="no-reasoning-model",
+            reasoning_efforts=(),
+            supports_reasoning=False,
+        )
+        cases = (
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name=None,
+                    subagent_model=None,
+                    subagent_reasoning_effort="high",
+                ),
+                (None, None, None),
+            ),
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name=None,
+                    subagent_model=None,
+                    subagent_reasoning_effort=None,
+                    vibe_agent_reasoning_effort="high",
+                ),
+                (None, None, None),
+            ),
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name=None,
+                    subagent_model=None,
+                    subagent_reasoning_effort=None,
+                ),
+                (None, None, "high"),
+            ),
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name="reviewer",
+                    subagent_model=None,
+                    subagent_reasoning_effort=None,
+                    working_path="/tmp/work",
+                ),
+                (None, None, None),
+            ),
+        )
+
+        with patch.object(
+            _MODULE,
+            "load_codex_subagent",
+            return_value=SimpleNamespace(
+                model=None,
+                reasoning_effort="high",
+                developer_instructions=None,
+            ),
+        ):
+            for request, overrides in cases:
+                agent.controller.get_codex_overrides.return_value = overrides
+                bind_launch(request.context, launch)
+                self.assertIsNone(agent._resolve_codex_agent_settings(request)[2])
+
+    def test_model_hub_keeps_supported_codex_effort_and_does_not_filter_direct(self):
+        from modules.agents.model_hub import ModelHubLaunch, bind_launch
+
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, "high")),
+            model_hub_runtime=object(),
+        )
+        request = SimpleNamespace(
+            context=SimpleNamespace(),
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+        )
+        common = {
+            "backend": "codex",
+            "requested_model": "gpt-5",
+            "target_model": "gpt-5",
+            "runtime_model": "gpt-5",
+        }
+
+        bind_launch(
+            request.context,
+            ModelHubLaunch(channel="hub", reasoning_efforts=("high",), **common),
+        )
+        self.assertEqual(agent._resolve_codex_agent_settings(request)[2], "high")
+
+        bind_launch(
+            request.context,
+            ModelHubLaunch(channel="direct", reasoning_efforts=(), **common),
+        )
+        self.assertEqual(agent._resolve_codex_agent_settings(request)[2], "high")
+
     async def test_start_turn_uses_codex_dm_user_effort_from_shared_overrides(self):
         agent = object.__new__(CodexAgent)
         agent.settings_manager = SimpleNamespace(
@@ -4062,6 +4167,18 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once_with()
 
+    async def test_model_hub_catalog_invalidation_preserves_direct_transports(self):
+        agent = self._agent()
+        transport = SimpleNamespace(stop=AsyncMock())
+        agent._transports["/repo"] = transport
+        agent._model_hub_catalog_path = Path("/runtime/codex-old.json")
+
+        await agent.invalidate_model_hub_runtime()
+
+        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertEqual(agent._model_hub_catalog_generation, 1)
+        transport.stop.assert_not_awaited()
+
     async def test_startup_catalog_preparation_cannot_overwrite_new_runtime_generation(self):
         agent = self._agent()
         previous_config = agent.codex_config
@@ -4073,8 +4190,8 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         release_previous = threading.Event()
         calls = []
 
-        def prepare(binary):
-            calls.append(binary)
+        def prepare(binary, base_env, configured_models):
+            calls.append((binary, base_env, configured_models))
             if binary == previous_config.binary:
                 previous_started.set()
                 release_previous.wait(timeout=2)
@@ -4095,7 +4212,13 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 await startup
             recovered = await agent.prepare_model_hub_runtime()
 
-        self.assertEqual(calls, [previous_config.binary, next_config.binary])
+        self.assertEqual(
+            calls,
+            [
+                (previous_config.binary, None, None),
+                (next_config.binary, None, None),
+            ],
+        )
         self.assertIs(agent.codex_config, next_config)
         self.assertEqual(agent._model_hub_catalog_path, next_catalog)
         self.assertEqual(recovered, next_catalog)
@@ -4150,7 +4273,11 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
                     await agent._get_or_create_transport(cwd, launch)
 
-            prepare_catalog.assert_called_once_with(agent.codex_config.binary)
+            prepare_catalog.assert_called_once_with(
+                agent.codex_config.binary,
+                None,
+                None,
+            )
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
             agent._session_mgr.invalidate_thread.assert_not_called()

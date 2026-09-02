@@ -500,12 +500,34 @@ class Controller:
         # post-paint refresh, so controller readiness never waits on npm.
         refresh_cli_presence(False, None)
 
+        async def backend_catalog_changed(backend: str) -> None:
+            try:
+                latest = V2Config.load()
+            except FileNotFoundError:
+                return
+            self.config.model_hub = latest.model_hub
+            if latest.model_hub.agents[backend].mode != "hub":
+                if backend == "codex":
+                    agent_service = getattr(self, "agent_service", None)
+                    if agent_service is None:
+                        raise RuntimeError("Agent service is unavailable")
+                    await agent_service.invalidate_model_hub_runtime(backend)
+                return
+            runtime_config = getattr(latest.agents, backend, None)
+            if runtime_config is None:
+                return
+            coordinator = getattr(self, "backend_restart_coordinator", None)
+            if coordinator is None:
+                raise RuntimeError("Backend restart coordinator is unavailable")
+            await coordinator.request_restart(backend)
+
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
+            backend_catalog_changed=backend_catalog_changed,
         )
         self.model_hub_turn_gateway = ModelHubTurnGateway(
             self.model_hub_service,

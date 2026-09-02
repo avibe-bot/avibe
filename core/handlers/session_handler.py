@@ -1454,10 +1454,20 @@ class SessionHandler(BaseHandler):
         )
         from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
+        catalog_efforts = (
+            model_hub_launch.reasoning_efforts
+            if model_hub_launch is not None
+            and model_hub_launch.backend == "claude"
+            and model_hub_launch.channel in {"hub", "native_cli"}
+            else backend_model_catalog.catalog_reasoning_efforts_for_model(
+                "claude",
+                effective_model,
+            )
+        )
         effective_effort = normalize_claude_reasoning_effort(
             effective_model,
             explicit_effort,
-            backend_model_catalog.catalog_reasoning_efforts_for_model("claude", effective_model),
+            catalog_efforts,
         )
 
         # Determine final system prompt: agent prompt takes precedence over config.

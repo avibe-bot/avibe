@@ -1909,7 +1909,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const [settingDefault, setSettingDefault] = useState(false);
   const [description, setDescription] = useState(agent.description ?? '');
   const [model, setModel] = useState(agent.model ?? '');
-  const [effort, setEffort] = useState(agent.reasoning_effort ?? 'medium');
+  // The panel shows what the server holds, so an unset effort stays unset. A
+  // `?? 'medium'` here would light a segment nobody chose, and switching models
+  // would then send only `model` while the record kept no effort at all.
+  const [effort, setEffort] = useState<string | null>(agent.reasoning_effort ?? null);
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt ?? '');
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -1951,12 +1954,19 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   >({});
   const [running, setRunning] = useState(false);
 
-  const serverSnapshotRef = useRef({
+  const serverSnapshotRef = useRef<{
+    id: string;
+    name: string;
+    description: string;
+    model: string;
+    effort: string | null;
+    systemPrompt: string;
+  }>({
     id: agent.id,
     name: agent.name,
     description: agent.description ?? '',
     model: agent.model ?? '',
-    effort: agent.reasoning_effort ?? 'medium',
+    effort: agent.reasoning_effort ?? null,
     systemPrompt: agent.system_prompt ?? '',
   });
 
@@ -1971,7 +1981,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       name: agent.name,
       description: agent.description ?? '',
       model: agent.model ?? '',
-      effort: agent.reasoning_effort ?? 'medium',
+      effort: agent.reasoning_effort ?? null,
       systemPrompt: agent.system_prompt ?? '',
     };
     const snapshotChanged =
@@ -2086,7 +2096,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         if (field === 'name') setName(snapshot.name);
         if (field === 'description') setDescription(snapshot.description ?? '');
         if (field === 'model') setModel(snapshot.model ?? '');
-        if (field === 'effort') setEffort(snapshot.effort ?? 'medium');
+        if (field === 'effort') setEffort(snapshot.effort);
         if (field === 'systemPrompt') {
           const value = snapshot.systemPrompt ?? '';
           setSystemPrompt(value);
@@ -2110,7 +2120,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         if (field === 'name') setName(snapshot.name);
         if (field === 'description') setDescription(snapshot.description ?? '');
         if (field === 'model') setModel(snapshot.model ?? '');
-        if (field === 'effort') setEffort(snapshot.effort ?? 'medium');
+        if (field === 'effort') setEffort(snapshot.effort);
         if (field === 'systemPrompt') setSystemPrompt(snapshot.systemPrompt ?? '');
       }
       throw err;
@@ -2341,15 +2351,18 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               // keeps an effort the model can't run (Codex P2).
               const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
               if (effort && !opts.includes(effort)) {
-                const fallback = opts.includes('medium') ? 'medium' : opts[0];
-                if (fallback) {
-                  markFieldEdit('effort');
-                  markFieldSubmitted('effort');
-                  setEffort(fallback);
-                  patch.reasoning_effort = fallback;
-                }
+                // No valid option is itself a valid answer: a model whose catalog
+                // row states no efforts must clear the field, not keep the old
+                // value because there was nothing to replace it with.
+                const fallback = opts.includes('medium') ? 'medium' : opts[0] ?? null;
+                markFieldEdit('effort');
+                markFieldSubmitted('effort');
+                setEffort(fallback);
+                patch.reasoning_effort = fallback;
               }
-              consumeBackgroundMutation(submitFields(patch, patch.reasoning_effort ? ['model', 'effort'] : ['model']));
+              consumeBackgroundMutation(
+                submitFields(patch, 'reasoning_effort' in patch ? ['model', 'effort'] : ['model']),
+              );
             }}
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
@@ -2358,7 +2371,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         )}
       </Field>
 
-      {/* Reasoning effort — design.pen LsjxT */}
+      {/* Reasoning effort — design.pen LsjxT. A model whose catalog row states
+          no efforts has nothing to choose, so the field is absent rather than an
+          empty outline the user would read as a control that failed to load. */}
+      {effortOptions.length > 0 && (
       <Field label={t('agents.detail.effort')}>
         <div
           className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
@@ -2390,6 +2406,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           })}
         </div>
       </Field>
+      )}
 
       {/* System prompt — design.pen y3mRv: collapsed by default. Token
           estimate (cheap heuristic, see lib/tokenEstimate) replaces the
