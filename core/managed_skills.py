@@ -669,7 +669,7 @@ def _project_directories(
     directory = current
     for _ in range(PROJECT_ROOT_MAX_DIRECTORIES):
         directories.append(directory)
-        if directory == boundary or (directory / ".git").exists():
+        if directory == boundary or (boundary is None and (directory / ".git").exists()):
             return directories
         if directory.parent == directory:
             break
@@ -1385,6 +1385,8 @@ def managed_skill_environment(
     working_directory: str | Path | None,
     *,
     project_base: str | Path | None = None,
+    builtin_snapshot_id: str | None = None,
+    builtin_snapshot_root: str | Path | None = None,
 ) -> dict[str, str]:
     """Return the per-backend shell bindings consumed by ``vibe skill``."""
 
@@ -1412,15 +1414,25 @@ def managed_skill_environment(
             SKILL_XDG_CONFIG_HOME_ENV: str(resolved_xdg_home),
         }
     )
-    snapshot_id = os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
-    if _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
-        env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
-        snapshot_root = os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+    explicit_builtin_snapshot = builtin_snapshot_id is not None or builtin_snapshot_root is not None
+    snapshot_id = (
+        builtin_snapshot_id
+        if explicit_builtin_snapshot
+        else os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    )
+    if isinstance(snapshot_id, str) and _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+        snapshot_root = (
+            builtin_snapshot_root
+            if explicit_builtin_snapshot
+            else os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+        )
         if snapshot_root:
             root = Path(snapshot_root).expanduser()
             if root.is_absolute() and root.name == snapshot_id:
+                env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
                 env[BUILTIN_SKILLS_ROOT_ENV] = str(_absolute_path(root))
-        if BUILTIN_SKILLS_ROOT_ENV not in env:
+        elif not explicit_builtin_snapshot:
+            env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
             env[BUILTIN_SKILLS_ROOT_ENV] = str(
                 (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id)
                 .expanduser()

@@ -27,8 +27,10 @@ from core.message_context import (
 from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
 from storage.agent_session_rows import (
+    SESSION_PROJECT_BASE_METADATA_KEY,
     create_agent_session_row,
     get_or_create_agent_session_row,
+    normalize_session_project_base,
     utc_now_iso,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -716,7 +718,7 @@ def _target_from_session_row(
         session_anchor=str(row.get("session_anchor") or fallback_anchor),
         workdir=workdir,
         source=source,
-        project_base=_project_base_for_workdir(workdir, row.get("_scope_workdir")),
+        project_base=_session_project_base(row, workdir),
         scope_id=_optional_str(row.get("scope_id")),
         scope_type=_optional_str(row.get("_scope_type")),
         agent_session_id=_optional_str(row.get("id")),
@@ -782,16 +784,19 @@ def _normalize_workdir(value: Any) -> Optional[str]:
 
 
 def _project_base_for_workdir(workdir: str, candidate: Any) -> Optional[str]:
-    project_base = _normalize_workdir(candidate)
-    if not project_base:
-        return None
-    resolved_workdir = Path(workdir).resolve()
-    resolved_project_base = Path(project_base).resolve()
+    return normalize_session_project_base(workdir, candidate)
+
+
+def _session_project_base(row: dict[str, Any], workdir: str) -> Optional[str]:
     try:
-        resolved_workdir.relative_to(resolved_project_base)
-    except ValueError:
-        return None
-    return str(resolved_project_base)
+        metadata = json.loads(str(row.get("metadata_json") or "{}"))
+    except (TypeError, ValueError):
+        metadata = {}
+    stored = metadata.get(SESSION_PROJECT_BASE_METADATA_KEY) if isinstance(metadata, dict) else None
+    return _project_base_for_workdir(workdir, stored) or _project_base_for_workdir(
+        workdir,
+        row.get("_scope_workdir"),
+    )
 
 
 def _resolve_workdir(

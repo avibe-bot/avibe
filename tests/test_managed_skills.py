@@ -455,6 +455,28 @@ def test_catalog_bounds_descriptions_and_row_bytes(tmp_path: Path) -> None:
     assert len(rows.encode("utf-8")) <= CATALOG_PAGE_MAX_BYTES
     assert notice == "More skills are available. Run `vibe skill list --page 2` to view more."
 
+    first_page_names = [line.split(":", 1)[0][2:] for line in rows.splitlines()]
+    second_page = render_skill_list(skills, page=2)
+    assert second_page.splitlines()[0].startswith(
+        f"- skill-{len(first_page_names):02d}:"
+    )
+
+
+def test_catalog_neutralizes_yaml_decoded_terminal_controls(tmp_path: Path) -> None:
+    skill_file = tmp_path / "controlled" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        '---\nname: controlled\ndescription: "\\u001b[31mred\\u009b0m"\n---\nBody\n',
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.description == "[31mred 0m"
+    assert "\x1b" not in render_skill_list([skill])
+    assert "\x9b" not in render_skill_list([skill])
+
 
 def test_system_prompt_catalog_reflects_add_edit_and_delete_each_render(tmp_path: Path, monkeypatch) -> None:
     _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
@@ -813,6 +835,24 @@ def test_bound_non_git_project_base_is_discovered_from_descendant(
         )
     ] == ["root-skill"]
 
+
+def test_bound_project_base_wins_over_nested_git_boundary(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    nested_checkout = project / "packages" / "app"
+    working_directory = nested_checkout / "src"
+    working_directory.mkdir(parents=True)
+    (nested_checkout / ".git").mkdir()
+    _write_skill(project / ".agents" / "skills", "outer", "outer", "Outer")
+    _write_skill(nested_checkout / ".agents" / "skills", "inner", "inner", "Inner")
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            working_directory,
+            tmp_path,
+            project_base=project,
+        )
+    ] == ["inner", "outer"]
 
 def test_project_base_outside_working_directory_is_ignored(tmp_path: Path) -> None:
     working_directory = tmp_path / "project" / "child"
@@ -1240,6 +1280,31 @@ def test_managed_skill_environment_binds_valid_project_base(tmp_path: Path) -> N
         working_directory,
         project_base=tmp_path / "other",
     )
+
+
+def test_managed_skill_environment_can_retain_an_explicit_builtin_snapshot(
+    tmp_path: Path,
+) -> None:
+    working_directory = tmp_path / "project"
+    working_directory.mkdir()
+    snapshot_id = "d" * 64
+    snapshot_root = tmp_path / "old-home" / "builtin-skills" / snapshot_id
+
+    env = managed_skill_environment(
+        working_directory,
+        builtin_snapshot_id=snapshot_id,
+        builtin_snapshot_root=snapshot_root,
+    )
+
+    assert env[BUILTIN_SKILLS_SNAPSHOT_ENV] == snapshot_id
+    assert env[BUILTIN_SKILLS_ROOT_ENV] == str(snapshot_root.resolve())
+    invalid = managed_skill_environment(
+        working_directory,
+        builtin_snapshot_id="invalid",
+        builtin_snapshot_root=snapshot_root,
+    )
+    assert BUILTIN_SKILLS_SNAPSHOT_ENV not in invalid
+    assert BUILTIN_SKILLS_ROOT_ENV not in invalid
 
 
 def test_bound_builtin_root_survives_avibe_home_change(monkeypatch, tmp_path: Path) -> None:

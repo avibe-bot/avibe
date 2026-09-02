@@ -165,6 +165,10 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
             "IGNORED_ENV": "must-not-pass",
         },
         "opencode_managed_skill_project_base": "/tmp",
+        "opencode_managed_skill_builtin_snapshot": {
+            "id": "d" * 64,
+            "root": "/old-avibe-home/builtin-skills/" + "d" * 64,
+        },
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
     binding_path = "/old-avibe-home/runtime/opencode_caller_context.json"
@@ -195,6 +199,10 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
     assert bound[0]["path"] == binding_path
     assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
     assert bound[0]["extra_env"]["AVIBE_SKILL_PROJECT_BASE"] == str(Path("/tmp").resolve())
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "d" * 64
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == (
+        "/old-avibe-home/builtin-skills/" + "d" * 64
+    )
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
     assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
 
@@ -222,6 +230,52 @@ def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> No
     assert asyncio.run(run()) == 1
     assert attempts == 3
     assert removed == []
+
+
+def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    attempts = 0
+    unbound: list[str] = []
+
+    def bind(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 4:
+            raise OSError("temporary binding failure")
+        return True
+
+    class _WaitForBindingPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            for _ in range(100):
+                if attempts >= 4:
+                    agent.sessions.remove_active_poll("oc-1")
+                    return
+                await asyncio.sleep(0)
+            raise AssertionError("restored binding was not retried")
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, **_kwargs: unbound.append(session_id) or True,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS",
+        0,
+    )
+    agent._poll_loop = _WaitForBindingPollLoop()
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert attempts == 4
+    assert unbound == ["oc-1"]
 
 
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:

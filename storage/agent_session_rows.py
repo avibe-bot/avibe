@@ -5,6 +5,7 @@ import logging
 import os
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Connection, func, select, update
@@ -42,6 +43,7 @@ ASSIGNABLE_SESSION_VISIBILITIES = frozenset({"foreground", "background"})
 INBOX_SESSION_VISIBILITIES: tuple[str, ...] = ("foreground", "system")
 
 PRIVATE_AGENT_RUN_SCOPE_TYPE = "private_agent_run"
+SESSION_PROJECT_BASE_METADATA_KEY = "project_base"
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,22 @@ def normalize_workdir(value: Any) -> str | None:
     if not text:
         return None
     return os.path.abspath(os.path.expanduser(text))
+
+
+def normalize_session_project_base(workdir: Any, candidate: Any) -> str | None:
+    """Return an absolute project base only when it contains the Session cwd."""
+
+    normalized_workdir = normalize_workdir(workdir)
+    normalized_candidate = normalize_workdir(candidate)
+    if not normalized_workdir or not normalized_candidate:
+        return None
+    resolved_workdir = Path(normalized_workdir).resolve()
+    resolved_candidate = Path(normalized_candidate).resolve()
+    try:
+        resolved_workdir.relative_to(resolved_candidate)
+    except ValueError:
+        return None
+    return str(resolved_candidate)
 
 
 #: A write that changes nothing, used ONLY to reserve SQLite's writer slot inside a
@@ -449,7 +467,8 @@ def create_agent_session_row(
     ``agent_sessions.workdir`` and never re-resolve cwd from Scope.
     """
 
-    resolved_workdir = normalize_workdir(workdir) or snapshot_scope_workdir(conn, scope_id)
+    scope_workdir = snapshot_scope_workdir(conn, scope_id)
+    resolved_workdir = normalize_workdir(workdir) or scope_workdir
     if require_workdir and not resolved_workdir:
         raise ValueError(f"cannot create agent session without workdir for scope_id={scope_id!r}")
 
@@ -463,6 +482,14 @@ def create_agent_session_row(
     backend = str(agent_backend or "")
     variant = str(agent_variant or backend or "default")
     title_value = title.strip() if (title or "").strip() else None
+    metadata_value = dict(metadata or {})
+    project_base = normalize_session_project_base(
+        resolved_workdir,
+        metadata_value.get(SESSION_PROJECT_BASE_METADATA_KEY),
+    ) or normalize_session_project_base(resolved_workdir, scope_workdir)
+    if project_base is not None:
+        metadata_value[SESSION_PROJECT_BASE_METADATA_KEY] = project_base
+
     conn.execute(
         agent_sessions.insert().values(
             id=row_id,
@@ -480,7 +507,7 @@ def create_agent_session_row(
             status=status,
             visibility=visibility_value,
             agent_status=agent_status,
-            metadata_json=json.dumps(dict(metadata or {}), separators=(",", ":"), ensure_ascii=False),
+            metadata_json=json.dumps(metadata_value, separators=(",", ":"), ensure_ascii=False),
             created_at=now_value,
             updated_at=now_value,
             last_active_at=now_value,

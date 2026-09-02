@@ -689,6 +689,10 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
 
 
 def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
+    snapshot_id = "f" * 64
+    snapshot_root = f"/old-avibe-home/builtin-skills/{snapshot_id}"
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", snapshot_id)
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_ROOT", snapshot_root)
     calls = []
     active_polls = []
     active_poll_updates = []
@@ -866,6 +870,9 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
     assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
+    assert active_polls[0]["processing_indicator"][
+        "opencode_managed_skill_builtin_snapshot"
+    ] == {"id": snapshot_id, "root": snapshot_root}
 
     binding_failures = []
 

@@ -144,6 +144,19 @@ def test_existing_workbench_session_retains_non_git_project_base(tmp_path):
             .where(agent_sessions.c.id == session["id"])
             .values(workdir=str(child))
         )
+        other_scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_other",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, other_scope_id, workdir=str(tmp_path / "other"))
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == session["id"])
+            .values(scope_id=other_scope_id)
+        )
         session = {**session, "workdir": str(child)}
 
     context = MessageContext(

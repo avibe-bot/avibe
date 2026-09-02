@@ -29,7 +29,12 @@ from core.caller_context import (
     validated_caller_env_snapshot,
 )
 from core.message_output import stop_output_for, terminal_output_for
-from core.managed_skills import managed_skill_environment, managed_skill_project_base
+from core.managed_skills import (
+    BUILTIN_SKILLS_ROOT_ENV,
+    BUILTIN_SKILLS_SNAPSHOT_ENV,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.native_dispatch_phase import (
     mark_backend_dispatch_attempted,
@@ -99,6 +104,7 @@ _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
 _MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
 _CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
 _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
+_MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY = "opencode_managed_skill_builtin_snapshot"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
@@ -113,6 +119,7 @@ _STEER_POST_WRITE_STATUS_SETTLE_SECONDS = 0.1
 _RESTORED_IM_REGISTRATION_RETRY_DELAY_SECONDS = 0.25
 _RESTORED_IM_PLATFORMS = {"slack", "discord", "telegram", "lark", "wechat"}
 _CALLER_CONTEXT_BINDING_REFRESH_SECONDS = 60 * 60
+_CALLER_CONTEXT_BINDING_RETRY_SECONDS = 1.0
 
 
 def _caller_context_path_for_server(server: object) -> str | None:
@@ -725,30 +732,69 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._attach_server_activation(server)
         return server
 
-    async def _renew_caller_context_binding(
+    async def _maintain_caller_context_binding(
         self,
         session_id: str,
         binding_token: str,
-        binding_path: str | None = None,
+        binding_path: str | None,
+        *,
+        payload: dict[str, Any] | None,
+        working_directory: str,
+        extra_env: dict[str, str],
+        initially_bound: bool,
+        message: Any = None,
+        fallback_platform: str | None = None,
     ) -> None:
+        """Keep one Turn binding published and renewed for its full lifetime."""
+
+        bound = initially_bound
         while True:
-            await asyncio.sleep(_CALLER_CONTEXT_BINDING_REFRESH_SECONDS)
+            await asyncio.sleep(
+                _CALLER_CONTEXT_BINDING_REFRESH_SECONDS
+                if bound
+                else _CALLER_CONTEXT_BINDING_RETRY_SECONDS
+            )
+            if bound:
+                try:
+                    bound = bool(
+                        await asyncio.to_thread(
+                            refresh_caller_context_session,
+                            session_id,
+                            binding_token=binding_token,
+                            **_binding_path_kwargs(binding_path),
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to renew restored OpenCode caller context for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    bound = False
+                if bound:
+                    continue
             try:
-                refreshed = await asyncio.to_thread(
-                    refresh_caller_context_session,
-                    session_id,
-                    binding_token=binding_token,
-                    **_binding_path_kwargs(binding_path),
+                bound = bool(
+                    await asyncio.to_thread(
+                        bind_caller_context_session,
+                        session_id,
+                        payload,
+                        base_env=os.environ,
+                        working_dir=working_directory,
+                        extra_env=extra_env,
+                        binding_token=binding_token,
+                        **_binding_path_kwargs(binding_path),
+                        message=message,
+                        fallback_platform=fallback_platform,
+                    )
                 )
             except Exception:
                 logger.warning(
-                    "Failed to renew OpenCode caller context for session %s",
+                    "Failed to republish restored OpenCode caller context for session %s",
                     session_id,
                     exc_info=True,
                 )
-                continue
-            if not refreshed:
-                return
+                bound = False
 
     @staticmethod
     async def _stop_caller_context_binding_renewal(
@@ -1393,6 +1439,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
 
             project_base = managed_skill_project_base(request.context)
+            managed_skills_env = managed_skill_environment(
+                request.working_path,
+                project_base=project_base,
+            )
             system_prompt_injection = await asyncio.to_thread(
                 build_system_prompt_injection,
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
@@ -1411,16 +1461,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
             binding_token = secrets.token_hex(16)
-            if await asyncio.to_thread(
+            binding_payload = request.context.platform_specific or {}
+            binding_bound = await asyncio.to_thread(
                 bind_caller_context_session,
                 session_id,
-                request.context.platform_specific or {},
+                binding_payload,
                 base_env=os.environ,
                 working_dir=request.working_path,
-                extra_env=managed_skill_environment(
-                    request.working_path,
-                    project_base=project_base,
-                ),
+                extra_env=managed_skills_env,
                 binding_token=binding_token,
                 **_binding_path_kwargs(caller_context_binding_path),
                 # The creation origin travels with the identity: an OpenCode shell
@@ -1428,16 +1476,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 # the only place the conversation behind the definition is visible.
                 message=request.context,
                 fallback_platform=platform,
-            ):
-                caller_context_binding_session_id = session_id
-                caller_context_binding_token = binding_token
-                caller_context_binding_renewal = asyncio.create_task(
-                    self._renew_caller_context_binding(
-                        session_id,
-                        binding_token,
-                        caller_context_binding_path,
-                    )
+            )
+            caller_context_binding_session_id = session_id
+            caller_context_binding_token = binding_token
+            caller_context_binding_renewal = asyncio.create_task(
+                self._maintain_caller_context_binding(
+                    session_id,
+                    binding_token,
+                    caller_context_binding_path,
+                    payload=binding_payload,
+                    working_directory=request.working_path,
+                    extra_env=managed_skills_env,
+                    initially_bound=bool(binding_bound),
+                    message=request.context,
+                    fallback_platform=platform,
                 )
+            )
 
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
@@ -1452,6 +1506,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = caller_context_env
             if project_base:
                 processing_indicator[_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY] = project_base
+            if BUILTIN_SKILLS_SNAPSHOT_ENV in managed_skills_env:
+                processing_indicator[_MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY] = {
+                    "id": managed_skills_env[BUILTIN_SKILLS_SNAPSHOT_ENV],
+                    "root": managed_skills_env[BUILTIN_SKILLS_ROOT_ENV],
+                }
             target_session_id = _target_agent_session_id(request)
             if target_session_id and logical_turn_id:
                 processing_indicator[_STEERING_SNAPSHOT_KEY] = {
@@ -2442,6 +2501,30 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 if isinstance(restored_project_base, str) and restored_project_base
                 else None
             )
+            restored_snapshot_kwargs: dict[str, str] = {}
+            if _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY in processing_snapshot:
+                restored_snapshot = processing_snapshot.get(
+                    _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY
+                )
+                restored_snapshot_kwargs = {
+                    "builtin_snapshot_id": (
+                        restored_snapshot.get("id", "")
+                        if isinstance(restored_snapshot, dict)
+                        and isinstance(restored_snapshot.get("id"), str)
+                        else ""
+                    ),
+                    "builtin_snapshot_root": (
+                        restored_snapshot.get("root", "")
+                        if isinstance(restored_snapshot, dict)
+                        and isinstance(restored_snapshot.get("root"), str)
+                        else ""
+                    ),
+                }
+            restored_managed_skills_env = managed_skill_environment(
+                poll_info.working_path,
+                project_base=restored_project_base,
+                **restored_snapshot_kwargs,
+            )
             restored_bound = False
             for attempt in range(3):
                 try:
@@ -2453,10 +2536,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         working_dir=poll_info.working_path,
                         extra_env={
                             **restored_caller_env,
-                            **managed_skill_environment(
-                                poll_info.working_path,
-                                project_base=restored_project_base,
-                            ),
+                            **restored_managed_skills_env,
                         },
                         binding_token=restored_binding_token,
                         **_binding_path_kwargs(restored_binding_path),
@@ -2488,9 +2568,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     restoration_ready=restoration_ready,
                     restoration_published=restoration_published,
                     caller_context_binding_token=(
-                        restored_binding_token if restored_bound else None
+                        restored_binding_token
                     ),
                     caller_context_binding_path=restored_binding_path,
+                    caller_context_binding_extra_env={
+                        **restored_caller_env,
+                        **restored_managed_skills_env,
+                    },
+                    caller_context_binding_initially_bound=restored_bound,
                 )
             )
             restoration_results.append(
@@ -2551,6 +2636,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         restoration_published: asyncio.Event | None = None,
         caller_context_binding_token: str | None = None,
         caller_context_binding_path: str | None = None,
+        caller_context_binding_extra_env: dict[str, str] | None = None,
+        caller_context_binding_initially_bound: bool = False,
     ) -> None:
         current_task = asyncio.current_task()
         steer_state = None
@@ -2558,10 +2645,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         restoration_registered = False
         caller_context_binding_renewal = (
             asyncio.create_task(
-                self._renew_caller_context_binding(
+                self._maintain_caller_context_binding(
                     poll_info.opencode_session_id,
                     caller_context_binding_token,
                     caller_context_binding_path,
+                    payload=None,
+                    working_directory=poll_info.working_path,
+                    extra_env=caller_context_binding_extra_env or {},
+                    initially_bound=caller_context_binding_initially_bound,
                 )
             )
             if caller_context_binding_token
