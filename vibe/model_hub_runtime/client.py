@@ -346,7 +346,8 @@ class EngineClient:
         request_protocol = request_protocol or source.protocol
         endpoint = _endpoint_for_protocol(request_protocol)
         body = dict(request)
-        body["model"] = f"{source.prefix}/{model_id}"
+        routed_model = f"{source.prefix}/{model_id}"
+        body["model"] = routed_model
         body["stream"] = stream
         headers = {
             key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in _PROTOCOL_HEADERS
@@ -422,6 +423,21 @@ class EngineClient:
                     observed_payload = ProtocolObservation()
                 finally:
                     error_body.close()
+                if response.status == 502 and _is_local_model_registration_failure(
+                    payload,
+                    routed_model=routed_model,
+                ):
+                    outcome = _outcome(
+                        kind=RawOutcomeKind.NETWORK_ERROR,
+                        source=source,
+                        model_id=model_id,
+                        http_status=response.status,
+                        error_code="engine_down",
+                        message="engine rejected its registered routed model",
+                    )
+                    response.close()
+                    await session.close()
+                    return ended(outcome)
                 outcome = _reduce_protocol_observation(
                     replace(
                         observed_payload,
@@ -913,6 +929,32 @@ def _project_model_inventory_before_deadline(
         payload,
         _project_model_inventory,
         deadline=deadline,
+    )
+
+
+def _is_local_model_registration_failure(
+    payload: bytes,
+    *,
+    routed_model: str,
+) -> bool:
+    """Identify CLIProxyAPI's local pre-egress model registry rejection."""
+
+    try:
+        decoded = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if (
+        not isinstance(decoded, dict)
+        or "type" not in decoded
+        or decoded["type"] != "error"
+    ):
+        return False
+    error = decoded.get("error")
+    error_type, _, _ = _raw_error_fields(payload)
+    return (
+        isinstance(error, dict)
+        and error_type == "api_error"
+        and error.get("message") == f"unknown provider for model {routed_model}"
     )
 
 
