@@ -328,6 +328,7 @@ class ModelHubTurnGateway:
         resolved_model_id: Optional[str] = None,
         source_id: Optional[str] = None,
         via_mapping: bool = False,
+        gateway_request_model_id: Optional[str] = None,
     ) -> tuple[str, str]:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -342,6 +343,7 @@ class ModelHubTurnGateway:
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
                 via_mapping=via_mapping,
+                gateway_request_model_id=gateway_request_model_id,
             )
         await self._ensure_started()
         assert self._base_url is not None

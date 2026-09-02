@@ -167,8 +167,77 @@ def test_codex_hub_catalog_projects_custom_backend_models_from_native_shape():
             "tool_mode": None,
             "prefer_websockets": False,
             "model_messages": {"instructions_template": "preserved"},
+            "support_verbosity": False,
+            "experimental_supported_tools": [],
         }
     ]
+
+
+def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_rows():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "description": "Native-only description",
+                    "priority": 1,
+                    "visibility": "list",
+                    "supported_in_api": True,
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "auto_compact_token_limit": 180_000,
+                    "comp_hash": "native-only",
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "medium", "description": "Medium"}
+                    ],
+                    "additional_speed_tiers": ["fast"],
+                    "service_tiers": [
+                        {"id": "priority", "name": "Fast", "description": "Native"}
+                    ],
+                    "supports_search_tool": True,
+                    "shell_type": "unified_exec",
+                    "support_verbosity": True,
+                    "experimental_supported_tools": ["native_tool"],
+                    "truncation_policy": {"mode": "tokens", "limit": 10_000},
+                    "model_messages": {"instructions_template": "preserved"},
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{"id": "custom-model", "input_modalities": [], "reasoning_efforts": []}],
+        )
+    )
+    custom = payload["models"][0]
+
+    assert custom["slug"] == "custom-model"
+    assert custom["model_messages"] == {"instructions_template": "preserved"}
+    assert custom["shell_type"] == "unified_exec"
+    assert custom["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert custom["input_modalities"] == ["text"]
+    assert custom["supported_reasoning_levels"] == [
+        {"effort": "none", "description": "None"}
+    ]
+    assert custom["support_verbosity"] is False
+    assert custom["experimental_supported_tools"] == []
+    for key in (
+        "description",
+        "context_window",
+        "max_context_window",
+        "auto_compact_token_limit",
+        "comp_hash",
+        "additional_speed_tiers",
+        "service_tiers",
+        "supports_search_tool",
+    ):
+        assert key not in custom
 
 
 def test_codex_hub_catalog_preserves_native_modalities_without_an_override():

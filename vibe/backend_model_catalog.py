@@ -61,6 +61,26 @@ _REASONING_LABELS = {
     "ultra": "Ultra",
 }
 
+# A custom model needs Codex's agent/runtime shape, but it must not inherit
+# provider metadata from whichever native model happens to be first.
+_CODEX_CUSTOM_SCAFFOLD_KEYS = (
+    "shell_type",
+    "model_messages",
+    "base_instructions",
+    "include_skills_usage_instructions",
+    "include_plugin_usage_instructions",
+    "include_apps_usage_instructions",
+    "apply_patch_tool_type",
+    "truncation_policy",
+    "effective_context_window_percent",
+    "node_repl_auto_review_required",
+    "node_repl_disabled",
+    "use_responses_lite",
+    "multi_agent_version",
+    "tool_mode",
+    "prefer_websockets",
+)
+
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
 _REMOTE_MEMORY_CACHE: dict[str, Any] = {}
@@ -122,7 +142,18 @@ def _codex_hub_catalog_bytes(
             if not isinstance(model_id, str) or not model_id:
                 raise ValueError("Configured Codex catalog contains an invalid model")
             native_row = native_by_slug.get(model_id)
-            row = dict(native_row or template)
+            if native_row is not None:
+                row = dict(native_row)
+            else:
+                row = {
+                    key: template[key]
+                    for key in _CODEX_CUSTOM_SCAFFOLD_KEYS
+                    if key in template
+                }
+                # Required in some Codex catalog versions, with no matching
+                # user-authored BackendModel field.
+                row["support_verbosity"] = False
+                row["experimental_supported_tools"] = []
             row["slug"] = model_id
             display_name = configured.get("display_name")
             row["display_name"] = (

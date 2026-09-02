@@ -286,6 +286,51 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
     asyncio.run(exercise())
 
 
+def test_codex_backend_model_id_survives_until_gateway_resolution(
+    tmp_path: Path,
+) -> None:
+    """Codex selects catalog identity while the gateway invokes its routed target."""
+
+    async def exercise() -> None:
+        source = _source("src_alias_route")
+        source.models.append(ModelHubModelConfig(id="model-b", provenance="manual"))
+        config = _config(source)
+        codex = config.agents["codex"]
+        codex.models.append(ModelHubBackendModelConfig(id="alias-a", origin="manual"))
+        codex.routes["alias-a"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "model-b"),)
+        )
+        adapter = AdapterBoundaryFake(
+            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
+        )
+        service = _service(
+            tmp_path,
+            MemoryStore(config),
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve(
+                "codex",
+                "alias-a",
+                process_scope="/repo",
+                turn_id="turn_alias",
+            )
+            assert launch.runtime_model == "alias-a"
+            assert launch.target_model == "model-b"
+
+            status, body = await _post_turn(launch, endpoint="responses")
+            assert status == 200
+            assert body == b'{"ok":true}'
+            assert adapter.invocations == [(source.id, "model-b", "codex")]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("backend", "requested_model", "endpoint"),
     [

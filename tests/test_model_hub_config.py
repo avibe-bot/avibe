@@ -2909,32 +2909,27 @@ def test_backend_model_modalities_match_the_contract_directions():
         )
 
 
-def test_config_reload_migrates_fixed_routes_when_bundled_catalog_changes(monkeypatch, tmp_path):
+def test_config_reload_adds_bundled_routes_without_discarding_legacy_models(tmp_path):
     payload = api.config_to_payload(default_config())
-    original_ids = tuple(payload["model_hub"]["agents"]["claude"]["routes"])
+    claude = payload["model_hub"]["agents"]["claude"]
+    original_ids = tuple(claude["routes"])
     removed_id = original_ids[0]
-    added_id = "claude-catalog-added-after-save"
     stale_id = "claude-catalog-removed-after-save"
-    routes = payload["model_hub"]["agents"]["claude"]["routes"]
+    routes = claude["routes"]
     routes.pop(removed_id)
     routes[stale_id] = {"hops": []}
-
-    def changed_catalog_ids(backend: str) -> tuple[str, ...]:
-        if backend == "claude":
-            return (*original_ids[1:], added_id)
-        return tuple(payload["model_hub"]["agents"][backend]["routes"])
-
-    monkeypatch.setattr("config.v2_config.model_hub_fixed_menu_ids", changed_catalog_ids)
+    claude.pop("models")
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = V2Config.load(config_path=config_path)
     migrated_routes = loaded.model_hub.agents["claude"].routes
+    migrated_models = loaded.model_hub.agents["claude"].models
 
-    assert set(migrated_routes) == set(changed_catalog_ids("claude"))
-    assert migrated_routes[added_id].hops == ()
-    assert removed_id not in migrated_routes
-    assert stale_id not in migrated_routes
+    assert set(migrated_routes) == {*original_ids, stale_id}
+    assert migrated_routes[removed_id].hops == ()
+    assert migrated_routes[stale_id].hops == ()
+    assert next(model for model in migrated_models if model.id == stale_id).origin == "manual"
 
 
 @pytest.mark.parametrize(

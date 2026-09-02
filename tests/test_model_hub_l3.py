@@ -3999,6 +3999,56 @@ def test_gateway_provenance_retains_pre_mapping_model_identity(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_gateway_accepts_canonical_backend_id_and_unique_legacy_target(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "provenance.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("codex", "/repo", "turn_alias")
+    registry.prepare_gateway_turn(
+        backend="codex",
+        token=token,
+        requested_model_id="alias-a",
+        resolved_model_id="model-b",
+        source_id="src_primary01",
+        via_mapping=False,
+        gateway_request_model_id="alias-a",
+    )
+
+    assert (
+        registry.begin_gateway_request(
+            backend="codex",
+            token=token,
+            requested_model_id="alias-a",
+        )
+        == "turn_alias"
+    )
+    assert (
+        registry.gateway_resolution_model(
+            backend="codex",
+            token=token,
+            gateway_model_id="alias-a",
+        )
+        == "alias-a"
+    )
+    assert (
+        registry.begin_gateway_request(
+            backend="codex",
+            token=token,
+            requested_model_id="model-b",
+        )
+        == "turn_alias"
+    )
+    assert (
+        registry.gateway_resolution_model(
+            backend="codex",
+            token=token,
+            gateway_model_id="model-b",
+        )
+        == "alias-a"
+    )
+
+
 def test_gateway_uses_persisted_exact_hops_for_failover(
     tmp_path: Path,
 ) -> None:

@@ -303,9 +303,9 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
 def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
     """Adapt fixed-menu route keys to the current bundled catalog on reload.
 
-    A changed catalog is a one-time structural migration: newly introduced
-    menu ids receive empty routes and removed ids are discarded. Existing hop
-    payloads are copied verbatim; matching and placement never run here.
+    Newly introduced menu ids receive empty routes. Legacy route keys remain
+    intact so the canonical agent loader can preserve them as manual catalog
+    rows; matching and placement never run here.
     """
 
     model_hub = payload.get("model_hub")
@@ -331,6 +331,11 @@ def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
             model_id: routes.get(model_id, {"hops": []})
             for model_id in expected_menu_ids
         }
+        migrated_routes.update(
+            (model_id, route)
+            for model_id, route in routes.items()
+            if model_id not in migrated_routes
+        )
         if migrated_routes == routes:
             continue
         migrated_agent = dict(raw_agent)

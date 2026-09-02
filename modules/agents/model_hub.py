@@ -550,6 +550,7 @@ class ModelHubRuntimeRouter:
         resolved_model_id: Optional[str] = None,
         source_id: Optional[str] = None,
         via_mapping: bool = False,
+        gateway_request_model_id: Optional[str] = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -560,6 +561,7 @@ class ModelHubRuntimeRouter:
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
                 via_mapping=via_mapping,
+                gateway_request_model_id=gateway_request_model_id,
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -860,6 +862,11 @@ class ModelHubRuntimeRouter:
                     via_mapping=False,
                 )
         else:
+            runtime_model = (
+                requested_model
+                if self.turn_gateway is not None and backend == "codex"
+                else target_model
+            )
             gateway_base_url, gateway_token = await self._gateway_credentials(
                 backend,
                 process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
@@ -868,8 +875,8 @@ class ModelHubRuntimeRouter:
                 resolved_model_id=target_model,
                 source_id=source.id,
                 via_mapping=False,
+                gateway_request_model_id=runtime_model,
             )
-            runtime_model = target_model
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{target_model}"
