@@ -459,11 +459,13 @@ Binding-file updates are serialized across processes, use a unique
 same-directory temporary file and atomic replacement, and cleanup is guarded
 by a per-Turn token so an older Turn cannot remove a newer binding for the same
 native Session. Normal completion removes the binding, and the plugin rejects
-an entry whose owning Avibe process is no longer alive. The binding does not
-expire while that process and Turn remain active, so a long-running Turn keeps
-its advertised working directory and snapshot. Restoring a persisted poll
-publishes a fresh binding with the current process identity, authorization
-snapshot, and absolute Skill roots.
+an entry unless both the owning Avibe PID and its non-reusable process-start
+identity still match. PID liveness alone is insufficient because an operating
+system can reuse a PID after a crash. The binding does not expire while that
+exact process and Turn remain active, so a long-running Turn keeps its advertised
+working directory and snapshot. Restoring a persisted poll publishes a fresh
+binding with the current process identity, authorization snapshot, and absolute
+Skill roots.
 
 ### 8.3 Caller authorization
 
@@ -833,7 +835,8 @@ and verify:
 - OpenCode user permission configuration is not rewritten, concurrent active
   Turn bindings preserve each other, and token-guarded cleanup removes only the
   binding created by that Turn; a binding remains valid for a Turn longer than
-  24 hours while its owning Avibe process stays alive; and
+  24 hours while its exact owning Avibe process stays alive, while a stale
+  binding is rejected after PID reuse; and
 - each adapter retains the same native Session when the Catalog changes.
 
 Codex `$skill`, backend TUI commands, and ordinary filesystem reads are not v1
