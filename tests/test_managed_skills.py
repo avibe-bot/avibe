@@ -189,6 +189,25 @@ def test_loose_parser_accepts_quoted_required_keys(tmp_path: Path) -> None:
     assert skill.description == "Formats source files."
 
 
+def test_loose_parser_decodes_escaped_required_keys(tmp_path: Path) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        '"na\\u006de": format-code\n'
+        '"descr\\u0069ption": Formats source files.\n'
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.name == "format-code"
+    assert skill.description == "Formats source files."
+
+
 def test_loose_parser_ignores_nested_required_field_names(tmp_path: Path) -> None:
     skill_file = tmp_path / "skill" / "SKILL.md"
     skill_file.parent.mkdir()
@@ -497,6 +516,31 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
+
+
+def test_manual_only_skill_is_loadable_but_not_advertised(tmp_path: Path) -> None:
+    skill_file = tmp_path / "manual" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "name: manual\n"
+        "description: Run only when explicitly requested.\n"
+        "disable-model-invocation: true\n"
+        "---\n"
+        "Manual body\n",
+        encoding="utf-8",
+    )
+    manual = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert manual is not None
+    assert manual.disable_model_invocation is True
+    assert render_skill_list([manual]) == ""
+    assert render_skill_catalog_prompt([manual]) == ""
+
+    loaded = load_skill("manual", resolved_skills=[manual])
+    assert loaded is not None
+    assert loaded.body == "Manual body\n"
+    assert loaded.disable_model_invocation is True
 
 
 def test_catalog_bounds_descriptions_and_row_bytes(tmp_path: Path) -> None:

@@ -59,11 +59,9 @@ CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_REQUIRED_FIELD_RE = re.compile(
-    r'^(?:"(name|description)"|\'(name|description)\'|(name|description))[ \t]*:[ \t]*(.*)$'
-)
 _TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
 _BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
+_CATALOG_FIELDS = frozenset({"name", "description", "disable-model-invocation"})
 _WINDOWS_RESERVED = {
     "con",
     "prn",
@@ -91,6 +89,7 @@ class ManagedSkill:
     source_directory: Path | None = None
     source_directory_identity: tuple[int, int] | None = None
     frontmatter_bytes: int = 0
+    disable_model_invocation: bool = False
 
 
 @dataclass
@@ -162,17 +161,12 @@ def _strip_yaml_comment(value: str) -> str:
 
 def _decode_scalar(value: str) -> str:
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        quote = value[0]
-        value = value[1:-1]
-        if quote == "'":
-            value = value.replace("''", "'")
-        else:
-            try:
-                decoded = yaml.safe_load(f'"{value}"')
-            except yaml.YAMLError:
-                return value.strip()
-            return decoded.strip() if isinstance(decoded, str) else value.strip()
+    try:
+        node = yaml.compose(value, Loader=yaml.BaseLoader)
+    except Exception:
+        node = None
+    if isinstance(node, yaml.ScalarNode):
+        return node.value.strip()
     return value.strip()
 
 
@@ -207,17 +201,102 @@ def _normalize_description(value: str) -> str:
     return " ".join(without_controls.split())
 
 
-def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
+class _BoundedBaseLoader(yaml.BaseLoader):
+    """Compose bounded YAML nodes without constructing optional typed values."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._composed_nodes = 0
+        self._aliases = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            self._aliases += 1
+            if self._aliases > 128:
+                raise yaml.YAMLError("frontmatter contains too many YAML aliases")
+        else:
+            self._composed_nodes += 1
+            if self._composed_nodes > 1024:
+                raise yaml.YAMLError("frontmatter contains too many YAML nodes")
+        return super().compose_node(parent, index)
+
+
+def _normalize_frontmatter_value(field: str, value: str) -> str:
+    return _normalize_description(value) if field == "description" else value.strip()
+
+
+def _structured_frontmatter_fields(frontmatter: str) -> dict[str, str]:
+    """Read only the root scalar fields needed by the managed catalog."""
+
+    try:
+        node = yaml.compose(frontmatter, Loader=_BoundedBaseLoader)
+    except Exception:
+        return {}
+    if not isinstance(node, yaml.MappingNode):
+        return {}
+
     fields: dict[str, str] = {}
+    for key_node, value_node in node.value:
+        if not isinstance(key_node, yaml.ScalarNode) or not isinstance(value_node, yaml.ScalarNode):
+            continue
+        field = key_node.value.strip()
+        if field not in _CATALOG_FIELDS or field in fields:
+            continue
+        value = _normalize_frontmatter_value(field, value_node.value)
+        if value:
+            fields[field] = value
+    return fields
+
+
+def _top_level_catalog_field(line: str) -> tuple[str, str] | None:
+    """Split one top-level mapping line and decode its scalar key."""
+
+    if not line or line[0].isspace() or line[0] == "#":
+        return None
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if double_quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                double_quoted = False
+        elif single_quoted:
+            if char == "'" and index + 1 < len(line) and line[index + 1] == "'":
+                index += 1
+            elif char == "'":
+                single_quoted = False
+        elif char == "'":
+            single_quoted = True
+        elif char == '"':
+            double_quoted = True
+        elif char == ":":
+            field = _decode_scalar(line[:index])
+            if field in _CATALOG_FIELDS:
+                return field, line[index + 1 :]
+            return None
+        index += 1
+    return None
+
+
+def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
+    fields = _structured_frontmatter_fields("".join(lines))
+    if "name" in fields and "description" in fields:
+        return fields
+
     index = 0
     while index < len(lines):
-        match = _REQUIRED_FIELD_RE.match(lines[index].rstrip("\r\n"))
-        if match is None:
+        matched = _top_level_catalog_field(lines[index].rstrip("\r\n"))
+        if matched is None:
             index += 1
             continue
 
-        double_quoted_field, single_quoted_field, plain_field, raw_value = match.groups()
-        field = double_quoted_field or single_quoted_field or plain_field
+        field, raw_value = matched
         if field in fields:
             index += 1
             continue
@@ -269,11 +348,7 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
         else:
             index += 1
 
-        decoded = _decode_scalar(value)
-        if field == "description":
-            decoded = _normalize_description(decoded)
-        else:
-            decoded = decoded.strip()
+        decoded = _normalize_frontmatter_value(field, _decode_scalar(value))
         if decoded:
             fields[field] = decoded
 
@@ -460,6 +535,12 @@ def _read_skill_path(
     fields = _frontmatter_fields(frontmatter.splitlines(keepends=True))
     name = fields.get("name", "")
     description = fields.get("description", "")
+    disable_model_invocation = fields.get("disable-model-invocation", "").casefold() in {
+        "1",
+        "on",
+        "true",
+        "yes",
+    }
     if not description or not 1 <= len(name) <= 64 or _PORTABLE_NAME_RE.fullmatch(name) is None:
         return None, body_start
     if len(description) > CATALOG_DESCRIPTION_MAX_CHARS:
@@ -503,6 +584,7 @@ def _read_skill_path(
             source_directory=source,
             source_directory_identity=source_directory_identity or directory_identity,
             frontmatter_bytes=body_start,
+            disable_model_invocation=disable_model_invocation,
         ),
         body_start,
     )
@@ -941,6 +1023,8 @@ def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
     current: list[ManagedSkill] = []
     current_bytes = 0
     for skill in skills:
+        if skill.disable_model_invocation:
+            continue
         row = f"- {skill.name}: {skill.description}"
         row_bytes = len(row.encode("utf-8")) + (1 if current else 0)
         if current and (len(current) >= CATALOG_PAGE_SIZE or current_bytes + row_bytes > CATALOG_PAGE_MAX_BYTES):
@@ -1121,6 +1205,7 @@ def load_skill(
             source_directory=winner.source_directory,
             source_directory_identity=winner.source_directory_identity,
             frontmatter_bytes=loaded.frontmatter_bytes,
+            disable_model_invocation=loaded.disable_model_invocation,
         )
     except OSError:
         return None

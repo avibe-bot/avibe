@@ -111,7 +111,14 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
       : selected.size === 1
         ? `--skill ${[...selected][0]}`
         : `--skill … (×${selected.size})`;
-    return ['askill add', baseSource, selector, scope === 'global' ? '-g' : '', '-y']
+    return [
+      'askill add',
+      baseSource,
+      '-a claude-code opencode codex',
+      selector,
+      scope === 'global' ? '-g' : '',
+      '-y',
+    ]
       .filter(Boolean)
       .join(' ');
   }, [baseSource, discovered, selected, scope]);
