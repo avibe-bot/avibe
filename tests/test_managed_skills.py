@@ -265,6 +265,18 @@ def test_reserved_root_and_non_git_ancestors_are_not_scanned(tmp_path: Path) -> 
     assert [skill.name for skill in _isolated_resolve(cwd, tmp_path)] == ["local"]
 
 
+def test_project_root_ascent_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    cwd = project / "a" / "b" / "c"
+    cwd.mkdir(parents=True)
+    (project / ".git").mkdir()
+    _write_skill(project / ".agents" / "skills", "root", "root", "Root")
+    _write_skill(cwd / ".agents" / "skills", "local", "local", "Local")
+    monkeypatch.setattr(managed_skills, "PROJECT_ROOT_MAX_DIRECTORIES", 3)
+
+    assert [skill.name for skill in _isolated_resolve(cwd, tmp_path)] == ["local"]
+
+
 def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -> None:
     skills = []
     for index in reversed(range(CATALOG_PAGE_SIZE + 1)):
@@ -652,6 +664,45 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
     (destination / snapshot_id).write_text("not a directory", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not a directory|unavailable"):
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
+
+
+def test_publication_rejects_builtins_outside_runtime_catalog_limits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    destination = tmp_path / "builtin-skills"
+
+    too_many_entries = tmp_path / "too-many-entries"
+    _write_skill(too_many_entries, "alpha", "alpha", "Alpha")
+    (too_many_entries / "README.md").write_text("extra\n", encoding="utf-8")
+    monkeypatch.setattr(managed_skills, "DISCOVERY_ROOT_MAX_CHILDREN", 1)
+    with pytest.raises(RuntimeError, match="at most"):
+        publish_builtin_skills(source_root=too_many_entries, destination_root=destination)
+
+    oversized_frontmatter = tmp_path / "oversized-frontmatter" / "alpha" / "SKILL.md"
+    oversized_frontmatter.parent.mkdir(parents=True)
+    oversized_frontmatter.write_text(
+        "---\nname: alpha\ndescription: Alpha\nunknown: "
+        + "x" * managed_skills.FRONTMATTER_MAX_BYTES
+        + "\n---\nBody\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="invalid"):
+        publish_builtin_skills(
+            source_root=oversized_frontmatter.parents[1],
+            destination_root=destination,
+        )
+
+    oversized_body = tmp_path / "oversized-body"
+    _write_skill(
+        oversized_body,
+        "alpha",
+        "alpha",
+        "Alpha",
+        "x" * (SKILL_BODY_MAX_BYTES + 1),
+    )
+    with pytest.raises(RuntimeError, match="invalid"):
+        publish_builtin_skills(source_root=oversized_body, destination_root=destination)
 
 
 def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(

@@ -38,6 +38,7 @@ SKILL_BODY_MAX_BYTES = 256 * 1024
 DISCOVERY_ROOT_MAX_CHILDREN = 1024
 DISCOVERY_CLASS_MAX_CANDIDATES = 1024
 DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES = 8 * 1024 * 1024
+PROJECT_ROOT_MAX_DIRECTORIES = 128
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -427,20 +428,16 @@ def _project_directories(cwd: Path) -> list[Path]:
     current = cwd.expanduser().resolve()
     if not current.is_dir():
         return []
-    project_root = next(
-        (directory for directory in (current, *current.parents) if (directory / ".git").exists()),
-        None,
-    )
-    if project_root is None:
-        return [current]
-
     directories: list[Path] = []
     directory = current
-    while True:
+    for _ in range(PROJECT_ROOT_MAX_DIRECTORIES):
         directories.append(directory)
-        if directory == project_root:
+        if (directory / ".git").exists():
             return directories
+        if directory.parent == directory:
+            break
         directory = directory.parent
+    return [current]
 
 
 def _working_directory(cwd: str | Path | None) -> Path:
