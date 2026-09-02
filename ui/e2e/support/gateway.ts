@@ -89,8 +89,12 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
 
       const agents = await api.agents();
       // A backend already in Gateway mode is used as found: switching a second
-      // one would change more of the instance than the test needs.
-      const alreadyHub = agents.find((agent: Agent) => agent.mode === 'hub');
+      // one would change more of the instance than the test needs. But only if
+      // its CLI is still installed — the product's own surface filters those
+      // backends out (`installedAgents`), so its route rows never render, and a
+      // spec handed one fails on missing elements instead of reaching for an
+      // installed backend or the documented no-backend skip.
+      const alreadyHub = agents.find((agent: Agent) => agent.mode === 'hub' && agent.cli_present);
       const candidate = alreadyHub ?? agents.find((agent: Agent) => agent.cli_present);
       testInfo.skip(!candidate, 'No agent backend is installed on this instance, so none can be put into Gateway mode.');
       if (!alreadyHub) {
@@ -122,9 +126,15 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       });
     } finally {
       // Put the instance back as it was found: the mode only if this fixture
-      // changed it, and always this suite's own sources.
-      if (switched) await api.setAgentMode(switched, 'direct');
-      await api.removeSuiteSources();
+      // changed it, and always this suite's own sources. Two nested blocks,
+      // because the two restorations are independent promises: a mode PUT that
+      // throws must not skip the source sweep, or the two route sources
+      // outlive the spec and every later surface check inherits them.
+      try {
+        if (switched) await api.setAgentMode(switched, 'direct');
+      } finally {
+        await api.removeSuiteSources();
+      }
     }
   },
 });

@@ -89,8 +89,11 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     // Wrapped in try/finally — and not just this click — because the gateway is
     // STOPPED at this point: if any assertion from here on fails, the instance
     // is left without its runtime for every spec after this one. The restart is
-    // attempted before the failure is re-raised, so the red is reported AND the
-    // instance is returned running.
+    // fully performed AND verified inside the finally — a click alone only
+    // dispatches the request; the page can close while startup is still in
+    // flight — so the original failure is re-raised over a running instance,
+    // and the run's red is one problem, not one problem plus a dark instance
+    // for every later spec.
     try {
       await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
       // The page must explain the stopped gateway, not just flip a switch.
@@ -106,12 +109,15 @@ test.describe('A · capability gate and runtime lifecycle', () => {
       if ((await api.runtime())?.enabled === false) {
         await hub.runtimeToggle.click().catch(() => {});
       }
+      // Verified restart, still inside the finally: the API is the authority —
+      // the toggle's own aria state follows a request this browser may never
+      // see answered.
+      await expect
+        .poll(async () => (await api.runtime())?.status?.health, { timeout: 90_000 })
+        .toEqual(expect.stringMatching(/^(ok|degraded)$/));
     }
     await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
     await expect(hub.closedState).toHaveCount(0);
-    await expect
-      .poll(async () => (await api.runtime())?.status?.health, { timeout: 90_000 })
-      .toEqual(expect.stringMatching(/^(ok|degraded)$/));
   });
 
   test('A3 · the blocked stop names the backends that block it', async ({ hub, api }) => {

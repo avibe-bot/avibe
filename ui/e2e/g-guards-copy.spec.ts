@@ -88,7 +88,16 @@ test.describe('G · supply guards and failure copy', () => {
         .poll(async () => (await api.sources()).some((s) => s.id === source.id), { timeout: 15_000 })
         .toBe(false);
     } finally {
-      if (original.length) await api.putAgentChain(gateway.backend, gateway.model, original);
+      // Same contract as B6's teardown: a refused restoration is a dirty
+      // instance and is reported as one, because the delete that just ran
+      // means nothing downstream can put this chain back.
+      if (original.length) {
+        const restored = await api.putAgentChain(gateway.backend, gateway.model, original);
+        expect(
+          restored,
+          'Teardown failed to restore the original route chain — the instance is left with the scenario\'s arrangement.',
+        ).toBe(true);
+      }
     }
   });
 

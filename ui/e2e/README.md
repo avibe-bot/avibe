@@ -111,7 +111,27 @@ PY
 #     `cd ui` above is for the browser side only, so return before starting them
 #     (`python main.py` finds no `ui/main.py`, and `vibe` is imported from the
 #     root, not from `ui/`).
+#
+#     And `AVIBE_HOME` alone does NOT make the run hermetic: switching a
+#     backend to Gateway mode scans the CLI homes the controller process
+#     sees — `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, the XDG dirs, `~/.claude`,
+#     `~/.codex` — and on a machine with real CLI credentials that scan can
+#     read production tokens and import a real native account into the test
+#     instance's state. The processes get test-owned copies of all of them.
+#     `PATH` keeps the real CLIs on purpose: the suite needs an installed
+#     backend, and with the config stores redirected the CLIs read the
+#     test-owned state, not yours.
 cd "$(git rev-parse --show-toplevel)"
+export E2E_ISOLATED_HOME="$E2E_HOME/home"
+mkdir -p "$E2E_ISOLATED_HOME/.claude" "$E2E_ISOLATED_HOME/.codex" \
+  "$E2E_ISOLATED_HOME/.config" "$E2E_ISOLATED_HOME/.cache" \
+  "$E2E_ISOLATED_HOME/.local/share"
+export HOME="$E2E_ISOLATED_HOME"
+export XDG_CONFIG_HOME="$E2E_ISOLATED_HOME/.config"
+export XDG_CACHE_HOME="$E2E_ISOLATED_HOME/.cache"
+export XDG_DATA_HOME="$E2E_ISOLATED_HOME/.local/share"
+export CLAUDE_CONFIG_DIR="$E2E_ISOLATED_HOME/.claude"
+export CODEX_HOME="$E2E_ISOLATED_HOME/.codex"
 AVIBE_HOME=$E2E_HOME VIBE_MODEL_HUB_ENABLED=1 python main.py &
 AVIBE_HOME=$E2E_HOME VIBE_MODEL_HUB_ENABLED=1 python -c \
   "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5199)" &
@@ -128,7 +148,8 @@ Set `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH` to a local manifest if the machine
 should not fetch the engine archive from the network.
 
 Tear it down by killing both processes and deleting `$E2E_HOME`. Nothing outside
-it was written.
+it was written — the CLI config stores were redirected into it at step 2 before
+either process read anything.
 
 ## Against a remote VM
 

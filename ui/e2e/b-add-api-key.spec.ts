@@ -283,8 +283,21 @@ test.describe('B · add an API-key source', () => {
     // passed" — one loud run, and the marker comes out. Any OTHER verdict still
     // fails hard below; a wrong classification is what the scenario exists to
     // catch.
+    // The #1818 signature is TWO facts together, and both are checked before
+    // the marker fires: the source in `cooldown.server_error`, AND the mock
+    // having received no protocol request while it got there. A cooldown with
+    // requests on the log is a different defect — the upstream answered and
+    // something upstream-side classified it badly — and it must fail hard, not
+    // ride #1818's marker to green. `upstreamSawRequest` reads the mock's own
+    // capture, reset before each settle so only that attempt's probes count.
+    const upstreamSawRequest = async (): Promise<boolean> => {
+      const requests = await mock.requests();
+      return requests.some((request) => request.path.startsWith('/v1/'));
+    };
+    await mock.resetRequests();
     await mock.configure({ auth: '401' });
     let verdict = await settleKeyVerdict(api, source.id, gateway);
+    let upstreamReceived = await upstreamSawRequest();
     for (let attempt = 0; attempt < 3 && verdict === 'models.source.cooldown.server_error'; attempt += 1) {
       // The recreation has to happen against a HEALTHY upstream — the create
       // probes the source before committing it, and the mock is still set to
@@ -311,10 +324,12 @@ test.describe('B · add an API-key source', () => {
       // second window after the first re-armed would only burn another 30 s on
       // the way to the same verdict. The FIRST settle keeps the full budget,
       // where a genuine one-off transient still gets its chance to clear.
+      await mock.resetRequests();
       verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
+      upstreamReceived = upstreamReceived || (await upstreamSawRequest());
     }
     test.fail(
-      verdict === 'models.source.cooldown.server_error',
+      verdict === 'models.source.cooldown.server_error' && !upstreamReceived,
       'Engine 5xx on the routed dry run (#1818): the upstream never received the request and the '
         + 'cooldown re-armed on every retry, so the replace-key flow was never reachable this run.',
     );
@@ -357,7 +372,16 @@ test.describe('B · add an API-key source', () => {
     } finally {
       // Whatever happened above, the instance's chain for this model goes back
       // to what it was — the arrangement was the scenario's, not the user's.
-      if (original.length) await api.putAgentChain(gateway.backend, gateway.model, original);
+      // A refused restoration is reported, not swallowed: the source sweep that
+      // follows cannot reconstruct a displaced original chain, so a silent
+      // false here leaves the routing changed while teardown reads clean.
+      if (original.length) {
+        const restored = await api.putAgentChain(gateway.backend, gateway.model, original);
+        expect(
+          restored,
+          'Teardown failed to restore the original route chain — the instance is left with the scenario\'s arrangement.',
+        ).toBe(true);
+      }
     }
   });
 });
