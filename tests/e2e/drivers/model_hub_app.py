@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import http.cookiejar
+import hashlib
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -16,11 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import (
     HTTPCookieProcessor,
     ProxyHandler,
     Request,
     build_opener,
+    url2pathname,
 )
 
 import psutil
@@ -28,6 +32,7 @@ import psutil
 
 _MISSING = object()
 _MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_ENGINE_MANIFEST_PATH_ENV = "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"
 _SAFE_INHERITED_ENV = (
     "LANG",
     "LC_ALL",
@@ -35,6 +40,7 @@ _SAFE_INHERITED_ENV = (
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
     "TZ",
+    _ENGINE_MANIFEST_PATH_ENV,
 )
 _UI_PORT_START_ATTEMPTS = 3
 _OWNED_PROCESS_GRACE_SECONDS = 3.0
@@ -249,6 +255,136 @@ class ModelHubTestApp:
         env.update(extra_env)
         return env
 
+    def _seed_local_engine_archive(self) -> None:
+        """Put a verified local engine asset in the isolated offline cache."""
+
+        raw_manifest_path = self.env.get(_ENGINE_MANIFEST_PATH_ENV, "").strip()
+        if not raw_manifest_path:
+            return
+        manifest_path = Path(raw_manifest_path).expanduser()
+        if not manifest_path.is_absolute():
+            manifest_path = self.repo_root / manifest_path
+
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        runtime_dir = (
+            self.avibe_home / "runtime" / "model-hub" / "engine"
+        )
+        manager = EngineRuntimeManager(
+            runtime_dir=runtime_dir,
+            manifest_path=manifest_path,
+            offline=True,
+        )
+        contract = manager.contract_manifest()
+        if contract.get("resolution") != "resolved":
+            return
+        selected = next(
+            (
+                asset
+                for asset in contract.get("assets", ())
+                if isinstance(asset, Mapping)
+                and asset.get("platform") == manager.host_platform()
+            ),
+            None,
+        )
+        if selected is None:
+            return
+        archive_url = selected.get("url")
+        if not isinstance(archive_url, str):
+            return
+        parsed_url = urlparse(archive_url)
+        if parsed_url.scheme != "file":
+            return
+        if (
+            parsed_url.netloc not in {"", "localhost"}
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise RuntimeError(
+                "local Model Hub engine archive must use a plain local file URL"
+            )
+        source = Path(url2pathname(parsed_url.path))
+        if not source.is_absolute():
+            raise RuntimeError(
+                "local Model Hub engine archive URL must be absolute"
+            )
+
+        expected_size = selected.get("size_bytes")
+        expected_sha256 = selected.get("sha256")
+        if (
+            not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_sha256, str)
+        ):
+            raise RuntimeError(
+                "local Model Hub engine archive requires size and sha256"
+            )
+        self._verify_local_engine_archive(
+            source,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
+
+        archive_status = manager.status().get("archive")
+        if not isinstance(archive_status, Mapping):
+            return
+        archive_name = archive_status.get("name")
+        if (
+            not isinstance(archive_name, str)
+            or not archive_name
+            or Path(archive_name).name != archive_name
+        ):
+            raise RuntimeError("local Model Hub engine archive name is unsafe")
+
+        downloads = runtime_dir / "downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        cached = downloads / archive_name
+        temporary = downloads / f".{archive_name}.seed.tmp"
+        try:
+            shutil.copyfile(source, temporary)
+            self._verify_local_engine_archive(
+                temporary,
+                expected_size=expected_size,
+                expected_sha256=expected_sha256,
+            )
+            temporary.replace(cached)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _verify_local_engine_archive(
+        path: Path,
+        *,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> None:
+        try:
+            actual_size = path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(
+                f"local Model Hub engine archive is unavailable: {path}"
+            ) from exc
+        if actual_size != expected_size:
+            raise RuntimeError(
+                "local Model Hub engine archive size mismatch: "
+                f"expected {expected_size}, got {actual_size}"
+            )
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as archive:
+                for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise RuntimeError(
+                f"local Model Hub engine archive is unavailable: {path}"
+            ) from exc
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256.lower():
+            raise RuntimeError(
+                "local Model Hub engine archive sha256 mismatch: "
+                f"expected {expected_sha256.lower()}, got {actual_sha256}"
+            )
+
     def start(self) -> "ModelHubTestApp":
         try:
             self.home.mkdir(parents=True, exist_ok=True)
@@ -257,6 +393,7 @@ class ModelHubTestApp:
             (self.runtime_root / "tmp").mkdir(
                 parents=True, exist_ok=True
             )
+            self._seed_local_engine_archive()
             self._initialize_config()
             self._start_controller()
             self._start_ui_with_port_retry()

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import shutil
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +18,6 @@ import psutil
 import pytest
 import yaml
 
-from core.managed_runtime import runtime_platform_tag
 from tests.e2e.drivers.model_hub_app import (
     HTTPResult,
     ModelHubTestApp,
@@ -28,11 +26,6 @@ from tests.e2e.drivers.model_hub_app import (
 
 
 pytestmark = pytest.mark.e2e_model_hub
-
-_ENGINE_MANIFEST_PLATFORMS = {
-    "linux-x64": "linux-amd64",
-}
-
 
 def _local_engine_manifest() -> str:
     raw = os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", "").strip()
@@ -51,51 +44,8 @@ def _local_engine_manifest() -> str:
 
 def _engine_app(model_hub_app_factory):
     manifest = _local_engine_manifest()
-
-    def seed_archive(app: ModelHubTestApp) -> None:
-        payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
-        host_platform = runtime_platform_tag()
-        platform = _ENGINE_MANIFEST_PLATFORMS.get(
-            host_platform,
-            host_platform,
-        )
-        archive = next(
-            (
-                item
-                for item in payload["assets"]
-                if item["platform"] == platform
-            ),
-            None,
-        )
-        if archive is None:
-            return
-        parsed = urllib.parse.urlparse(archive["url"])
-        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
-            pytest.skip(
-                "managed Model Hub E2E requires a local file archive "
-                "in its offline manifest"
-            )
-        source = Path(urllib.parse.unquote(parsed.path))
-        if not source.is_file():
-            pytest.skip(
-                f"managed Model Hub engine archive does not exist: {source}"
-            )
-        downloads = (
-            app.avibe_home
-            / "runtime"
-            / "model-hub"
-            / "engine"
-            / "downloads"
-        )
-        downloads.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, downloads / source.name)
-
     return model_hub_app_factory(
-        extra_env={
-            "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest,
-            "VIBE_MODEL_HUB_ENGINE_OFFLINE": "1",
-        },
-        before_start=seed_archive,
+        extra_env={"VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest}
     )
 
 
@@ -191,6 +141,210 @@ def test_harness_scrubs_inherited_backend_credentials(
     assert set(inherited).isdisjoint(app.env)
     assert app.env["HOME"] == str(tmp_path / "home")
     assert app.env["CODEX_HOME"] == str(tmp_path / "home" / ".codex")
+
+
+def _write_harness_engine_manifest(
+    path: Path,
+    *,
+    archive_url: str,
+    size_bytes: int,
+    sha256: str,
+) -> Path:
+    manifest = path / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "cliproxyapi",
+                "version": "v7.2.95",
+                "source": "router-for-me/CLIProxyAPI",
+                "source_url": "https://example.test/source",
+                "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
+                "release_tag": "v7.2.95",
+                "license": "MIT",
+                "assets": [
+                    {
+                        "platform": platform,
+                        "url": archive_url,
+                        "size_bytes": size_bytes,
+                        "sha256": sha256,
+                        "binary_sha256": "b" * 64,
+                        "bin_path": "cli-proxy-api",
+                    }
+                    for platform in (
+                        "darwin-arm64",
+                        "darwin-x64",
+                        "linux-amd64",
+                        "linux-arm64",
+                    )
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def test_harness_inherits_only_the_engine_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: the outer manifest path is the only engine control."""
+
+    manifest_path = tmp_path / "outer-manifest.json"
+    monkeypatch.setenv(
+        "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", str(manifest_path)
+    )
+    monkeypatch.setenv(
+        "VIBE_MODEL_HUB_ENGINE_MANIFEST_URL",
+        "https://inherited.example/manifest.json",
+    )
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_OFFLINE", "0")
+
+    app = ModelHubTestApp(Path.cwd(), tmp_path / "runtime")
+
+    assert app.env["VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"] == str(
+        manifest_path
+    )
+    assert "VIBE_MODEL_HUB_ENGINE_MANIFEST_URL" not in app.env
+    assert app.env["VIBE_MODEL_HUB_ENGINE_OFFLINE"] == "1"
+
+
+def test_engine_app_passes_the_normalized_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: child paths retain the validated parent meaning."""
+
+    manifest = tmp_path / "fixture" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH",
+        str(manifest.relative_to(tmp_path)),
+    )
+    captured: dict = {}
+    launched = object()
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return launched
+
+    assert _engine_app(factory) is launched
+    assert captured == {
+        "extra_env": {
+            "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": str(manifest.resolve())
+        }
+    }
+
+
+def test_harness_seeds_a_verified_file_archive_before_child_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: local assets enter the offline cache before spawn."""
+
+    archive = tmp_path / "fixture" / "CLIProxyAPI_fixture.tar.gz"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"verified local engine archive")
+    manifest = _write_harness_engine_manifest(
+        tmp_path / "fixture",
+        archive_url=archive.as_uri(),
+        size_bytes=archive.stat().st_size,
+        sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", str(manifest))
+    app = ModelHubTestApp(Path.cwd(), tmp_path / "runtime")
+    cached = (
+        app.avibe_home
+        / "runtime"
+        / "model-hub"
+        / "engine"
+        / "downloads"
+        / archive.name
+    )
+    calls: list[str] = []
+
+    def initialize_config() -> None:
+        calls.append("config")
+
+    def start_controller() -> None:
+        assert cached.read_bytes() == archive.read_bytes()
+        calls.append("controller")
+
+    monkeypatch.setattr(app, "_initialize_config", initialize_config)
+    monkeypatch.setattr(app, "_start_controller", start_controller)
+    monkeypatch.setattr(
+        app,
+        "_start_ui_with_port_retry",
+        lambda: calls.append("ui"),
+    )
+
+    app.start()
+
+    assert calls == ["config", "controller", "ui"]
+    assert app.env["VIBE_MODEL_HUB_ENGINE_OFFLINE"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("size_delta", "sha256", "error"),
+    [
+        (1, None, "archive size mismatch"),
+        (0, "0" * 64, "archive sha256 mismatch"),
+    ],
+)
+def test_harness_rejects_unverified_local_engine_archives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    size_delta: int,
+    sha256: str | None,
+    error: str,
+) -> None:
+    """Harness contract: neither size nor digest mismatches enter the cache."""
+
+    archive = tmp_path / "fixture" / "CLIProxyAPI_fixture.tar.gz"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"local engine archive")
+    manifest = _write_harness_engine_manifest(
+        tmp_path / "fixture",
+        archive_url=archive.as_uri(),
+        size_bytes=archive.stat().st_size + size_delta,
+        sha256=sha256
+        or hashlib.sha256(archive.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", str(manifest))
+    app = ModelHubTestApp(Path.cwd(), tmp_path / "runtime")
+
+    with pytest.raises(RuntimeError, match=error):
+        app._seed_local_engine_archive()
+
+    assert not (
+        app.avibe_home / "runtime" / "model-hub" / "engine" / "downloads"
+    ).exists()
+
+
+def test_harness_does_not_fetch_non_file_engine_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: offline seeding never turns into network egress."""
+
+    manifest = _write_harness_engine_manifest(
+        tmp_path / "fixture",
+        archive_url="https://network.invalid/CLIProxyAPI_fixture.tar.gz",
+        size_bytes=1,
+        sha256="0" * 64,
+    )
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", str(manifest))
+    app = ModelHubTestApp(Path.cwd(), tmp_path / "runtime")
+
+    app._seed_local_engine_archive()
+
+    assert not (
+        app.avibe_home / "runtime" / "model-hub" / "engine" / "downloads"
+    ).exists()
 
 
 def test_harness_cleans_controller_when_ui_start_fails(
