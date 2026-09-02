@@ -142,7 +142,10 @@ def test_existing_workbench_session_retains_non_git_project_base(tmp_path):
         conn.execute(
             agent_sessions.update()
             .where(agent_sessions.c.id == session["id"])
-            .values(workdir=str(child))
+            .values(
+                workdir=str(child),
+                metadata_json=json.dumps({"created_via": "workbench"}),
+            )
         )
         other_scope_id = upsert_scope(
             conn,
@@ -152,10 +155,10 @@ def test_existing_workbench_session_retains_non_git_project_base(tmp_path):
             now="2026-06-04T05:00:00Z",
         )
         _seed_scope_settings(conn, other_scope_id, workdir=str(tmp_path / "other"))
-        conn.execute(
-            agent_sessions.update()
-            .where(agent_sessions.c.id == session["id"])
-            .values(scope_id=other_scope_id)
+        sessions_service.update_session(
+            conn,
+            session["id"],
+            scope_id=other_scope_id,
         )
         session = {**session, "workdir": str(child)}
 
