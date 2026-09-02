@@ -2393,8 +2393,9 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
     result = api.claude_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][0] == "claude-fable-5"
-    assert result["models"][1] == "claude-opus-5"
+    assert result["models"][0] == "claude-fable-5-1"
+    assert result["models"][1] == "claude-fable-5"
+    assert result["models"][2] == "claude-opus-5"
     assert "opus" in result["models"]
     assert "sonnet" in result["models"]
     assert "haiku" in result["models"]
