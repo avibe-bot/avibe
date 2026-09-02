@@ -27,6 +27,22 @@ COMPOSE_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "docker-compo
 KEEP_CONTAINER = os.environ.get("VIBE_E2E_KEEP", "false").lower() == "true"
 
 
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    """Keep Model Hub process suites opt-in during broad E2E runs."""
+
+    if "e2e_model_hub" in (config.option.markexpr or ""):
+        return
+    skip = pytest.mark.skip(
+        reason="Model Hub E2E is opt-in; run with -m e2e_model_hub"
+    )
+    for item in items:
+        if item.get_closest_marker("e2e_model_hub") is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture
 def mock_llm_upstream(monkeypatch):
     """Run the frozen Model Hub upstream contract on loopback."""

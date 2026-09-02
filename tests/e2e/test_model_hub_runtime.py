@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 import yaml
+
+from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -42,11 +46,14 @@ def _install_engine_or_skip(app) -> list[str]:
     observed: list[str] = []
     response = app.client.post("/api/models/runtime/install", {})
     body = response.json()
-    if response.status != 200:
+    if (
+        response.status == 422
+        and body.get("error") == "runtime_platform_unsupported"
+    ):
         pytest.skip(
-            "managed Model Hub engine install was unavailable: "
-            f"HTTP {response.status} {body.get('error')}"
+            "managed Model Hub engine has no archive for this host platform"
         )
+    assert response.status == 200, body
     observed.append(body["runtime"]["status"]["health"])
     deadline = time.monotonic() + 60
     latest = body["runtime"]
@@ -59,14 +66,70 @@ def _install_engine_or_skip(app) -> list[str]:
         if health != "installing":
             break
         time.sleep(0.1)
-    if latest["status"]["health"] == "not_installed":
-        pytest.skip(
-            "offline Model Hub engine archive is unavailable or unverifiable: "
-            f"{latest['status'].get('error_key')}"
-        )
     assert latest["status"]["health"] == "not_started", latest
     assert latest["status"]["verified"] is True
     return observed
+
+
+def test_harness_scrubs_inherited_backend_credentials(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: subprocesses inherit no user backend credentials."""
+
+    inherited = {
+        "ANTHROPIC_API_KEY": "real-user-anthropic-key",
+        "ANTHROPIC_BASE_URL": "https://real-user-anthropic.example",
+        "CLAUDE_CODE_OAUTH_TOKEN": "real-user-claude-token",
+        "OPENAI_API_KEY": "real-user-openai-key",
+        "OPENAI_BASE_URL": "https://real-user-openai.example",
+        "OPENCODE_CONFIG_CONTENT": '{"real":"user"}',
+    }
+    for name, value in inherited.items():
+        monkeypatch.setenv(name, value)
+
+    app = ModelHubTestApp(Path.cwd(), tmp_path)
+
+    assert set(inherited).isdisjoint(app.env)
+    assert app.env["HOME"] == str(tmp_path / "home")
+    assert app.env["CODEX_HOME"] == str(tmp_path / "home" / ".codex")
+
+
+def test_harness_cleans_controller_when_ui_start_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: partial startup never leaves a child process alive."""
+
+    app = ModelHubTestApp(Path.cwd(), tmp_path)
+    process: subprocess.Popen[bytes] | None = None
+
+    def start_controller() -> None:
+        nonlocal process
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        app._controller = process
+
+    def fail_ui_start() -> None:
+        raise OSError("synthetic UI startup failure")
+
+    monkeypatch.setattr(app, "_initialize_config", lambda: None)
+    monkeypatch.setattr(app, "_start_controller", start_controller)
+    monkeypatch.setattr(app, "_start_ui", fail_ui_start)
+    try:
+        with pytest.raises(
+            RuntimeError, match="hermetic Model Hub app failed to start"
+        ):
+            app.start()
+        assert process is not None
+        assert process.poll() is not None
+        assert app._controller is None
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def test_a1_feature_flag_disables_the_complete_models_api(

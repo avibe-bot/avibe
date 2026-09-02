@@ -24,12 +24,17 @@ def test_e1_metered_turn_usage_requires_the_private_turn_gateway() -> None:
     )
 
 
-def test_e2_normal_usage_windows_and_garbage_query_are_bounded(
+def test_e2_usage_windows_are_bounded(
     model_hub_app,
 ) -> None:
-    """E2: valid day windows survive and garbage uses the default window."""
+    """E2: valid, garbage, and pathological windows stay bounded."""
 
-    for query, expected in (("1", 1), ("62", 62), ("garbage", 30)):
+    for query, expected in (
+        ("1", 1),
+        ("62", 62),
+        ("garbage", 30),
+        ("100000", 62),
+    ):
         response = model_hub_app.client.get(
             f"/api/models/usage?days={query}"
         )
@@ -48,7 +53,8 @@ def test_e2_normal_usage_windows_and_garbage_query_are_bounded(
 @pytest.mark.xfail(
     reason=(
         "E2/B14 remains classified fix-first in the plan, although the "
-        "current ledger bounds oversized windows at 62 days"
+        "current ledger bounds oversized windows at 62 days; the unmarked "
+        "companion test independently protects that bound"
     )
 )
 def test_e2_huge_usage_window_is_bounded(

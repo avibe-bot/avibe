@@ -24,6 +24,14 @@ from urllib.request import (
 
 _MISSING = object()
 _MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_SAFE_INHERITED_ENV = (
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TZ",
+)
 
 
 @dataclass(frozen=True)
@@ -167,14 +175,29 @@ class ModelHubTestApp:
     def _environment(
         self, extra_env: Mapping[str, str]
     ) -> dict[str, str]:
-        env = os.environ.copy()
+        env = {
+            name: os.environ[name]
+            for name in _SAFE_INHERITED_ENV
+            if os.environ.get(name)
+        }
         env.update(
             {
+                "PATH": os.pathsep.join(
+                    dict.fromkeys(
+                        (
+                            str(Path(sys.executable).resolve().parent),
+                            *os.defpath.split(os.pathsep),
+                        )
+                    )
+                ),
                 "HOME": str(self.home),
                 "AVIBE_HOME": str(self.avibe_home),
                 "XDG_CONFIG_HOME": str(self.home / ".config"),
                 "XDG_CACHE_HOME": str(self.home / ".cache"),
                 "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+                "TMPDIR": str(self.runtime_root / "tmp"),
+                "TMP": str(self.runtime_root / "tmp"),
+                "TEMP": str(self.runtime_root / "tmp"),
                 "CODEX_HOME": str(self.home / ".codex"),
                 "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
                 "VIBE_MODEL_HUB_ENABLED": "1" if self.enabled else "0",
@@ -195,34 +218,27 @@ class ModelHubTestApp:
                 "no_proxy": "127.0.0.1,localhost",
             }
         )
-        for name in (
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "SENTRY_DSN",
-        ):
-            env.pop(name, None)
         env.update(extra_env)
         return env
 
     def start(self) -> "ModelHubTestApp":
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.avibe_home.mkdir(parents=True, exist_ok=True)
-        self.logs.mkdir(parents=True, exist_ok=True)
-        self._initialize_config()
-        self._start_controller()
-        self._start_ui()
         try:
+            self.home.mkdir(parents=True, exist_ok=True)
+            self.avibe_home.mkdir(parents=True, exist_ok=True)
+            self.logs.mkdir(parents=True, exist_ok=True)
+            (self.runtime_root / "tmp").mkdir(
+                parents=True, exist_ok=True
+            )
+            self._initialize_config()
+            self._start_controller()
+            self._start_ui()
             self.wait_ready()
-        except Exception:
-            details = self.diagnostics()
+        except Exception as exc:
             self.stop()
+            details = self.diagnostics()
             raise RuntimeError(
                 f"hermetic Model Hub app failed to start\n{details}"
-            ) from None
+            ) from exc
         return self
 
     def _initialize_config(self) -> None:
