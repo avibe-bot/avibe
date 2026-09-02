@@ -87,6 +87,9 @@ export const BackendModelEditorDialog: React.FC<{
   const { t } = useTranslation();
   const creating = model === null;
   const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
+  /** Held as text, like the token fields: the schema's name is a non-empty
+   *  string or null, and only `commit` gets to decide which an empty box is. */
+  const [nameText, setNameText] = React.useState('');
   const [contextText, setContextText] = React.useState('');
   const [outputText, setOutputText] = React.useState('');
   const [fillState, setFillState] = React.useState<FillState>('idle');
@@ -102,6 +105,7 @@ export const BackendModelEditorDialog: React.FC<{
 
   const seed = React.useCallback((next: BackendModel) => {
     setDraft(next);
+    setNameText(next.display_name ?? '');
     setContextText(groupTokens(next.context_window));
     setOutputText(groupTokens(next.max_output_tokens));
     setFillState('idle');
@@ -152,10 +156,38 @@ export const BackendModelEditorDialog: React.FC<{
     // `applyModelsDevMatch` leaves `id` alone: a fill never renames the row, even
     // when the chosen match is published under a different id.
     setDraft((current) => applyModelsDevMatch(current, match, creating ? 'models_dev' : current.origin));
+    setNameText(match.display_name ?? '');
     setContextText(groupTokens(match.context_window));
     setOutputText(groupTokens(match.max_output_tokens));
     setMatchesOpen(false);
     setFillState('idle');
+  };
+
+  /**
+   * Retype the id, and every models.dev answer to the old one is retired: the
+   * request still in flight, the match list it would open, and the metadata an
+   * earlier fill already poured in.
+   *
+   * `models_dev_id` decides how far that goes, because it is the schema's own
+   * record of where a row's metadata came from. A filled draft describes the id
+   * that fetched it — keeping its context window, modalities or efforts would
+   * save one model's facts under another model's name — so it goes back to
+   * blank. A hand-typed draft owes models.dev nothing and keeps every field,
+   * since correcting a typo in the id is not a decision to retype the rest.
+   */
+  const changeId = (nextId: string) => {
+    fillAttempt.current += 1;
+    setFillState('idle');
+    setMatches([]);
+    setMatchesOpen(false);
+    if (draft.models_dev_id === null) {
+      patch({ id: nextId });
+      return;
+    }
+    setDraft({ ...blankBackendModel(), id: nextId });
+    setNameText('');
+    setContextText('');
+    setOutputText('');
   };
 
   const fill = () => {
@@ -198,6 +230,9 @@ export const BackendModelEditorDialog: React.FC<{
     onCommit({
       ...draft,
       id: trimmedId,
+      // An empty box is 「no name」, not an empty name: the schema takes null and
+      // the list falls back to the id.
+      display_name: nameText.trim() || null,
       context_window: context.value,
       max_output_tokens: output.value,
       // Only an explicit "no reasoning" clears the efforts. A row whose support
@@ -244,7 +279,7 @@ export const BackendModelEditorDialog: React.FC<{
                     maxLength={BACKEND_MODEL_ID_MAX_LENGTH}
                     spellCheck={false}
                     autoComplete="off"
-                    onChange={(event) => patch({ id: event.target.value })}
+                    onChange={(event) => changeId(event.target.value)}
                     placeholder={t('settings.models.gateway.modelEditor.id.placeholder') as string}
                     className="model-hub-model-control w-full font-mono text-[12.5px] read-only:text-muted"
                   />
@@ -308,6 +343,22 @@ export const BackendModelEditorDialog: React.FC<{
                 })}
               </div>
             )}
+
+            <Field
+              label={t('settings.models.gateway.modelEditor.displayName.label')}
+              className="min-w-0 gap-1.5"
+              labelClassName="model-hub-model-field-label"
+            >
+              {(id) => (
+                <Input
+                  id={id}
+                  value={nameText}
+                  onChange={(event) => setNameText(event.target.value)}
+                  placeholder={t('settings.models.gateway.modelEditor.displayName.placeholder') as string}
+                  className="model-hub-model-control w-full text-[12.5px]"
+                />
+              )}
+            </Field>
           </section>
 
           <section className="model-hub-model-section">

@@ -3610,7 +3610,10 @@ class ModelHubConfig:
                 ),
                 None,
             )
-            if extra_route is not None:
+            # The retained OpenCode menu endpoint can hide a checked model while
+            # preserving its dormant Route for a later re-enable. Fixed-menu
+            # backends have never had that compatibility state.
+            if extra_route is not None and backend != "opencode":
                 raise ValueError(
                     f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
                 )

@@ -31,6 +31,7 @@ from config.v2_config import ModelHubModelConfig
 from core.handlers.model_hub.identifiers import (
     MODEL_ID_MAX_LENGTH,
     USAGE_LEDGER_KEY_MAX_LENGTH,
+    USAGE_LEDGER_VERBATIM_MAX_LENGTH,
     persisted_ledger_key,
     usage_ledger_key,
 )
@@ -1165,6 +1166,14 @@ def test_an_unusable_identifier_is_never_persisted(
         pytest.param("model-x", id="ordinary"),
         pytest.param("  model-x  ", id="padded"),
         pytest.param("   ", id="padding-only"),
+        pytest.param(
+            "m" * USAGE_LEDGER_VERBATIM_MAX_LENGTH,
+            id="at-the-ledger-verbatim-bound",
+        ),
+        pytest.param(
+            "m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
+            id="one-past-the-ledger-verbatim-bound",
+        ),
         pytest.param("m" * MODEL_ID_MAX_LENGTH, id="at-the-admission-bound"),
         pytest.param("m" * (MODEL_ID_MAX_LENGTH + 1), id="one-past-it"),
         pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 4), id="far-past-it"),
@@ -1184,8 +1193,8 @@ def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: o
 
     Keying the loaded value and the raw payload alike stops one model from occupying
     two rows. The length assertion is the review-4966041599 property: a key is either
-    within the admission bound or exactly a folded key's length, never in between, so
-    no identifier a config can hold can occupy the folded form. And the read path
+    within the stable verbatim bound or exactly a folded key's length, never in
+    between, so no admitted identifier can occupy the folded form. And the read path
     returns a derived key unchanged, so a row read back after a restart is the row
     that was written — the guarantee that used to be spelled as self-idempotence,
     which is what forced the fold to start too late.
@@ -1203,7 +1212,10 @@ def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: o
     assert (key is None) == (loadable is None)
     if key is None:
         return
-    assert len(key) <= MODEL_ID_MAX_LENGTH or len(key) == USAGE_LEDGER_KEY_MAX_LENGTH
+    assert (
+        len(key) <= USAGE_LEDGER_VERBATIM_MAX_LENGTH
+        or len(key) == USAGE_LEDGER_KEY_MAX_LENGTH
+    )
     assert usage_ledger_key(loadable) == key
     assert persisted_ledger_key(key) == key
 
@@ -1211,6 +1223,14 @@ def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: o
 @pytest.mark.parametrize(
     "model_id",
     [
+        pytest.param(
+            "m" * USAGE_LEDGER_VERBATIM_MAX_LENGTH,
+            id="at-the-ledger-verbatim-bound",
+        ),
+        pytest.param(
+            "m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
+            id="one-past-the-ledger-verbatim-bound",
+        ),
         pytest.param("m" * MODEL_ID_MAX_LENGTH, id="at-the-admission-bound"),
         pytest.param("m" * (MODEL_ID_MAX_LENGTH + 1), id="one-past-it"),
         pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 4), id="far-past-it"),
@@ -1276,8 +1296,9 @@ def test_no_two_identities_a_config_holds_can_share_one_row(tmp_path: Path) -> N
 
     seeds = (
         "model-x",
-        "m" * MODEL_ID_MAX_LENGTH,
-        "m" * (MODEL_ID_MAX_LENGTH + 1),
+        "m" * USAGE_LEDGER_VERBATIM_MAX_LENGTH,
+        "m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
+        "n" * MODEL_ID_MAX_LENGTH,
         "z" * (USAGE_LEDGER_KEY_MAX_LENGTH * 3),
     )
     identities = sorted({*seeds, *(usage_ledger_key(seed) for seed in seeds)})
@@ -1301,8 +1322,14 @@ def test_no_two_identities_a_config_holds_can_share_one_row(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "key",
     [
-        pytest.param("m" * MODEL_ID_MAX_LENGTH, id="a-verbatim-key"),
-        pytest.param(usage_ledger_key("m" * (MODEL_ID_MAX_LENGTH + 1)), id="a-folded-key"),
+        pytest.param(
+            "m" * USAGE_LEDGER_VERBATIM_MAX_LENGTH,
+            id="a-verbatim-key",
+        ),
+        pytest.param(
+            usage_ledger_key("m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1)),
+            id="a-folded-key",
+        ),
         pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH + 1), id="one-past-every-derivable-key"),
         pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 8), id="far-past-them"),
     ],
@@ -1436,8 +1463,8 @@ def _keying_populations(prefix: str) -> tuple[str, ...]:
 
     return (
         padded(len(prefix) + 8),
-        padded(MODEL_ID_MAX_LENGTH),
-        padded(MODEL_ID_MAX_LENGTH + 1),
+        padded(USAGE_LEDGER_VERBATIM_MAX_LENGTH),
+        padded(USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
         padded(USAGE_LEDGER_KEY_MAX_LENGTH * 2),
     )
 

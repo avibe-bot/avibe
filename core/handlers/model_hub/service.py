@@ -3378,7 +3378,7 @@ class ModelHubService:
                 0,
                 {
                     "id": "default",
-                    "display_name": "Default",
+                    "display_name": None,
                     "origin": "builtin",
                     "models_dev_id": None,
                     "context_window": None,
@@ -3668,14 +3668,6 @@ class ModelHubService:
                     checked=merged_checked,
                 )
                 current_models = {model.id: model for model in agent.models}
-                for identifier in removed:
-                    route = agent.routes.get(identifier)
-                    if route is not None and route.hops:
-                        raise ModelHubError(
-                            "backend_model_in_route",
-                            status=409,
-                            data={"model_id": identifier},
-                        )
                 candidate = agent.to_payload()
                 candidate["menu"] = merged_menu.to_payload()
                 candidate["models"] = [
@@ -3688,12 +3680,12 @@ class ModelHubService:
                     ).to_payload()
                     for identifier in merged_menu.checked
                 ]
+                merged_routes = dict(agent.routes)
+                for identifier in merged_menu.checked:
+                    merged_routes.setdefault(identifier, ModelHubRouteConfig())
                 candidate["routes"] = {
-                    identifier: agent.routes.get(
-                        identifier,
-                        ModelHubRouteConfig(),
-                    ).to_payload()
-                    for identifier in merged_menu.checked
+                    identifier: route.to_payload()
+                    for identifier, route in merged_routes.items()
                 }
                 parsed = ModelHubAgentSupplyConfig.from_payload(
                     candidate,
@@ -3737,9 +3729,6 @@ class ModelHubService:
                 model = ModelHubBackendModelConfig.from_payload(item)
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("backend_model_catalog_invalid") from exc
-            canonical = canonical_model_id(model.id)
-            if canonical is None or canonical != model.id:
-                raise ModelHubError("backend_model_id_invalid")
             if backend == "opencode":
                 try:
                     canonical_opencode_menu_identity(model.id)
@@ -3794,6 +3783,10 @@ class ModelHubService:
             current_by_id = {model.id: model for model in agent.models}
             baseline_by_id = {model.id: model for model in baseline_models}
             desired_by_id = {model.id: model for model in desired_models}
+            for model_id in desired_by_id.keys() - current_by_id.keys():
+                canonical = canonical_model_id(model_id)
+                if canonical is None or canonical != model_id:
+                    raise ModelHubError("backend_model_id_invalid")
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
                 if desired.origin == "builtin" and (
@@ -3850,7 +3843,19 @@ class ModelHubService:
             desired_existing = [
                 model.id for model in desired_models if model.id in baseline_by_id
             ]
-            order_changed = baseline_survivors != desired_existing
+            desired_order = [model.id for model in desired_models]
+            appended_order = [
+                *baseline_survivors,
+                *(
+                    model.id
+                    for model in desired_models
+                    if model.id not in baseline_by_id
+                ),
+            ]
+            order_changed = (
+                baseline_survivors != desired_existing
+                or desired_order != appended_order
+            )
             concurrent_ids = [
                 model.id
                 for model in agent.models

@@ -2888,6 +2888,14 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
     with pytest.raises(ValueError, match="missing menu model 'custom/model'"):
         ModelHubConfig.from_payload(dynamic)
 
+    dormant = json.loads(json.dumps(payload))
+    dormant["agents"]["opencode"]["routes"]["openai/dormant-model"] = {
+        "hops": []
+    }
+    restored = ModelHubConfig.from_payload(dormant)
+    assert restored.agents["opencode"].models == []
+    assert "openai/dormant-model" in restored.agents["opencode"].routes
+
 
 def test_backend_model_modalities_match_the_contract_directions():
     input_pdf = ModelHubBackendModelConfig.from_payload(

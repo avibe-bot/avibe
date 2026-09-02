@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -73,7 +73,12 @@ describe('BackendModelEditorDialog', () => {
     await user.type(id, 'kept');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     expect(onCommit).toHaveBeenCalledTimes(1);
-    expect(onCommit.mock.calls[0][0]).toMatchObject({ id: 'kept', origin: 'manual', models_dev_id: null });
+    expect(onCommit.mock.calls[0][0]).toMatchObject({
+      id: 'kept',
+      origin: 'manual',
+      models_dev_id: null,
+      display_name: null,
+    });
   });
 
   it('caps the ID at the contract length', () => {
@@ -138,6 +143,7 @@ describe('BackendModelEditorDialog', () => {
 
     await screen.findByText('models.dev · anthropic/claude-sonnet-4-5');
     expect(search).toHaveBeenCalledWith('anthropic/claude-sonnet-4-5-20250929');
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Claude Sonnet 4.5');
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
     expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByRole('switch', { name: 'Reasoning' }).getAttribute('aria-checked')).toBe('true');
@@ -217,6 +223,117 @@ describe('BackendModelEditorDialog', () => {
     ).toBeTruthy();
     expect(screen.queryByText('models.dev could not be reached.')).toBeNull();
     expect(screen.queryByText('modelHub.errors.models_dev_unavailable')).toBeNull();
+  });
+
+  it('drops a models.dev answer once the ID that asked for it is gone', async () => {
+    // The answer describes the id that was typed when 填充 was pressed. Landing
+    // it on the id that replaced it would file one model's context window,
+    // modalities and efforts under another model's name.
+    const user = userEvent.setup();
+    let settle: (matches: ModelsDevMatch[]) => void = () => {};
+    vi.spyOn(modelsApi, 'searchModelsDev').mockImplementation(
+      () => new Promise<ModelsDevMatch[]>((resolve) => { settle = resolve; }),
+    );
+    const { onCommit } = renderEditor();
+
+    const id = screen.getByLabelText('Backend model ID');
+    await user.type(id, 'anthropic/claude-sonnet-4-5');
+    await user.click(screen.getByRole('button', { name: 'Fill from models.dev' }));
+    await user.clear(id);
+    await user.type(id, 'openai/gpt-5');
+
+    await act(async () => { settle([match()]); });
+
+    expect(screen.queryByText('models.dev · anthropic/claude-sonnet-4-5')).toBeNull();
+    expect(screen.queryByRole('option')).toBeNull();
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
+    // The retired request also releases the button, so the new id can be filled.
+    expect((screen.getByRole('button', { name: 'Fill from models.dev' }) as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'openai/gpt-5',
+      origin: 'manual',
+      models_dev_id: null,
+      display_name: null,
+      context_window: null,
+      reasoning_efforts: [],
+    }));
+  });
+
+  it('retires filled metadata once the ID it describes is replaced', async () => {
+    // The settled answer is the same hazard as the one in flight: a fill fetched
+    // for one id must not end up saved under another.
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([match()]);
+    const { onCommit } = renderEditor();
+
+    const id = screen.getByLabelText('Backend model ID');
+    await user.type(id, 'anthropic/claude-sonnet-4-5');
+    await user.click(screen.getByRole('button', { name: 'Fill from models.dev' }));
+    await screen.findByText('models.dev · anthropic/claude-sonnet-4-5');
+
+    await user.clear(id);
+    await user.type(id, 'openai/gpt-5');
+
+    expect(screen.queryByText('models.dev · anthropic/claude-sonnet-4-5')).toBeNull();
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('');
+    expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByRole('switch', { name: 'Reasoning' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByRole('checkbox', { name: 'high' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    // Nothing of the old model survives — not the provenance, not one field.
+    expect(onCommit).toHaveBeenCalledWith({ ...blankBackendModel(), id: 'openai/gpt-5' });
+  });
+
+  it('keeps hand-typed metadata while the user corrects the ID', async () => {
+    const user = userEvent.setup();
+    const { onCommit } = renderEditor();
+
+    await user.type(screen.getByLabelText('Backend model ID'), 'internal/hous');
+    await user.type(screen.getByLabelText('Display name'), 'House model');
+    await user.type(screen.getByLabelText('Context window'), '32000');
+    await user.click(modalities('Input').getByRole('checkbox', { name: 'Image' }));
+    // A row that owes models.dev nothing has nothing to retire: fixing a typo in
+    // the id is not a decision to retype everything under it.
+    await user.type(screen.getByLabelText('Backend model ID'), 'e');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'internal/house',
+      origin: 'manual',
+      display_name: 'House model',
+      context_window: 32000,
+      input_modalities: ['text', 'image'],
+    }));
+  });
+
+  it('keeps a display name optional, trimmed, and null when the box is empty', async () => {
+    const user = userEvent.setup();
+    const unnamed: BackendModel = { ...blankBackendModel(), id: 'gpt-5-codex', context_window: 400000 };
+    const { onCommit } = renderEditor({ model: unnamed, takenIds: new Set([unnamed.id]) });
+
+    const name = screen.getByLabelText('Display name') as HTMLInputElement;
+    expect(name.value).toBe('');
+
+    // A row that arrived without a name still has none after a save it never
+    // touched: an empty box is 「no name」, not an empty string the schema refuses.
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'gpt-5-codex', display_name: null }));
+
+    onCommit.mockClear();
+    await user.type(name, '  GPT-5 Codex  ');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ display_name: 'GPT-5 Codex' }));
+
+    onCommit.mockClear();
+    await user.clear(name);
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ display_name: null }));
   });
 
   it('sends a custom reasoning effort verbatim and drops the list when reasoning is off', async () => {

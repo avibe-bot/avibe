@@ -51,9 +51,10 @@ const renderDialog = (overrides: Partial<React.ComponentProps<typeof BackendMode
   return { onClose, onSaved, onObserved };
 };
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
+  await i18n.changeLanguage('en');
 });
 
 describe('BackendModelCatalogDialog', () => {
@@ -69,6 +70,19 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.queryByRole('button', { name: 'Edit claude-default' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove claude-default' })).toBeNull();
     expect(screen.getByText('2 models')).toBeTruthy();
+  });
+
+  it('localizes the server-owned Claude default row instead of rendering backend copy', async () => {
+    await i18n.changeLanguage('zh');
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([
+      model('default', { display_name: null, locked: true, routeable: false }),
+    ]));
+    renderDialog();
+
+    expect(await screen.findByText('Claude Code 默认模型')).toBeTruthy();
+    expect(screen.getByText('default')).toBeTruthy();
+    expect(screen.queryByText('Default')).toBeNull();
+    expect(screen.getByLabelText('搜索名称或模型 ID')).toBeTruthy();
   });
 
   it('shows the catalog and nothing else — no source, route, fallback or mapping control', async () => {

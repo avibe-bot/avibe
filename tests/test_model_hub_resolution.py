@@ -1139,7 +1139,7 @@ def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(
     )
 
 
-def test_opencode_menu_cannot_remove_a_model_used_by_a_route(tmp_path):
+def test_opencode_menu_hides_a_model_without_removing_its_route(tmp_path):
     source = _source("src_opencode07", ("upstream-model",), vendor="openai")
     config = _config([source])
     opencode = config.agents["opencode"]
@@ -1153,16 +1153,19 @@ def test_opencode_menu_cannot_remove_a_model_used_by_a_route(tmp_path):
     )
     service, store, _ = _service(tmp_path, config)
 
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(
-            service.set_opencode_menu(
-                {"view": "featured", "checked": ["openai/menu-model"]},
-                {"view": "featured", "checked": []},
-            )
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/menu-model"]},
+            {"view": "featured", "checked": []},
         )
+    )
 
-    assert exc.value.code == "backend_model_in_route"
-    assert store.load().agents["opencode"].models == opencode.models
+    saved = store.load().agents["opencode"]
+    assert saved.menu.checked == []
+    assert saved.models == []
+    assert saved.routes["openai/menu-model"].hops == (
+        ModelHubRouteHopConfig(source.id, "upstream-model"),
+    )
 
 
 def test_opencode_menu_adds_an_inventory_model_with_an_empty_route(tmp_path):

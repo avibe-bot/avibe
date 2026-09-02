@@ -47,11 +47,11 @@ type Announcement = {
   count: number;
 } | null;
 
-const matchesQuery = (model: BackendModel, query: string): boolean => {
+const matchesQuery = (model: BackendModel, query: string, renderedLabel: string): boolean => {
   if (query === '') return true;
   const needle = query.toLowerCase();
   return model.id.toLowerCase().includes(needle)
-    || (model.display_name ?? '').toLowerCase().includes(needle);
+    || renderedLabel.toLowerCase().includes(needle);
 };
 
 export const BackendModelCatalogDialog: React.FC<{
@@ -128,7 +128,12 @@ export const BackendModelCatalogDialog: React.FC<{
   const busy = catalogWrite.pending;
   const dirty = editable && !sameCatalog(baseline?.models ?? [], draft);
   const filtering = query.trim() !== '';
-  const visible = draft.filter((model) => matchesQuery(model, query.trim()));
+  const displayLabel = (model: BackendModel): string => (
+    backend === 'claude' && model.id === 'default' && model.locked && !model.routeable
+      ? t('settings.models.gateway.catalog.systemDefault') as string
+      : model.display_name ?? model.id
+  );
+  const visible = draft.filter((model) => matchesQuery(model, query.trim(), displayLabel(model)));
   const movableIds = draft.filter((model) => !model.locked).map((model) => model.id);
   const takenIds = new Set(draft.map((model) => model.id));
   const effortSuggestions = [...new Set(draft.flatMap((model) => model.reasoning_efforts))];
@@ -144,7 +149,7 @@ export const BackendModelCatalogDialog: React.FC<{
 
   const label = (modelId: string): string => {
     const model = draft.find((entry) => entry.id === modelId);
-    return model?.display_name ?? modelId;
+    return model ? displayLabel(model) : modelId;
   };
 
   const announce = (key: AnnouncementKey, modelId: string, order: string[] = movableIds) => {
@@ -290,12 +295,15 @@ export const BackendModelCatalogDialog: React.FC<{
     </div>
   );
 
-  const rowBody = (model: BackendModel) => (
-    <span className="flex min-w-0 flex-1 flex-col">
-      <span className="model-hub-catalog-name truncate">{model.display_name ?? model.id}</span>
-      {model.display_name && <span className="model-hub-catalog-id truncate font-mono">{model.id}</span>}
-    </span>
-  );
+  const rowBody = (model: BackendModel) => {
+    const renderedLabel = displayLabel(model);
+    return (
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="model-hub-catalog-name truncate">{renderedLabel}</span>
+        {renderedLabel !== model.id && <span className="model-hub-catalog-id truncate font-mono">{model.id}</span>}
+      </span>
+    );
+  };
 
   const blockedNote = (model: BackendModel) => (
     removeBlocked === model.id

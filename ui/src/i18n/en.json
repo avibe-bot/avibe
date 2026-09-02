@@ -951,6 +951,7 @@
           "columnActions": "Actions",
           "columnState": "State",
           "lockedBadge": "Default",
+          "systemDefault": "Claude Code default",
           "edit": "Edit {{model}}",
           "remove": "Remove {{model}}",
           "reorder": "Reorder {{model}}",
@@ -994,6 +995,10 @@
             "required": "Enter a backend model ID.",
             "tooLong": "A model ID may be at most 256 characters.",
             "duplicate": "This list already has a model with this ID."
+          },
+          "displayName": {
+            "label": "Display name",
+            "placeholder": "Optional — the list shows the model ID when this is empty"
           },
           "fill": "Fill from models.dev",
           "fillEmpty": "models.dev has no model matching this ID.",

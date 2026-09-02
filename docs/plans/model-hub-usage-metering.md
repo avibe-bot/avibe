@@ -91,15 +91,12 @@ time order once two rows carry different UTC offsets.
 
 Identity is decided once, by `canonical_model_id` in `identifiers.py`: a model ID is
 trimmed, non-empty, and within `MODEL_ID_MAX_LENGTH`. Both boundaries that admit one
-(discovery and custom-model mapping) store what it returns, and the ledger keys rows
-by it, so config, resolution, and metering cannot disagree about what "the same
-model" means — two spellings of one ID would otherwise become two rows in the tab,
-and a listing naming one model twice is a failed discovery rather than two models.
-The ledger's re-check is therefore unreachable for anything the hub admits, so it
-logs a warning rather than dropping silently: a future boundary that forgets should
-show up as lost metering, not as a quietly incomplete tab. The rule is deliberately
-*not* applied when loading persisted config — per the persisted-shape rule, a legacy
-value must not make startup fail.
+(discovery and custom-model mapping) store what it returns, so config and resolution
+cannot disagree about what "the same model" means. Metering preserves that identity
+through `usage_ledger_key`: keys up to the shipped 200-character verbatim threshold
+remain unchanged and longer identities fold to the same bounded key across upgrades.
+The ledger never re-runs admission because a persisted legacy model must remain
+meterable even when a new request could no longer add that identifier.
 
 Every cross-field promise the read contract makes is a `_COUNTER_SUBSETS` entry
 repaired in one place — cached input inside input, token reports inside requests —
