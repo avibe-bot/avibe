@@ -21,6 +21,7 @@ catalog.
 | Variable | Default | What it is |
 | --- | --- | --- |
 | `VIBE_E2E_BASE_URL` | *(none — required)* | The Avibe instance under test. The run refuses to start without it. |
+| `VIBE_E2E_DESTRUCTIVE_TARGET` | *(none — required)* | The same URL again, stating that instance is disposable. |
 | `VIBE_E2E_MOCK_UPSTREAM_URL` | *(unset)* | A controllable model upstream. Specs that need one **skip** when it is absent. |
 
 Nothing else is read, and the suite never imports the mock's code — it types the
@@ -54,6 +55,25 @@ failure and fails the spec. `VIBE_E2E_BASE_URL` has no default for the same
 reason: the suite mutates the instance it is pointed at, and refusing to start
 on an unspecified target is safer than any warning.
 
+### Admitting a target
+
+Being named is not the same as being disposable, and the suite is destructive on
+every axis the Model Hub has — it force-deletes sources, rewrites route chains,
+flips agent modes, and stops the gateway. So a target is admitted only when:
+
+- `VIBE_E2E_DESTRUCTIVE_TARGET` names the **same** URL as `VIBE_E2E_BASE_URL`
+  (trailing slashes and case are normalized away, so only the target has to
+  match, not the spelling); and
+- that URL is not on port `5123`, which is where the packaged service listens
+  unless its operator moved it. That port is refused outright, consent or not —
+  the likeliest way to reach it is pasting the URL of the vibe UI you have open.
+
+The consent variable names the target rather than being a flag on purpose: an
+answer given for one instance then expires the moment `VIBE_E2E_BASE_URL` moves,
+instead of sitting in a shell profile approving whatever comes next. Nothing a
+running instance reports could replace it — a hermetic instance and the one you
+work on serve the same API — so consent is the only honest form the check has.
+
 ## Running it
 
 ```bash
@@ -62,12 +82,13 @@ npm install                      # once
 npx playwright install chromium  # once
 
 VIBE_E2E_BASE_URL=http://127.0.0.1:5199 \
+VIBE_E2E_DESTRUCTIVE_TARGET=http://127.0.0.1:5199 \
 VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931 \
 npm run e2e
 ```
 
-`VIBE_E2E_BASE_URL` is required — the suite refuses to start without it, because
-it mutates the instance it points at (see below).
+Both target variables are required and must agree — the suite refuses to start
+otherwise, because it mutates the instance it points at (see below).
 
 `npm run e2e:headed` runs the same thing in a visible browser. Artifacts (traces
 for failures, screenshots, the HTML report) land in `ui/e2e/.artifacts/` and are
@@ -162,6 +183,7 @@ cd "$(git rev-parse --show-toplevel)/ui"
 # PLAYWRIGHT_BROWSERS_PATH to a stable path instead works equally well.
 npx playwright install chromium
 VIBE_E2E_BASE_URL=http://127.0.0.1:5199 \
+VIBE_E2E_DESTRUCTIVE_TARGET=http://127.0.0.1:5199 \
 VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931 \
 npm run e2e
 ```
@@ -175,11 +197,19 @@ either process read anything.
 
 ## Against a remote VM
 
-Same suite, one variable:
+Same suite, same two variables:
 
 ```bash
-VIBE_E2E_BASE_URL=http://<vm-host>:5123 npm run e2e
+VIBE_E2E_BASE_URL=http://<vm-host>:5123 \
+VIBE_E2E_DESTRUCTIVE_TARGET=http://<vm-host>:5123 \
+npm run e2e
 ```
+
+Port `5123` is refused only on loopback, where it is recognizably the local
+service; on another host it is admitted with consent, because nothing here can
+tell whose machine that is. Which makes the consent yours to mean: a shared
+regression VM accumulates product state on purpose, and this suite deletes
+sources and rewrites routes on whatever it is pointed at.
 
 Two caveats. The browser must reach the instance **without a login**, which is
 true for loopback and for a tunnelled instance you are already authenticated to,

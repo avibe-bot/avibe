@@ -9,6 +9,9 @@
 //   - WHAT to undo. "Whatever appeared since I looked" is a proxy for "the
 //     thing my switch imported"; it is correct only while nothing else on the
 //     instance moves.
+//   - WHAT to put back. "The chain as I found it" is a proxy for "the chain the
+//     operator left"; the two differ the moment the suite's own sources have
+//     been placed into it, which the server does on create.
 //   - WHETHER it is done. "`enabled` is false" is a proxy for "the runtime is
 //     stopped"; the runtime has two facts and a failed stop can land one
 //     without the other.
@@ -21,7 +24,41 @@
 // differently, and so the next site added inherits the answer instead of
 // picking one.
 import type { HubApi, RouteHop, Runtime } from './api';
+import { isSuiteSource } from './api';
 import { expect, runtimeIsRunning } from './fixtures';
+
+/**
+ * Reads the baseline `restoreAgentChain` puts back: the OPERATOR's chain, which
+ * is not the same thing as the chain that is there when a spec looks.
+ *
+ * Adding a source is not an inert act. `_apply_source_placement` walks every
+ * backend's menu and appends the new source to each route whose model it
+ * matches, so by the time a spec captures its baseline the gateway fixture's
+ * own two sources may already be hops in it. Those hops are arrangement, not
+ * state: the fixture's sweep deletes the sources that supply them, so they do
+ * not outlive the spec either way.
+ *
+ * Restoring them is worse than pointless, because a spec may delete or rebuild
+ * one of those sources mid-body — B7 deletes it to raise the supply guard, B6
+ * deletes and recreates it to shake off a sticky cooldown — and `set_agent_chain`
+ * rejects a PUT containing ANY unknown source id outright. So one stale
+ * suite-owned hop takes every real hop down with it and the route the operator
+ * had is gone.
+ *
+ * Hence the pair: capture and restore live together and are written once,
+ * because the defect was capture being re-derived at each site while only the
+ * restore was shared.
+ */
+export const captureAgentChain = async (
+  api: HubApi,
+  route: { backend: string; model: string },
+): Promise<RouteHop[]> => {
+  const ours = new Set((await api.sources()).filter(isSuiteSource).map((source) => source.id));
+  const chain = (await api.chains(route.backend)).find((entry) => entry.model_id === route.model);
+  return (chain?.chain ?? [])
+    .filter((hop) => !ours.has(hop.source_id))
+    .map((hop) => ({ source_id: hop.source_id, model_id: hop.model_id }));
+};
 
 /**
  * Puts one model's route chain back to `original` — including back to EMPTY.

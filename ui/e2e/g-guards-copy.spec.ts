@@ -11,7 +11,7 @@ import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm, labelledButton } from './support/hub';
-import { restoreAgentChain } from './support/restore';
+import { captureAgentChain, restoreAgentChain } from './support/restore';
 
 test.describe('G · supply guards and failure copy', () => {
   test.beforeEach(async ({ api, mock }) => {
@@ -31,12 +31,10 @@ test.describe('G · supply guards and failure copy', () => {
     // Arrange the one state a guard exists for: this source is the ONLY hop of a
     // configured route, so removing it leaves that model with no supply. The
     // chain is captured first and put back in teardown — the instance's real
-    // routing is not this spec's to keep.
-    const before = (await api.chains(gateway.backend)).find((chain) => chain.model_id === gateway.model);
-    const original: RouteHop[] = (before?.chain ?? []).map((hop) => ({
-      source_id: hop.source_id,
-      model_id: hop.model_id,
-    }));
+    // routing is not this spec's to keep. Real routing is also all it captures:
+    // the source deleted below may already be a hop here, and restoring a hop
+    // this spec is about to delete is how the whole restore gets refused.
+    const original: RouteHop[] = await captureAgentChain(api, gateway);
     try {
       // Entered BEFORE the arranged PUT, not after it succeeds: a response
       // lost to a timeout or disconnect rejects that await with the chain

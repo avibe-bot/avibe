@@ -69,6 +69,17 @@ export type Capabilities = { model_hub?: { enabled?: boolean } };
 export type RouteHop = { source_id: string; model_id: string };
 
 /**
+ * Whether a source is this suite's own — the one namespace declaration, so
+ * "ours" cannot be spelled differently by the code that deletes sources and the
+ * code that decides which route hops survive the suite.
+ *
+ * The prefix is the identity, not a heuristic: every create path in the suite
+ * carries it, including the ones that expect to fail.
+ */
+export const isSuiteSource = (source: Source): boolean =>
+  source.display_name.startsWith(E2E_SOURCE_PREFIX);
+
+/**
  * The plan a guarded mutation is refused with, read the way the route actually
  * sends it: `{ok: false, error: "source_in_route_chain", would_remove_hops: [],
  * would_interrupt: []}` — the two lists sit at the TOP level beside `error`,
@@ -342,7 +353,7 @@ export class HubApi {
     // failure that already stopped this one.
     const failures: string[] = [];
     for (const source of await this.sources()) {
-      if (!source.display_name.startsWith(E2E_SOURCE_PREFIX)) continue;
+      if (!isSuiteSource(source)) continue;
       try {
         await this.deleteSource(source.id);
       } catch (error) {

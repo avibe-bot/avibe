@@ -16,7 +16,7 @@ import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './s
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm } from './support/hub';
 import { anthropicInventory } from './support/mock';
-import { restoreAgentChain } from './support/restore';
+import { captureAgentChain, restoreAgentChain } from './support/restore';
 
 /**
  * Runs the routed dry run until the source has settled on a verdict about its
@@ -259,11 +259,10 @@ test.describe('B · add an API-key source', () => {
       expect(arranged, 'The instance refused the arranged route, so the key cannot be rejected.').toBe(true);
     };
 
-    const before = (await api.chains(gateway.backend)).find((chain) => chain.model_id === gateway.model);
-    const original: RouteHop[] = (before?.chain ?? []).map((hop) => ({
-      source_id: hop.source_id,
-      model_id: hop.model_id,
-    }));
+    // The operator's chain only. The retry below deletes and recreates the
+    // precondition source, so a baseline carrying its hop would name a source id
+    // that no longer exists — and that refusal is not partial.
+    const original: RouteHop[] = await captureAgentChain(api, gateway);
     try {
       // The restoration boundary is entered BEFORE the arranged PUT (inside
       // `arrange` below), not after it returns: a PUT whose response is lost

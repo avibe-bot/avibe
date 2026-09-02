@@ -12,7 +12,7 @@ import { hub as copy, hubOrNull } from './support/copy';
 import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
 import { expect, test } from './support/gateway';
 import { labelledButton } from './support/hub';
-import { restoreAgentChain } from './support/restore';
+import { captureAgentChain, restoreAgentChain } from './support/restore';
 
 /** The product falls back to the raw backend id for a backend it has no label
  *  for, so this does too rather than throwing on an id the bundle never named. */
@@ -182,11 +182,7 @@ test.describe('D · route chains and priority order', () => {
       { source_id: gateway.sources[1].id, model_id: gateway.sources[1].models[0].id },
       { source_id: gateway.sources[0].id, model_id: gateway.sources[0].models[0].id },
     ];
-    const before = (await api.chains(gateway.backend)).find((chain) => chain.model_id === gateway.model);
-    const original: RouteHop[] = (before?.chain ?? []).map((hop) => ({
-      source_id: hop.source_id,
-      model_id: hop.model_id,
-    }));
+    const original: RouteHop[] = await captureAgentChain(api, gateway);
     try {
       // Entered BEFORE the arranged PUT, not after it succeeds: a PUT whose
       // response is lost or times out rejects that await with the chain
