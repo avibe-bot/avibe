@@ -320,6 +320,9 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
             while index < len(lines):
                 line = lines[index].rstrip("\r\n")
                 if line and not line[0].isspace():
+                    if line.startswith("#"):
+                        index += 1
+                        continue
                     break
                 continuation.append(_strip_yaml_comment(line.strip()))
                 index += 1

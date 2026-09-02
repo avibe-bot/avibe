@@ -252,7 +252,7 @@ def test_loose_parser_ignores_comments_before_continued_required_scalars(tmp_pat
         "---\n"
         "unknown: [invalid yaml\n"
         "name:\n"
-        "  # local name\n"
+        "# local name\n"
         "  formatter # callable name\n"
         "description:\n"
         "  # catalog copy\n"
@@ -1081,19 +1081,26 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
     assert captured["max_bytes"] == managed_skills.CLAUDE_PLUGIN_LIST_MAX_BYTES
 
 
-@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize(
+    ("stdout_bytes", "stderr_bytes"),
+    [(4097, 0), (0, 4097), (2049, 2049)],
+)
 def test_bounded_subprocess_capture_rejects_oversized_combined_output(
     tmp_path: Path,
-    stream: str,
+    stdout_bytes: int,
+    stderr_bytes: int,
 ) -> None:
-    descriptor = 1 if stream == "stdout" else 2
     limit = 4096
 
     assert managed_skills._bounded_subprocess_stdout(
         [
             sys.executable,
             "-c",
-            f"import os; os.write({descriptor}, b'x' * {limit + 1})",
+            (
+                "import os; "
+                f"os.write(1, b'x' * {stdout_bytes}); "
+                f"os.write(2, b'x' * {stderr_bytes})"
+            ),
         ],
         cwd=tmp_path,
         env=dict(os.environ),
