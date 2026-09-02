@@ -293,6 +293,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/show-pages/session-1"),
         # Read-only model catalogs behind Chat's route picker and the Agents
         # detail panel. Editor-tier because the picker is an editor surface.
+        ("GET", "/api/models/agents/claude/models"),
         ("GET", "/api/claude/models"),
         ("GET", "/api/codex/models"),
     )
@@ -327,6 +328,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("DELETE", "/api/agents/demo"),
         ("GET", "/api/models/agents/codex/chains"),
         ("PUT", "/api/models/agents/codex/chain"),
+        ("PUT", "/api/models/agents/codex/models"),
+        ("GET", "/api/models/catalog/models-dev"),
         ("PUT", "/api/global-prompts"),
         ("POST", "/api/projects"),
         ("PATCH", "/api/projects/project-1"),
@@ -478,6 +481,7 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         ("GET", "/api/models/agents/claude/chains"),
     )
     catalog_reads = (
+        ("GET", "/api/models/agents/claude/models"),
         ("GET", "/api/claude/models"),
         ("GET", "/api/codex/models"),
     )
@@ -493,7 +497,6 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         for method, path in (*page_load_reads, *catalog_reads):
             minimum_role = http_authorization_policy(method, path).minimum_role
             assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
-
     # The counterparts a member page load must not announce. Bulk onboarding is a
     # one-way instance-wide migration and must not be requested at all; the
     # OpenCode provider catalog may be requested but its refusal is expected data
@@ -508,6 +511,27 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         minimum_role = http_authorization_policy(method, path).minimum_role
         assert minimum_role == "owner", path
         assert not _context("member", remote=True).has_role(minimum_role), path
+
+
+def test_backend_catalog_surface_follows_the_agent_management_boundary() -> None:
+    catalog_surface = (
+        ("GET", "/api/models/agents/claude/models", "editor"),
+        ("PUT", "/api/models/agents/claude/models", "member"),
+        ("GET", "/api/models/catalog/models-dev", "member"),
+    )
+    for method, path, role in catalog_surface:
+        assert http_authorization_policy(method, path).minimum_role == role
+
+    assert not _context("editor", remote=True).has_role("member")
+    assert _context("member", remote=True).has_role("member")
+
+    source_model_mutations = (
+        ("POST", "/api/models/sources/src-1/models"),
+        ("PATCH", "/api/models/sources/src-1/models/model-1"),
+        ("DELETE", "/api/models/sources/src-1/models/model-1"),
+    )
+    for method, source_path in source_model_mutations:
+        assert http_authorization_policy(method, source_path).minimum_role == "owner"
 
 
 def test_workbench_events_follow_role_boundaries() -> None:

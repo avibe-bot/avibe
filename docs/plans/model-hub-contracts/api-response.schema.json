@@ -21,6 +21,9 @@
     {"method": "PUT", "path": "/api/models/agents/<backend>/sources", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/sources", "status": 200, "json": {"order": ["src_conform001"]}}},
     {"method": "POST", "path": "/api/models/agents/<backend>/chains/reorder", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/chains/reorder", "status": 200}},
     {"method": "PATCH", "path": "/api/models/agents/<backend>/mode", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/mode", "status": 200, "json": {"mode": "hub"}}},
+    {"method": "GET", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentCatalogResponse", "exercise": {"path": "/api/models/agents/claude/models", "status": 200}},
+    {"method": "PUT", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/models", "status": 200, "json": {"baseline": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}], "models": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}]}}},
+    {"method": "GET", "path": "/api/models/catalog/models-dev?query=<text>", "response_schema": "ModelsDevResponse", "exercise": {"path": "/api/models/catalog/models-dev?query=contract-model", "status": 200}},
     {"method": "PUT", "path": "/api/models/agents/opencode/menu", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/opencode/menu", "status": 200, "json": {"baseline": {"view": "featured", "checked": []}, "menu": {"view": "featured", "checked": []}}}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chains", "response_schema": "ChainListResponse", "exercise": {"path": "/api/models/agents/claude/chains", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200}},
@@ -58,7 +61,7 @@
       "allOf": [
         {"$ref": "model-hub/agent-supply.schema.json"},
         {
-          "required": ["backend", "cli_present", "mode", "menu_kind", "selected_by_agent", "selected_model_id", "selected_model_explicit", "sources", "routes", "supply_status", "menu", "model_supply", "named_agents", "builtin_models", "standard_vendors"],
+          "required": ["backend", "cli_present", "mode", "menu_kind", "catalog_models", "selected_by_agent", "selected_model_id", "selected_model_explicit", "sources", "routes", "supply_status", "menu", "model_supply", "named_agents", "builtin_models", "standard_vendors"],
           "properties": {
             "sources": {
               "oneOf": [
@@ -222,6 +225,59 @@
         "ok": {"const": true},
         "contract_version": {"const": 6},
         "agent": {"$ref": "#/definitions/AgentSupplyApi"}
+      }
+    },
+    "AgentCatalogResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "agent"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 6},
+        "agent": {
+          "type": "object",
+          "required": ["backend", "mode", "catalog_models"],
+          "additionalProperties": false,
+          "properties": {
+            "backend": {"enum": ["claude", "codex", "opencode"]},
+            "mode": {"enum": ["hub", "direct"]},
+            "catalog_models": {
+              "type": "array",
+              "items": {"$ref": "model-hub/backend-model.schema.json"}
+            }
+          }
+        }
+      }
+    },
+    "ModelsDevResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "matches"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 6},
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["provider_id", "provider_name", "model_id", "models_dev_id", "display_name", "context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning", "reasoning_efforts"],
+            "additionalProperties": false,
+            "properties": {
+              "provider_id": {"type": "string", "minLength": 1},
+              "provider_name": {"type": "string", "minLength": 1},
+              "model_id": {"type": "string", "minLength": 1},
+              "models_dev_id": {"type": "string", "minLength": 3},
+              "display_name": {"type": "string", "minLength": 1},
+              "context_window": {"type": ["integer", "null"], "minimum": 1},
+              "max_output_tokens": {"type": ["integer", "null"], "minimum": 1},
+              "input_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video", "pdf"]}, "uniqueItems": true},
+              "output_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video"]}, "uniqueItems": true},
+              "supports_tools": {"type": ["boolean", "null"]},
+              "supports_reasoning": {"type": ["boolean", "null"]},
+              "reasoning_efforts": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+            }
+          }
+        }
       }
     },
     "ChainResponse": {

@@ -76,6 +76,11 @@ class ModelHubLaunch:
     source_id: Optional[str] = None
     gateway_base_url: Optional[str] = None
     gateway_token: Optional[str] = None
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    supports_tools: Optional[bool] = None
+    supports_reasoning: Optional[bool] = None
+    reasoning_efforts: tuple[str, ...] = ()
     settlement_generation: Optional[int] = field(default=None, repr=False)
 
     @property
@@ -83,15 +88,29 @@ class ModelHubLaunch:
         if self.channel == "direct":
             return "direct"
         if self.channel == "native_cli":
-            return f"native_cli:{self.source_id or ''}"
-        token_hash = hashlib.sha256((self.gateway_token or "").encode()).hexdigest()
-        return ":".join(
-            (
-                self.channel,
-                self.gateway_base_url or "",
-                token_hash,
+            identity = f"native_cli:{self.source_id or ''}"
+        else:
+            token_hash = hashlib.sha256((self.gateway_token or "").encode()).hexdigest()
+            identity = ":".join(
+                (
+                    self.channel,
+                    self.gateway_base_url or "",
+                    token_hash,
+                )
             )
+        if self.backend != "claude":
+            return identity
+        process_settings = json.dumps(
+            {
+                "context_window": self.context_window,
+                "max_output_tokens": self.max_output_tokens,
+                "reasoning_efforts": self.reasoning_efforts,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        settings_hash = hashlib.sha256(process_settings.encode()).hexdigest()
+        return f"{identity}:settings:{settings_hash}"
 
 
 @dataclass(frozen=True)
@@ -280,17 +299,35 @@ def build_claude_hub_env(
     base_env: dict[str, str],
     launch: ModelHubLaunch,
 ) -> dict[str, str]:
-    """Return a hub-only Claude environment without inherited auth routing."""
+    """Return Claude environment overrides for the resolved Hub launch."""
 
-    if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
+    if launch.channel == "direct":
         return dict(base_env)
-    result = {
-        key: value
-        for key, value in base_env.items()
-        if not key.startswith("ANTHROPIC_") and key != "CLAUDE_CODE_OAUTH_TOKEN"
-    }
-    result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
-    result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
+    if launch.channel == "hub":
+        if not launch.gateway_base_url or not launch.gateway_token:
+            return dict(base_env)
+        result = {
+            key: value
+            for key, value in base_env.items()
+            if not key.startswith("ANTHROPIC_")
+            and key
+            not in {
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            }
+        }
+        result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
+        result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
+        result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+    else:
+        # A native_cli hop keeps the user's official CLI authentication while
+        # applying metadata owned by the selected Hub catalog row.
+        result = dict(base_env)
+    if launch.context_window is not None:
+        result["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(launch.context_window)
+    if launch.max_output_tokens is not None:
+        result["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(launch.max_output_tokens)
     return result
 
 
@@ -534,6 +571,7 @@ class ModelHubRuntimeRouter:
         resolved_model_id: Optional[str] = None,
         source_id: Optional[str] = None,
         via_mapping: bool = False,
+        gateway_request_model_id: Optional[str] = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -544,6 +582,7 @@ class ModelHubRuntimeRouter:
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
                 via_mapping=via_mapping,
+                gateway_request_model_id=gateway_request_model_id,
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -806,6 +845,32 @@ class ModelHubRuntimeRouter:
 
         target_model = resolution.target_model
         source = resolution.source
+        backend_model = next(
+            (
+                model
+                for model in config.agents[backend].models
+                if model.id == requested_model
+            ),
+            None,
+        )
+        context_window = (
+            backend_model.context_window if backend_model is not None else None
+        )
+        max_output_tokens = (
+            backend_model.max_output_tokens if backend_model is not None else None
+        )
+        supports_tools = (
+            backend_model.supports_tools if backend_model is not None else None
+        )
+        supports_reasoning = (
+            backend_model.supports_reasoning if backend_model is not None else None
+        )
+        reasoning_efforts = (
+            tuple(backend_model.reasoning_efforts)
+            if backend_model is not None
+            and backend_model.supports_reasoning is not False
+            else ()
+        )
         self._last_supply_state[(backend, requested_model)] = ("ok", None)
         if source.supply_channel == "native_cli":
             if self.service.revocations.list():
@@ -821,6 +886,11 @@ class ModelHubRuntimeRouter:
                 target_model=target_model,
                 runtime_model=target_model,
                 source_id=source.id,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_tools=supports_tools,
+                supports_reasoning=supports_reasoning,
+                reasoning_efforts=reasoning_efforts,
                 settlement_generation=self.service._reserve_settlement_generation(
                     source.id
                 ),
@@ -836,6 +906,11 @@ class ModelHubRuntimeRouter:
                     via_mapping=False,
                 )
         else:
+            runtime_model = (
+                requested_model
+                if self.turn_gateway is not None and backend == "codex"
+                else target_model
+            )
             gateway_base_url, gateway_token = await self._gateway_credentials(
                 backend,
                 process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
@@ -844,8 +919,8 @@ class ModelHubRuntimeRouter:
                 resolved_model_id=target_model,
                 source_id=source.id,
                 via_mapping=False,
+                gateway_request_model_id=runtime_model,
             )
-            runtime_model = target_model
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{target_model}"
@@ -858,6 +933,11 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_tools=supports_tools,
+                supports_reasoning=supports_reasoning,
+                reasoning_efforts=reasoning_efforts,
             )
         self._emit_transition(launch, config)
         return launch
@@ -962,9 +1042,9 @@ class ModelHubRuntimeRouter:
         agent = config.agents["opencode"]
         if agent.mode == "direct":
             return None
-        checked = tuple(agent.menu.checked if agent.menu else ())
+        checked = tuple(model.id for model in agent.models)
         if not checked:
-            return None
+            raise ModelHubError("mapping_target_unavailable", status=409)
         gateway_base_url, gateway_token = await self._gateway_credentials(
             "opencode",
             process_scope="opencode:shared-server",
@@ -976,6 +1056,9 @@ class ModelHubRuntimeRouter:
         available_identifiers: list[str] = []
         launches: list[ModelHubLaunch] = []
         for identifier in dict.fromkeys(checked):
+            backend_model = next(
+                model for model in agent.models if model.id == identifier
+            )
             config, resolution = await self._resolve_turn(
                 config,
                 "opencode",
@@ -999,14 +1082,6 @@ class ModelHubRuntimeRouter:
                     if resolution.projectable_hops
                     else None
                 )
-            if (
-                inspection is None
-                or inspection.source is None
-                or inspection.model_id is None
-            ):
-                continue
-            source = inspection.source
-            exact_model_id = inspection.model_id
             package = _provider_package()
             base_url = _provider_base_url(gateway_base_url)
             provider = providers.setdefault(
@@ -1020,24 +1095,33 @@ class ModelHubRuntimeRouter:
             )
             runtime_model = identifier
             if self.turn_gateway is None:
+                if (
+                    inspection is None
+                    or inspection.source is None
+                    or inspection.model_id is None
+                ):
+                    continue
+                source = inspection.source
+                exact_model_id = inspection.model_id
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{exact_model_id}"
-            projected_model = project_opencode_public_model(identifier, resolution)
-            if projected_model is None:
-                continue
+            projected_model = project_opencode_public_model(backend_model)
             projected_model["id"] = runtime_model
             provider["models"][identifier] = projected_model
             projected_identifiers.append(identifier)
             if resolution.candidate_hops:
+                candidate = resolution.candidate_hops[0]
+                if candidate.source is None or candidate.model_id is None:
+                    continue
                 available_identifiers.append(identifier)
                 launches.append(
                     ModelHubLaunch(
                         backend="opencode",
                         channel="hub",
                         requested_model=identifier,
-                        target_model=exact_model_id,
+                        target_model=candidate.model_id,
                         runtime_model=runtime_model,
-                        source_id=source.id,
+                        source_id=candidate.source.id,
                         gateway_base_url=gateway_base_url,
                         gateway_token=gateway_token,
                     )

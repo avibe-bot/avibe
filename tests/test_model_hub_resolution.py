@@ -12,6 +12,7 @@ import pytest
 
 from config.v2_config import (
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubMenuConfig,
     ModelHubModelConfig,
@@ -1115,6 +1116,7 @@ def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(
         view="featured",
         checked=["openai/menu-model"],
     )
+    opencode.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
     opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
     )
@@ -1137,10 +1139,15 @@ def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(
     )
 
 
-def test_opencode_menu_reselects_a_dormant_route_alias_with_an_eligible_exact_hop(tmp_path):
-    source = _source("src_opencode05", ("upstream-model",), vendor="openai")
+def test_opencode_menu_hides_a_model_without_removing_its_route(tmp_path):
+    source = _source("src_opencode07", ("upstream-model",), vendor="openai")
     config = _config([source])
     opencode = config.agents["opencode"]
+    opencode.menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["openai/menu-model"],
+    )
+    opencode.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
     opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
     )
@@ -1148,24 +1155,39 @@ def test_opencode_menu_reselects_a_dormant_route_alias_with_an_eligible_exact_ho
 
     asyncio.run(
         service.set_opencode_menu(
-            {"view": "featured", "checked": []},
             {"view": "featured", "checked": ["openai/menu-model"]},
+            {"view": "featured", "checked": []},
         )
     )
 
     saved = store.load().agents["opencode"]
-    assert saved.menu.checked == ["openai/menu-model"]
+    assert saved.menu.checked == []
+    assert saved.models == []
     assert saved.routes["openai/menu-model"].hops == (
         ModelHubRouteHopConfig(source.id, "upstream-model"),
     )
 
 
-def test_opencode_menu_rejects_a_dormant_route_alias_with_a_stale_exact_hop(tmp_path):
+def test_opencode_menu_adds_an_inventory_model_with_an_empty_route(tmp_path):
+    source = _source("src_opencode05", ("upstream-model",), vendor="openai")
+    config = _config([source])
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": []},
+            {"view": "featured", "checked": ["openai/upstream-model"]},
+        )
+    )
+
+    saved = store.load().agents["opencode"]
+    assert saved.menu.checked == ["openai/upstream-model"]
+    assert saved.routes["openai/upstream-model"].hops == ()
+
+
+def test_opencode_menu_rejects_a_model_absent_from_inventory(tmp_path):
     source = _source("src_opencode06", (), vendor="openai")
     config = _config([source])
-    config.agents["opencode"].routes["openai/menu-model"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
-    )
     service, store, _ = _service(tmp_path, config)
 
     with pytest.raises(ModelHubError) as exc:
@@ -1192,6 +1214,10 @@ def test_opencode_menu_applies_local_intent_to_the_latest_saved_menu(tmp_path):
         view="featured",
         checked=["openai/model-a", "openai/model-b"],
     )
+    config.agents["opencode"].models = [
+        ModelHubBackendModelConfig(id="openai/model-a"),
+        ModelHubBackendModelConfig(id="openai/model-b"),
+    ]
     config.agents["opencode"].routes.update(
         {
             "openai/model-a": ModelHubRouteConfig(),
@@ -1242,6 +1268,9 @@ def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
     config = ModelHubConfig()
     config.agents["opencode"].mode = "hub"
     config.agents["opencode"].menu.checked = ["openai/visible-model"]
+    config.agents["opencode"].models = [
+        ModelHubBackendModelConfig(id="openai/visible-model")
+    ]
     service, store, _ = _service(tmp_path, config)
     store.requested_models["opencode"] = "custom/hidden-model"
     service.named_agents_override = lambda backend: (
@@ -1306,6 +1335,9 @@ def test_chain_write_rejects_models_outside_the_current_menu(
     source = _source("src_menu0001", ("upstream-model",), vendor="openai")
     config = _config([source])
     config.agents["opencode"].menu.checked = ["openai/visible-model"]
+    config.agents["opencode"].models = [
+        ModelHubBackendModelConfig(id="openai/visible-model")
+    ]
     config.agents["opencode"].routes["openai/visible-model"] = ModelHubRouteConfig()
     service, store, _ = _service(tmp_path, config)
     before = store.load().to_payload()
@@ -1456,10 +1488,7 @@ def test_opencode_identity_computation_stays_in_validator_and_resolver():
     )
     validator_calls = RawIdentityCalls()
     validator_calls.visit(validator)
-    assert set(validator_calls.calls) == {
-        "STANDARD_OPENCODE_VENDOR_IDS",
-        "parse_opencode_model_id",
-    }
+    assert set(validator_calls.calls) == {"parse_opencode_model_id"}
     other_config_calls = RawIdentityCalls()
     other_config_calls.visit(
         Module(
@@ -1736,6 +1765,7 @@ def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
     opencode.mode = "hub"
     assert opencode.menu is not None
     opencode.menu.checked = ["openai/gpt-5.6"]
+    opencode.models = [ModelHubBackendModelConfig(id="openai/gpt-5.6")]
     opencode.routes["openai/gpt-5.6"] = ModelHubRouteConfig()
     adapter = FakeAdapter(discovered=("gpt-5.6",))
     service, store, _ = _service(tmp_path, config, adapter)

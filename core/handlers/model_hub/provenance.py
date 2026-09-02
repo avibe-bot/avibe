@@ -511,6 +511,7 @@ class TurnTrace:
     model_supply_state: Optional[SupplyState] = None
     blockers: list[dict] = field(default_factory=list)
     gateway_source_id: Optional[str] = None
+    gateway_request_model_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
     ambiguous: bool = False
     terminal_outcome: TurnOutcomeProjectionInput | None = None
@@ -553,6 +554,7 @@ class PreparedGatewayRoute:
     requested_model_id: str
     resolved_model_id: str
     source_id: str
+    gateway_request_model_id: str
 
 
 @dataclass(frozen=True)
@@ -974,8 +976,11 @@ class TurnCorrelationRegistry:
                 )
                 self._traces[turn_id] = trace
             elif (
-                trace.gateway_model_id is not None
-                and trace.gateway_model_id != requested_model_id
+                trace.gateway_request_model_id is not None
+                and requested_model_id not in {
+                    trace.gateway_request_model_id,
+                    trace.gateway_model_id,
+                }
             ):
                 trace.ambiguous = True
                 self._scopes[key].ambiguous_turns.add(turn_id)
@@ -992,6 +997,7 @@ class TurnCorrelationRegistry:
         resolved_model_id: str,
         source_id: str,
         via_mapping: bool,
+        gateway_request_model_id: str | None = None,
     ) -> str:
         """Bind a credential to this route, independently of attribution.
 
@@ -1019,10 +1025,12 @@ class TurnCorrelationRegistry:
                 if exact is None:
                     return token
                 route_turn_id = exact[0]
+            request_model_id = gateway_request_model_id or resolved_model_id
             prepared = PreparedGatewayRoute(
                 requested_model_id=requested_model_id,
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
+                gateway_request_model_id=request_model_id,
             )
             launch_token = self._route_credential(key, scope, prepared)
             existing = scope.prepared_routes.get(route_turn_id)
@@ -1054,6 +1062,10 @@ class TurnCorrelationRegistry:
                     and trace.gateway_source_id != source_id
                 )
                 or (
+                    trace.gateway_request_model_id is not None
+                    and trace.gateway_request_model_id != request_model_id
+                )
+                or (
                     trace.gateway_model_id is not None
                     and trace.gateway_model_id != resolved_model_id
                 )
@@ -1062,6 +1074,7 @@ class TurnCorrelationRegistry:
                 self._scopes[key].ambiguous_turns.add(exact_turn_id)
                 return launch_token
             trace.gateway_source_id = source_id
+            trace.gateway_request_model_id = request_model_id
             trace.gateway_model_id = resolved_model_id
             return launch_token
 
@@ -1147,12 +1160,20 @@ class TurnCorrelationRegistry:
             # wire model id really is the route key, because one credential
             # serves every model the process may name.
             return (gateway_model_id if scope.untracked_use else None), False
-        if route.resolved_model_id != gateway_model_id:
-            # This credential was minted for a launch that named one upstream
-            # model. A request for a different one belongs to no route the
-            # process was launched on — a CLI naming its own model, most
-            # often — and answering it from some other route would be exactly
-            # the aliasing this credential exists to prevent.
+        if gateway_model_id not in {
+            route.gateway_request_model_id,
+            route.resolved_model_id,
+        }:
+            # This credential was minted for one route, and the route knows
+            # both model ids a request on it may legitimately name: the id the
+            # launch was told to send, and the resolved upstream id a backend
+            # started before that became explicit still sends. A request for
+            # anything else belongs to no route the process was launched on —
+            # a CLI naming its own model, most often — and answering it from
+            # some other route would be exactly the aliasing this credential
+            # exists to prevent. Accepting both ids cannot alias here: the
+            # credential already named the route, so there is no second route
+            # for the legacy id to be confused with.
             return None, False
         # A live turn claims this request when it prepared this same route.
         # The whole route must match, not just the upstream model: two routes

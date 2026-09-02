@@ -19,6 +19,7 @@ from config.v2_config import (
     MODEL_HUB_LEGACY_CREATED_AT,
     ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubMenuConfig,
     ModelHubModelConfig,
@@ -448,6 +449,7 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
             "builtin_models": raw_example.get("builtin_models"),
             "standard_vendors": raw_example.get("standard_vendors"),
         }
+        serialized.pop("models", None)
         if "routes" not in raw_example:
             serialized.pop("routes", None)
         if "sources" not in raw_example:
@@ -2093,10 +2095,21 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     elif invalid_invariant == "subscription-api-key":
         source["base_url"] = "https://api.anthropic.com"
     else:
-        payload["model_hub"]["agents"]["opencode"]["menu"] = {
-            "view": "featured",
-            "checked": ["invalid-opencode-identity"],
-        }
+        payload["model_hub"]["agents"]["opencode"]["models"] = [
+            {
+                "id": "invalid-opencode-identity",
+                "display_name": None,
+                "origin": "manual",
+                "models_dev_id": None,
+                "context_window": None,
+                "max_output_tokens": None,
+                "input_modalities": [],
+                "output_modalities": [],
+                "supports_tools": None,
+                "supports_reasoning": None,
+                "reasoning_efforts": [],
+            }
+        ]
     if invalid_invariant != "opencode-identity":
         payload["model_hub"]["sources"] = [source]
     config_path = tmp_path / "config.json"
@@ -2109,9 +2122,9 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     persisted = json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]
     if invalid_invariant == "opencode-identity":
-        assert persisted["agents"]["opencode"]["menu"]["checked"] == [
+        assert persisted["agents"]["opencode"]["models"][0]["id"] == (
             "invalid-opencode-identity"
-        ]
+        )
     else:
         assert persisted["sources"] == [source]
 
@@ -2856,37 +2869,67 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
         "view": "featured",
         "checked": ["custom/model"],
     }
+    dynamic["agents"]["opencode"]["models"] = [
+        {
+            "id": "custom/model",
+            "display_name": None,
+            "origin": "manual",
+            "models_dev_id": None,
+            "context_window": None,
+            "max_output_tokens": None,
+            "input_modalities": [],
+            "output_modalities": [],
+            "supports_tools": None,
+            "supports_reasoning": None,
+            "reasoning_efforts": [],
+        }
+    ]
     dynamic["agents"]["opencode"]["routes"] = {}
     with pytest.raises(ValueError, match="missing menu model 'custom/model'"):
         ModelHubConfig.from_payload(dynamic)
 
+    dormant = json.loads(json.dumps(payload))
+    dormant["agents"]["opencode"]["routes"]["openai/dormant-model"] = {
+        "hops": []
+    }
+    restored = ModelHubConfig.from_payload(dormant)
+    assert restored.agents["opencode"].models == []
+    assert "openai/dormant-model" in restored.agents["opencode"].routes
 
-def test_config_reload_migrates_fixed_routes_when_bundled_catalog_changes(monkeypatch, tmp_path):
+
+def test_backend_model_modalities_match_the_contract_directions():
+    input_pdf = ModelHubBackendModelConfig.from_payload(
+        {"id": "custom-model", "input_modalities": ["pdf"]}
+    )
+    assert input_pdf.input_modalities == ["pdf"]
+
+    with pytest.raises(ValueError, match="output_modalities"):
+        ModelHubBackendModelConfig.from_payload(
+            {"id": "custom-model", "output_modalities": ["pdf"]}
+        )
+
+
+def test_config_reload_adds_bundled_routes_without_discarding_legacy_models(tmp_path):
     payload = api.config_to_payload(default_config())
-    original_ids = tuple(payload["model_hub"]["agents"]["claude"]["routes"])
+    claude = payload["model_hub"]["agents"]["claude"]
+    original_ids = tuple(claude["routes"])
     removed_id = original_ids[0]
-    added_id = "claude-catalog-added-after-save"
     stale_id = "claude-catalog-removed-after-save"
-    routes = payload["model_hub"]["agents"]["claude"]["routes"]
+    routes = claude["routes"]
     routes.pop(removed_id)
     routes[stale_id] = {"hops": []}
-
-    def changed_catalog_ids(backend: str) -> tuple[str, ...]:
-        if backend == "claude":
-            return (*original_ids[1:], added_id)
-        return tuple(payload["model_hub"]["agents"][backend]["routes"])
-
-    monkeypatch.setattr("config.v2_config.model_hub_fixed_menu_ids", changed_catalog_ids)
+    claude.pop("models")
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = V2Config.load(config_path=config_path)
     migrated_routes = loaded.model_hub.agents["claude"].routes
+    migrated_models = loaded.model_hub.agents["claude"].models
 
-    assert set(migrated_routes) == set(changed_catalog_ids("claude"))
-    assert migrated_routes[added_id].hops == ()
-    assert removed_id not in migrated_routes
-    assert stale_id not in migrated_routes
+    assert set(migrated_routes) == {*original_ids, stale_id}
+    assert migrated_routes[removed_id].hops == ()
+    assert migrated_routes[stale_id].hops == ()
+    assert next(model for model in migrated_models if model.id == stale_id).origin == "manual"
 
 
 @pytest.mark.parametrize(

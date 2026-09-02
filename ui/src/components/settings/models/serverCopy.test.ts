@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import {
+  catalogSaveFailureKey,
+  modelsDevFillFailureKey,
   NATIVE_LOGIN_IN_PROGRESS_FAILURE,
   NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
   oauthFailureKey,
@@ -147,5 +149,77 @@ describe('oauthStartFailureKey', () => {
   it('uses the dedicated gateway outage copy for engine-down starts', () => {
     expect(oauthStartFailureKey('engine_down')).toBe('settings.models.addSub.error.engineDown');
     expect(oauthStartFailureKey('modelHub.errors.engine_down')).toBe('settings.models.addSub.error.engineDown');
+  });
+});
+
+describe('catalogSaveFailureKey', () => {
+  // Every refusal `PUT /api/models/agents/<backend>/models` can answer with, and
+  // the sentence that tells the user what to do about it. Spelled out here rather
+  // than imported from the module, so this fails when the UI's table and the
+  // service's taxonomy drift apart.
+  const REFUSALS = [
+    ['backend_model_in_route', 'saveRouted'],
+    ['backend_model_conflict', 'saveConflict'],
+    ['backend_model_id_prefix', 'saveIdPrefix'],
+    ['backend_model_id_invalid', 'saveIdInvalid'],
+    ['backend_model_duplicate', 'saveDuplicate'],
+    ['backend_model_locked', 'saveLocked'],
+    ['backend_model_catalog_invalid', 'saveInvalid'],
+  ] as const;
+
+  it.each(REFUSALS)('renders %s as copy, not as a key, in both locales', (code, key) => {
+    const resolved = catalogSaveFailureKey(`modelHub.errors.${code}`);
+    expect(resolved).toBe(`settings.models.gateway.catalog.${key}`);
+    for (const lng of ['en', 'zh'] as const) {
+      // Ours, so it must translate outright — a missing entry would reach the
+      // user as the key itself.
+      const text = t(lng)(resolved, { defaultValue: '' }) as string;
+      expect(text, `${lng}: ${resolved}`).not.toBe('');
+      expect(text).not.toContain('settings.models');
+    }
+  });
+
+  it('gives each refusal a next step of its own', () => {
+    // Seven codes pointing at one sentence would be the generic fallback wearing
+    // seven names; the taxonomy exists because the actions differ.
+    const texts = REFUSALS.map(([code]) => t('en')(catalogSaveFailureKey(`modelHub.errors.${code}`)) as string);
+    expect(new Set(texts).size).toBe(REFUSALS.length);
+    expect(texts).not.toContain(t('en')('settings.models.gateway.catalog.saveFailed'));
+  });
+
+  it('asks for a re-add where the ID rule is broken, because the field is read-only', () => {
+    // Edit mode keeps the backend model id read-only, so 「fix the ID」 would be
+    // advice this dialog refuses to take.
+    const prefix = catalogSaveFailureKey('modelHub.errors.backend_model_id_prefix');
+    expect(t('en')(prefix)).toMatch(/add it again/i);
+    expect(t('zh')(prefix)).toContain('重新添加');
+    const invalid = catalogSaveFailureKey('modelHub.errors.backend_model_id_invalid');
+    expect(t('en')(invalid)).toMatch(/add it again/i);
+    expect(t('zh')(invalid)).toContain('重新添加');
+  });
+
+  it('never passes an unrecognized server detail through as copy', () => {
+    // `modelHub.errors.*` keys live in the backend bundle, so a code this UI does
+    // not know would render as a machine string if it reached i18next.
+    for (const detail of [undefined, 'modelHub.errors.some_future_code', 'engine_down']) {
+      expect(catalogSaveFailureKey(detail)).toBe('settings.models.gateway.catalog.saveFailed');
+    }
+  });
+});
+
+describe('modelsDevFillFailureKey', () => {
+  it('separates an upstream catalog outage from a lookup that simply failed', () => {
+    // The one cause that is not about this machine, and the one where retrying is
+    // the wrong advice: every field the fill would have set is typeable by hand.
+    const down = modelsDevFillFailureKey('modelHub.errors.models_dev_unavailable');
+    expect(down).toBe('settings.models.gateway.modelEditor.fillUnavailable');
+    expect(t('en')(down)).toMatch(/by hand/i);
+    expect(t('zh')(down)).toContain('手动填写');
+  });
+
+  it('keeps every other cause on the plain unreachable line', () => {
+    for (const detail of [undefined, 'engine_down', 'modelHub.errors.some_future_code']) {
+      expect(modelsDevFillFailureKey(detail)).toBe('settings.models.gateway.modelEditor.fillFailed');
+    }
   });
 });

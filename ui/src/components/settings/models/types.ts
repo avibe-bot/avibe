@@ -145,6 +145,77 @@ export type AgentMenu = {
   checked: string[];
 };
 
+// ── backend-model.schema.json ───────────────────────────────────────────
+/** How the row was first created. User edits stay authoritative afterwards,
+ *  which is why this never gates editability — only `locked` does. */
+export type BackendModelOrigin = 'builtin' | 'models_dev' | 'manual';
+export const BACKEND_MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const;
+export type BackendModelInputModality = (typeof BACKEND_MODEL_INPUT_MODALITIES)[number];
+/** One member shorter than the input vocabulary: the schema declares no `pdf`
+ *  output. Mirrored as two lists rather than one filtered at the call site, so a
+ *  future divergence is a contract edit and not a UI condition. */
+export const BACKEND_MODEL_OUTPUT_MODALITIES = ['text', 'image', 'audio', 'video'] as const;
+export type BackendModelOutputModality = (typeof BACKEND_MODEL_OUTPUT_MODALITIES)[number];
+export const BACKEND_MODEL_ID_MAX_LENGTH = 256 as const;
+export const BACKEND_MODEL_EFFORT_MAX_LENGTH = 64 as const;
+
+/** One model a backend Agent exposes: backend menu metadata, never upstream
+ *  inventory and never a Route. The catalog deliberately holds no Source id,
+ *  upstream model id, priority or fallback — those stay with the Route. */
+export type BackendModel = {
+  /** The exact identifier the backend Agent emits. OpenCode uses provider/model. */
+  id: string;
+  display_name: string | null;
+  origin: BackendModelOrigin;
+  /** The provider/model identity chosen on models.dev, null for a manual row. */
+  models_dev_id: string | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  input_modalities: BackendModelInputModality[];
+  output_modalities: BackendModelOutputModality[];
+  /** Tri-state. `null` is not `false`: the server omits the capability from the
+   *  backend projection entirely, leaving the backend's own default in force.
+   *  Every shipped builtin row starts here, so the editor must never state a
+   *  value the user did not. */
+  supports_tools: boolean | null;
+  supports_reasoning: boolean | null;
+  /** Sent verbatim upstream. `[]` means the backend omits the effort parameter,
+   *  which is a decision — not an absence the UI may fill in. */
+  reasoning_efforts: string[];
+  /** Server-derived: visible, but not editable, removable or reorderable. */
+  locked: boolean;
+  /** Server-derived: false only for a backend-owned selector such as Claude
+   *  Code's `Default`, which never names a Route key. */
+  routeable: boolean;
+};
+
+/** `baseline` is the last full list this caller observed; `models` is its
+ *  desired replacement. The server applies the difference to the latest saved
+ *  list, so a concurrent editor's unrelated row survives. */
+export type BackendModelsPut = {
+  baseline: BackendModel[];
+  models: BackendModel[];
+};
+
+/** One normalized models.dev candidate. Metadata only: choosing it fills the
+ *  editor's fields and persists nothing until the catalog itself is saved. */
+export type ModelsDevMatch = {
+  provider_id: string;
+  provider_name: string;
+  model_id: string;
+  models_dev_id: string;
+  display_name: string | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  input_modalities: BackendModelInputModality[];
+  output_modalities: BackendModelOutputModality[];
+  /** Null when models.dev does not state the capability, which a fill carries
+   *  through rather than resolving to `false` on the model's behalf. */
+  supports_tools: boolean | null;
+  supports_reasoning: boolean | null;
+  reasoning_efforts: string[];
+};
+
 /** Why a source cannot serve this backend at all. A closed vocabulary — a new
  *  cause ships its enum member and its locale copy in the same change. */
 export type EligibilityReasonKey =
@@ -251,6 +322,11 @@ export type AgentSupply = {
   /** AC-9 attribution source. Always present; every entry's `supply_status` is
    *  null in direct mode. */
   named_agents?: NamedAgentSupply[];
+  /** The one editable model catalog for this backend. Its ORDER is the Agent
+   *  menu order. Presence-gated: a server that predates backend model catalogs
+   *  omits it, and the UI then falls back to `builtin_models`/`menu` for the
+   *  rolling-upgrade window rather than synthesizing a payload shape. */
+  catalog_models?: BackendModel[] | null;
   menu?: AgentMenu | null;
   /** v1.2 read-only projection: fixed-menu backends only — the backend's real
    *  built-in model ids (from vibe/backend_model_catalog.py). null for open-menu

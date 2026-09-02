@@ -149,14 +149,14 @@ const renderStockedDialog = () => {
     </I18nextProvider>,
   );
 };
-const renderDialog = (onCommitted = vi.fn()) => {
+const renderDialog = (onCommitted = vi.fn(), onClose = vi.fn()) => {
   vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
   return render(
     <I18nextProvider i18n={i18n}>
       <RouteChainDialog
         selection={{ agent, modelId: "opus-5", read: readyRegion(chain) }}
         sources={sources}
-        onClose={vi.fn()}
+        onClose={onClose}
         onCommitted={onCommitted}
         readAgents={vi.fn().mockResolvedValue(observation([agent]))}
         readSources={vi.fn().mockResolvedValue(observation(sources))}
@@ -768,16 +768,43 @@ describe("RouteChainDialog", () => {
     );
   });
 
-  it("supports the grip keyboard contract and restores the draft on Escape", async () => {
+  it("cancels only the active grab and preserves the earlier unsaved draft", async () => {
     const user = userEvent.setup();
-    renderDialog();
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
     const grips = await screen.findAllByRole("button", {
       name: "Reorder this hop",
     });
 
-    await user.click(grips[1]);
+    await user.click(grips[0]);
     await user.keyboard("{Space}");
-    expect(grips[1].getAttribute("aria-grabbed")).toBe("true");
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getAllByRole("button", { name: "Reorder this hop" })[1],
+      ),
+    );
+    await user.keyboard("{Space}");
+    expect(
+      screen.getAllByRole("button", { name: "Reorder this hop" })[1]
+        .getAttribute("aria-grabbed"),
+    ).toBe("false");
+    const unsavedOrder = ["Claude subscription", "API key"];
+    expect(
+      [...document.querySelectorAll(".model-hub-route-hop-name")].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(unsavedOrder);
+    expect(
+      (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+
+    await user.keyboard("{Space}");
+    expect(
+      screen.getAllByRole("button", { name: "Reorder this hop" })[1]
+        .getAttribute("aria-grabbed"),
+    ).toBe("true");
     await user.keyboard("{ArrowUp}");
     expect(screen.getByText("Moved to hop 1.")).toBeTruthy();
     await waitFor(() =>
@@ -786,7 +813,15 @@ describe("RouteChainDialog", () => {
       ),
     );
     await user.keyboard("{Escape}");
-    expect(screen.getByText("Reorder cancelled. Restored to hop 2.")).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Reorder cancelled. Restored to hop 2."),
+    ).toBeTruthy();
+    expect(
+      [...document.querySelectorAll(".model-hub-route-hop-name")].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(unsavedOrder);
     const restoredGrips = screen.getAllByRole("button", {
       name: "Reorder this hop",
     });
@@ -795,6 +830,17 @@ describe("RouteChainDialog", () => {
     expect(
       (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
         .disabled,
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it("keeps the native Escape dismissal when no hop is grabbed", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
+    await screen.findAllByRole("button", { name: "Reorder this hop" });
+
+    await user.keyboard("{Escape}");
+
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

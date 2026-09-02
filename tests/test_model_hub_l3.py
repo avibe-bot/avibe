@@ -24,6 +24,7 @@ from sqlalchemy import create_engine, delete, select
 from config.v2_config import (
     ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -66,6 +67,7 @@ from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
     ResolvedInvocation,
+    project_opencode_public_model,
 )
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
@@ -1201,6 +1203,9 @@ def _config(sources: list[ModelHubSourceConfig]) -> ModelHubConfig:
                 for source in eligible
             )
         )
+    agents["opencode"].models = [
+        ModelHubBackendModelConfig(id="openai/shared-model")
+    ]
     agents["opencode"].menu.checked = ["openai/shared-model"]
     return ModelHubConfig(sources=sources, agents=agents)
 
@@ -2130,6 +2135,48 @@ def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(
     asyncio.run(exercise())
 
 
+def test_gateway_models_endpoint_serves_authenticated_backend_catalog(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        service = _service(
+            tmp_path,
+            sources=[_source("src_primary01", "Primary")],
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_models_catalog",
+            requested_model_id="shared-model",
+            resolved_model_id="shared-model",
+            source_id="src_primary01",
+        )
+        expected = [
+            model["id"]
+            for model in service.backend_catalog_models("codex")
+            if model["routeable"] is True
+        ]
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                unauthorized = await client.get(f"{base_url}/v1/models")
+                assert unauthorized.status == 401
+                response = await client.get(
+                    f"{base_url}/v1/models",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 200
+                payload = await response.json()
+                assert [model["id"] for model in payload["data"]] == expected
+                assert payload["has_more"] is False
+                assert payload["first_id"] == expected[0]
+                assert payload["last_id"] == expected[-1]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("path", "body", "status", "reason"),
     [
@@ -2436,6 +2483,114 @@ def test_runtime_no_candidate_projects_live_exact_hop_blockers(
         }
     ]
     _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_runtime_launch_carries_claude_catalog_capabilities(tmp_path: Path) -> None:
+    source = _source("src_catalogcap", "Catalog capability")
+    service = _service(tmp_path, sources=[source])
+    agent = service.store.config.agents["claude"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="shared-model",
+            context_window=128_000,
+            max_output_tokens=32_000,
+            supports_tools=True,
+            supports_reasoning=True,
+            reasoning_efforts=["low", "high"],
+        )
+    ]
+    agent.routes = {
+        "shared-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "shared-model"),)
+        )
+    }
+    gateway = SimpleNamespace(
+        endpoint=AsyncMock(
+            return_value=("http://127.0.0.1:19000/claude", "gateway-token")
+        )
+    )
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    launch = asyncio.run(router.resolve("claude", "shared-model"))
+
+    assert launch.context_window == 128_000
+    assert launch.max_output_tokens == 32_000
+    assert launch.supports_tools is True
+    assert launch.supports_reasoning is True
+    assert launch.reasoning_efforts == ("low", "high")
+
+
+def test_native_cli_launch_carries_claude_catalog_capabilities(tmp_path: Path) -> None:
+    source = _source(
+        "src_nativecatalog",
+        "Native catalog capability",
+        channel="native_cli",
+        vendor="anthropic",
+        protocol="anthropic",
+    )
+    service = _service(tmp_path, sources=[source])
+    agent = service.store.config.agents["claude"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="shared-model",
+            context_window=128_000,
+            max_output_tokens=32_000,
+            supports_tools=True,
+            supports_reasoning=True,
+            reasoning_efforts=["low", "max"],
+        )
+    ]
+    agent.routes = {
+        "shared-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "shared-model"),)
+        )
+    }
+    router = ModelHubRuntimeRouter(
+        service=service,
+        native_cli_ready=lambda _backend: True,
+    )
+
+    launch = asyncio.run(router.resolve("claude", "shared-model"))
+
+    assert launch.channel == "native_cli"
+    assert launch.context_window == 128_000
+    assert launch.max_output_tokens == 32_000
+    assert launch.supports_tools is True
+    assert launch.supports_reasoning is True
+    assert launch.reasoning_efforts == ("low", "max")
+
+
+def test_runtime_launch_suppresses_efforts_when_reasoning_is_disabled(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_noreasoning", "No reasoning")
+    service = _service(tmp_path, sources=[source])
+    agent = service.store.config.agents["claude"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="shared-model",
+            supports_reasoning=False,
+            reasoning_efforts=["low", "high"],
+        )
+    ]
+    agent.routes = {
+        "shared-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "shared-model"),)
+        )
+    }
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000/claude", "gateway-token")
+            )
+        ),
+    )
+
+    launch = asyncio.run(router.resolve("claude", "shared-model"))
+
+    assert launch.supports_reasoning is False
+    assert launch.reasoning_efforts == ()
 
 
 def test_runtime_no_candidate_reinspects_the_full_chain_for_terminal_facts(
@@ -4473,6 +4628,49 @@ def test_gateway_provenance_retains_pre_mapping_model_identity(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+@pytest.mark.parametrize(
+    "wire_model_id",
+    [
+        pytest.param("alias-a", id="canonical_backend_id"),
+        pytest.param("model-b", id="legacy_upstream_target"),
+    ],
+)
+def test_gateway_accepts_canonical_backend_id_and_unique_legacy_target(
+    tmp_path: Path,
+    wire_model_id: str,
+) -> None:
+    """A route answers for both model ids a request on it may name.
+
+    The launch is told which id to send, so that one is canonical. A process
+    started before Avibe made it explicit still sends the resolved upstream
+    id, and its requests must keep routing: the credential already named the
+    route, so accepting the older shape resolves an alias rather than
+    guessing between routes.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "provenance.json")
+    registry = TurnCorrelationRegistry(store)
+    launch_token = registry.prepare_gateway_turn(
+        backend="codex",
+        token=registry.credentials("codex", "/repo", "turn_alias"),
+        requested_model_id="alias-a",
+        resolved_model_id="model-b",
+        source_id="src_primary01",
+        via_mapping=False,
+        gateway_request_model_id="alias-a",
+    )
+
+    routing = registry.claim_gateway_request(
+        backend="codex",
+        token=launch_token,
+        prepared_turn_id="turn_alias",
+        gateway_model_id=wire_model_id,
+    )
+
+    assert routing.caller_model_id == "alias-a"
+    assert routing.owner_turn_id == "turn_alias"
+
+
 def test_gateway_uses_persisted_exact_hops_for_failover(
     tmp_path: Path,
 ) -> None:
@@ -5008,11 +5206,17 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
 
 def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path) -> None:
     source = _source("src_overlay01", "Overlay", model_id="upstream-model")
-    source.models[0].reasoning_efforts = ["low", "high"]
+    source.models[0].reasoning_efforts = ["medium"]
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
     agent.routes["openai/menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),))
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="openai/menu-model",
+            reasoning_efforts=["low", "high"],
+        )
+    ]
     agent.menu.checked = ["openai/menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
@@ -5062,6 +5266,13 @@ def test_opencode_public_models_follow_persisted_config_without_overlay(
             hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
         )
     }
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="custom/current-model",
+            display_name="Current model",
+            reasoning_efforts=["low", "high"],
+        )
+    ]
     agent.menu.checked = ["custom/current-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
@@ -5079,6 +5290,58 @@ def test_opencode_public_models_follow_persisted_config_without_overlay(
 
     service.store.config.agents["opencode"].mode = "direct"
     assert service.opencode_public_models() == {}
+
+
+def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disabled(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_no_reasoning", "No reasoning", model_id="upstream-model")
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="custom/no-reasoning",
+            supports_reasoning=False,
+            reasoning_efforts=["low", "high"],
+        )
+    ]
+    agent.menu.checked = ["custom/no-reasoning"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+
+    assert service.opencode_public_models()["custom/no-reasoning"] == {
+        "id": "custom/no-reasoning",
+        "name": "custom/no-reasoning",
+        "reasoning": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("input_modalities", "output_modalities", "expected"),
+    [
+        (["text"], [], {"input": ["text"]}),
+        ([], ["text"], {"output": ["text"]}),
+        (["text", "image"], ["text"], {"input": ["text", "image"], "output": ["text"]}),
+        ([], [], None),
+    ],
+)
+def test_opencode_public_model_omits_unspecified_modality_directions(
+    input_modalities: list[str],
+    output_modalities: list[str],
+    expected: dict[str, list[str]] | None,
+) -> None:
+    model = ModelHubBackendModelConfig(
+        id="custom/modalities",
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
+    )
+
+    projected = project_opencode_public_model(model)
+
+    if expected is None:
+        assert "modalities" not in projected
+    else:
+        assert projected["modalities"] == expected
 
 
 def test_opencode_overlay_private_provider_id_is_credential_scoped(
@@ -5125,6 +5388,10 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     )
     config = _config([first, second])
     agent = config.agents["opencode"]
+    agent.models = [
+        ModelHubBackendModelConfig(id="custom/first-model"),
+        ModelHubBackendModelConfig(id="custom/second-model"),
+    ]
     agent.menu.checked = ["custom/first-model", "custom/second-model"]
     agent.routes = {
         "custom/first-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(first.id, "first-model"),)),
@@ -5173,6 +5440,7 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
             ModelHubRouteHopConfig(source.id, "supported-model"),
         )
     )
+    agent.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
     agent.menu.checked = ["openai/menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
@@ -5202,6 +5470,7 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
     agent.routes["openai/menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "stale-model"),))
+    agent.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
     agent.menu.checked = ["openai/menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config

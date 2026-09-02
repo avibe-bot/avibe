@@ -83,13 +83,50 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText('网关 · 未配置模型路由')).toBeTruthy();
-    expect(screen.getByText('已选 0 个模型')).toBeTruthy();
-    expect(screen.getByText('尚未选择模型')).toBeTruthy();
+    expect(screen.getByText('0 个模型')).toBeTruthy();
+    // The card offers the catalog instead of reporting missing supply: an empty
+    // list is something the user can fix from here, not a broken backend.
+    expect(screen.getByText('这个后端的模型列表是空的')).toBeTruthy();
     expect(screen.queryByText(retainedModelId)).toBeNull();
-    expect(screen.queryByText('这个后端没有可用模型')).toBeNull();
 
     await userEvent.click(screen.getAllByRole('button', { name: '管理模型' })[0]);
     expect(onOpenModels).toHaveBeenCalledWith(agentWithRetainedRoute);
+  });
+
+  it('offers the same catalog action on every backend and lists the catalog in its own order', async () => {
+    const onOpenModels = vi.fn();
+    const catalogued = (backend: AgentSupply['backend'], ids: string[]): AgentSupply => ({
+      ...hubAgent,
+      backend,
+      routes: {},
+      model_supply: ids.map((modelId) => ({ model_id: modelId, chain_length: 1, has_runnable_hop: true })),
+      catalog_models: ids.map((id) => ({
+        id, display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+        input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,
+        reasoning_efforts: [], locked: false, routeable: true,
+      })),
+    });
+    const agents = [
+      catalogued('claude', ['claude-two', 'claude-one']),
+      catalogued('codex', ['codex-only']),
+      catalogued('opencode', ['openai/one']),
+    ];
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={agents} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    // The OpenCode-only distinction is gone: the action is the backend-agnostic one.
+    const actions = screen.getAllByRole('button', { name: 'Manage models' });
+    expect(actions).toHaveLength(agents.length);
+    await userEvent.click(actions[1]);
+    expect(onOpenModels).toHaveBeenCalledWith(agents[1]);
+
+    // Catalog order, not an alphabetized or legacy projection.
+    const routeRows = screen.getAllByRole('button', { name: /route chain/i });
+    expect(routeRows.map((row) => row.getAttribute('aria-label'))).toEqual([
+      'Open claude-two route chain',
+      'Open claude-one route chain',
+      'Open codex-only route chain',
+      'Open openai/one route chain',
+    ]);
   });
 
   it('labels a selected OpenCode model with an empty route as unconfigured', () => {
@@ -100,7 +137,7 @@ describe('AgentCard', () => {
       model_supply: [{ model_id: modelId, chain_length: 0, has_runnable_hop: false }],
     }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
-    expect(screen.getByText('已选 1 个模型')).toBeTruthy();
+    expect(screen.getByText('1 个模型')).toBeTruthy();
     expect(screen.getByText(modelId)).toBeTruthy();
     expect(screen.getByText('未配置模型路由')).toBeTruthy();
     expect(screen.queryByText('没有可用供应商')).toBeNull();
@@ -206,13 +243,19 @@ describe('AgentCard', () => {
     expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(2);
   });
 
-  it('offers only gateway enablement and ignores stale chain data in direct mode', () => {
+  it('hides gateway-owned catalog and supply actions in direct mode', () => {
+    const onOpenModels = vi.fn();
     const key = modelChainKey('claude', 'claude-opus-4-6');
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[{ ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null }]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    const directAgent: AgentSupply = { ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null };
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[directAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.queryByText(/Adjust priority/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /route chain/i })).toBeNull();
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
+
+    expect(screen.getByRole('button', { name: 'Switch to gateway' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Manage models' })).toBeNull();
+    expect(onOpenModels).not.toHaveBeenCalled();
   });
 
   it.each([

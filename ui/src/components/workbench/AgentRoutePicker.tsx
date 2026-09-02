@@ -308,10 +308,17 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         </Button>
       </PopoverTrigger>
       <PopoverContent align={align} className="z-50 max-h-[70vh] w-[680px] max-w-[92vw] overflow-y-auto p-0">
-        {/* On phones the three columns stack into one scrollable list; sm+ keeps
-            the side-by-side cascading menu. Model gets the widest track (long ids)
-            and Effort the narrowest (short labels). */}
-        <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-[1fr_1.35fr_0.7fr] sm:divide-x sm:divide-y-0">
+        {/* On phones the columns stack into one scrollable list; sm+ keeps the
+            side-by-side cascading menu. Model gets the widest track (long ids)
+            and Effort the narrowest (short labels). When the picked model states
+            no efforts the menu is a two-column cascade: an Effort column with a
+            heading and nothing under it would look like a list that failed. */}
+        <div
+          className={clsx(
+            'grid grid-cols-1 divide-y divide-border sm:divide-x sm:divide-y-0',
+            effortOptions.length > 0 ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
+          )}
+        >
           {/* Column 1 — Agent */}
           <RouteColumn title={t('chat.picker.agent')}>
             {/* Default option: clears the route back to inherited defaults after
@@ -435,19 +442,21 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           </RouteColumn>
 
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
-          <RouteColumn title={t('chat.picker.effort')}>
-            {effortOptions.map((opt) => (
-              <RouteItem
-                key={opt}
-                active={opt === currentEffort}
-                onClick={() => applyPatch({ reasoning_effort: opt })}
-              >
-                <span className="flex-1 capitalize">
-                  {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
-                </span>
-              </RouteItem>
-            ))}
-          </RouteColumn>
+          {effortOptions.length > 0 && (
+            <RouteColumn title={t('chat.picker.effort')}>
+              {effortOptions.map((opt) => (
+                <RouteItem
+                  key={opt}
+                  active={opt === currentEffort}
+                  onClick={() => applyPatch({ reasoning_effort: opt })}
+                >
+                  <span className="flex-1 capitalize">
+                    {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
+                  </span>
+                </RouteItem>
+              ))}
+            </RouteColumn>
+          )}
         </div>
       </PopoverContent>
     </Popover>

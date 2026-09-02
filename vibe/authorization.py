@@ -475,6 +475,8 @@ _MEMBER_HTTP_RULES = tuple(
         ("PUT", r"^/api/models/agents/[^/]+/chain$"),
         ("GET", r"^/api/models/agents/[^/]+/sources$"),
         ("PUT", r"^/api/models/agents/[^/]+/sources$"),
+        ("PUT", r"^/api/models/agents/[^/]+/models$"),
+        ("GET", r"^/api/models/catalog/models-dev$"),
         ("PUT", r"^/api/models/agents/opencode/menu$"),
         ("PATCH", r"^/api/models/agents/[^/]+/mode$"),
         ("POST", r"^/api/models/agents/[^/]+/chains/reorder$"),
@@ -510,12 +512,13 @@ _EDITOR_HTTP_RULES = tuple(
         # `/api/claude/*` nor `/api/codex/*` grows an editor-visible mutation by
         # accident.
         #
-        # OpenCode has no editor-visible catalog. Its only one is
-        # `/api/backend/opencode/providers`, which is the Settings surface --
+        # OpenCode's native live catalog has no editor-visible endpoint. The only
+        # live endpoint is `/api/backend/opencode/providers`, a Settings surface --
         # base URLs, masked API keys, active auth type, tool-call permission
         # state -- and reaching it runs `ensure_running()`, which can install a
         # plugin, restart, or launch the daemon. Both stay Owner; the model
         # picker treats the refusal as "no catalog" instead.
+        ("GET", r"^/api/models/agents/[^/]+/models$"),
         ("GET", r"^/api/claude/models$"),
         ("GET", r"^/api/codex/models$"),
         ("GET", r"^/api/running-agents$"),

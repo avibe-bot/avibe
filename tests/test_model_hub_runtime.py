@@ -763,32 +763,32 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     assert manifest == {
         "name": "cliproxyapi",
         "resolution": "resolved",
-        "version": "v7.2.95",
-        "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
+        "version": "v7.2.105",
+        "source_sha": "4a2eb54dc6bf943196be4fb515e6a9407a4db143",
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_aarch64.tar.gz",
-                "size_bytes": 14384655,
-                "sha256": "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_darwin_aarch64.tar.gz",
+                "size_bytes": 18975205,
+                "sha256": "641de855c486d373b3c69704bec55a5c5ce3efa523149cc9bd253f76040470d7",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_darwin_amd64.tar.gz",
-                "size_bytes": 15372282,
-                "sha256": "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_darwin_amd64.tar.gz",
+                "size_bytes": 20513376,
+                "sha256": "c9332b8401cd54d357e7c66e88bce603fdb497701a7fa86ee2f82bb1aad846b9",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_amd64.tar.gz",
-                "size_bytes": 15401775,
-                "sha256": "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_linux_amd64.tar.gz",
+                "size_bytes": 20558559,
+                "sha256": "f432872815fe85ac4b0f83b5598253725eea70aae4c95025194cf558f6acef31",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.95/CLIProxyAPI_7.2.95_linux_aarch64.tar.gz",
-                "size_bytes": 14062559,
-                "sha256": "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
+                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_linux_aarch64.tar.gz",
+                "size_bytes": 18559648,
+                "sha256": "b72245cf1958251330eae9e17f1fc5a077f94146b2eea30e23ab5012c6059981",
             },
         ],
     }
@@ -1237,30 +1237,30 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
         (
             "darwin-arm64",
             "darwin-arm64",
-            14384655,
-            "c7ccc28b7db5d1799999a9e22725ccc6bd0e36d9aa023da6b52b7c1a71aad978",
-            "ad81a4c82700bf96eaa4cf5811690b0498ebcfe6087e26ffc0498b8fc8e867af",
+            18975205,
+            "641de855c486d373b3c69704bec55a5c5ce3efa523149cc9bd253f76040470d7",
+            "e8da44e6bf9d85fe7b98a2843d33ff509156727222d6a1ad5dd1a79709849337",
         ),
         (
             "darwin-x64",
             "darwin-x64",
-            15372282,
-            "fbee90c29ee1047a8b3041d736500422bea22cd2ebb306782efcd74c0a10939c",
-            "6b5d209c3bc6adcff035060a862b9fe6eccf8f4ca3c8c0bb7fc88c0b625d38d5",
+            20513376,
+            "c9332b8401cd54d357e7c66e88bce603fdb497701a7fa86ee2f82bb1aad846b9",
+            "07a607965a40f782f63625c557eeeddb39b08e08b1a3057881bb13fe6e887109",
         ),
         (
             "linux-x64",
             "linux-amd64",
-            15401775,
-            "826604e2dbf11913b0f373047f7bca1829eb2bab8a45d3a1916cc2534c7a9fd5",
-            "2be8e4581fe802fe522126b273bc099c01910b6179dca4a4e1b451dd0c80a1c0",
+            20558559,
+            "f432872815fe85ac4b0f83b5598253725eea70aae4c95025194cf558f6acef31",
+            "2717656b33a0d76a7c02b451797341e8791f740a72d4e71577140886f42ba628",
         ),
         (
             "linux-arm64",
             "linux-arm64",
-            14062559,
-            "acc1173c73db2a2ee203438bac9a956491855d4955c5175855abc62d12ae0184",
-            "647a48ab6b2f5520d1279061c4a7aa7ff65729a68614495b1e431debbf4f8706",
+            18559648,
+            "b72245cf1958251330eae9e17f1fc5a077f94146b2eea30e23ab5012c6059981",
+            "8c389d565b8555d5788314e56258c64d675ff76bb9e32047d339088f2789b07e",
         ),
     ],
 )
@@ -3734,6 +3734,115 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
         assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
         assert outcome.error_code == "engine_down"
         assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "reported_model",
+        "expected_kind",
+        "expected_code",
+        "expected_reason",
+    ),
+    (
+        (
+            502,
+            "source-fixture123/model-a",
+            RawOutcomeKind.NETWORK_ERROR,
+            "engine_down",
+            None,
+        ),
+        (
+            502,
+            "source-fixture123/model-b",
+            RawOutcomeKind.HTTP_ERROR,
+            None,
+            "server_error",
+        ),
+        (
+            503,
+            "source-fixture123/model-a",
+            RawOutcomeKind.HTTP_ERROR,
+            None,
+            "server_error",
+        ),
+    ),
+)
+def test_engine_client_distinguishes_local_model_registration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    reported_model: str,
+    expected_kind: RawOutcomeKind,
+    expected_code: str | None,
+    expected_reason: str | None,
+) -> None:
+    async def run() -> None:
+        payload = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": f"unknown provider for model {reported_model}",
+                },
+            }
+        ).encode()
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self) -> None:
+                self.status = status
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="anthropic",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection(
+                "http://127.0.0.1:15220",
+                "management",
+                "gateway",
+            )
+        ).invoke(source, "model-a", {}, stream=False)
+        outcome = await handle.outcome()
+        decision = classify_outcome(outcome)
+
+        assert outcome.kind is expected_kind
+        assert outcome.error_code == expected_code
+        assert decision.error_code == expected_code
+        assert decision.reason == expected_reason
 
     asyncio.run(run())
 

@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/backend-model.schema.json",
+  "title": "BackendModel",
+  "description": "One model exposed by a backend Agent. This is backend menu metadata, not upstream inventory and not a Route.",
+  "type": "object",
+  "required": [
+    "id",
+    "display_name",
+    "origin",
+    "models_dev_id",
+    "context_window",
+    "max_output_tokens",
+    "input_modalities",
+    "output_modalities",
+    "supports_tools",
+    "supports_reasoning",
+    "reasoning_efforts",
+    "locked",
+    "routeable"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The exact identifier shown to and emitted by the backend Agent. OpenCode identifiers use provider/model form. Responses may echo longer identifiers persisted by older releases; mutation admission limits newly added identifiers to 256 characters."
+    },
+    "display_name": {
+      "type": ["string", "null"],
+      "description": "Optional human-readable label. The backend id remains the routing identity."
+    },
+    "origin": {
+      "enum": ["builtin", "models_dev", "manual"],
+      "description": "How this row was first created. User edits remain authoritative regardless of origin."
+    },
+    "models_dev_id": {
+      "type": ["string", "null"],
+      "description": "The provider/model identity selected from models.dev, or null when no match has been selected. Filling metadata later does not change an existing row's origin."
+    },
+    "context_window": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Maximum context tokens used by the backend for context budgeting."
+    },
+    "max_output_tokens": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Maximum output tokens advertised to the backend."
+    },
+    "input_modalities": {
+      "type": "array",
+      "items": { "enum": ["text", "image", "audio", "video", "pdf"] },
+      "uniqueItems": true,
+      "description": "Explicitly supported input modalities. An empty array leaves native metadata in place when the backend has it and otherwise uses that backend adapter's safe default."
+    },
+    "output_modalities": {
+      "type": "array",
+      "items": { "enum": ["text", "image", "audio", "video"] },
+      "uniqueItems": true,
+      "description": "Explicitly supported output modalities. An empty array leaves native metadata in place when the backend has it and otherwise uses that backend adapter's safe default."
+    },
+    "supports_tools": {
+      "type": ["boolean", "null"],
+      "description": "True or false explicitly overrides tool support in the backend projection. Null omits that override and preserves the backend's own default."
+    },
+    "supports_reasoning": {
+      "type": ["boolean", "null"],
+      "description": "True or false explicitly overrides reasoning support in the backend projection. Null omits that override and preserves the backend's own default."
+    },
+    "reasoning_efforts": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "uniqueItems": true,
+      "description": "Effort values are sent verbatim unless supports_reasoning is false. False suppresses their runtime projection without deleting the list, so returning the capability to null is lossless. An empty array means the backend omits the effort parameter."
+    },
+    "locked": {
+      "type": "boolean",
+      "description": "Server-derived. A locked system row is visible but cannot be edited, removed, or reordered."
+    },
+    "routeable": {
+      "type": "boolean",
+      "description": "Server-derived. False only for a backend-owned selector such as Claude Code Default that never names a Route key."
+    }
+  }
+}

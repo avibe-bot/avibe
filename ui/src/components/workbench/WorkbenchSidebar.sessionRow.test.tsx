@@ -117,4 +117,15 @@ describe('session row actions rail', () => {
     // A read-only row has no rail: no pin, no menu, nothing to reserve space for.
     expect(railOffsets(row({ canManageMetadata: false }))).toEqual([]);
   });
+
+  it('keeps the editable rail width stable while hover and focus move across rows', () => {
+    const editable = row({ canManageMetadata: true });
+
+    expect(editable).toContain('pr-11');
+    expect(editable).not.toMatch(/(?:hover|focus-within|pointer-coarse):pr-/);
+    expect(editable).not.toContain('padding-right');
+
+    const readOnly = row({ canManageMetadata: false });
+    expect(readOnly).toContain('pr-2.5');
+  });
 });

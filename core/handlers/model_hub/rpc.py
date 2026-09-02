@@ -133,6 +133,18 @@ async def dispatch_model_hub_rpc(
     if operation == "set_agent_mode":
         await _refresh_payload_backend(service, payload.get("backend"))
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))
+    if operation == "set_agent_models":
+        await _refresh_payload_backend(service, payload.get("backend"))
+        return await service.set_agent_models(
+            payload.get("backend"),
+            payload.get("baseline"),
+            payload.get("models"),
+        )
+    if operation == "models_dev_matches":
+        return await asyncio.to_thread(
+            service.models_dev_matches,
+            payload.get("query"),
+        )
     if operation == "set_agent_chain":
         return await service.set_agent_chain(
             payload.get("backend"),

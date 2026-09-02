@@ -103,6 +103,276 @@ def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
     }
 
 
+def test_codex_hub_catalog_projects_custom_backend_models_from_native_shape():
+    raw = json.dumps(
+        {
+            "client_version": "0.149.1",
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "priority": 99,
+                    "visibility": "list",
+                    "supported_in_api": True,
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "medium", "description": "Medium"}
+                    ],
+                    "use_responses_lite": True,
+                    "multi_agent_version": "v1",
+                    "tool_mode": "code_mode_only",
+                    "prefer_websockets": True,
+                    "model_messages": {"instructions_template": "preserved"},
+                }
+            ],
+        }
+    ).encode()
+    configured = [
+        {
+            "id": "deepseek-v4",
+            "display_name": "DeepSeek V4",
+            "context_window": 1_048_576,
+            "input_modalities": ["text"],
+            "reasoning_efforts": ["low", "high"],
+        }
+    ]
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(raw, configured)
+    )
+
+    assert payload["client_version"] == "0.149.1"
+    assert payload["models"] == [
+        {
+            "slug": "deepseek-v4",
+            "display_name": "DeepSeek V4",
+            "priority": 1,
+            "visibility": "list",
+            "supported_in_api": True,
+            "context_window": 1_048_576,
+            "max_context_window": 1_048_576,
+            "input_modalities": ["text"],
+            "supports_image_detail_original": False,
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+            ],
+            "use_responses_lite": False,
+            "multi_agent_version": None,
+            "tool_mode": None,
+            "prefer_websockets": False,
+            "model_messages": {"instructions_template": "preserved"},
+            "support_verbosity": False,
+            "experimental_supported_tools": [],
+        }
+    ]
+
+
+def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_rows():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "description": "Native-only description",
+                    "priority": 1,
+                    "visibility": "list",
+                    "supported_in_api": True,
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "auto_compact_token_limit": 180_000,
+                    "comp_hash": "native-only",
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "medium", "description": "Medium"}
+                    ],
+                    "additional_speed_tiers": ["fast"],
+                    "service_tiers": [
+                        {"id": "priority", "name": "Fast", "description": "Native"}
+                    ],
+                    "supports_search_tool": True,
+                    "shell_type": "unified_exec",
+                    "support_verbosity": True,
+                    "experimental_supported_tools": ["native_tool"],
+                    "truncation_policy": {"mode": "tokens", "limit": 10_000},
+                    "model_messages": {"instructions_template": "preserved"},
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{"id": "custom-model", "input_modalities": [], "reasoning_efforts": []}],
+        )
+    )
+    custom = payload["models"][0]
+
+    assert custom["slug"] == "custom-model"
+    assert custom["model_messages"] == {"instructions_template": "preserved"}
+    assert custom["shell_type"] == "unified_exec"
+    assert custom["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert custom["input_modalities"] == ["text"]
+    assert custom["supported_reasoning_levels"] == [
+        {"effort": "none", "description": "None"}
+    ]
+    assert custom["support_verbosity"] is False
+    assert custom["experimental_supported_tools"] == []
+    for key in (
+        "description",
+        "context_window",
+        "max_context_window",
+        "auto_compact_token_limit",
+        "comp_hash",
+        "additional_speed_tiers",
+        "service_tiers",
+        "supports_search_tool",
+    ):
+        assert key not in custom
+
+
+def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "auto_compact_token_limit": 180_000,
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [
+                {
+                    "id": "gpt-native",
+                    "display_name": "GPT Native",
+                    "input_modalities": [],
+                }
+            ],
+        )
+    )
+
+    assert payload["models"][0]["input_modalities"] == ["text", "image"]
+    assert payload["models"][0]["supports_image_detail_original"] is True
+    assert payload["models"][0]["auto_compact_token_limit"] == 180_000
+
+
+def test_codex_hub_catalog_retires_native_compaction_limit_after_context_override():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "auto_compact_token_limit": 180_000,
+                    "effective_context_window_percent": 90,
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{"id": "gpt-native", "context_window": 400_000}],
+        )
+    )
+    projected = payload["models"][0]
+
+    assert projected["context_window"] == 400_000
+    assert projected["max_context_window"] == 400_000
+    assert projected["effective_context_window_percent"] == 90
+    assert "auto_compact_token_limit" not in projected
+
+
+def test_codex_hub_catalog_does_not_give_custom_models_template_modalities():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{"id": "custom-model", "input_modalities": []}],
+        )
+    )
+
+    assert payload["models"][0]["input_modalities"] == ["text"]
+    assert payload["models"][0]["supports_image_detail_original"] is False
+
+
+def test_codex_hub_catalog_can_disable_and_restore_native_reasoning():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "default_reasoning_level": "high",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Low"},
+                        {"effort": "high", "description": "High"},
+                    ],
+                }
+            ]
+        }
+    ).encode()
+    configured = {
+        "id": "gpt-native",
+        "reasoning_efforts": ["low", "high"],
+    }
+
+    disabled = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{**configured, "supports_reasoning": False}],
+        )
+    )["models"][0]
+    restored = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{**configured, "supports_reasoning": None}],
+        )
+    )["models"][0]
+
+    assert disabled["default_reasoning_level"] == "none"
+    assert disabled["supported_reasoning_levels"] == [
+        {"effort": "none", "description": "None"}
+    ]
+    assert restored["default_reasoning_level"] == "low"
+    assert restored["supported_reasoning_levels"] == [
+        {"effort": "low", "description": "Low"},
+        {"effort": "high", "description": "High"},
+    ]
+
+
 def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     captured = {}
 

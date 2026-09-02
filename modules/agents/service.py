@@ -1172,6 +1172,17 @@ class AgentService:
         finally:
             self.release_runtime_turn_tokens(runtime_tokens)
 
+    async def invalidate_model_hub_runtime(self, agent_name: str) -> bool:
+        """Invalidate future Hub-only runtime state without disturbing Direct work."""
+        agent = self.agents.get(agent_name)
+        if agent is None:
+            return False
+        invalidate = getattr(agent, "invalidate_model_hub_runtime", None)
+        if not callable(invalidate):
+            return False
+        await invalidate()
+        return True
+
 
 @dataclass
 class _RuntimeTurnGate:
