@@ -1156,6 +1156,13 @@ def render_skill_list(
 def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
     rows = render_skill_list(skills, page=1)
     if not rows:
+        if any(skill.disable_model_invocation for skill in skills):
+            return (
+                "\n\n## Skills\n\n"
+                "If the user requests a skill by exact name, run "
+                "`vibe skill load -- <name>` before proceeding.\n"
+                "Otherwise, do not guess skill names."
+            )
         return ""
     _, next_page = _page(skills, 1)
     later_page_guidance = (

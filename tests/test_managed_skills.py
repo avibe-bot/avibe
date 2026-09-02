@@ -559,7 +559,10 @@ def test_manual_only_skill_is_loadable_but_not_advertised(tmp_path: Path) -> Non
     assert manual is not None
     assert manual.disable_model_invocation is True
     assert render_skill_list([manual]) == ""
-    assert render_skill_catalog_prompt([manual]) == ""
+    manual_prompt = render_skill_catalog_prompt([manual])
+    assert "`vibe skill load -- <name>`" in manual_prompt
+    assert "- manual:" not in manual_prompt
+    assert "Run only when explicitly requested." not in manual_prompt
 
     loaded = load_skill("manual", resolved_skills=[manual])
     assert loaded is not None
