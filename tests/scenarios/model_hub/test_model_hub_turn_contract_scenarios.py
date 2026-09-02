@@ -562,10 +562,9 @@ def test_mh_turn_outcomes_and_cancel_are_closed_provenance_products(tmp_path: Pa
     records: list[dict] = []
 
     def terminalizer(turn_id: str):
-        token = registry.credentials("claude", f"scope-{turn_id}", turn_id)
-        registry.prepare_gateway_turn(
+        token = registry.prepare_gateway_turn(
             backend="claude",
-            token=token,
+            token=registry.credentials("claude", f"scope-{turn_id}", turn_id),
             requested_model_id="scenario-model",
             resolved_model_id="scenario-model",
             source_id="src_outcome01",

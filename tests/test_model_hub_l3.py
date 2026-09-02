@@ -1088,10 +1088,9 @@ def _prepared_gateway_request(
     source_id: str,
     stream: bool,
 ) -> SimpleNamespace:
-    token = gateway.correlation.credentials("codex", "/repo", turn_id)
-    gateway.correlation.prepare_gateway_turn(
+    token = gateway.correlation.prepare_gateway_turn(
         backend="codex",
-        token=token,
+        token=gateway.correlation.credentials("codex", "/repo", turn_id),
         requested_model_id=requested_model,
         resolved_model_id="shared-model",
         source_id=source_id,
@@ -1434,6 +1433,15 @@ def test_retired_process_scope_revokes_token_and_fails_closed(
     store = BoundedProvenanceStore(tmp_path / "retired-scope.json")
     registry = TurnCorrelationRegistry(store)
     token = registry.credentials("codex", "/repo", "turn_evicted")
+    launch = registry.prepare_gateway_turn(
+        backend="codex",
+        token=token,
+        requested_model_id="shared-model",
+        resolved_model_id="shared-model",
+        source_id="src_primary01",
+        via_mapping=False,
+    )
+    assert launch != token
     turn_id = registry.begin_gateway_request(
         backend="codex",
         token=token,
@@ -1449,7 +1457,10 @@ def test_retired_process_scope_revokes_token_and_fails_closed(
 
     registry.retire_scope("codex", "/repo")
 
+    # Every credential the scope minted is revoked, not only the one that
+    # names the process: a launch credential is as good as a token.
     assert registry.authenticates("codex", token) is False
+    assert registry.authenticates("codex", launch) is False
     replacement = registry.credentials("codex", "/repo", "turn_replacement")
     assert replacement != token
     assert registry.authenticates("codex", replacement) is True
@@ -1467,7 +1478,7 @@ def test_retired_process_scope_revokes_token_and_fails_closed(
     )
     registry.retire_scope("codex", "/repo")
     assert registry._scopes == {}
-    assert registry._token_scopes == {}
+    assert registry._credentials == {}
 
 
 def test_terminal_failure_survives_exact_scope_retirement(
@@ -1544,6 +1555,584 @@ def test_terminal_retirement_does_not_restore_ambiguous_scope(
     )
 
     assert store.get("turn_first") is None
+
+
+def _routing_registry(tmp_path: Path, label: str) -> tuple[TurnCorrelationRegistry, str]:
+    store = BoundedProvenanceStore(tmp_path / f"routing-{label}.json")
+    registry = TurnCorrelationRegistry(store)
+    return registry, registry.credentials("claude", "session:/repo", "turn_route01")
+
+
+def _prepare_route(
+    registry: TurnCorrelationRegistry,
+    token: str,
+    *,
+    turn_id: str,
+    requested: str,
+    resolved: str,
+    source_id: str = "src_primary01",
+) -> str:
+    """Prepare a route and return the credential its launch must use.
+
+    Mirrors `ModelHubTurnGateway.endpoint`: the scope credential goes in, the
+    credential bound to this route comes back, and that is the one the
+    launched process authenticates with.
+    """
+
+    return registry.prepare_gateway_turn(
+        backend="claude",
+        token=token,
+        turn_id=turn_id,
+        requested_model_id=requested,
+        resolved_model_id=resolved,
+        source_id=source_id,
+        via_mapping=True,
+    )
+
+
+def _resolution(registry: TurnCorrelationRegistry, token: str, model: str) -> str | None:
+    return registry.claim_gateway_request(
+        backend="claude",
+        token=token,
+        prepared_turn_id=None,
+        gateway_model_id=model,
+    ).caller_model_id
+
+
+@pytest.mark.parametrize(
+    "arrives",
+    [
+        pytest.param("after_its_turn_settled", id="after_its_turn_settled"),
+        pytest.param("while_another_model_is_live", id="while_another_model_is_live"),
+    ],
+)
+def test_gateway_keeps_a_live_process_routable_outside_its_turn_windows(
+    tmp_path: Path,
+    arrives: str,
+) -> None:
+    """Routing is a property of the process scope, not of an open turn window.
+
+    A launched CLI keeps issuing gateway requests between the turns Avibe
+    dispatches — tool loops, agent-initiated continuations, transport retries.
+    Those requests carry the upstream model id, which only the route the
+    process was launched on can translate back into the caller model the
+    resolver routes from, so routing tied to an open turn window makes every
+    one of them unroutable.
+    """
+
+    registry, token = _routing_registry(tmp_path, arrives)
+    route_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route01",
+        requested="caller-model",
+        resolved="hub-model",
+    )
+    registry.settle(
+        "turn_route01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    if arrives == "while_another_model_is_live":
+        # A dispatched turn on a different model is the common case: the CLI
+        # keeps finishing work for the previous one. Its route answers for the
+        # model it prepared and must say nothing about any other.
+        registry.credentials("claude", "session:/repo", "turn_route02")
+        _prepare_route(
+            registry,
+            token,
+            turn_id="turn_route02",
+            requested="other-caller",
+            resolved="other-hub-model",
+        )
+
+    assert _resolution(registry, route_token, "hub-model") == "caller-model"
+    # Reach follows the route this launch was made on, so a model that route
+    # does not name stays unroutable rather than becoming reachable by naming
+    # it — including one another launch on the same process can reach.
+    assert _resolution(registry, route_token, "never-routed") is None
+    assert _resolution(registry, route_token, "other-hub-model") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario", "rival_caller", "rival_source"),
+    [
+        pytest.param("two_caller_models", "rival-caller", "src_primary01", id="two_caller_models"),
+        pytest.param("two_sources", "caller-model", "src_backup001", id="two_sources"),
+    ],
+)
+def test_gateway_answers_each_route_that_aliases_one_upstream_model(
+    tmp_path: Path,
+    scenario: str,
+    rival_caller: str,
+    rival_source: str,
+) -> None:
+    """A request is routed by the credential it arrives on, not by its model.
+
+    Two menu entries may resolve to one upstream model — deliberately, as two
+    price tiers or two Sources for the same model — and one process scope
+    launches both. The wire carries the upstream id alone, so a credential
+    naming only the process cannot say which of them a request belongs to, and
+    the routing table has to either guess or refuse. Binding the credential to
+    the route removes the question: each launch answers for its own route, and
+    that stays true once the turns that prepared them have settled.
+    """
+
+    registry, token = _routing_registry(tmp_path, scenario)
+    registry.credentials("claude", "session:/repo", "turn_route02")
+    first = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route01",
+        requested="caller-model",
+        resolved="hub-model",
+        source_id="src_primary01",
+    )
+    rival = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route02",
+        requested=rival_caller,
+        resolved="hub-model",
+        source_id=rival_source,
+    )
+
+    assert first != rival
+    for turn_id in (None, "turn_route01", "turn_route02"):
+        if turn_id is not None:
+            registry.settle(
+                turn_id,
+                settled_by=SETTLED_BY_TERMINAL_RESULT,
+                ts=NOW.isoformat(),
+            )
+        assert _resolution(registry, first, "hub-model") == "caller-model"
+        assert _resolution(registry, rival, "hub-model") == rival_caller
+        # The scope credential names the process and no route, so it answers
+        # for neither rather than picking one.
+        assert _resolution(registry, token, "hub-model") is None
+
+
+def test_gateway_routing_dies_with_the_process_scope(tmp_path: Path) -> None:
+    """A retired scope revokes its credentials, so its routes stop answering.
+
+    Every credential the scope minted, not only the one that names the process
+    itself: a launch credential outliving its scope would keep a dead
+    runtime's routes answering on a token nothing can revoke.
+    """
+
+    registry, token = _routing_registry(tmp_path, "retired")
+    route_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route01",
+        requested="caller-model",
+        resolved="hub-model",
+    )
+    registry.settle(
+        "turn_route01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert _resolution(registry, route_token, "hub-model") == "caller-model"
+
+    registry.retire_scope("claude", "session:/repo")
+
+    assert registry.authenticates("claude", token) is False
+    assert registry.authenticates("claude", route_token) is False
+    assert _resolution(registry, route_token, "hub-model") is None
+
+
+@pytest.mark.parametrize(
+    ("settled_resolved", "live_resolved"),
+    [
+        pytest.param("hub-settled", "hub-live", id="distinct_upstream_models"),
+        pytest.param("hub-shared", "hub-shared", id="one_aliased_upstream_model"),
+    ],
+)
+def test_gateway_attributes_a_request_only_to_a_turn_that_claims_its_model(
+    tmp_path: Path,
+    settled_resolved: str,
+    live_resolved: str,
+) -> None:
+    """Serving a scope-routed request must not cost the live turn its record.
+
+    Routing and attribution share one entry point, so an out-of-turn request is
+    resolved while some unrelated turn is the only open window. Binding it there
+    would tell that turn a model it never asked for arrived on its token, which
+    marks it ambiguous — and an ambiguous trace makes `settle` drop the record
+    for the request the turn goes on to make itself.
+
+    A live turn's claim is its whole route, not the upstream model the route
+    ends at, so the aliased case holds too: two menu entries resolving to one
+    upstream model are two routes, and the live one owns only its own.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-attribution.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    settled_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved=settled_resolved,
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved=live_resolved,
+    )
+
+    with registry.gateway_terminalizer(
+        backend="claude",
+        token=settled_token,
+    ) as out_of_turn:
+        assert out_of_turn.resolution_model(settled_resolved) == "caller-settled"
+        # Its own turn has already settled, so there is nothing to attribute to.
+        assert out_of_turn.turn_id is None
+
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as live:
+        assert live.resolution_model(live_resolved) == "caller-live"
+        assert live.turn_id == "turn_live01"
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["terminal_error"] == {
+        "source_id": "src_primary01",
+        "configured_model_id": live_resolved,
+        "channel": "hub",
+        "reason": "protocol_error",
+        "stream_started": False,
+    }
+
+
+def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
+    tmp_path: Path,
+) -> None:
+    """A turn holding several requests reports the one in flight the longest.
+
+    The settlement record has one attempt slot, but a live process issues
+    concurrent requests on one turn and each carries its own identity — a
+    request that fell back to a backup Source is not the same attempt as a peer
+    still holding the primary. The slot has to name one of them, and the oldest
+    entry is the only stable answer: entries are removed as their requests
+    settle, so whatever is still first arrived before all the others and no
+    later request can displace it.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-oldest.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_live01")
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as first:
+        assert first.resolution_model("hub-live") == "caller-live"
+        # This request fell back to a backup hop and is awaiting upstream.
+        first.begin_attempt(
+            source_id="src_backup001",
+            resolved_model_id="hub-live",
+            channel="hub",
+            via_mapping=True,
+        )
+        with registry.gateway_terminalizer(
+            backend="claude",
+            token=live_token,
+        ) as second:
+            assert second.resolution_model("hub-live") == "caller-live"
+            # Cancelled while both are open, before either has settled.
+            registry.settle(
+                "turn_live01",
+                settled_by=SETTLED_BY_STOPPED,
+                ts=NOW.isoformat(),
+            )
+
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["outcome"] == "canceled"
+    assert record["canceled_attempt"] == {
+        "source_id": "src_backup001",
+        "configured_model_id": "hub-live",
+        "channel": "hub",
+    }
+
+
+def test_an_unclaimed_request_leaves_no_attempt_on_the_live_turn(
+    tmp_path: Path,
+) -> None:
+    """A turn that issued no gateway request must settle as having made none.
+
+    The terminalizer opens the live turn's attempt on the way in, before any
+    model id has been read — `fail` runs before routing and needs a turn to
+    fail. So a request routed from scope history has to give that attempt back
+    on its way out: left armed, it settles the live turn as having canceled or
+    interrupted a Hub attempt that only ever belonged to the settled turn.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-phantom.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    settled_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+
+    with registry.gateway_terminalizer(
+        backend="claude",
+        token=settled_token,
+    ) as out_of_turn:
+        assert out_of_turn.resolution_model("hub-settled") == "caller-settled"
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_NO_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert store.get("turn_live01") is None
+
+
+def test_an_unclaimed_request_leaves_an_attempt_in_flight_untouched(
+    tmp_path: Path,
+) -> None:
+    """A request records what it attempted, whoever else is on its turn.
+
+    An attempt identity describes one request, and a live process issues
+    concurrent ones on one turn. So a delayed request for a settled turn's
+    route arrives while the live turn's own request is awaiting an upstream
+    result, and it touches the turn's pending state twice: on the way in to
+    arm a launch identity, and on the way out to give it back. Either move,
+    aimed at the turn rather than at the request, erases the attempt actually
+    in flight — and `finish_attempt` reconstructs nothing from an absent one,
+    so the live turn settles having served a model with no record of which
+    Source and model served it.
+
+    Stated as the surviving provenance rather than as the two moves, so any
+    later route to the same erasure fails here.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-concurrent.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    settled_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+        source_id="src_live0001",
+    )
+
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as live:
+        assert live.resolution_model("hub-live") == "caller-live"
+        live.begin_attempt(
+            source_id="src_live0001",
+            resolved_model_id="hub-live",
+            channel="hub",
+            via_mapping=True,
+        )
+        # The live request is now awaiting upstream. A delayed request for the
+        # settled turn's route lands on the same process and same live turn.
+        with registry.gateway_terminalizer(
+            backend="claude",
+            token=settled_token,
+        ) as delayed:
+            assert delayed.resolution_model("hub-settled") == "caller-settled"
+        success = _outcome(RawOutcomeKind.SUCCESS, source_id="src_live0001")
+        live.finish_attempt(outcome=success, decision=classify_outcome(success))
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["served"] == {
+        "source_id": "src_live0001",
+        "configured_model_id": "hub-live",
+        "channel": "hub",
+    }
+
+
+def test_a_request_gives_back_only_its_own_launch_identity(
+    tmp_path: Path,
+) -> None:
+    """Giving back a launch identity must not take a real attempt with it.
+
+    The reverse arrival order of the test above: a delayed request arms its
+    launch identity first, and only then does the live request begin its own
+    attempt. The delayed one is now stale, and it names the same Source and
+    model as the live attempt whenever the live request went out on its
+    primary hop — which is the ordinary case. So a give-back cannot be decided
+    by what a launch identity looks like, only by whose it is; by value the two
+    are indistinguishable, and the live turn loses the provenance of a request
+    it really did make.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-stale-prep.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    settled_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+        source_id="src_live0001",
+    )
+
+    # The delayed request arms its launch identity first.
+    with registry.gateway_terminalizer(
+        backend="claude",
+        token=settled_token,
+    ) as delayed:
+        # Only then does the live request begin its own attempt, on the primary
+        # hop — the same Source and model the identity above named.
+        with registry.gateway_terminalizer(backend="claude", token=live_token) as live:
+            assert live.resolution_model("hub-live") == "caller-live"
+            live.begin_attempt(
+                source_id="src_live0001",
+                resolved_model_id="hub-live",
+                channel="hub",
+                via_mapping=True,
+            )
+            assert delayed.resolution_model("hub-settled") == "caller-settled"
+            success = _outcome(RawOutcomeKind.SUCCESS, source_id="src_live0001")
+            live.finish_attempt(outcome=success, decision=classify_outcome(success))
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["served"] == {
+        "source_id": "src_live0001",
+        "configured_model_id": "hub-live",
+        "channel": "hub",
+    }
+
+
+def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(
+    tmp_path: Path,
+) -> None:
+    """The 409 this fixes, end to end: same request, before and after settlement.
+
+    ``service.adapter.invocations`` is the evidence that the caller model was
+    the routing input — only the route keyed by it carries this hop.
+    """
+
+    async def exercise() -> None:
+        primary = _source(
+            "src_primary01",
+            "Primary",
+            vendor="anthropic",
+            protocol="anthropic",
+            model_id="hub-model",
+        )
+        service = _service(
+            tmp_path,
+            sources=[primary],
+            outcomes=[_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id)],
+        )
+        service.store.config.agents["claude"].routes["caller-model"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(primary.id, "hub-model"),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "claude",
+            process_scope="session:/repo",
+            turn_id="turn_between_windows",
+            requested_model_id="caller-model",
+            resolved_model_id="hub-model",
+            source_id=primary.id,
+        )
+        gateway.correlation.settle(
+            "turn_between_windows",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/messages",
+                    json={
+                        "model": "hub-model",
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 200
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [(primary.id, "hub-model", "claude")]
+
+    asyncio.run(exercise())
 
 
 def test_gateway_models_endpoint_serves_authenticated_backend_catalog(
@@ -1817,10 +2406,9 @@ def test_no_candidate_provenance_carries_exact_hop_blockers_from_each_entry(
             blockers=blockers,
         )
     else:
-        token = registry.credentials("claude", "/repo", turn_id)
-        registry.prepare_gateway_turn(
+        token = registry.prepare_gateway_turn(
             backend="claude",
-            token=token,
+            token=registry.credentials("claude", "/repo", turn_id),
             requested_model_id="shared-model",
             resolved_model_id="shared-model",
             source_id="src_primary01",
@@ -4040,15 +4628,31 @@ def test_gateway_provenance_retains_pre_mapping_model_identity(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+@pytest.mark.parametrize(
+    "wire_model_id",
+    [
+        pytest.param("alias-a", id="canonical_backend_id"),
+        pytest.param("model-b", id="legacy_upstream_target"),
+    ],
+)
 def test_gateway_accepts_canonical_backend_id_and_unique_legacy_target(
     tmp_path: Path,
+    wire_model_id: str,
 ) -> None:
+    """A route answers for both model ids a request on it may name.
+
+    The launch is told which id to send, so that one is canonical. A process
+    started before Avibe made it explicit still sends the resolved upstream
+    id, and its requests must keep routing: the credential already named the
+    route, so accepting the older shape resolves an alias rather than
+    guessing between routes.
+    """
+
     store = BoundedProvenanceStore(tmp_path / "provenance.json")
     registry = TurnCorrelationRegistry(store)
-    token = registry.credentials("codex", "/repo", "turn_alias")
-    registry.prepare_gateway_turn(
+    launch_token = registry.prepare_gateway_turn(
         backend="codex",
-        token=token,
+        token=registry.credentials("codex", "/repo", "turn_alias"),
         requested_model_id="alias-a",
         resolved_model_id="model-b",
         source_id="src_primary01",
@@ -4056,38 +4660,15 @@ def test_gateway_accepts_canonical_backend_id_and_unique_legacy_target(
         gateway_request_model_id="alias-a",
     )
 
-    assert (
-        registry.begin_gateway_request(
-            backend="codex",
-            token=token,
-            requested_model_id="alias-a",
-        )
-        == "turn_alias"
+    routing = registry.claim_gateway_request(
+        backend="codex",
+        token=launch_token,
+        prepared_turn_id="turn_alias",
+        gateway_model_id=wire_model_id,
     )
-    assert (
-        registry.gateway_resolution_model(
-            backend="codex",
-            token=token,
-            gateway_model_id="alias-a",
-        )
-        == "alias-a"
-    )
-    assert (
-        registry.begin_gateway_request(
-            backend="codex",
-            token=token,
-            requested_model_id="model-b",
-        )
-        == "turn_alias"
-    )
-    assert (
-        registry.gateway_resolution_model(
-            backend="codex",
-            token=token,
-            gateway_model_id="model-b",
-        )
-        == "alias-a"
-    )
+
+    assert routing.caller_model_id == "alias-a"
+    assert routing.owner_turn_id == "turn_alias"
 
 
 def test_gateway_uses_persisted_exact_hops_for_failover(

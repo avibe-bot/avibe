@@ -335,7 +335,10 @@ class ModelHubTurnGateway:
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
         token = self.correlation.credentials(backend, scope, turn_id)
         if requested_model_id and resolved_model_id and source_id:
-            self.correlation.prepare_gateway_turn(
+            # Preparing the route hands back the credential bound to it. The
+            # launch must authenticate with that one: routing is answered from
+            # the credential, and the scope credential names only the process.
+            token = self.correlation.prepare_gateway_turn(
                 backend=backend,
                 token=token,
                 turn_id=turn_id,
