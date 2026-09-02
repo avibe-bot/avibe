@@ -164,6 +164,33 @@ def test_runtime_catalog_filter_reuses_backend_specific_listing_acl(monkeypatch)
     assert captured["backends"] == ["claude"]
 
 
+def test_mixed_runtime_catalog_does_not_grant_global_skills_to_project_editor(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    monkeypatch.setattr(skills, "_project_role_allows_editor", lambda context, project_id: True)
+    try:
+        filtered = skills._filter_skill_listing(
+            {
+                "ok": True,
+                "skills": [
+                    {"name": "project-skill", "scope": "project", "agents": ["codex"]},
+                    {"name": "global-skill", "scope": "global", "agents": ["codex"]},
+                ],
+            },
+            scope="all",
+            project_dir=str(tmp_path / "project"),
+            project_id="project-1",
+            backends=["codex"],
+            user_context=_organization_context("member-1", instance_role="viewer"),
+        )
+    finally:
+        engine.dispose()
+
+    assert [row["name"] for row in filtered["skills"]] == ["project-skill"]
+
+
 def test_list_project_uses_p_and_cwd_and_agents(monkeypatch):
     rec = _Recorder({"ok": True, "skills": []})
     monkeypatch.setattr(skills, "_run_askill", rec)

@@ -92,6 +92,28 @@ def test_loose_parser_requires_only_portable_name_and_description(tmp_path: Path
     assert skill.body == "# Instructions\n"
 
 
+def test_loose_parser_ignores_nested_required_field_names(tmp_path: Path) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "metadata:\n"
+        "  name: nested-name\n"
+        "  description: Nested description\n"
+        "name: top-level-name\n"
+        "description: Top-level description\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.name == "top-level-name"
+    assert skill.description == "Top-level description"
+
+
 @pytest.mark.parametrize(
     "name",
     ["", "Uppercase", "two words", "-leading", "trailing-", "two--hyphens", "shell;word"],
@@ -156,6 +178,28 @@ def test_global_roots_honor_backend_home_overrides(tmp_path: Path, monkeypatch) 
     _write_skill(xdg_home / "opencode" / "skills", "opencode", "opencode", "OpenCode")
 
     assert [skill.name for skill in resolve_skills(cwd)] == ["claude", "codex", "opencode"]
+
+
+def test_codex_system_skills_are_a_low_priority_global_compatibility_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    codex_home = home / ".codex"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+
+    user = _write_skill(home / ".agents" / "skills", "shared", "shared", "User")
+    _write_skill(codex_home / "skills" / ".system", "shared", "shared", "System")
+    system = _write_skill(codex_home / "skills" / ".system", "imagegen", "imagegen", "System")
+
+    by_name = {skill.name: skill for skill in resolve_skills(cwd)}
+
+    assert by_name["shared"].directory == user.parent.resolve()
+    assert by_name["imagegen"].directory == system.parent.resolve()
 
 
 def test_empty_backend_home_overrides_fall_back_to_default_roots(tmp_path: Path, monkeypatch) -> None:
@@ -302,6 +346,40 @@ def test_system_prompt_catalog_forwards_remote_acl_context(tmp_path: Path, monke
         "backend": "codex",
         "user_context": resource_context,
     }
+
+
+def test_remote_acl_identity_uses_the_registered_working_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = tmp_path / "repository"
+    working_directory = repository / "registered-subdirectory"
+    working_directory.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    _write_skill(working_directory / ".agents" / "skills", "project", "project", "Project")
+    captured = {}
+
+    def filter_names(rows, *, backend, project_dir, user_context):
+        captured.update(project_dir=project_dir, rows=rows)
+        return {"project"}
+
+    monkeypatch.setattr(
+        "core.services.skills.filter_accessible_runtime_skill_names",
+        filter_names,
+    )
+
+    skills = resolve_accessible_skills(
+        working_directory,
+        backend="codex",
+        user_context={"sub": "member-1"},
+    )
+
+    assert [skill.name for skill in skills] == ["project"]
+    assert captured["project_dir"] == str(working_directory.resolve())
 
 
 def test_load_emits_body_only_and_agent_accessible_directory(tmp_path: Path, monkeypatch) -> None:

@@ -12,13 +12,17 @@ import shutil
 import stat
 import struct
 import tempfile
-import tomllib
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from config import paths
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +42,7 @@ DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES = 8 * 1024 * 1024
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_REQUIRED_FIELD_RE = re.compile(r"^[ \t]*(name|description)[ \t]*:[ \t]*(.*)$")
+_REQUIRED_FIELD_RE = re.compile(r"^(name|description)[ \t]*:[ \t]*(.*)$")
 _TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
 _BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
 _WINDOWS_RESERVED = {
@@ -526,6 +530,7 @@ def resolve_skills(
         (resolved_codex_home / "skills", 2),
         (resolved_claude_home / "skills", 3),
         (resolved_xdg_home / "opencode" / "skills", 4),
+        (resolved_codex_home / "skills" / ".system", 5),
     )
     for root, family_rank in global_roots:
         if compatibility_budget.exhausted:
@@ -559,8 +564,6 @@ def resolve_accessible_skills(
     from core.services.skills import filter_accessible_runtime_skill_names
 
     working_directory = _working_directory(cwd)
-    project_directories = _project_directories(working_directory)
-    project_base = project_directories[-1] if project_directories else working_directory
     try:
         allowed_names = filter_accessible_runtime_skill_names(
             [
@@ -571,7 +574,7 @@ def resolve_accessible_skills(
                 for skill in compatibility
             ],
             backend=backend or "",
-            project_dir=str(project_base),
+            project_dir=str(working_directory),
             user_context=user_context,
         )
     except Exception:
