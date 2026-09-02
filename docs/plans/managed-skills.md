@@ -107,10 +107,13 @@ Discovery and load share one verified-read primitive. It records the open
 file's identity, size, high-resolution modification time, and change/version
 metadata available on the platform before the bounded read, queries the same
 handle afterward, and accepts the bytes only when every recorded value remains
-unchanged. An in-place rewrite, truncation, or replacement during the read
-therefore omits the candidate during discovery or fails load with empty standard
-output. This consistency rule is owned once by the resolver rather than
-reimplemented by Catalog and load call sites.
+unchanged. Before accepting, it also queries the `SKILL.md` directory entry
+again, relative to the retained directory handle when one is available, and
+requires that path to remain a regular file naming the same file identity as
+the open handle. An in-place rewrite, truncation, or atomic path replacement
+during the read therefore omits the candidate during discovery or fails load
+with empty standard output. This consistency rule is owned once by the resolver
+rather than reimplemented by Catalog and load call sites.
 
 Backend-bundled or system Skills other than the explicitly listed Codex
 `.system` compatibility root, plugin caches, administrator-only Skills, and
@@ -460,7 +463,30 @@ entry when either its owner process is gone or its expiry has passed. Restoring
 a persisted poll publishes a fresh binding with the current process identity,
 authorization snapshot, absolute Skill roots, and a new expiry.
 
-### 8.3 Historical context is historical
+### 8.3 Caller authorization
+
+For a remote Workbench caller, the same trusted `resource_user_context` used by
+the Skills management surface is carried in the backend caller binding. Catalog
+rendering, `vibe skill list`, and `vibe skill load` each resolve the current
+winner and filter it through that context before exposing its description or
+body. Missing, malformed, or unavailable remote authorization state fails
+closed for compatibility Skills. Avibe built-ins are product runtime content
+and remain available without per-user resource policies. A genuinely local
+caller retains local owner access.
+
+Authorization belongs to the resolved candidate, not merely its declared name.
+The backend-neutral `.agents` candidate uses the three legacy backend policy
+identifiers for its one logical installation. A backend-native candidate uses
+only its own backend policy identifier: Codex for `.codex` and Codex system,
+Claude for `.claude`, and OpenCode for `.opencode` or the OpenCode config root.
+askill compatibility links that resolve back to the selected backend-neutral
+`.agents` directory do not add candidates or policy identities. Distinct
+directories that declare the same name remain distinct candidates, so access
+to a losing Claude candidate cannot authorize a winning Codex candidate. These
+source and policy details remain internal and are never shown in the
+agent-facing Catalog.
+
+### 8.4 Historical context is historical
 
 Avibe does not track which Skills a Session has loaded, attach revisions to
 loaded content, rewrite old conversation history, invalidate prior loads, or
@@ -556,10 +582,13 @@ Built-in source paths must be representable without aliases on every supported
 platform. Release packaging rejects absolute or traversal paths, backslashes,
 NUL, drive/UNC prefixes, Windows-reserved components, trailing-dot/space names,
 case-insensitive path collisions, and empty directories. It also rejects more
-than 1,024 total direct child entries, any direct child that is not a valid
-Skill directory, any Skill whose closing frontmatter delimiter exceeds 64 KiB,
-any body over 256 KiB, or a built-in tree whose bounded frontmatter exceeds
-8 MiB.
+than 1,024 built-in root entries, any direct child that is not a valid Skill
+directory, more than 4,096 directories and regular files across the complete
+tree, more than 32 MiB of regular-file bytes across the complete tree, any
+Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over 256
+KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB. The aggregate
+entry and byte checks occur before hashing or copying and abort as soon as a
+limit is crossed.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -639,10 +668,13 @@ do not create three product-level copies.
 
 Existing backend-native installs remain in place and are discovered as
 compatibility inputs; Avibe does not move or rewrite user files during this
-migration. Existing backend-specific Workbench access-policy identifiers are
-treated as aliases for one logical Skill: any accessible alias permits the
-logical Skill, new installs create all three aliases, and logical removal
-removes all aliases and askill-managed links. The API may continue accepting a
+migration. New backend-neutral installs create all three legacy Workbench
+access-policy identifiers for the one logical `.agents` Skill, and logical
+removal removes all three identifiers and askill-managed links. Existing
+backend-native Skills retain their own backend policy identity; same-name
+directories are never policy aliases. Physical askill links back to the selected
+backend-neutral directory are deduplicated as defined in Section 8.3. The API
+may continue accepting a
 legacy `backends` field for compatibility, but validates and ignores narrowing
 requests. The UI removes backend filters, chips, install selectors, and
 availability switches.
@@ -709,7 +741,8 @@ Catalogs at runtime.
   any read, and load follows the same descriptor-bound contract.
 - An in-place rewrite, truncation, or replacement of `SKILL.md` during the
   verified read is never accepted: discovery omits it and load exits non-zero
-  with empty standard output.
+  with empty standard output. Atomic namespace replacement after the file is
+  opened is covered separately from in-place handle mutation.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
@@ -749,6 +782,10 @@ Catalogs at runtime.
   cannot pair the opened body with a different directory identity.
 - A body over 256 KiB is omitted from discovery, and a body that crosses the
   limit before load produces empty standard output and a non-zero exit.
+- A remote caller denied by the resolved candidate's Skill policy sees neither
+  its Catalog row nor its loaded body. A same-name accessible candidate from a
+  different backend directory cannot authorize the winner, while physical
+  askill aliases of one backend-neutral directory retain logical access.
 
 ### 14.2 Live Session behavior
 
@@ -790,8 +827,9 @@ isolation acceptance gates.
 - a fixed snapshot-v1 fixture proves the canonical tree byte stream and
   lowercase SHA-256 identifier remain stable;
 - release packaging rejects non-portable, Windows-reserved, trailing-dot/space,
-  case-insensitively colliding, or empty built-in paths; more than 1,024 total
-  direct child entries; a non-Skill direct child; a Skill whose closing
+  case-insensitively colliding, or empty built-in paths; more than 1,024 root
+  entries; more than 4,096 total subtree entries; more than 32 MiB of aggregate
+  regular-file bytes; a non-Skill direct child; a Skill whose closing
   frontmatter delimiter exceeds 64 KiB; a body over 256 KiB; and a tree whose
   bounded frontmatter exceeds the built-in 8 MiB budget;
 - a mode-only built-in change produces a different snapshot and published
