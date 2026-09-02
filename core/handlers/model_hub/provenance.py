@@ -522,9 +522,12 @@ class ProcessScope:
     prepared_routes: dict[str, "PreparedGatewayRoute"] = field(default_factory=dict)
     routing_conflicts: set[str] = field(default_factory=set)
     untracked_use: bool = False
-    # The launched process keeps this route for its whole life, so requests it
-    # issues outside any dispatched turn window stay routable. Turn-keyed
-    # routes above own attribution; this owns routing.
+    # The route this process was last observed actually using, so requests it
+    # issues outside any dispatched turn window stay routable. Recorded when a
+    # request resolves through a live turn's route, never when one is merely
+    # prepared: a resolution that never reaches an activated runtime must not
+    # re-point the process still running on the previous one. Turn-keyed routes
+    # above own attribution; this owns routing.
     launch_route: Optional["PreparedGatewayRoute"] = None
 
 
@@ -533,6 +536,21 @@ class PreparedGatewayRoute:
     requested_model_id: str
     resolved_model_id: str
     source_id: str
+
+
+@dataclass(frozen=True)
+class GatewayResolution:
+    """A gateway request's route identity, or why it has none.
+
+    An unresolved request has two causes the caller must not conflate. The
+    model may be one this process never routed, which reselecting fixes. Or the
+    scope's own routing may be momentarily unknowable — a turn that prepared two
+    identities, or live turns disagreeing about one gateway model — where the
+    models are configured and reselecting changes nothing.
+    """
+
+    model_id: Optional[str] = None
+    ambiguous: bool = False
 
 
 class GatewayTurnTerminalizer:
@@ -579,11 +597,11 @@ class GatewayTurnTerminalizer:
             self.turn_id = None
         return self.turn_id
 
-    def resolution_model(self, gateway_model_id: str) -> Optional[str]:
-        """Return the uniquely prepared caller model for this gateway request."""
+    def resolution(self, gateway_model_id: str) -> GatewayResolution:
+        """Return the caller model routing this gateway request, or why none is."""
 
         self.bind_request_model(gateway_model_id)
-        return self._registry.gateway_resolution_model(
+        return self._registry.gateway_resolution(
             backend=self._backend,
             token=self._token,
             gateway_model_id=gateway_model_id,
@@ -943,14 +961,8 @@ class TurnCorrelationRegistry:
             if existing is not None and existing != prepared:
                 scope.prepared_routes.pop(route_turn_id, None)
                 scope.routing_conflicts.add(route_turn_id)
-                # One turn prepared two identities: the process route is no
-                # longer knowable, so stop answering from it.
-                scope.launch_route = None
             elif route_turn_id not in scope.routing_conflicts:
                 scope.prepared_routes[route_turn_id] = prepared
-                # A later turn may relaunch the process against another Source;
-                # the newest accepted route is the one the process now carries.
-                scope.launch_route = prepared
 
             exact = self._exact_turn(backend, token)
             if exact is None:
@@ -984,31 +996,27 @@ class TurnCorrelationRegistry:
             trace.gateway_source_id = source_id
             trace.gateway_model_id = resolved_model_id
 
-    def gateway_resolution_model(
+    def gateway_resolution(
         self,
         *,
         backend: str,
         token: str,
         gateway_model_id: str,
-    ) -> Optional[str]:
-        """Resolve a route identity the launching turn or process prepared."""
+    ) -> GatewayResolution:
+        """Resolve a route identity the launching turn or process is using."""
 
         with self._lock:
             key = self._token_scopes.get(token)
             if key is None or key[0] != backend:
-                return None
+                return GatewayResolution()
             scope = self._scopes[key]
             if scope.routing_conflicts.intersection(scope.active_turns):
-                return None
-            active_routes = [
+                return GatewayResolution(ambiguous=True)
+            matching = [
                 route
                 for turn_id, route in scope.prepared_routes.items()
                 if turn_id in scope.active_turns
-            ]
-            matching = [
-                route
-                for route in active_routes
-                if route.resolved_model_id == gateway_model_id
+                and route.resolved_model_id == gateway_model_id
             ]
             identities = {
                 (
@@ -1019,21 +1027,30 @@ class TurnCorrelationRegistry:
                 for route in matching
             }
             if len(identities) == 1:
-                return matching[0].requested_model_id
-            if active_routes:
-                return None
-            # No turn owns a route right now, but the launched process is still
+                # The process is demonstrably talking to this route right now,
+                # which is the only evidence that its runtime really activated.
+                scope.launch_route = matching[0]
+                return GatewayResolution(model_id=matching[0].requested_model_id)
+            if identities:
+                # Live turns claim this gateway model for more than one caller
+                # identity, so which route the request belongs to is not
+                # knowable. Routes held for other models say nothing about this
+                # one and must not be read as ambiguity about it.
+                return GatewayResolution(ambiguous=True)
+            # No live turn claims this model, yet the launched process is still
             # alive on this token and keeps issuing requests: tool loops,
             # agent-initiated continuations, and transport retries all land
-            # here. Routing follows the process, so its launch identity answers
-            # them; only a model this process never routed stays unresolvable.
+            # here. Routing follows the process, so the route it was last seen
+            # using answers them; a model it never routed stays unresolvable.
             launch_route = scope.launch_route
             if (
                 launch_route is not None
                 and launch_route.resolved_model_id == gateway_model_id
             ):
-                return launch_route.requested_model_id
-            return gateway_model_id if scope.untracked_use else None
+                return GatewayResolution(model_id=launch_route.requested_model_id)
+            if scope.untracked_use:
+                return GatewayResolution(model_id=gateway_model_id)
+            return GatewayResolution()
 
     def gateway_terminalizer(
         self,

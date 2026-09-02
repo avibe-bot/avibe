@@ -1695,9 +1695,12 @@ class CodexAgent(BaseAgent):
                             )
                         if (
                             runtime_changed
-                            and desired_fingerprint == "direct"
+                            and not desired_fingerprint.startswith("hub:")
                             and existing_fingerprint.startswith("hub:")
                         ):
+                            # `ModelHubLaunch.retires_replaced_hub_scope` states
+                            # the rule; `desired_fingerprint` is its answer here
+                            # because it already folds in `launch is None`.
                             self._retire_model_hub_process_scope(cwd)
                         # The new app-server process won't know about threads/turns
                         # from the old process. Invalidate only sessions bound to

@@ -79,6 +79,19 @@ class ModelHubLaunch:
     settlement_generation: Optional[int] = field(default=None, repr=False)
 
     @property
+    def retires_replaced_hub_scope(self) -> bool:
+        """Whether replacing a Hub runtime with this launch must revoke its scope.
+
+        Only a `hub` launch mints a gateway token, and it mints its own before
+        the replaced runtime is torn down — so retiring the scope then would
+        revoke the new token. Every other channel leaves the old credential
+        with no owner, and a surviving subprocess holding it could keep making
+        billable gateway requests, so the scope must be retired.
+        """
+
+        return self.channel != "hub"
+
+    @property
     def fingerprint(self) -> str:
         if self.channel == "direct":
             return "direct"
