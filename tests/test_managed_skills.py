@@ -1166,6 +1166,7 @@ def test_enabled_claude_plugin_skill_overrides_codex_system_default(
         avibe_home=tmp_path / "avibe",
         codex_home=home / ".codex",
         claude_home=claude_home,
+        claude_cli_path="/opt/claude-custom",
         xdg_config_home=home / ".config",
         builtin_snapshot_id="",
     )
