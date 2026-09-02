@@ -201,11 +201,14 @@ a candidate and consumes no frontmatter budget there. Its children are charged
 only when the explicit Codex system root is scanned.
 
 If `${CLAUDE_CONFIG_DIR}/plugins/installed_plugins.json` exists, Avibe invokes
-the official `claude plugin list --json` command in the Turn's bound working
-directory and scans `<installPath>/skills` for each entry whose `enabled` field
-is exactly `true`. It does not crawl the installation cache or trust stale
-registry entries directly. Disabled plugins and relative installation paths are
-omitted. This lookup runs on every Avibe-dispatched Turn so installing,
+the official `<configured-claude-cli> plugin list --json` command in the Turn's
+bound working directory and scans `<installPath>/skills` for each entry whose
+`enabled` field is exactly `true`. The executable is the normalized V2
+`agents.claude.cli_path` used by the live Claude backend, including a custom
+path; standalone commands fall back to the normal Claude executable lookup. It
+does not crawl the installation cache or trust stale registry entries directly.
+Disabled plugins and relative installation paths are omitted. This lookup runs
+on every Avibe-dispatched Turn so installing,
 enabling, disabling, or removing a plugin is reflected without restarting Avibe
 or creating a Session. A missing CLI, non-zero exit, timeout after one second,
 invalid UTF-8 or JSON, output over 1 MiB, or more than 256 reported entries
@@ -515,7 +518,9 @@ When a backend launches either command, Avibe supplies internal bindings:
   cannot combine the retained snapshot ID with a different Avibe home.
 - `AVIBE_SKILL_HOME`, `AVIBE_SKILL_CODEX_HOME`,
   `AVIBE_SKILL_CLAUDE_HOME`, and `AVIBE_SKILL_XDG_CONFIG_HOME` are normalized
-  absolute roots resolved by the advertising Avibe process. A relative
+  absolute roots resolved by the advertising Avibe process.
+  `AVIBE_SKILL_CLAUDE_CLI_PATH` carries its configured Claude executable for
+  plugin enumeration and load-time re-resolution. A relative
   `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `XDG_CONFIG_HOME` is therefore resolved
   once at Turn dispatch and cannot select a different compatibility tree merely
   because the agent launches `vibe skill` from another shell directory.
@@ -835,6 +840,8 @@ Catalogs at runtime.
   container, resolves one entry per final name.
 - Enabled Claude plugins contribute their standard `skills` directories to the
   same Avibe Catalog for all three backends, while disabled plugins do not.
+  A custom V2 Claude CLI path is used for both Turn-time and bound-command
+  plugin enumeration.
   Missing, failing, timed-out, malformed, oversized, or over-count plugin-list
   results omit only plugin roots, and static compatibility discovery continues.
 - Global-root fixtures override `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
