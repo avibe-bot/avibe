@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -910,6 +911,123 @@ def test_distinct_same_name_candidates_keep_precedence_winner(tmp_path: Path) ->
 
     assert len(skills) == 1
     assert skills[0].description == "Codex"
+
+
+def test_enabled_claude_plugin_skills_join_the_managed_catalog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text('{"version": 2, "plugins": {}}', encoding="utf-8")
+    plugin = tmp_path / "plugin-cache" / "formatter"
+    _write_skill(plugin / "skills", "format-code", "format-code", "Format code")
+    captured = {}
+
+    def plugin_list(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    [
+                        {
+                            "id": "formatter@example",
+                            "enabled": True,
+                            "installPath": str(plugin),
+                        },
+                        {
+                            "id": "disabled@example",
+                            "enabled": False,
+                            "installPath": str(tmp_path / "disabled"),
+                        },
+                    ]
+                ).encode(),
+            },
+        )()
+
+    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(managed_skills.subprocess, "run", plugin_list)
+
+    skills = resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    )
+
+    assert [skill.name for skill in skills] == ["format-code"]
+    assert captured["command"] == ["/usr/bin/claude", "plugin", "list", "--json"]
+    assert captured["cwd"] == cwd
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(claude_home)
+
+
+def test_claude_plugin_discovery_fails_closed_on_oversized_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        managed_skills.subprocess,
+        "run",
+        lambda *args, **kwargs: type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": b" " * (managed_skills.CLAUDE_PLUGIN_LIST_MAX_BYTES + 1),
+            },
+        )(),
+    )
+
+    assert resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    ) == []
+
+
+def test_claude_plugin_discovery_fails_closed_on_timeout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
+
+    def time_out(*args, **kwargs):
+        raise managed_skills.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(managed_skills.subprocess, "run", time_out)
+
+    assert resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    ) == []
 
 
 def test_snapshot_v1_digest_fixture_is_stable(tmp_path: Path) -> None:

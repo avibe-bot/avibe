@@ -99,6 +99,7 @@ def _row_to_payload(
     include_local_details: bool = True,
 ) -> dict[str, Any]:
     metadata = _load_metadata(row.get("metadata_json"))
+    metadata.pop(SESSION_PROJECT_BASE_METADATA_KEY, None)
     if not include_local_details:
         metadata = {}
     return {

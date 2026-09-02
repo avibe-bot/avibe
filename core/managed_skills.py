@@ -5,12 +5,14 @@ from __future__ import annotations
 import errno
 import hashlib
 import html
+import json
 import logging
 import os
 import re
 import shutil
 import stat
 import struct
+import subprocess
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -49,6 +51,9 @@ DISCOVERY_CLASS_MAX_CHILDREN = 4096
 PROJECT_ROOT_MAX_DIRECTORIES = 128
 BUILTIN_TREE_MAX_ENTRIES = 4096
 BUILTIN_TREE_MAX_BYTES = 32 * 1024 * 1024
+CLAUDE_PLUGIN_LIST_MAX_BYTES = 1024 * 1024
+CLAUDE_PLUGIN_LIST_MAX_ENTRIES = 256
+CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -752,6 +757,61 @@ def _selected_builtin_root(
     return root if stat.S_ISDIR(root_stat.st_mode) else None
 
 
+def _claude_plugin_skill_roots(
+    working_directory: Path,
+    claude_home: Path,
+) -> list[Path]:
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    try:
+        if not registry.is_file():
+            return []
+    except OSError:
+        return []
+
+    command = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
+    if not command:
+        return []
+    environment = dict(os.environ)
+    environment["CLAUDE_CONFIG_DIR"] = str(claude_home)
+    try:
+        result = subprocess.run(
+            [command, "plugin", "list", "--json"],
+            cwd=working_directory,
+            env=environment,
+            capture_output=True,
+            check=False,
+            timeout=CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.info("Unable to resolve enabled Claude plugins", exc_info=True)
+        return []
+    if result.returncode != 0 or len(result.stdout) > CLAUDE_PLUGIN_LIST_MAX_BYTES:
+        return []
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list) or len(payload) > CLAUDE_PLUGIN_LIST_MAX_ENTRIES:
+        return []
+
+    roots: list[tuple[str, Path]] = []
+    for item in payload:
+        if not isinstance(item, dict) or item.get("enabled") is not True:
+            continue
+        plugin_id = item.get("id")
+        install_path = item.get("installPath")
+        if not isinstance(plugin_id, str) or not isinstance(install_path, str):
+            continue
+        raw_path = Path(install_path).expanduser()
+        if not raw_path.is_absolute():
+            continue
+        root = _absolute_path(raw_path) / "skills"
+        if not _path_is_utf8(root):
+            continue
+        roots.append((plugin_id, root))
+    return [root for _, root in sorted(roots, key=lambda item: (item[0], str(item[1])))]
+
+
 def resolve_skills(
     cwd: str | Path | None = None,
     *,
@@ -864,6 +924,18 @@ def resolve_skills(
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,
                 ignored_names=ignored_names,
+            )
+        )
+
+    for root in _claude_plugin_skill_roots(working_directory, resolved_claude_home):
+        if compatibility_budget.exhausted:
+            break
+        candidates.extend(
+            _scan_root(
+                root,
+                priority=(2, 0, 6),
+                budget=compatibility_budget,
+                seen_directory_identities=compatibility_directory_identities,
             )
         )
 
