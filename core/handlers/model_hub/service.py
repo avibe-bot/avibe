@@ -3716,7 +3716,7 @@ class ModelHubService:
         cls,
         backend: str,
         payload: object,
-    ) -> tuple[list[ModelHubBackendModelConfig], bool]:
+    ) -> list[ModelHubBackendModelConfig]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         if not isinstance(payload, list):
@@ -3732,11 +3732,13 @@ class ModelHubService:
                 or payload[0] != cls._claude_default_catalog_payload()
             ):
                 raise ModelHubError("backend_model_locked", status=409)
-        elif default_indices:
-            raise ModelHubError("backend_model_locked", status=409)
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
-            if isinstance(item, dict) and item.get("id") == "default":
+            if (
+                backend == "claude"
+                and isinstance(item, dict)
+                and item.get("id") == "default"
+            ):
                 continue
             try:
                 model = ModelHubBackendModelConfig.from_payload(item)
@@ -3750,7 +3752,7 @@ class ModelHubService:
             rows.append(model)
         if len({model.id for model in rows}) != len(rows):
             raise ModelHubError("backend_model_duplicate")
-        return rows, bool(default_indices)
+        return rows
 
     async def _refresh_backend_catalog(self, backend: BackendName) -> None:
         if self.backend_catalog_changed is None:
@@ -3772,20 +3774,14 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
-            baseline_models, baseline_default = self._parse_backend_catalog_models(
+            baseline_models = self._parse_backend_catalog_models(
                 backend,
                 baseline,
             )
-            desired_models, desired_default = self._parse_backend_catalog_models(
+            desired_models = self._parse_backend_catalog_models(
                 backend,
                 models,
             )
-            expected_default = backend == "claude"
-            if (
-                baseline_default != expected_default
-                or desired_default != expected_default
-            ):
-                raise ModelHubError("backend_model_locked", status=409)
 
             current_by_id = {model.id: model for model in agent.models}
             baseline_by_id = {model.id: model for model in baseline_models}
@@ -3796,14 +3792,9 @@ class ModelHubService:
                     raise ModelHubError("backend_model_id_invalid")
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
-                if desired.origin == "builtin" and (
-                    trusted is None or trusted.origin != "builtin"
-                ):
-                    raise ModelHubError("backend_model_locked", status=409)
                 if (
-                    trusted is not None
-                    and trusted.origin == "builtin"
-                    and desired.origin != "builtin"
+                    (trusted is None and desired.origin == "builtin")
+                    or (trusted is not None and desired.origin != trusted.origin)
                 ):
                     raise ModelHubError("backend_model_locked", status=409)
             for model_id in desired_by_id.keys() - current_by_id.keys():

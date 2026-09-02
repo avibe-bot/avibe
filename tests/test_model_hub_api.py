@@ -2249,6 +2249,36 @@ def test_backend_catalog_reports_duplicate_ids(tmp_path):
     assert raised.value.code == "backend_model_duplicate"
 
 
+def test_codex_catalog_treats_default_as_an_ordinary_model_id(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "codex"
+    )
+    added = {
+        **baseline[0],
+        "id": "default",
+        "display_name": "Gateway default",
+        "origin": "manual",
+    }
+
+    created = asyncio.run(
+        service.set_agent_models("codex", baseline, [*baseline, added])
+    )
+    desired = copy.deepcopy(created["catalog_models"])
+    next(model for model in desired if model["id"] == "default")[
+        "display_name"
+    ] = "Edited default"
+    edited = asyncio.run(
+        service.set_agent_models("codex", created["catalog_models"], desired)
+    )
+
+    assert next(
+        model for model in edited["catalog_models"] if model["id"] == "default"
+    )["display_name"] == "Edited default"
+
+
 def test_backend_catalog_rejects_client_claimed_builtin_origin(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(
@@ -2266,6 +2296,71 @@ def test_backend_catalog_rejects_client_claimed_builtin_origin(tmp_path):
         asyncio.run(service.set_agent_models("claude", baseline, [*baseline, forged]))
 
     assert raised.value.code == "backend_model_locked"
+
+
+@pytest.mark.parametrize(
+    ("origin", "replacement"),
+    (
+        ("manual", "models_dev"),
+        ("manual", "builtin"),
+        ("models_dev", "manual"),
+        ("models_dev", "builtin"),
+        ("builtin", "manual"),
+        ("builtin", "models_dev"),
+    ),
+)
+def test_backend_catalog_keeps_every_existing_origin_immutable(
+    tmp_path,
+    origin,
+    replacement,
+):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "provenance-model"
+    agent = store.config.agents["codex"]
+    agent.models.append(ModelHubBackendModelConfig(id=model_id, origin=origin))
+    agent.routes[model_id] = ModelHubRouteConfig()
+    baseline = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "codex"
+    )
+    desired = copy.deepcopy(baseline)
+    next(model for model in desired if model["id"] == model_id)[
+        "origin"
+    ] = replacement
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("codex", baseline, desired))
+
+    assert raised.value.code == "backend_model_locked"
+    assert next(model for model in agent.models if model.id == model_id).origin == origin
+
+
+def test_backend_catalog_rejects_an_origin_forged_into_the_baseline(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "manual-provenance-model"
+    agent = store.config.agents["codex"]
+    agent.models.append(ModelHubBackendModelConfig(id=model_id, origin="manual"))
+    agent.routes[model_id] = ModelHubRouteConfig()
+    observed = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "codex"
+    )
+    forged_baseline = copy.deepcopy(observed)
+    forged_desired = copy.deepcopy(observed)
+    for catalog in (forged_baseline, forged_desired):
+        next(model for model in catalog if model["id"] == model_id)[
+            "origin"
+        ] = "models_dev"
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models("codex", forged_baseline, forged_desired)
+        )
+
+    assert raised.value.code == "backend_model_locked"
+    assert next(model for model in agent.models if model.id == model_id).origin == "manual"
 
 
 @pytest.mark.parametrize("model_id", ["opus", "sonnet[1m]"])
