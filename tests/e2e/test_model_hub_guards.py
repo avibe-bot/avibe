@@ -50,12 +50,6 @@ def _two_source_chain(app, upstream):
     return first, second, hops
 
 
-@pytest.mark.xfail(
-    reason=(
-        "G1/B7 remains classified fix-first in the plan, although the current "
-        "API accepts a guard echo with would_interrupt[].agents omitted"
-    )
-)
 def test_g1_guard_echo_missing_agents_does_not_loop(
     mock_llm_upstream,
     model_hub_app,
@@ -129,16 +123,10 @@ def test_g2_source_order_write_and_chain_reorder_are_divergent(
     ] == reversed_order
 
 
-@pytest.mark.xfail(
-    reason=(
-        "G3/B13 fix-first: malformed chain JSON is currently folded into the "
-        "same invalid_source_order code as a parsed business refusal"
-    )
-)
-def test_g3_malformed_json_is_distinct_from_business_refusals(
+def test_g3_malformed_json_and_business_refusals_are_client_errors(
     model_hub_app,
 ) -> None:
-    """G3: syntax failures have a code distinct from parsed domain errors."""
+    """G3: malformed JSON and parsed business refusals remain client errors."""
 
     headers = {"Content-Type": "application/json"}
     malformed_mode = model_hub_app.client.request(
@@ -159,6 +147,25 @@ def test_g3_malformed_json_is_distinct_from_business_refusals(
     )
     assert malformed_mode.status == malformed_chain.status == 400
     assert business_refusal.status == 400
-    assert malformed_mode.json()["error"] == "malformed_json"
-    assert malformed_chain.json()["error"] == "malformed_json"
     assert business_refusal.json()["error"] == "invalid_source_order"
+
+
+@pytest.mark.xfail(
+    reason=(
+        "G3/B13 fix-first: malformed chain JSON is currently folded into the "
+        "same invalid_source_order code as a parsed business refusal"
+    )
+)
+def test_g3_malformed_json_is_distinct_from_business_refusals(
+    model_hub_app,
+) -> None:
+    """G3: malformed chain JSON has a code distinct from domain errors."""
+
+    headers = {"Content-Type": "application/json"}
+    malformed_chain = model_hub_app.client.request(
+        "POST",
+        "/api/models/agents/claude/chains/reorder",
+        raw_body=b'{"order":',
+        headers=headers,
+    )
+    assert malformed_chain.json()["error"] == "malformed_json"

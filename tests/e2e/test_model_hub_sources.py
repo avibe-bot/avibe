@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -270,18 +271,34 @@ def test_b6_replace_key_rolls_back_then_rename_and_retarget_commit(
     source, _ = _create_source(model_hub_app, mock_llm_upstream)
     original_ref = source["credential_ref"]
     original_mask = source["masked_credential"]
+    revocation_journal = (
+        model_hub_app.avibe_home
+        / "state"
+        / "model_hub_pending_revocations.json"
+    )
+    assert revocation_journal.is_file()
+    assert json.loads(revocation_journal.read_text(encoding="utf-8")) == []
+    journal_mtime = revocation_journal.stat().st_mtime_ns
 
+    time.sleep(0.01)
     mock_llm_upstream.configure(auth="401")
     failed = model_hub_app.client.put(
         f"/api/models/sources/{source['id']}/credential",
         {"key": "sk-model-hub-e2e-rejected"},
     )
-    assert failed.status >= 400
+    failed_body = failed.json()
+    assert failed.status == 502, failed_body
+    assert failed_body["error"] == "discovery_failed"
     after_failure = model_hub_app.client.get(
         "/api/models/sources"
     ).json()["sources"][0]
     assert after_failure["credential_ref"] == original_ref
     assert after_failure["masked_credential"] == original_mask
+    # The journal is the public rollback evidence boundary. An empty, rewritten
+    # journal means the rejected replacement was queued before cleanup and then
+    # observably removed; engine-private credential storage stays opaque.
+    assert revocation_journal.stat().st_mtime_ns > journal_mtime
+    assert json.loads(revocation_journal.read_text(encoding="utf-8")) == []
 
     mock_llm_upstream.configure(auth="ok")
     replaced = model_hub_app.client.put(
@@ -389,11 +406,11 @@ def test_b7_delete_guard_requires_exact_echo_before_force(
     ).json()["sources"] == []
 
 
-def test_b8_force_transport_asymmetry_is_the_current_http_contract(
+def test_b8_delete_force_is_query_only_in_the_current_http_contract(
     mock_llm_upstream: MockLLMUpstream,
     model_hub_app,
 ) -> None:
-    """B8: DELETE force is query-only while refresh force is body-only."""
+    """B8: DELETE force is query-only in the current HTTP contract."""
 
     # Open decision B6 has no D-1..D-4 identifier in plan section 5:
     # normalize destructive force transport or retain the current split.
@@ -420,6 +437,71 @@ def test_b8_force_transport_asymmetry_is_the_current_http_contract(
         },
     )
     assert query_force.status == 200, query_force.json()
+
+
+def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
+    mock_llm_upstream: MockLLMUpstream,
+    model_hub_app,
+) -> None:
+    """B8: refresh force is body-only in the current HTTP contract."""
+
+    # Open decision B6 has no D-1..D-4 identifier in plan section 5:
+    # normalize destructive force transport or retain the current split.
+    source = _create_guarded_source(model_hub_app, mock_llm_upstream)
+    endpoint = f"/api/models/sources/{source['id']}/refresh"
+    mock_llm_upstream.configure(models=[])
+    refused = model_hub_app.client.post(endpoint, {})
+    refusal = refused.json()
+    assert refused.status == 409, refusal
+    assert refusal["error"] == "source_model_in_route_chain"
+
+    query_force = model_hub_app.client.post(
+        f"{endpoint}?force=true",
+        {
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+    )
+    assert query_force.status == 409, query_force.json()
+    assert query_force.json()["error"] == "source_model_in_route_chain"
+
+    body_force = model_hub_app.client.post(
+        endpoint,
+        {
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+    )
+    body = body_force.json()
+    assert body_force.status == 200, body
+    assert body["removed_hops"] == refusal["would_remove_hops"]
+    assert body["interrupted"] == refusal["would_interrupt"]
+
+
+def test_b9_refetch_updates_added_and_removed_inventory(
+    mock_llm_upstream: MockLLMUpstream,
+    model_hub_app,
+) -> None:
+    """B9: refetch adds new inventory rows and removes vanished rows."""
+
+    _configure_protocol(
+        mock_llm_upstream,
+        models=[{"id": "stable-model"}, {"id": "removed-model"}],
+    )
+    source, _ = _create_source(model_hub_app, mock_llm_upstream)
+    mock_llm_upstream.configure(
+        models=[{"id": "stable-model"}, {"id": "added-model"}]
+    )
+    refreshed = model_hub_app.client.post(
+        f"/api/models/sources/{source['id']}/refresh", {}
+    )
+    body = refreshed.json()
+    assert refreshed.status == 200, body
+    assert {model["id"] for model in body["source"]["models"]} == {
+        "stable-model",
+        "added-model",
+    }
 
 
 @pytest.mark.xfail(
@@ -450,11 +532,9 @@ def test_b9_refetch_preserves_existing_model_discovery_timestamp(
         f"/api/models/sources/{source['id']}/refresh", {}
     )
     refreshed_body = refreshed.json()
-    assert refreshed.status == 200, refreshed_body
     models = {
         model["id"]: model for model in refreshed_body["source"]["models"]
     }
-    assert set(models) == {"stable-model", "added-model"}
     assert models["stable-model"]["discovered_at"] == before[
         "stable-model"
     ]

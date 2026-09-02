@@ -42,17 +42,10 @@ def _engine_app(model_hub_app_factory):
     )
 
 
-def _install_engine_or_skip(app) -> list[str]:
+def _install_engine(app) -> list[str]:
     observed: list[str] = []
     response = app.client.post("/api/models/runtime/install", {})
     body = response.json()
-    if (
-        response.status == 422
-        and body.get("error") == "runtime_platform_unsupported"
-    ):
-        pytest.skip(
-            "managed Model Hub engine has no archive for this host platform"
-        )
     assert response.status == 200, body
     observed.append(body["runtime"]["status"]["health"])
     deadline = time.monotonic() + 60
@@ -132,6 +125,50 @@ def test_harness_cleans_controller_when_ui_start_fails(
             process.wait(timeout=5)
 
 
+@pytest.mark.parametrize(
+    "interruption_type",
+    [KeyboardInterrupt, SystemExit],
+    ids=["keyboard-interrupt", "system-exit"],
+)
+def test_harness_cleans_controller_when_startup_is_interrupted(
+    monkeypatch,
+    tmp_path: Path,
+    interruption_type: type[BaseException],
+) -> None:
+    """Harness contract: startup interruptions cannot leak controller children."""
+
+    app = ModelHubTestApp(Path.cwd(), tmp_path)
+    process: subprocess.Popen[bytes] | None = None
+
+    def start_controller() -> None:
+        nonlocal process
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        app._controller = process
+
+    def interrupt_ui_start() -> None:
+        raise interruption_type("synthetic startup interruption")
+
+    monkeypatch.setattr(app, "_initialize_config", lambda: None)
+    monkeypatch.setattr(app, "_start_controller", start_controller)
+    monkeypatch.setattr(app, "_start_ui", interrupt_ui_start)
+    try:
+        with pytest.raises(
+            interruption_type,
+            match="synthetic startup interruption",
+        ):
+            app.start()
+        assert process is not None
+        assert process.poll() is not None
+        assert app._controller is None
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
 def test_a1_feature_flag_disables_the_complete_models_api(
     disabled_model_hub_app,
 ) -> None:
@@ -170,7 +207,7 @@ def test_a2_offline_engine_install_start_stop_and_hardened_config(
     """A2: install/start/stop preserves the hardened engine configuration."""
 
     with _engine_app(model_hub_app_factory) as app:
-        observed = _install_engine_or_skip(app)
+        observed = _install_engine(app)
         assert "installing" in observed
 
         started = app.client.post("/api/models/runtime/start", {})
@@ -206,16 +243,10 @@ def test_a2_offline_engine_install_start_stop_and_hardened_config(
         assert stopped_body["runtime"]["status"]["health"] == "not_started"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "A3 fix-first: API returns structured blocking backends, but the "
-        "current UI still presents a generic stop failure"
-    )
-)
-def test_a3_runtime_stop_reports_every_blocking_backend_but_ui_copy_is_pending(
+def test_a3_runtime_stop_reports_every_blocking_backend(
     model_hub_app,
 ) -> None:
-    """A3: runtime stop is guarded while any backend remains in Hub mode."""
+    """A3: the API guards runtime stop with every blocking backend."""
 
     changed = model_hub_app.client.patch(
         "/api/models/agents/claude/mode", {"mode": "hub"}
@@ -226,6 +257,17 @@ def test_a3_runtime_stop_reports_every_blocking_backend_but_ui_copy_is_pending(
     assert refused.status == 409, body
     assert body["error"] == "runtime_in_use"
     assert body["backends"] == ["claude"]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "A3 fix-first: the current UI still presents a generic stop failure "
+        "instead of naming the structured blocking backends"
+    )
+)
+def test_a3_runtime_stop_ui_copy_names_every_blocking_backend() -> None:
+    """A3: runtime-stop copy names the backends returned by the API guard."""
+
     pytest.fail("UI blocking-backend copy remains the A3 fix-first gap")
 
 
@@ -247,7 +289,7 @@ def test_a5_controller_restart_during_oauth_poll_reports_engine_down(
     """A5: restart during a Hub OAuth poll does not fake materialization."""
 
     with _engine_app(model_hub_app_factory) as app:
-        _install_engine_or_skip(app)
+        _install_engine(app)
         started = app.client.post("/api/models/runtime/start", {})
         assert started.status == 200, started.json()
         oauth = app.client.post(
@@ -259,11 +301,7 @@ def test_a5_controller_restart_during_oauth_poll_reports_engine_down(
             },
         )
         oauth_body = oauth.json()
-        if oauth.status != 200:
-            pytest.skip(
-                "installed engine does not expose the Anthropic OAuth test "
-                f"surface: {oauth_body.get('error')}"
-            )
+        assert oauth.status == 200, oauth_body
         flow_id = oauth_body["flow"]["flow_id"]
 
         app.restart_controller()

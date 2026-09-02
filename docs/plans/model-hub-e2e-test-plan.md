@@ -184,6 +184,25 @@ lane-to-lane.
   behavior with a comment naming the open decision (D-1…D-4); `fix-first`
   scenarios land as `xfail` (pytest) / `test.fixme` (Playwright) with the
   issue reference, never as red tests.
+- **Discipline tightening (orchestrator ruling 2026-09-02, post circuit
+  breaker on PR #1812):**
+  - *Skip policy:* only ENVIRONMENTAL preconditions may `skip` (engine binary
+    unavailable BEFORE an install attempt, mock upstream absent, credentials
+    required but not provisioned). Once a precondition has passed, any
+    subsequent product-side failure (installer error after manifest accepted,
+    OAuth-start HTTP error after engine confirmed up, etc.) is a test
+    FAILURE. Every skip site states the precondition it guards.
+  - *xfail granularity:* an `xfail`/`fixme` wraps ONLY the assertion known to
+    be broken (e.g. the human-readable error copy). All currently enforceable
+    assertions (structured API guards, state transitions, status codes) live
+    in separate passing tests. A broad xfail over a mixed test is forbidden.
+  - *B6 rollback evidence boundary:* the pending-revocation journal at
+    `$AVIBE_HOME/state/model_hub_pending_revocations.json` inside the
+    test-owned hermetic home is the public evidence surface for rejected
+    credential material. Tests may read it; they must NOT read engine-private
+    credential blobs. If the product writes neither journal entry nor
+    observable removal on failed replacement, B6 narrows to an xfail with a
+    product-gap finding — never private-storage inspection.
 
 ### Playwright scope (this round)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -152,7 +153,6 @@ def test_f1_unsupported_opencode_provider_ids_are_noted(
     )
     with launch as app:
         response = app.client.post("/api/models/migration/scan", {})
-        assert response.status == 200, response.json()
         assert any(
             item["backend"] == "opencode"
             and item.get("notes_key")
@@ -166,6 +166,10 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
 ) -> None:
     """F2: apply copies selected material and performs the one-time sort."""
 
+    seeded_api_key = "sk-ant-e2e-copy-only-123456"
+    seeded_api_key_digest = hashlib.sha256(
+        seeded_api_key.encode("utf-8")
+    ).hexdigest()
     _configure_protocol(
         mock_llm_upstream,
         "anthropic",
@@ -180,6 +184,7 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
         scan_body = scan.json()
         assert scan.status == 200, scan_body
         item_ids = [item["id"] for item in scan_body["scan"]["items"]]
+        mock_llm_upstream.reset_requests()
 
         applied = app.client.post(
             "/api/models/migration/apply", {"item_ids": item_ids}
@@ -204,6 +209,24 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
         serialized = json.dumps(body)
         assert "sk-ant-e2e-copy-only-123456" not in serialized
         assert "codex-oauth-e2e-123456" not in serialized
+
+        captured_digests = set()
+        for request in mock_llm_upstream.requests():
+            headers = request["headers"]
+            credential = headers.get("x-api-key")
+            if credential is None:
+                authorization = headers.get("authorization", "")
+                prefix = "Bearer "
+                credential = (
+                    authorization[len(prefix) :]
+                    if authorization.startswith(prefix)
+                    else authorization
+                )
+            if credential:
+                captured_digests.add(
+                    hashlib.sha256(credential.encode("utf-8")).hexdigest()
+                )
+        assert seeded_api_key_digest in captured_digests
 
 
 @pytest.mark.xfail(

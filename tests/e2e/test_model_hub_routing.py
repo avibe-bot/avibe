@@ -10,7 +10,7 @@ from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 from tests.e2e.test_model_hub_migration import _write
 from tests.e2e.test_model_hub_runtime import (
     _engine_app,
-    _install_engine_or_skip,
+    _install_engine,
 )
 from tests.e2e.test_model_hub_sources import (
     MENU_MODEL,
@@ -100,7 +100,7 @@ def _prepare_probe_chain(
     first_upstream: MockLLMUpstream,
     second_upstream: MockLLMUpstream | None = None,
 ):
-    _install_engine_or_skip(app)
+    _install_engine(app)
     _configure_protocol(
         first_upstream,
         "anthropic",
@@ -316,41 +316,3 @@ def test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown(
                 expected_reason="server_error",
                 expected_delay=30,
             )
-
-
-def test_d7_stream_interrupt_requires_a_live_turn_gateway() -> None:
-    """D7: a partial stream terminates but never replays on another Source."""
-
-    pytest.skip(
-        "D7 is not reachable through the buffered /probe API; the private "
-        "per-turn gateway credential is issued only to a live backend turn"
-    )
-
-
-def test_d8_cooldown_recovery_requires_a_controllable_runtime_clock() -> None:
-    """D8: elapsed retry_at recovers hop zero and emits recover."""
-
-    pytest.skip(
-        "D8 has no HTTP clock-control seam; sleeping 60-300 seconds would make "
-        "the hermetic suite nondeterministic"
-    )
-
-
-def test_d9_all_hops_failed_requires_the_private_turn_gateway() -> None:
-    """D9: a turn with no surviving hop returns mapping_target_unavailable."""
-
-    pytest.skip(
-        "D9's terminal 503 is owned by the private turn gateway; /probe returns "
-        "the distinct probe_no_candidate contract"
-    )
-
-
-def test_d10_undeclared_effort_strip_requires_a_live_backend_turn() -> None:
-    """D10: undeclared reasoning_effort is omitted from the upstream body."""
-
-    # D-1..D-4 do not alter this assert-current behavior. The public probe
-    # never accepts reasoning_effort, so it cannot prove a request-side strip.
-    pytest.skip(
-        "D10 requires a live backend turn carrying reasoning_effort; the probe "
-        "request has no effort input and would make the assertion vacuous"
-    )

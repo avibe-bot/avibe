@@ -233,8 +233,10 @@ class ModelHubTestApp:
             self._start_controller()
             self._start_ui()
             self.wait_ready()
-        except Exception as exc:
+        except BaseException as exc:
             self.stop()
+            if not isinstance(exc, Exception):
+                raise
             details = self.diagnostics()
             raise RuntimeError(
                 f"hermetic Model Hub app failed to start\n{details}"

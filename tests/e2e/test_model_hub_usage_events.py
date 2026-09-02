@@ -15,15 +15,6 @@ from tests.e2e.test_model_hub_sources import (
 pytestmark = pytest.mark.e2e_model_hub
 
 
-def test_e1_metered_turn_usage_requires_the_private_turn_gateway() -> None:
-    """E1: metered turns aggregate cache-aware upstream usage."""
-
-    pytest.skip(
-        "E1 needs an installed engine plus a live backend turn; the browser "
-        "API exposes buffered probes but no turn-gateway credentials"
-    )
-
-
 def test_e2_usage_windows_are_bounded(
     model_hub_app,
 ) -> None:
@@ -48,27 +39,6 @@ def test_e2_usage_windows_are_bounded(
             "cached_input_tokens": 0,
             "output_tokens": 0,
         }
-
-
-@pytest.mark.xfail(
-    reason=(
-        "E2/B14 remains classified fix-first in the plan, although the "
-        "current ledger bounds oversized windows at 62 days; the unmarked "
-        "companion test independently protects that bound"
-    )
-)
-def test_e2_huge_usage_window_is_bounded(
-    model_hub_app,
-) -> None:
-    """E2: a pathological days value must not create an unbounded query."""
-
-    response = model_hub_app.client.get(
-        "/api/models/usage?days=100000"
-    )
-    body = response.json()
-    assert response.status == 200, body
-    assert body["usage"]["window_days"] == 62
-
 
 def test_e3_event_feed_paginates_and_never_persists_credentials(
     mock_llm_upstream,
