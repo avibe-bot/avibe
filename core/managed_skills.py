@@ -745,7 +745,8 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
         return ""
     _, next_page = _page(skills, 1)
     later_page_guidance = (
-        "If no Skill on this page matches the task, inspect subsequent Catalog pages before proceeding.\n"
+        "If no Skill on this page matches the task, inspect each subsequent Catalog page in order "
+        "until a Skill matches or no page remains.\n"
         if next_page is not None
         else ""
     )

@@ -335,7 +335,7 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
 
     assert prompt.count("\n- skill-") == CATALOG_PAGE_SIZE
     assert "`vibe skill list --page 2`" in prompt
-    assert "inspect subsequent Catalog pages" in prompt
+    assert "inspect each subsequent Catalog page in order" in prompt
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
