@@ -728,10 +728,13 @@ It then re-enumerates one bounded, fixed entry set and copies only those entries
 into staging; entries created after that enumeration are neither traversed nor
 copied. Each file is reopened without following its final path component,
 charged against the aggregate byte budget, read to its opened size, and rejected
-if it changes during the read. Avibe then validates that staging directory and
-recomputes the canonical snapshot-v1 digest from the completed staging tree and
-requires it to equal the target `<snapshot-id>` before atomically renaming it
-once into the previously absent digest path. The staged digest includes every
+if it changes during the read. Source and destination descriptors use binary
+mode where the platform distinguishes it, so publication preserves exact bytes
+on Windows as well as POSIX systems. Avibe then validates that staging
+directory, recomputes the canonical snapshot-v1 digest from the completed
+staging tree, and requires it to equal the target `<snapshot-id>` before
+atomically renaming it once into the previously absent digest path. The staged
+digest includes every
 file byte and executable mode, so copied bytes cannot diverge from the name
 under which they are published. A process interruption can leave only that
 undiscoverable, bounded staging directory, and the next attempt safely replaces
@@ -1020,6 +1023,8 @@ isolation acceptance gates.
   digest;
 - publication recomputes the snapshot-v1 digest from the completed staging
   tree and refuses to rename staging bytes under a different digest;
+- publication opens destination files in binary mode where available and
+  preserves mixed newline bytes exactly;
 - publication ignores entries created after its bounded copy enumeration and
   rejects aggregate file growth observed at hashing or copy time;
 - an upgrade's selected snapshot contains changed Skills and omits retired
