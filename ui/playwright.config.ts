@@ -6,13 +6,13 @@
 // with an installed gateway engine, not a process a test run may create and
 // discard. `VIBE_E2E_BASE_URL` names that instance.
 //
-// The default matches the frozen cross-lane vocabulary (test plan §5a). It is
-// also the port a developer's own `vibe` service listens on, which is exactly
-// why the README tells you to point the variable at a hermetic instance instead
-// of relying on the default.
+// `VIBE_E2E_BASE_URL` has no default, and reading it here is what enforces
+// that: the whole run refuses to load without it. See `e2e/support/env.ts` for
+// why — the suite mutates the instance it is pointed at, and the port it would
+// otherwise default to is a developer's real `vibe`.
 import { defineConfig, devices } from '@playwright/test';
 
-const baseURL = process.env.VIBE_E2E_BASE_URL ?? 'http://127.0.0.1:5123';
+import { BASE_URL } from './e2e/support/env';
 
 export default defineConfig({
   testDir: './e2e',
@@ -31,7 +31,7 @@ export default defineConfig({
     ['html', { outputFolder: './e2e/.artifacts/report', open: 'never' }],
   ],
   use: {
-    baseURL,
+    baseURL: BASE_URL,
     // Pins the language the copy assertions read from `src/i18n/en.json`.
     // i18next detects `localStorage` then `navigator`; a fresh Playwright
     // context has no stored preference, so the navigator locale decides.

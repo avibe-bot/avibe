@@ -7,9 +7,10 @@
 // says what would have to change for it to become an assertion.
 import type { RouteHop } from './support/api';
 import { hasCopy, hub as copy } from './support/copy';
+import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
 import { expect, test } from './support/gateway';
-import { labelledButton } from './support/hub';
+import { fillApiKeyForm, labelledButton } from './support/hub';
 
 test.describe('G · supply guards and failure copy', () => {
   test.beforeEach(async ({ api, mock }) => {
@@ -21,7 +22,10 @@ test.describe('G · supply guards and failure copy', () => {
   test('B7 · removing the only source of a route is refused, explained, then reported', async ({ hub, api, gateway }) => {
     const source = gateway.sources[0];
     const supplied = source.models[0]?.id;
-    test.skip(!supplied, 'The precondition source came back with no models to route through.');
+    expect(
+      supplied,
+      `The precondition source ${source.display_name} came back with no models, so no route can reach it.`,
+    ).toBeDefined();
 
     // Arrange the one state a guard exists for: this source is the ONLY hop of a
     // configured route, so removing it leaves that model with no supply. The
@@ -35,7 +39,7 @@ test.describe('G · supply guards and failure copy', () => {
     const arranged = await api.putAgentChain(gateway.backend, gateway.model, [
       { source_id: source.id, model_id: supplied! },
     ]);
-    test.skip(!arranged, 'This instance would not accept the arranged route, so no guard can be raised.');
+    expect(arranged, 'The instance refused the arranged route, so no guard can be raised.').toBe(true);
 
     try {
       await hub.goto();
@@ -103,7 +107,9 @@ test.describe('G · supply guards and failure copy', () => {
   // `modelHub.errors.*` key. `AddApiKeyDialog.tsx` passes `failure.detail`
   // straight through as an i18n key when it starts with that prefix, and no
   // `modelHub.*` namespace exists in either browser bundle, so the key renders
-  // as itself.
+  // as itself. The form is filled and SUBMITTED, because the defect only shows
+  // in the answer to a submission that failed: an unsubmitted dialog shows
+  // nothing to leak, and asserting on one would pass with the defect present.
   test.fixme('B11 · a server failure code is rendered as human copy, not as its key', async ({ hub, mock }) => {
     // Unfixme when D-3 lands the missing `modelHub.*` keys. The check itself:
     // drive a failure whose detail carries the prefix, then assert no visible
@@ -111,6 +117,15 @@ test.describe('G · supply guards and failure copy', () => {
     await mock.configure({ auth: '5xx', protocol: 'anthropic', models_endpoint: 'ok' });
     await hub.goto();
     await hub.addApiKeyButton.click();
+    await expect(hub.addKeyDialog).toBeVisible();
+    await fillApiKeyForm(hub.addKeyDialog, {
+      name: `${E2E_SOURCE_PREFIX}b11-copy`,
+      baseUrl: mockBaseUrl(),
+      apiKey: 'e2e-copy-probe',
+    });
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+    await expect(hub.addKeyDialog).toContainText(/modelHub\.errors\.|settings\.models\./);
+    // The defect: the raw key is what reaches the user.
     await expect(hub.addKeyDialog).not.toContainText(/modelHub\.errors\./);
   });
 

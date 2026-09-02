@@ -12,6 +12,7 @@ import {
   requireMockUpstream,
   requireModelHub,
   requireRuntimeRunning,
+  requireSource,
   test,
 } from './support/fixtures';
 import { anthropicInventory } from './support/mock';
@@ -36,11 +37,10 @@ test.describe('B · the source detail panel', () => {
     });
     const before = `${E2E_SOURCE_PREFIX}rename-before`;
     const after = `${E2E_SOURCE_PREFIX}rename-after`;
-    const source = await api.createApiKeySource(before, mockBaseUrl());
-    test.skip(!source, 'The mock upstream refused the precondition source.');
+    const source = await requireSource(api, before, mockBaseUrl());
 
     await hub.goto();
-    await hub.openSource(source!.id);
+    await hub.openSource(source.id);
     await expect(hub.sourceDetailDialog).toBeVisible();
 
     await hub.manageMenuTrigger(before).click();
@@ -58,7 +58,7 @@ test.describe('B · the source detail panel', () => {
     await expect(edit).toHaveCount(0, { timeout: 30_000 });
     await expect(hub.sourceDetailDialog).toContainText(after);
     await expect
-      .poll(async () => (await api.sources()).find((s) => s.id === source!.id)?.display_name, {
+      .poll(async () => (await api.sources()).find((s) => s.id === source.id)?.display_name, {
         timeout: 15_000,
       })
       .toBe(after);
@@ -74,17 +74,19 @@ test.describe('B · the source detail panel', () => {
       models: anthropicInventory(['e2e-keep', 'e2e-drop']),
     });
     const name = `${E2E_SOURCE_PREFIX}refetch`;
-    const source = await api.createApiKeySource(name, mockBaseUrl());
-    test.skip(!source, 'The mock upstream refused the precondition source.');
-    test.skip(
-      (source!.models ?? []).length !== 2,
+    const source = await requireSource(api, name, mockBaseUrl());
+    // The mock has been seeded and has answered; a source that comes back
+    // without the inventory it was handed is the product's doing, not the
+    // environment's (§5a).
+    expect(
+      source.models.length,
       'The precondition source did not take the seeded inventory, so there is no diff to observe.',
-    );
+    ).toBe(2);
 
     await mock.configure({ models: anthropicInventory(['e2e-keep', 'e2e-arrive']) });
 
     await hub.goto();
-    await hub.openSource(source!.id);
+    await hub.openSource(source.id);
     await hub.sourceDetailDialog
       .getByRole('button', { name: copy('sourceDetail.action.refetch'), exact: true })
       .click();
@@ -114,11 +116,10 @@ test.describe('B · the source detail panel', () => {
       models: anthropicInventory(['e2e-discovered']),
     });
     const name = `${E2E_SOURCE_PREFIX}manual-model`;
-    const source = await api.createApiKeySource(name, mockBaseUrl());
-    test.skip(!source, 'The mock upstream refused the precondition source.');
+    const source = await requireSource(api, name, mockBaseUrl());
 
     await hub.goto();
-    await hub.openSource(source!.id);
+    await hub.openSource(source.id);
     await hub.sourceDetailDialog
       .getByRole('button', { name: copy('sourceDetail.action.addModel'), exact: true })
       .click();
@@ -150,7 +151,7 @@ test.describe('B · the source detail panel', () => {
       .poll(
         async () =>
           (await api.sources())
-            .find((s) => s.id === source!.id)
+            .find((s) => s.id === source.id)
             ?.models.find((model) => model.id === 'e2e-by-hand')?.reasoning_efforts,
         { timeout: 15_000 },
       )

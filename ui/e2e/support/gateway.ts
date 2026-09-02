@@ -17,7 +17,7 @@
 // failures under their names.
 import type { Agent, Source } from './api';
 import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
-import { test as base } from './fixtures';
+import { expect, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
 
 export type Gateway = {
@@ -46,11 +46,7 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
         // rejecting everything — and an anchor that cannot be created would
         // report the last test's mock state as this test's missing precondition.
         await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'ok' });
-        anchor = await api.createApiKeySource(`${E2E_SOURCE_PREFIX}surface-anchor`, mockBaseUrl());
-        testInfo.skip(
-          !anchor,
-          'The mock upstream refused the anchor source, so the page stays on the direct home.',
-        );
+        anchor = await requireSource(api, `${E2E_SOURCE_PREFIX}surface-anchor`, mockBaseUrl());
       }
       try {
         await provide();
@@ -68,37 +64,37 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       models_endpoint: 'ok',
       models: anthropicInventory(['e2e-route-1', 'e2e-route-2']),
     });
-    const created = [
-      await api.createApiKeySource(`${E2E_SOURCE_PREFIX}route-a`, mockBaseUrl()),
-      await api.createApiKeySource(`${E2E_SOURCE_PREFIX}route-b`, mockBaseUrl()),
-    ];
-    // From here on the instance has been changed, so every exit — including the
-    // `skip`s below, which throw — has to go through the teardown. A skip that
-    // returned early used to leave a backend in Gateway mode and two sources
-    // behind for whatever ran next.
+    // `requireSource`, not a skip: the mock has answered its control plane by
+    // this point, so a refused source is the product refusing a healthy
+    // upstream (§5a) — even though the fixture's own teardown still has to run.
+    let created: Source[] = [];
+    // From here on the instance has been changed, so every exit — including
+    // the `skip`s below, which throw — has to go through the teardown. A skip
+    // that returned early used to leave a backend in Gateway mode and two
+    // sources behind for whatever ran next.
     let switched: string | null = null;
     try {
-      testInfo.skip(
-        created.some((source) => source === null),
-        'The mock upstream refused a precondition source, so there is nothing to route through.',
-      );
+      created = [
+        await requireSource(api, `${E2E_SOURCE_PREFIX}route-a`, mockBaseUrl()),
+        await requireSource(api, `${E2E_SOURCE_PREFIX}route-b`, mockBaseUrl()),
+      ];
 
       const agents = await api.agents();
       // A backend already in Gateway mode is used as found: switching a second
       // one would change more of the instance than the test needs.
       const alreadyHub = agents.find((agent: Agent) => agent.mode === 'hub');
       const candidate = alreadyHub ?? agents.find((agent: Agent) => agent.cli_present);
-      testInfo.skip(!candidate, 'No agent backend on this instance can be put into Gateway mode.');
+      testInfo.skip(!candidate, 'No agent backend is installed on this instance, so none can be put into Gateway mode.');
       if (!alreadyHub) {
         await api.setAgentMode(candidate!.backend, 'hub');
         switched = candidate!.backend;
       }
 
       const live = (await api.agents()).find((agent: Agent) => agent.backend === candidate!.backend);
-      testInfo.skip(
-        live?.mode !== 'hub',
-        `Backend ${candidate!.backend} would not switch to Gateway mode on this instance.`,
-      );
+      expect(
+        live?.mode,
+        `Backend ${candidate!.backend} did not take the Gateway-mode switch the instance accepted.`,
+      ).toBe('hub');
       // The backend's currently selected model when it is one of the routable
       // ones: a guard that interrupts the model the backend actually runs is the
       // interruption the product is warning about, and B7 reads that warning.
@@ -106,15 +102,15 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       const model =
         supply.find((entry) => entry.model_id === live?.selected_model_id)?.model_id
         ?? supply[0]?.model_id;
-      testInfo.skip(
-        !model,
+      expect(
+        model,
         `Backend ${candidate!.backend} lists no models, so it has no route to open.`,
-      );
+      ).toBeDefined();
 
       await provide({
         backend: candidate!.backend,
         model: model!,
-        sources: created as Source[],
+        sources: created,
       });
     } finally {
       // Put the instance back as it was found: the mode only if this fixture

@@ -6,7 +6,13 @@ import {
   MODEL_HUB_SETTINGS_PATH,
 } from '../src/components/settings/models/modelHubRoutes';
 import { hub as copy } from './support/copy';
-import { expect, requireModelHub, requireRuntimeRunning, test } from './support/fixtures';
+import {
+  expect,
+  requireModelHub,
+  requireRuntimeRunning,
+  runtimeIsRunning,
+  test,
+} from './support/fixtures';
 
 test.describe('A · capability gate and runtime lifecycle', () => {
   test('A1 · the capability gate, not the browser, decides the route', async ({ page, hub, api }) => {
@@ -56,7 +62,7 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     await requireModelHub(api);
     const runtime = await api.runtime();
     test.skip(
-      runtime?.status?.health !== 'ok',
+      !runtimeIsRunning(runtime?.status?.health),
       'The gateway is not running on this instance, so there is no running state to stop.',
     );
     const hubBackends = (await api.agents()).filter((agent) => agent.mode === 'hub');
@@ -70,17 +76,24 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true');
 
     await hub.runtimeToggle.click();
-    await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
-    // The page must explain the stopped gateway, not just flip a switch.
-    await expect(hub.closedState).toBeVisible();
-    expect((await api.runtime())?.enabled).toBe(false);
-
-    await hub.runtimeToggle.click();
+    // Wrapped in try/finally — and not just this click — because the gateway is
+    // STOPPED at this point: if any assertion from here on fails, the instance
+    // is left without its runtime for every spec after this one. The restart is
+    // attempted before the failure is re-raised, so the red is reported AND the
+    // instance is returned running.
+    try {
+      await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
+      // The page must explain the stopped gateway, not just flip a switch.
+      await expect(hub.closedState).toBeVisible();
+      expect((await api.runtime())?.enabled).toBe(false);
+    } finally {
+      await hub.runtimeToggle.click().catch(() => {});
+    }
     await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
     await expect(hub.closedState).toHaveCount(0);
     await expect
       .poll(async () => (await api.runtime())?.status?.health, { timeout: 90_000 })
-      .toBe('ok');
+      .toEqual(expect.stringMatching(/^(ok|degraded)$/));
   });
 
   test('A3 · the blocked stop names the backends that block it', async ({ hub, api }) => {

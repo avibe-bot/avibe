@@ -112,11 +112,26 @@ export class HubApi {
     return this.token;
   }
 
-  /** GET returning the parsed body, or `null` on any non-2xx (the caller
-   *  decides whether an absent read is a skip or a failure). */
-  async read<T>(path: string): Promise<T | null> {
+  /**
+   * GET returning the parsed body, and THROWING on any non-2xx.
+   *
+   * The throw is the point. These reads feed the precondition helpers, and an
+   * earlier version collapsed every failure to `null` — so a 401, a 500, or a
+   * `VIBE_E2E_BASE_URL` aimed at the wrong server all arrived as
+   * `modelHubEnabled() === false` and `runtime() === null`, which the helpers
+   * correctly treat as "this instance does not have the feature" and skip. A
+   * broken run then reported itself as a clean one. An absent capability and an
+   * unreachable API are different facts and are no longer spelled the same way.
+   */
+  async read<T>(path: string): Promise<T> {
     const response = await this.request.get(path);
-    if (!response.ok()) return null;
+    if (!response.ok()) {
+      throw new Error(
+        `GET ${path} → ${response.status()} ${response.statusText()}. `
+          + `This is the instance at ${BASE_URL} failing a read, not a missing capability: `
+          + `${(await response.text()).slice(0, 300)}`,
+      );
+    }
     return (await response.json()) as T;
   }
 
@@ -145,11 +160,16 @@ export class HubApi {
     return { ok: response.ok(), status: response.status(), body: parsed };
   }
 
-  /** The same projection the browser reads: availability is the backend's to
-   *  declare, and `GET /api/config` is where it declares it. */
+  /**
+   * The same projection the browser reads: availability is the backend's to
+   * declare, and `GET /api/config` is where it declares it.
+   *
+   * `/api/config` answers on every instance, capability on or off, so a failure
+   * here is never "the feature is missing" — it is the read itself failing, and
+   * `read` throws it.
+   */
   async capabilities(): Promise<Capabilities> {
-    const config = await this.read<{ capabilities?: Capabilities }>('/api/config');
-    return config?.capabilities ?? {};
+    return (await this.read<{ capabilities?: Capabilities }>('/api/config')).capabilities ?? {};
   }
 
   async modelHubEnabled(): Promise<boolean> {
@@ -157,15 +177,17 @@ export class HubApi {
   }
 
   async sources(): Promise<Source[]> {
-    return (await this.read<{ sources: Source[] }>('/api/models/sources'))?.sources ?? [];
+    return (await this.read<{ sources: Source[] }>('/api/models/sources')).sources ?? [];
   }
 
   async agents(): Promise<Agent[]> {
-    return (await this.read<{ agents: Agent[] }>('/api/models/agents'))?.agents ?? [];
+    return (await this.read<{ agents: Agent[] }>('/api/models/agents')).agents ?? [];
   }
 
+  /** `null` here means the payload carried no `runtime` — an answered read with
+   *  nothing installed to describe, not a read that failed. */
   async runtime(): Promise<Runtime | null> {
-    return (await this.read<{ runtime: Runtime }>('/api/models/runtime/status'))?.runtime ?? null;
+    return (await this.read<{ runtime?: Runtime }>('/api/models/runtime/status')).runtime ?? null;
   }
 
   async setAgentMode(backend: string, mode: 'hub' | 'direct'): Promise<void> {
@@ -173,9 +195,7 @@ export class HubApi {
   }
 
   async chains(backend: string): Promise<AgentChain[]> {
-    return (
-      (await this.read<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`))?.chains ?? []
-    );
+    return (await this.read<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`)).chains ?? [];
   }
 
   /** Replaces one model's chain outright. Used to arrange the preconditions a
@@ -219,9 +239,10 @@ export class HubApi {
    * AFTER a source exists. `display_name` carries the suite prefix so teardown
    * can find it even if the spec died halfway through.
    *
-   * Returns `null` when the upstream refused — the caller turns that into a skip
-   * with a message about the mock, not into a failure of the feature it meant
-   * to test.
+   * Returns `null` when the instance refused. Callers reach this through
+   * `requireSource`, which FAILS on that null: by the time a spec asks, the mock
+   * has already answered its own control plane, so a refusal is the product
+   * refusing a healthy upstream — not a missing precondition (§5a).
    */
   async createApiKeySource(
     displayName: string,
@@ -241,20 +262,43 @@ export class HubApi {
     return (body?.source ?? (body as Source)) ?? null;
   }
 
+  /**
+   * Removes a source, forcing past the route guard when there is one, and
+   * THROWS if it is still there afterwards.
+   *
+   * The forced attempt's result used to be discarded, which made teardown
+   * unfalsifiable: a stale guard echo, an engine failure, or a 500 all left the
+   * source and its route state behind while cleanup reported success, and the
+   * next spec inherited it as a mysterious precondition. A cleanup that cannot
+   * say whether it cleaned is worse than none, because it is believed.
+   *
+   * A 404 is success, not failure: the postcondition is that the source is
+   * gone, and one already deleted by a suite sweep satisfies it.
+   */
   async deleteSource(id: string): Promise<void> {
-    const first = await this.mutate('delete', `/api/models/sources/${encodeURIComponent(id)}`);
-    if (first.ok) return;
+    const path = `/api/models/sources/${encodeURIComponent(id)}`;
+    const first = await this.mutate('delete', path);
+    if (first.ok || first.status === 404) return;
     // A source that still supplies a route is refused until the caller echoes
     // the server's own plan back. Teardown is exactly the caller that means it.
-    await this.mutate(
-      'delete',
-      `/api/models/sources/${encodeURIComponent(id)}?force=true`,
-      refusedPlan(first.body),
+    const forced = await this.mutate('delete', `${path}?force=true`, refusedPlan(first.body));
+    if (forced.ok || forced.status === 404) return;
+    throw new Error(
+      `Could not delete source ${id}: first attempt ${first.status}, forced attempt `
+        + `${forced.status} ${JSON.stringify(forced.body)}. It is still on the instance, and every `
+        + 'spec after this one inherits it.',
     );
   }
 
-  /** Removes every source this suite created, whatever spec left it behind. */
+  /**
+   * Removes every source this suite created, whatever spec left it behind.
+   *
+   * Returns quietly when the capability is off — a hub-disabled instance has no
+   * `/api/models/*` to sweep, and that is the one case where nothing to clean is
+   * a fact about the instance rather than a failed read.
+   */
   async removeSuiteSources(): Promise<void> {
+    if (!(await this.modelHubEnabled())) return;
     for (const source of await this.sources()) {
       if (source.display_name.startsWith(E2E_SOURCE_PREFIX)) await this.deleteSource(source.id);
     }

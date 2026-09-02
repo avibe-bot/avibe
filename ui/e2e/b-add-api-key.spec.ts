@@ -113,7 +113,15 @@ test.describe('B · add an API-key source', () => {
 
     await hub.goto();
     await hub.addApiKeyButton.click();
-    await fillApiKeyForm(hub.addKeyDialog, { baseUrl: mockBaseUrl(), apiKey: 'e2e-bad-key' });
+    // The suite prefix is on this "doomed" create too: if the regression under
+    // test commits the source before reporting the failure, teardown still has
+    // to be able to sweep it. A failure path that can leave state behind is a
+    // failure path that poisons whichever spec runs next.
+    await fillApiKeyForm(hub.addKeyDialog, {
+      name: `${E2E_SOURCE_PREFIX}auth-rejected`,
+      baseUrl: mockBaseUrl(),
+      apiKey: 'e2e-bad-key',
+    });
     await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
 
     // The three lines are one message: what went wrong, where to look, and that
@@ -133,6 +141,9 @@ test.describe('B · add an API-key source', () => {
     await hub.goto();
     await hub.addApiKeyButton.click();
     await fillApiKeyForm(hub.addKeyDialog, {
+      // Prefixed for the same reason as B1's rejected credential: a mismatch
+      // that commits anyway must still be sweepable.
+      name: `${E2E_SOURCE_PREFIX}mismatch`,
       baseUrl: mockBaseUrl(),
       apiKey: 'e2e-mismatch',
       protocol: copy('addKey.protocol.anthropicMessages'),
@@ -196,7 +207,8 @@ test.describe('B · add an API-key source', () => {
   test('B4 · a proven interface with no model list can still be added, on the record', async ({ hub, mock, api }) => {
     // The interface answers; only discovery is broken. That is a different
     // situation from "we do not know what this is", and the product treats it
-    // as one: it offers to add the source anyway.
+    // as one: it offers to add the source anyway. `models_endpoint: http_500`
+    // is exactly this shape: the interface probes 200, `/v1/models` 500s.
     await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'http_500' });
     const name = `${E2E_SOURCE_PREFIX}no-inventory`;
 
@@ -225,7 +237,7 @@ test.describe('B · add an API-key source', () => {
   test('B6 · replacing the key reuses the same dialog, and reports what it did', async ({ hub, mock, api, gateway }) => {
     // The only spec in the suite that may have to sit out a 30-second cooldown
     // before its precondition even exists. See `settleKeyVerdict`.
-    test.setTimeout(180_000);
+    test.setTimeout(300_000);
     // A source offers to have its key replaced only once the key has actually
     // been rejected: `repairAction` reads `needs_action.credential_revoked`, and
     // that button is the dialog's ONLY entry point in replace mode. Nothing
@@ -233,72 +245,112 @@ test.describe('B · add an API-key source', () => {
     // and arranged the way a real one happens, since a refetch will not do it.
     // The upstream still serves its model list to an unauthorised caller; only a
     // request that runs down the chain learns the key is dead.
-    const source = gateway.sources[0];
+    let source = gateway.sources[0];
     const supplied = source.models[0]?.id;
-    test.skip(!supplied, 'The precondition source came back with no models, so no route can reach it.');
+    const arrange = async (): Promise<void> => {
+      expect(
+        supplied,
+        `The precondition source ${source.display_name} came back with no models, so no route can reach it.`,
+      ).toBeDefined();
+      const arranged = await api.putAgentChain(gateway.backend, gateway.model, [
+        { source_id: source.id, model_id: supplied! },
+      ]);
+      expect(arranged, 'The instance refused the arranged route, so the key cannot be rejected.').toBe(true);
+    };
 
     const before = (await api.chains(gateway.backend)).find((chain) => chain.model === gateway.model);
     const original: RouteHop[] = (before?.hops ?? []).map((hop) => ({
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));
-    const arranged = await api.putAgentChain(gateway.backend, gateway.model, [
-      { source_id: source.id, model_id: supplied! },
-    ]);
-    test.skip(!arranged, 'This instance would not accept the arranged route, so the key cannot be rejected.');
+    await arrange();
 
     try {
-      await mock.configure({ auth: '401' });
-      const verdict = await settleKeyVerdict(api, source.id, gateway);
-      // `cooldown.server_error` is the one answer that is not an answer: the
-      // gateway engine failed the dry run itself, without the upstream ever
-      // receiving it, and every retry re-arms a fresh thirty-second cooldown on
-      // top of the last. Roughly one run in three ends there and stays there,
-      // and this lane may not touch product code to find out why (reported as a
-      // finding). So the scenario sits the round out rather than reporting a
-      // credential defect it never got close enough to test. Every OTHER verdict
-      // still fails below — a wrong classification is exactly what this asserts.
-      test.skip(
-        verdict === 'models.source.cooldown.server_error',
-        'The gateway engine answered the dry run with a 5xx of its own, so the key was never '
-          + 'rejected and the replace entry point never appeared. See ui/e2e/README.md § Known flakes.',
-      );
-      expect(verdict).toBe('models.source.needs_action.credential_revoked');
-      // The replacement has to be a key that works, or the dialog would be
-      // reporting the same failure over again under a different name.
+    // `cooldown.server_error` is the one answer that is not an answer: the
+    // gateway engine fails the dry run itself, without the upstream ever
+    // receiving it, and every retry re-arms a fresh thirty-second cooldown on
+    // top of the last — roughly one run in three. Recreating the source
+    // sometimes clears it; waiting, restarting the engine, and cycling the
+    // whole gateway do not. So a sticky cooldown is retried by rebuilding the
+    // arrangement, bounded to three attempts, and a defect that survives all
+    // three FAILS below rather than skipping — per §5a, once the mock has
+    // answered, a product-side failure is the suite's finding, not its exit
+    // (reported to the orchestrator either way).
+    await mock.configure({ auth: '401' });
+    let verdict = await settleKeyVerdict(api, source.id, gateway);
+    for (let attempt = 0; attempt < 3 && verdict === 'models.source.cooldown.server_error'; attempt += 1) {
+      // The recreation has to happen against a HEALTHY upstream — the create
+      // probes the source before committing it, and the mock is still set to
+      // 401 for the settle. The rejection is re-armed after the new source
+      // exists, by the same dry run as before.
       await mock.configure({ auth: 'ok' });
+      await api.deleteSource(source.id);
+      const rebuilt = await api.createApiKeySource(source.display_name, mockBaseUrl());
+      if (!rebuilt) {
+        // The instance that cannot rebuild this arrangement is the same failure
+        // as the cooldown it was clearing — named, not skipped.
+        expect(rebuilt, 'The instance refused to recreate the precondition source.').not.toBeNull();
+        break;
+      }
+      expect(
+        rebuilt.models.some((model) => model.id === supplied),
+        'The recreated source lost the model the route depends on.',
+      ).toBe(true);
+      source = rebuilt;
+      await arrange();
+      await mock.configure({ auth: '401' });
+      // One cooldown window (plus slack) is enough for a retry attempt: the
+      // defect this loop exists for re-arms the cooldown on EVERY probe, so a
+      // second window after the first re-armed would only burn another 30 s on
+      // the way to the same verdict. The FIRST settle keeps the full budget,
+      // where a genuine one-off transient still gets its chance to clear.
+      verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
+    }
+    expect(
+      verdict,
+      'The gateway engine kept answering the dry run with a 5xx of its own across three fresh '
+        + 'arrangements (models.source.cooldown.server_error), so the upstream was never reached and '
+        + 'the key never rejected. This is the engine defect reported to the orchestrator, not a '
+        + 'missing precondition — see ui/e2e/README.md § Known flakes.',
+    ).toBe('models.source.needs_action.credential_revoked');
+    // The replacement has to be a key that works, or the dialog would be
+    // reporting the same failure over again under a different name.
+    await mock.configure({ auth: 'ok' });
 
-      await hub.goto();
-      await hub.openSource(source.id);
-      await expect(hub.sourceDetailDialog).toBeVisible();
+    await hub.goto();
+    await hub.openSource(source.id);
+    await expect(hub.sourceDetailDialog).toBeVisible();
 
-      // What a stopped row owes the user is one tap to the fix, not an error
-      // string. The attribute is the product's own statement of where that tap
-      // goes, and the label is what the user reads on it.
-      const repair = hub.sourceDetailDialog.locator('[data-repair-destination="replace_key_dialog"]');
-      await expect(repair).toHaveText(copy('repair.replaceKey'));
-      await repair.click();
+    // What a stopped row owes the user is one tap to the fix, not an error
+    // string. The attribute is the product's own statement of where that tap
+    // goes, and the label is what the user reads on it.
+    const repair = hub.sourceDetailDialog.locator('[data-repair-destination="replace_key_dialog"]');
+    await expect(repair).toHaveText(copy('repair.replaceKey'));
+    await repair.click();
 
-      const dialog = hub.addKeyDialog;
-      await expect(dialog).toBeVisible();
-      await expect(dialog).toContainText(copy('repair.replaceTitle', { name: source.display_name }));
+    const dialog = hub.addKeyDialog;
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(copy('repair.replaceTitle', { name: source.display_name }));
 
-      await dialog.getByLabel(copy('repair.replaceLabel'), { exact: true }).fill('e2e-second-key');
-      await dialog.getByRole('button', { name: copy('repair.replaceSubmit'), exact: true }).click();
+    await dialog.getByLabel(copy('repair.replaceLabel'), { exact: true }).fill('e2e-second-key');
+    await dialog.getByRole('button', { name: copy('repair.replaceSubmit'), exact: true }).click();
 
-      // The upstream still lists the same models, so the new key costs the route
-      // nothing — a plain repair, and the dialog says which of the two it was.
-      await expect(dialog).toContainText(copy('repair.repaired'), { timeout: 30_000 });
-      // And the row it was raised from is no longer stopped. A dialog that
-      // reports a repair over a source still marked blocked has reported a
-      // repair that did not happen.
-      await expect
-        .poll(
-          async () => (await api.sources()).find((s) => s.id === source.id)?.state.detail_key,
-          { timeout: 15_000 },
-        )
-        .toBeNull();
+    // The upstream still lists the same models, so the new key costs the route
+    // nothing — a plain repair, and the dialog says which of the two it was.
+    await expect(dialog).toContainText(copy('repair.repaired'), { timeout: 30_000 });
+    // And the row it was raised from is no longer stopped. A dialog that
+    // reports a repair over a source still marked blocked has reported a
+    // repair that did not happen.
+    await expect
+      .poll(
+        async () => (await api.sources()).find((s) => s.id === source.id)?.state.detail_key,
+        { timeout: 15_000 },
+      )
+      .toBeNull();
+
     } finally {
+      // Whatever happened above, the instance's chain for this model goes back
+      // to what it was — the arrangement was the scenario's, not the user's.
       if (original.length) await api.putAgentChain(gateway.backend, gateway.model, original);
     }
   });

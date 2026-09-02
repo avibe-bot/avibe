@@ -1,6 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { configDefaults, defineConfig } from 'vitest/config'
 
 // Point the dev proxy at any running Avibe instance — e.g. the Incus regression
 // environment — with VIBE_UI_BACKEND=http://127.0.0.1:15130 npm run dev, so UI
@@ -29,6 +29,14 @@ const backendProxy = () => ({
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Vitest's default `include` is `**/*.{test,spec}.?(c|m)[jt]s?(x)`, which
+  // matches `e2e/*.spec.ts` as readily as `src/*.test.tsx`. Those files are
+  // Playwright's, and calling `test.describe()` under Vitest throws
+  // ("Playwright Test did not expect test.describe() to be called here"), so
+  // without this the unit suite fails on files it was never meant to collect.
+  // Excluding the directory — rather than renaming the specs — keeps the trap
+  // disarmed for every Playwright file added later.
+  test: { exclude: [...configDefaults.exclude, 'e2e/**'] },
   plugins: [react()],
   resolve: {
     alias: {

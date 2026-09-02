@@ -31,14 +31,20 @@ test.describe('E · usage and logs', () => {
     await expect(window).toBeVisible();
     await expect(window.getByRole('radio', { checked: true })).toHaveCount(1);
 
-    // Two honest shapes. Empty says so in words. Populated owes both breakdowns
-    // — a total with no attribution cannot be acted on.
+    // Two honest shapes, and the tab has to say which it is. `count()` reads
+    // instantly, and the tab renders NEITHER shape while the read is in flight
+    // — so branching on it this early would classify a valid empty report as
+    // populated. Waiting on one shape or the other settles the read first.
     const empty = page.getByText(copy('usage.empty'), { exact: true });
+    const populated = page.getByRole('heading', { name: copy('usage.bySource.title'), level: 3 });
+    await expect(empty.or(populated)).toBeVisible();
     if (await empty.count()) {
       await expect(empty).toBeVisible();
       return;
     }
-    await expect(page.getByRole('heading', { name: copy('usage.bySource.title'), level: 3 })).toBeVisible();
+    // Populated owes both breakdowns — a total with no attribution cannot be
+    // acted on.
+    await expect(populated).toBeVisible();
     await expect(page.getByRole('heading', { name: copy('usage.byDay.title'), level: 3 })).toBeVisible();
   });
 
@@ -60,7 +66,9 @@ test.describe('E · usage and logs', () => {
     const checked = (await window.getByRole('radio', { checked: true }).innerText()).trim();
     const labels = (await options.allInnerTexts()).map((label) => label.trim());
     const targetLabel = labels.find((label) => label !== checked);
-    test.skip(!targetLabel, 'Every window option carries the same label, so none can be named.');
+    // A `find` miss here means every option carries the same label, which is a
+    // broken radio group, not an environment the instance was born with.
+    expect(targetLabel, 'Every usage window option carries the same label.').toBeDefined();
     const target = window.getByRole('radio', { name: targetLabel!, exact: true });
     await target.click();
 
@@ -98,13 +106,25 @@ test.describe('E · usage and logs', () => {
     });
 
     const empty = page.getByText(copy('recent.empty'), { exact: true });
+    const viewAll = page.getByRole('button', { name: copy('recent.viewAll'), exact: true });
+    // A populated card's event rows carry no stable class, so the third honest
+    // shape is named by what every row must render — the timestamped cell. The
+    // `loadingMore` guard above has already settled the read by this point.
+    // `.or()` demands exactly one match and a populated card shows BOTH "View
+    // all" and rows, so the populated branch asserts its own element rather
+    // than joining the chain.
+    const populated = page
+      .locator('section')
+      .filter({ has: page.getByRole('heading', { name: copy('recent.title'), level: 2 }) })
+      .locator('span.font-mono')
+      .first();
     if (await empty.count()) {
       await expect(empty).toBeVisible();
       return;
     }
+    await expect(populated).toBeVisible();
     // With history present the card offers the rest of it, unless everything
     // already fits — both are stated states, and neither is a blank panel.
-    const viewAll = page.getByRole('button', { name: copy('recent.viewAll'), exact: true });
     if (await viewAll.count()) {
       await viewAll.click();
       await expect(

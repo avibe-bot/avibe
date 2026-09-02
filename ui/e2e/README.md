@@ -4,18 +4,39 @@ Playwright specs that drive the Model Hub surface of a **running Avibe
 instance** through a real browser. They are not wired into CI, and they do not
 start anything for you: you point them at an instance, and they exercise it.
 
-Scenario IDs in the spec titles refer to `docs/plans/model-hub-e2e-test-plan.md`.
+Scenario IDs in the spec titles (A1…E3) refer to
+`docs/plans/model-hub-e2e-test-plan.md` §3 — the web-interaction plan this suite
+implements. They are that plan's working labels, deliberately not the
+`MH-*` ids of `tests/scenarios/model_hub/catalog.yaml`: the catalog's canonical
+evidence gate binds each `MH-*` row to one pytest or vitest case it can verify
+collects, and a Playwright spec drives a live instance rather than collecting
+under either runner, so citing it there would make an unverifiable claim. The
+cross-reference lives in the plan, which maps every §3 id to its `MH-*`
+counterpart; if the pytest lane lands an orchestration that runs this suite and
+records its result, that runner — not the spec files — is what belongs in the
+catalog.
 
 ## What it talks to
 
 | Variable | Default | What it is |
 | --- | --- | --- |
-| `VIBE_E2E_BASE_URL` | `http://127.0.0.1:5123` | The Avibe instance under test. |
+| `VIBE_E2E_BASE_URL` | *(none — required)* | The Avibe instance under test. The run refuses to start without it. |
 | `VIBE_E2E_MOCK_UPSTREAM_URL` | *(unset)* | A controllable model upstream. Specs that need one **skip** when it is absent. |
 
 Nothing else is read, and the suite never imports the mock's code — it types the
 mock's URL into the dialog's Base URL field the way a user would, and steers it
 over its own HTTP control plane.
+
+### The mock upstream
+
+The driver the repo's own instructions reference (`tests/e2e/drivers/
+mock_llm_upstream.py`) ships with the pytest lane and is not in this PR, so a
+clean checkout has no bundled copy. Any server implementing the §5a control
+plane will do: `POST /__control/config` with `auth`, `protocol`,
+`models_endpoint`, `stream`, and `models`; `GET /__control/requests` returning
+`{"requests": [...]}`; `DELETE /__control/requests` to reset; plus the
+Anthropic/OpenAI protocol endpoints under `/v1/*`. Until the pytest lane lands
+its driver, run the suite with a mock you provide on that contract.
 
 ## Preconditions, and why they skip instead of fail
 
@@ -24,6 +45,14 @@ capability can be off, the gateway runtime can be stopped, no agent backend CLI
 can be installed. Those are facts about the instance, not defects, so each one
 produces a **skip whose message says what to start**. A red test here always
 means the product did something wrong.
+
+The line between the two is deliberate (test plan §5a): only an environmental
+fact may skip. Once the instance has answered — the capability read succeeded,
+the mock's control plane replied — a later refusal (a source it will not create,
+a mode switch that does not take, a forced route PUT it rejects) is a product
+failure and fails the spec. `VIBE_E2E_BASE_URL` has no default for the same
+reason: the suite mutates the instance it is pointed at, and refusing to start
+on an unspecified target is safer than any warning.
 
 ## Running it
 
@@ -36,6 +65,9 @@ VIBE_E2E_BASE_URL=http://127.0.0.1:5199 \
 VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931 \
 npm run e2e
 ```
+
+`VIBE_E2E_BASE_URL` is required — the suite refuses to start without it, because
+it mutates the instance it points at (see below).
 
 `npm run e2e:headed` runs the same thing in a visible browser. Artifacts (traces
 for failures, screenshots, the HTML report) land in `ui/e2e/.artifacts/` and are
@@ -131,10 +163,13 @@ the retry after that window fails the same way and re-arms it, so the source
 never reaches a verdict about its key. Recreating the source clears it; waiting,
 restarting the engine, and stopping and starting the whole gateway do not.
 
-B6 **skips** on exactly that detail key, with the reason above. Any other verdict
-still fails the spec, because a wrong classification is what it is there to
-catch. Reported as a finding rather than patched: this suite changes no product
-code.
+B6 retries that sticky state by rebuilding its arrangement (delete the source,
+recreate it, re-chain, re-settle) up to three times, and then **fails** with a
+message naming the engine defect if all three attempts land in the same
+cooldown. Per §5a this is a product-side failure once the mock has answered, so
+it is the suite's finding rather than its exit — it has been reported to the
+orchestrator either way. Any other verdict fails immediately, because a wrong
+classification is exactly what the scenario exists to catch.
 
 ## What this suite cannot reach
 

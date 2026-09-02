@@ -5,9 +5,18 @@
 // instance, not about the code. A precondition that is not met produces a SKIP
 // whose message says what to start — never a failure that looks like a bug in
 // the product.
+//
+// The line is drawn where the plan draws it (§5a, discipline tightening): only
+// an ENVIRONMENTAL fact may skip — the capability off, the mock absent, the
+// runtime not running, no backend CLI installed, an instance whose shape means
+// the scenario's surface does not exist. Once those have passed, anything that
+// then goes wrong is the product going wrong, and it fails. A source the
+// instance will not create, a mode switch that does not take, a forced route
+// PUT that is refused: each of those used to skip, and each of them was a
+// product failure wearing a missing precondition's clothes.
 import { test as base, expect } from '@playwright/test';
 
-import { HubApi } from './api';
+import { HubApi, type Source } from './api';
 import { NO_MOCK_UPSTREAM } from './env';
 import { ModelHubPage } from './hub';
 import { MockUpstream } from './mock';
@@ -50,12 +59,44 @@ export const requireMockUpstream = async (mock: MockUpstream): Promise<void> => 
   test.skip(!(await mock.reachable()), NO_MOCK_UPSTREAM);
 };
 
+/**
+ * The product's own running predicate, not a stricter one of the suite's.
+ *
+ * `runtimeIsRunning` in `src/components/settings/models/runtimeLifecycle.ts`
+ * accepts `degraded` alongside `ok`, and it has to: a gateway serving in its
+ * supported degraded state renders the full surface. Insisting on exactly `ok`
+ * here reported such an instance as switched off and skipped every source,
+ * routing, guard, usage, and logs spec — nearly the whole suite, silently.
+ */
+export const runtimeIsRunning = (health: string | undefined): boolean =>
+  health === 'ok' || health === 'degraded';
+
 /** Skips unless the gateway runtime is installed and running — the precondition
  *  for anything that adds a source or serves a route. */
 export const requireRuntimeRunning = async (api: HubApi): Promise<void> => {
   const runtime = await api.runtime();
   test.skip(
-    runtime?.status?.health !== 'ok',
+    !runtimeIsRunning(runtime?.status?.health),
     'The gateway runtime is not running on this instance. Turn the model gateway on first (see ui/e2e/README.md).',
   );
+};
+
+/**
+ * Creates a source a spec needs before it can begin, and FAILS if the instance
+ * will not make one.
+ *
+ * Deliberately not a skip. By the time this runs, every environmental
+ * precondition has passed — the capability is on, the runtime is up, and the
+ * mock has answered its own control plane — so an instance that then refuses a
+ * source it was handed a healthy upstream for has done something wrong, and
+ * saying so is what the suite is for.
+ */
+export const requireSource = async (
+  api: HubApi,
+  displayName: string,
+  baseUrl: string,
+): Promise<Source> => {
+  const source = await api.createApiKeySource(displayName, baseUrl);
+  expect(source, `the instance refused to create the precondition source ${displayName}`).not.toBeNull();
+  return source!;
 };
