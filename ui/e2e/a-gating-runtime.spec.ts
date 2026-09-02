@@ -40,8 +40,10 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     await requireModelHub(api);
     const runtime = await api.runtime();
     test.skip(
-      Boolean(runtime?.status?.installed_version),
-      'The gateway is already installed on this instance, so the install entry point is not reachable. '
+      runtime?.status?.health !== 'not_installed',
+      'The install entry point exists only in the not-installed state — an installed runtime (whatever '
+        + 'its health) and an in-progress installation both render different closed states with the '
+        + 'switch disabled or busy, so this spec covers neither. '
         + 'Point VIBE_E2E_BASE_URL at a fresh hermetic instance to cover it (see ui/e2e/README.md).',
     );
     // `not_installed` with an `unsupported` manifest is a different closed

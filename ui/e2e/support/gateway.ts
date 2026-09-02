@@ -49,19 +49,31 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       // other than "no sources and nothing in Gateway mode" is already the
       // gateway surface, and an anchor would only add a row nobody asked for.
       const directEmpty = sources.length === 0 && agents.every((agent) => agent.mode === 'direct');
+      const anchorName = `${E2E_SOURCE_PREFIX}surface-anchor`;
       let anchor: Source | null = null;
-      if (directEmpty) {
-        testInfo.skip(!(await mock.reachable()), NO_MOCK_UPSTREAM);
-        // A healthy baseline, because the previous test may have left the mock
-        // rejecting everything — and an anchor that cannot be created would
-        // report the last test's mock state as this test's missing precondition.
-        await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'ok' });
-        anchor = await requireSource(api, `${E2E_SOURCE_PREFIX}surface-anchor`, mockBaseUrl());
-      }
       try {
+        if (directEmpty) {
+          testInfo.skip(!(await mock.reachable()), NO_MOCK_UPSTREAM);
+          // A healthy baseline, because the previous test may have left the mock
+          // rejecting everything — and an anchor that cannot be created would
+          // report the last test's mock state as this test's missing precondition.
+          await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'ok' });
+          anchor = await requireSource(api, anchorName, mockBaseUrl());
+        }
         await provide();
       } finally {
-        if (anchor) await api.deleteSource(anchor.id);
+        // By NAME, not only by the id a successful create returned: the server
+        // persists the source before its response leaves, so a POST whose
+        // response is lost rejects `requireSource` above — with the anchor
+        // already on the instance and no id in hand. The prefix sweep catches
+        // that path; the id delete covers the ordinary one without re-listing.
+        if (anchor) {
+          await api.deleteSource(anchor.id);
+        } else if (directEmpty) {
+          for (const source of await api.sources()) {
+            if (source.display_name === anchorName) await api.deleteSource(source.id);
+          }
+        }
       }
     },
     { auto: true },

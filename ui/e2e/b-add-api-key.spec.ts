@@ -291,19 +291,35 @@ test.describe('B · add an API-key source', () => {
       // catch.
       // The #1818 signature is TWO facts together, and both are checked before
       // the marker fires: the source in `cooldown.server_error`, AND the mock
-      // having received no protocol request while it got there. A cooldown with
-      // requests on the log is a different defect — the upstream answered and
-      // something upstream-side classified it badly — and it must fail hard, not
-      // ride #1818's marker to green. `upstreamSawRequest` reads the mock's own
-      // capture, reset before each settle so only that attempt's probes count.
-      const upstreamSawRequest = async (): Promise<boolean> => {
+      // having received no DRY RUN while it got there. A cooldown with the dry
+      // run on the log is a different defect — the upstream answered 401 and
+      // something classified it badly — and it must fail hard, not ride #1818's
+      // marker to green. Two discrimination rules keep that line honest:
+      //
+      //   - Only a POST down a protocol path counts (`/v1/messages`,
+      //     `/v1/responses`, `/v1/chat/completions`): the 401 the marker
+      //     exists to route travels only on the dry run, while a `GET
+      //     /v1/models` is model-list traffic an engine reads at startup — and
+      //     #1818's engine restarts mid-settle, so startup GETs land on a
+      //     post-reset log without any completion ever being attempted.
+      //   - The marker reads the FINAL attempt's log, not an OR across
+      //     attempts: an earlier attempt's dial that still ended in a sticky
+      //     cooldown says nothing about the attempt that produced the verdict
+      //     being marked, and OR-ing them let #1818 ride in green under an
+      //     earlier attempt's history.
+      const upstreamSawDryRun = async (): Promise<boolean> => {
         const requests = await mock.requests();
-        return requests.some((request) => request.path.startsWith('/v1/'));
+        return requests.some(
+          (request) => request.method === 'POST'
+            && /^\/v1\/(messages|responses|chat\/completions)$/.test(request.path.split('?')[0]),
+        );
       };
       await mock.resetRequests();
       await mock.configure({ auth: '401' });
       let verdict = await settleKeyVerdict(api, source.id, gateway);
-      let upstreamReceived = await upstreamSawRequest();
+      // Per-attempt, not cumulative: the marker at the end must be able to say
+      // "the attempt that produced THIS verdict never reached the upstream."
+      let upstreamReceived = await upstreamSawDryRun();
       for (let attempt = 0; attempt < 3 && verdict === 'models.source.cooldown.server_error'; attempt += 1) {
         // The recreation has to happen against a HEALTHY upstream — the create
         // probes the source before committing it, and the mock is still set to
@@ -332,7 +348,7 @@ test.describe('B · add an API-key source', () => {
         // where a genuine one-off transient still gets its chance to clear.
         await mock.resetRequests();
         verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
-        upstreamReceived = upstreamReceived || (await upstreamSawRequest());
+        upstreamReceived = await upstreamSawDryRun();
       }
       test.fail(
         verdict === 'models.source.cooldown.server_error' && !upstreamReceived,
