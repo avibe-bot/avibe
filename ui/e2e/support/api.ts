@@ -318,8 +318,25 @@ export class HubApi {
    */
   async removeSuiteSources(): Promise<void> {
     if (!(await this.modelHubEnabled())) return;
+    // Every match is attempted before any failure is raised: the gateway
+    // fixture leaves two sources behind, and a first delete that throws used
+    // to strand the second on the shared instance — poisoning the source
+    // ordering and routing preconditions of every later spec — alongside the
+    // failure that already stopped this one.
+    const failures: string[] = [];
     for (const source of await this.sources()) {
-      if (source.display_name.startsWith(E2E_SOURCE_PREFIX)) await this.deleteSource(source.id);
+      if (!source.display_name.startsWith(E2E_SOURCE_PREFIX)) continue;
+      try {
+        await this.deleteSource(source.id);
+      } catch (error) {
+        failures.push(`${source.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (failures.length) {
+      throw new Error(
+        `Suite-source sweep left ${failures.length} source(s) on the instance:\n  `
+          + failures.join('\n  '),
+      );
     }
   }
 }

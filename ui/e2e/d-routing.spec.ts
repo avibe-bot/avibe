@@ -193,9 +193,14 @@ test.describe('D · route chains and priority order', () => {
 
     try {
       await hub.goto();
-      // The row for THIS model, not the card's first: the card collapses its
-      // model list, and the first row it shows is whichever model the supply
-      // ranks first — a different chain than the one arranged above.
+      // The row for THIS model, not the card's first: the first row a card
+      // shows is whichever model the supply ranks first — a different chain
+      // than the one arranged above. And a collapsed card renders only its
+      // first six models, so a selected model seventh-or-later has no row in
+      // the DOM at all until the card is expanded.
+      const card = hub.agentCard(gateway.backend);
+      const expand = card.locator('.model-hub-model-collapse').first();
+      if (await expand.count()) await expand.click();
       await hub.routeRow(gateway.backend, gateway.model).click();
       const dialog = hub.routeDialog;
       await expect(dialog).toBeVisible();

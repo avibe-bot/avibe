@@ -118,9 +118,16 @@ PY
 #     `~/.codex` — and on a machine with real CLI credentials that scan can
 #     read production tokens and import a real native account into the test
 #     instance's state. The processes get test-owned copies of all of them.
-#     `PATH` keeps the real CLIs on purpose: the suite needs an installed
-#     backend, and with the config stores redirected the CLIs read the
-#     test-owned state, not yours.
+#
+#     On macOS there is one more channel the env cannot redirect: a Claude CLI
+#     that stores OAuth in the SYSTEM KEYCHAIN still sees your real login even
+#     under a redirected HOME, because `claude auth status` (which the mode
+#     switch's presence probe executes) reads the keychain, not the filesystem.
+#     If your install is keychain-backed, point the suite at a shim instead of
+#     the real binary — put a directory FIRST on PATH carrying an executable
+#     `claude` that answers `auth status --json` from test-owned state (e.g.
+#     `{"oauth_account":null}` printed and exit 0) and execs nothing else. A
+#     container or separate OS user is the stronger form of the same boundary.
 cd "$(git rev-parse --show-toplevel)"
 export E2E_ISOLATED_HOME="$E2E_HOME/home"
 mkdir -p "$E2E_ISOLATED_HOME/.claude" "$E2E_ISOLATED_HOME/.codex" \

@@ -71,6 +71,12 @@ test.describe('A · capability gate and runtime lifecycle', () => {
   });
 
   test('A2 · turning the gateway off and back on round-trips', async ({ hub, api }) => {
+    // The lifecycle alone can lawfully take 150s on a slow host (60s stop +
+    // 90s verified restart), and per-expect timeouts do not extend the test
+    // timeout — the config's 90s cap used to be able to cancel the spec while
+    // its finally was still proving the runtime back up, failing the run AND
+    // closing the page over an unconfirmed shared runtime.
+    test.setTimeout(240_000);
     await requireModelHub(api);
     const runtime = await api.runtime();
     test.skip(
