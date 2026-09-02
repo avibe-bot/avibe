@@ -6800,3 +6800,71 @@ def test_the_initial_drift_reset_still_clears_an_unreleased_database(tmp_path: P
     surviving = _surviving_tables(db_path)
     assert drifted not in surviving
     assert "alembic_version" not in surviving
+
+
+def test_legacy_sessions_import_preflight_matches_the_migration_on_every_key_shape(
+    tmp_path: Path,
+) -> None:
+    """The preflight must require a platform exactly when the migration needs one.
+
+    ``_migrate_session_state_for_import`` decides whether ``primary_platform``
+    is mandatory, then hands the state to ``migrate_session_state_mappings``.
+    Two independent copies of "is this a legacy raw key?" can disagree, and the
+    failure is asymmetric: the preflight refuses to import state the migration
+    would have left untouched, so a user with that state cannot start at all.
+    Seed one key of every shape rather than listing the ones that are exempt.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    (state_dir / "sessions.json").write_text(
+        json.dumps(
+            {
+                "session_mappings": {
+                    # A Session with no Scope: no platform in the key and none
+                    # inferable from the anchors, yet not legacy.
+                    "": {"codex": {"archived:seed": "codex-session-scopeless"}},
+                    # Already prefixed.
+                    "slack::C123": {"codex": {"slack_1774074591.762089": "codex-session-1"}},
+                    # Legacy, but the platform is inferable from the anchors.
+                    "D456": {"codex": {"discord_1485641561998889093:/repo": "codex-session-2"}},
+                    # Legacy key with nothing left in it.
+                    "C999": {},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
+
+    assert report.imported is True
+    with sqlite3.connect(db_path) as conn:
+        anchors = {
+            row[0]
+            for row in conn.execute("select session_anchor from agent_sessions").fetchall()
+        }
+    assert "archived:seed" in anchors, "the scope-less Session was dropped by the import"
+
+
+def test_legacy_sessions_import_still_requires_platform_for_an_unresolvable_legacy_key(
+    tmp_path: Path,
+) -> None:
+    """Exempting the empty key must not exempt a real legacy key beside it."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    (state_dir / "sessions.json").write_text(
+        json.dumps(
+            {
+                "session_mappings": {
+                    "": {"codex": {"archived:seed": "codex-session-scopeless"}},
+                    "C123": {"codex": {"1774074591.762089:/repo": "codex-session-1"}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="primary_platform is required"):
+        ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
