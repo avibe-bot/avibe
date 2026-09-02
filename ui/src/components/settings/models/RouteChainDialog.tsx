@@ -312,6 +312,14 @@ export const RouteChainDialog: React.FC<{
       position: next.focusIndex + 1,
     });
   };
+  const cancelGrab = () => {
+    if (!interactionRef.current.grab) return;
+    const next = advanceInteraction({ type: "cancel-grab" });
+    requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
+    announce("settings.models.routeDialog.reorder.cancelled", {
+      position: next.focusIndex + 1,
+    });
+  };
   const onGripKeyDown = (
     event: React.KeyboardEvent<HTMLButtonElement>,
     index: number,
@@ -341,11 +349,7 @@ export const RouteChainDialog: React.FC<{
       }
     } else if (event.key === "Escape" && grabbed !== null) {
       event.preventDefault();
-      const next = advanceInteraction({ type: "cancel-grab" });
-      requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
-      announce("settings.models.routeDialog.reorder.cancelled", {
-        position: next.focusIndex + 1,
-      });
+      event.stopPropagation();
     } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       if (grabbed === null) {
@@ -1028,6 +1032,12 @@ export const RouteChainDialog: React.FC<{
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             cancelButtonRef.current?.focus();
+          }}
+          onEscapeKeyDown={(event) => {
+            if (phase === "ready" && interactionRef.current.grab) {
+              event.preventDefault();
+              cancelGrab();
+            }
           }}
         >
           <header className="model-hub-route-head flex flex-col border-b border-border">

@@ -129,35 +129,51 @@ test.describe('D · route chains and priority order', () => {
     await expect(dialog).toHaveCount(0);
   });
 
-  // A defect this suite found, not a scenario from §3, and reported rather than
-  // patched (this lane changes no product code) — filed as #1819.
-  //
-  // Escape during a keyboard grab is meant to be an undo: `onGripKeyDown` puts
-  // the hop back, refocuses it, and announces `reorder.cancelled`. It does all
-  // three — and then the dialog closes on the same keystroke, discarding every
-  // unsaved edit, so nobody ever reads that announcement. The handler calls
-  // `preventDefault()` only; Radix's dismissable layer listens on the document
-  // and does not consult `defaultPrevented`. `SourceOrderDrawer` gets this right
-  // twice over: `stopPropagation()` in the row handler AND an `onEscapeKeyDown`
-  // guard on the dialog content. The route dialog has neither.
-  //
-  // Unfixme once #1819 lands the same guard on the route dialog; the assertion
-  // is the two lines below, which is exactly what the drawer spec already
-  // asserts.
-  test.fixme('D · Escape cancels a grab without discarding the chain edit', async ({ hub, gateway, page }) => {
-    await hub.goto();
-    await hub.firstRouteRow(gateway.backend).click();
-    const dialog = hub.routeDialog;
-    const grip = dialog.locator('.model-hub-route-hop').first().getByRole('button', {
-      name: copy('routeDialog.grip'),
-      exact: true,
-    });
-    await grip.press(' ');
-    await page.keyboard.press('Escape');
-    await expect(dialog).toBeVisible();
-    await expect(dialog.locator('[aria-live="polite"]')).toHaveText(
-      copy('routeDialog.reorder.cancelled', { position: 1 }),
-    );
+  test('D · Escape cancels a grab without discarding the chain edit', async ({ api, hub, gateway, page }) => {
+    const original = await captureAgentChain(api, gateway);
+    const arranged = gateway.sources.map((source) => ({
+      source_id: source.id,
+      model_id: source.models[0].id,
+    }));
+    try {
+      expect(await api.putAgentChain(gateway.backend, gateway.model, arranged)).toBe(true);
+      await hub.goto();
+      await hub.routeRow(gateway.backend, gateway.model).click();
+
+      const dialog = hub.routeDialog;
+      const hops = dialog.locator('.model-hub-route-hop');
+      const models = dialog.locator('.model-hub-route-hop-model');
+      const announcer = dialog.locator('[aria-live="polite"]');
+      const gripName = copy('routeDialog.grip');
+      const unsavedOrder = [arranged[1].model_id, arranged[0].model_id];
+      const firstGrip = hops.first().getByRole('button', { name: gripName, exact: true });
+
+      await firstGrip.focus();
+      await firstGrip.press(' ');
+      await firstGrip.press('ArrowDown');
+      const heldGrip = dialog.locator('[aria-grabbed="true"]');
+      await expect(heldGrip).toBeFocused();
+      await heldGrip.press(' ');
+      await expect(models).toHaveText(unsavedOrder);
+      await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeEnabled();
+
+      const unsavedGrip = hops.last().getByRole('button', { name: gripName, exact: true });
+      await unsavedGrip.press(' ');
+      await unsavedGrip.press('ArrowUp');
+      await expect(dialog.locator('[aria-grabbed="true"]')).toBeFocused();
+      await page.keyboard.press('Escape');
+
+      await expect(dialog).toBeVisible();
+      await expect(announcer).toHaveText(copy('routeDialog.reorder.cancelled', { position: 2 }));
+      await expect(dialog.locator('[aria-grabbed="true"]')).toHaveCount(0);
+      await expect(models).toHaveText(unsavedOrder);
+      await expect(hops.last().getByRole('button', { name: gripName, exact: true })).toBeFocused();
+      await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeEnabled();
+
+      await labelledButton(dialog, copy('routeDialog.cancel')).click();
+    } finally {
+      await restoreAgentChain(api, gateway, original);
+    }
   });
 
   test('D · Reorder by Source order restates the chain, and says which it did', async ({ hub, gateway, api }) => {
