@@ -5,6 +5,7 @@ import {
   MODEL_HUB_DISABLED_REDIRECT,
   MODEL_HUB_SETTINGS_PATH,
 } from '../src/components/settings/models/modelHubRoutes';
+import type { Agent } from './support/api';
 import { hub as copy } from './support/copy';
 import {
   expect,
@@ -13,6 +14,7 @@ import {
   runtimeIsRunning,
   test,
 } from './support/fixtures';
+import { E2E_SOURCE_PREFIX } from './support/env';
 
 test.describe('A · capability gate and runtime lifecycle', () => {
   test('A1 · the capability gate, not the browser, decides the route', async ({ page, hub, api }) => {
@@ -126,26 +128,31 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     test.skip(runtime?.enabled !== true, 'The gateway is off, so stopping cannot be blocked.');
 
     const restore: string[] = [];
+    // Same snapshot discipline as the gateway fixture: the Direct→Gateway
+    // switch is not mode-only on a machine whose CLI holds a native login — it
+    // imports a `native_cli` subscription source as part of the transition, and
+    // that source carries no suite prefix the sweep could find.
+    let sourcesBeforeSwitch: Set<string> | null = null;
     const hubBackends = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
-    if (hubBackends.length === 0) {
-      const candidate = (await api.agents()).find((agent) => agent.cli_present);
-      test.skip(!candidate, 'No agent backend is present on this instance to put into Gateway mode.');
-      await api.setAgentMode(candidate!.backend, 'hub');
-      // Recorded the instant the mutation succeeds, before any verification
-      // read can fail: a transient `/agents` error between the switch and this
-      // line used to exit the spec with the backend stranded in Gateway mode,
-      // which skips the round-trip spec and distorts every later one. The
-      // verification skip below stays — it can no longer outrun the record.
-      restore.push(candidate!.backend);
-      const now = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
-      test.skip(
-        now.length === 0,
-        `Backend ${candidate!.backend} could not be switched to Gateway mode — it has no eligible source yet. `
-          + 'Add a source first (see ui/e2e/README.md).',
-      );
-    }
-
     try {
+      if (hubBackends.length === 0) {
+        const candidate = (await api.agents()).find((agent: Agent) => agent.cli_present);
+        test.skip(!candidate, 'No agent backend is present on this instance to put into Gateway mode.');
+        sourcesBeforeSwitch = new Set((await api.sources()).map((source) => source.id));
+        await api.setAgentMode(candidate!.backend, 'hub');
+        // The cleanup boundary is ENTERED the moment the mutation succeeds:
+        // every exit from here — including a throwing verification read or the
+        // skip below — passes through the finally, so the backend cannot stay
+        // in Gateway mode any path out of this spec can take.
+        restore.push(candidate!.backend);
+        const now = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
+        test.skip(
+          now.length === 0,
+          `Backend ${candidate!.backend} could not be switched to Gateway mode — it has no eligible source yet. `
+            + 'Add a source first (see ui/e2e/README.md).',
+        );
+      }
+
       const names = (await api.agents()).filter((a) => a.mode === 'hub').map((a) => a.backend).join(', ');
       await hub.goto();
       // The product refuses the stop AND says who is holding it. A generic
@@ -156,7 +163,23 @@ test.describe('A · capability gate and runtime lifecycle', () => {
         copy('shell.toggle.stopBlocked', { names }),
       );
     } finally {
-      for (const backend of restore) await api.setAgentMode(backend, 'direct');
+      // Mode first (the switch imported the source into a Gateway context),
+      // then the transition-created source — before any sweep, because it does
+      // not carry the prefix. Best-effort per source: one already gone is
+      // success. Two nested blocks keep the two restorations independent.
+      try {
+        for (const backend of restore) await api.setAgentMode(backend, 'direct');
+      } finally {
+        if (sourcesBeforeSwitch) {
+          for (const source of await api.sources()) {
+            if (!sourcesBeforeSwitch.has(source.id)
+                && !source.display_name.startsWith(E2E_SOURCE_PREFIX)) {
+              await api.deleteSource(source.id);
+            }
+          }
+        }
+        await api.removeSuiteSources();
+      }
     }
   });
 
