@@ -1809,6 +1809,151 @@ def test_an_unclaimed_request_leaves_no_attempt_on_the_live_turn(
     assert store.get("turn_live01") is None
 
 
+def test_an_unclaimed_request_leaves_an_attempt_in_flight_untouched(
+    tmp_path: Path,
+) -> None:
+    """A request records what it attempted, whoever else is on its turn.
+
+    A turn holds one pending-attempt slot, but the slot describes one request,
+    and a live process issues concurrent ones. So a delayed request for a
+    settled turn's route arrives while the live turn's own request is awaiting
+    an upstream result, and both reach for that one slot: on the way in to take
+    a launch identity, and on the way out to give it back. Either move erases
+    the attempt actually in flight, and `finish_attempt` reconstructs nothing
+    from an empty slot — the live turn settles having served a model with no
+    record of which Source and model served it.
+
+    Stated as the surviving provenance rather than as the two moves, so any
+    later route to the same erasure fails here.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-concurrent.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+        source_id="src_live0001",
+    )
+
+    with registry.gateway_terminalizer(backend="claude", token=token) as live:
+        assert live.resolution_model("hub-live") == "caller-live"
+        live.begin_attempt(
+            source_id="src_live0001",
+            resolved_model_id="hub-live",
+            channel="hub",
+            via_mapping=True,
+        )
+        # The live request is now awaiting upstream. A delayed request for the
+        # settled turn's route lands on the same token and same turn.
+        with registry.gateway_terminalizer(
+            backend="claude",
+            token=token,
+        ) as delayed:
+            assert delayed.resolution_model("hub-settled") == "caller-settled"
+        success = _outcome(RawOutcomeKind.SUCCESS, source_id="src_live0001")
+        live.finish_attempt(outcome=success, decision=classify_outcome(success))
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["served"] == {
+        "source_id": "src_live0001",
+        "configured_model_id": "hub-live",
+        "channel": "hub",
+    }
+
+
+def test_a_preparation_is_given_back_only_while_it_is_still_in_the_slot(
+    tmp_path: Path,
+) -> None:
+    """Giving back a launch identity must not take a real attempt with it.
+
+    A delayed request can arm the turn's empty slot and only then have the live
+    request begin its own attempt there. Its launch identity is now stale, and
+    the attempt that replaced it carries the same Source and model whenever the
+    live request went out on its primary hop — which is the ordinary case. So
+    the slot cannot be given back by matching what a preparation looks like,
+    only by being the very preparation this request put there; by value the two
+    are indistinguishable, and the live turn loses the provenance of a request
+    it really did make.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-stale-prep.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+        source_id="src_live0001",
+    )
+
+    # The delayed request arms the empty slot first.
+    with registry.gateway_terminalizer(backend="claude", token=token) as delayed:
+        # Only then does the live request begin its own attempt, on the primary
+        # hop — the same Source and model the preparation above named.
+        with registry.gateway_terminalizer(backend="claude", token=token) as live:
+            assert live.resolution_model("hub-live") == "caller-live"
+            live.begin_attempt(
+                source_id="src_live0001",
+                resolved_model_id="hub-live",
+                channel="hub",
+                via_mapping=True,
+            )
+            assert delayed.resolution_model("hub-settled") == "caller-settled"
+            success = _outcome(RawOutcomeKind.SUCCESS, source_id="src_live0001")
+            live.finish_attempt(outcome=success, decision=classify_outcome(success))
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["served"] == {
+        "source_id": "src_live0001",
+        "configured_model_id": "hub-live",
+        "channel": "hub",
+    }
+
+
 def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(
     tmp_path: Path,
 ) -> None:

@@ -552,10 +552,15 @@ class GatewayTurnTerminalizer:
         self._registry = registry
         self._backend = backend
         self._token = token
-        self.turn_id = registry._open_prepared_gateway_turn(
+        opened = registry._open_prepared_gateway_turn(
             backend=backend,
             token=token,
         )
+        # Keep the exact identity object armed for *this* request, not just its
+        # value: it is the only thing that distinguishes an untouched
+        # preparation from the turn's single pending slot having since been
+        # written by someone else. See `clear_prepared_attempt`.
+        self.turn_id, self._prepared_attempt = opened or (None, None)
         self._stream_started = False
         self._attempt_started = False
         self._downstream_canceled = False
@@ -578,6 +583,7 @@ class GatewayTurnTerminalizer:
             backend=self._backend,
             token=self._token,
             prepared_turn_id=self.turn_id,
+            prepared_attempt=self._prepared_attempt,
             gateway_model_id=gateway_model_id,
         )
         self.turn_id = routing.owner_turn_id
@@ -981,6 +987,7 @@ class TurnCorrelationRegistry:
         backend: str,
         token: str,
         prepared_turn_id: Optional[str],
+        prepared_attempt: Optional[AttemptIdentity] = None,
         gateway_model_id: str,
     ) -> GatewayRouting:
         """Route one gateway request and settle its attribution atomically.
@@ -1022,7 +1029,17 @@ class TurnCorrelationRegistry:
             # settles that turn as having canceled or interrupted a Hub attempt
             # it never made. It cannot be opened later instead, because `fail`
             # runs before this call and needs a turn to fail.
-            self.clear_prepared_attempt(prepared_turn_id)
+            #
+            # Give back only what this request itself armed. A request that
+            # armed nothing — because an attempt was already in flight on the
+            # turn's one slot — has nothing to give back, and clearing that
+            # attempt would lose its provenance outright: `finish_attempt`
+            # returns on an empty slot with no identity to reconstruct from.
+            if prepared_attempt is not None:
+                self.clear_prepared_attempt(
+                    prepared_turn_id,
+                    only_if=prepared_attempt,
+                )
             return GatewayRouting(caller_model_id, None)
 
     def _route_gateway_model(
@@ -1096,7 +1113,22 @@ class TurnCorrelationRegistry:
         *,
         backend: str,
         token: str,
-    ) -> Optional[str]:
+    ) -> Optional[tuple[str, Optional[AttemptIdentity]]]:
+        """Arm the launch identity for one gateway request.
+
+        A turn holds one pending slot, but it describes one request, and
+        concurrent requests from one process share the turn. So a preparation
+        never displaces what is already there: whatever occupies the slot is an
+        attempt some request has begun, and overwriting it substitutes this
+        request's launch identity for the one that is actually in flight.
+        Nothing is lost by declining — `_terminalize_gateway_exit` rebuilds the
+        launch identity from the trace when the slot is empty or not ours.
+
+        Returns the turn together with the identity armed, or `None` in that
+        slot when an attempt was already in flight, so the caller gives back
+        only what it armed itself.
+        """
+
         with self._lock:
             exact = self._exact_turn(backend, token)
             if exact is None:
@@ -1109,21 +1141,44 @@ class TurnCorrelationRegistry:
                 or trace.gateway_model_id is None
             ):
                 return None
-            trace.pending_attempt = AttemptIdentity(
+            if trace.pending_attempt is not None:
+                return turn_id, None
+            prepared = AttemptIdentity(
                 source_id=trace.gateway_source_id,
                 resolved_model_id=trace.gateway_model_id,
                 channel="hub",
             )
-            return turn_id
+            trace.pending_attempt = prepared
+            return turn_id, prepared
 
-    def clear_prepared_attempt(self, turn_id: Optional[str]) -> None:
-        """Remove the launch identity when cancellation precedes invocation."""
+    def clear_prepared_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        only_if: Optional[AttemptIdentity] = None,
+    ) -> None:
+        """Remove the launch identity when cancellation precedes invocation.
+
+        A turn holds one pending slot, but it describes one request, and
+        concurrent gateway requests on one process share the turn. So a caller
+        giving back a preparation it made itself passes it as `only_if`: the
+        slot is cleared only while it still holds that exact preparation. The
+        check is on object identity, not equality — a real attempt begun on the
+        primary hop carries the same Source and model as the preparation it
+        replaced, so `==` cannot tell "nobody has written here" from "the live
+        request already did", and clearing the latter drops its provenance for
+        good (`finish_attempt` returns on an empty slot and reconstructs
+        nothing). `only_if=None` keeps the whole-turn behavior for callers that
+        are ending the turn rather than one request.
+        """
 
         if turn_id is None:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
             if trace is not None and trace.pending_attempt is not None:
+                if only_if is not None and trace.pending_attempt is not only_if:
+                    return
                 if trace.pending_attempt.channel == "hub":
                     trace.pending_attempt = None
 
