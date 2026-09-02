@@ -196,9 +196,15 @@ def test_d2_healthy_hop_is_served_by_the_real_engine_probe(
             if item["path"] == "/v1/messages"
         ]
         assert captured
+        # The engine forwards Anthropic credentials as Bearer; x-api-key is
+        # used only by Avibe's direct discovery probe path.
         assert all(
-            _request_credential(item) == SYNTHETIC_API_KEY
+            item["headers"].get("authorization")
+            == f"Bearer {SYNTHETIC_API_KEY}"
             for item in captured
+        )
+        assert all(
+            item["headers"].get("anthropic-version") for item in captured
         )
 
 
