@@ -88,6 +88,12 @@ part of their parent Skill. The only nested container exception is the
 explicit Codex `.system` discovery root in Section 4.4; its direct children
 still follow the same candidate shape.
 
+Compatibility roots accept either a direct child directory or a direct child
+directory symlink. A symlink contributes the resolved target as the directory
+shown by `vibe skill load`; discovery and load revalidate both the alias and
+target identities so replacing either cannot pair one Skill body with another
+directory. Avibe-owned built-in snapshots remain symlink-free.
+
 Avibe opens `SKILL.md` with platform nonblocking semantics, immediately uses
 `fstat` or the platform-equivalent handle query to verify that same open handle
 is a regular file, and performs the bounded parse or load through that handle.
@@ -212,14 +218,18 @@ large optional field, description, or unterminated frontmatter cannot create
 unbounded per-Turn work. Discovery enumerates at most 1,025 direct child
 entries in any root and omits the entire root if it contains more than 1,024.
 One resolution gives the built-in root and the combined project/global roots
-independent aggregate budgets of 1,024 candidate Skill directories and 8 MiB
-of frontmatter bytes each. A full built-in root therefore cannot consume the
-capacity reserved for user Skills. Within the compatibility-input budget,
-roots are visited in precedence order and each accepted root's candidates in
-stable name order. Reaching that budget omits the remaining lower-priority
-roots. These rules make omission deterministic without walking the rest of an
-oversized directory. Omission is diagnostic log data, not additional prompt
-content.
+independent aggregate budgets of 4,096 direct child entries, 1,024 candidate
+Skill directories, and 8 MiB of frontmatter bytes each. A full built-in root
+therefore cannot consume the capacity reserved for user Skills. Within each
+class, roots are visited in precedence order. Before reading frontmatter,
+direct children of each root are sorted by their absolute entry path; declared
+names participate only after parsing. If a root would exceed the remaining
+direct-child budget, Avibe observes at most one entry beyond that remainder,
+omits the whole root, and omits all lower-priority roots. Reaching the candidate
+or frontmatter budget likewise omits remaining lower-priority roots. These
+rules make pre-parse work and omission deterministic without walking the rest
+of an oversized directory. Omission is diagnostic log data, not additional
+prompt content.
 
 These limits do not validate optional frontmatter, require the directory and
 declared name to match, or add compatibility metadata.
@@ -273,6 +283,7 @@ Skills provide specialized instructions and workflows for specific tasks.
 When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.
 If the user requests a skill by name, load it.
 Only load skill names listed here or returned by `vibe skill list`; do not guess names.
+If no Skill on this page matches the task, inspect subsequent Catalog pages before proceeding.
 
 ### Available skills
 - data-analysis: Analyze datasets, generate charts, and create reports.
@@ -280,7 +291,8 @@ Only load skill names listed here or returned by `vibe skill list`; do not guess
 ```
 
 The system prompt contains page 1 only, within the entry and row budgets in
-Section 5.1. If more entries exist, append exactly:
+Section 5.1. The subsequent-page instruction is present only when another page
+exists. If more entries exist, append exactly:
 
 ```md
 More skills are available. Run `vibe skill list --page 2` to view more.
@@ -419,6 +431,15 @@ the OpenCode caller-context plugin. They are not prompt text or agent-visible
 command arguments. A standalone command without Avibe bindings uses its own
 current working directory and the snapshot bundled with its own executable.
 
+An OpenCode binding lives for the active Avibe-dispatched Turn rather than for
+a wall-clock TTL. Binding-file updates are serialized across processes, use a
+unique same-directory temporary file and atomic replacement, and cleanup is
+guarded by a per-Turn token so an older Turn cannot remove a newer binding for
+the same native Session. Normal completion removes the binding; after a crash,
+the plugin rejects entries whose owner process is no longer alive. Legacy
+entries with an expiry remain readable until that expiry for upgrade
+compatibility.
+
 ### 8.3 Historical context is historical
 
 Avibe does not track which Skills a Session has loaded, attach revisions to
@@ -456,7 +477,7 @@ applies the same Avibe Catalog to all three backends.
 | --- | --- | --- |
 | Claude Code | Configure the SDK with `skills=[]`. | Build the candidate prompt every Turn. If it changed, recreate the SDK client and resume the same native session; otherwise reuse the client. |
 | Codex | Set `skills.include_instructions=false`. | Build `developerInstructions` every Turn. Send updated instructions only when they differ, while retaining the same thread/session. |
-| OpenCode | Set the effective Agent permission `skill=deny` and send `tools.skill=false` in every prompt request. | Build and send the current system prompt on every new Turn. |
+| OpenCode | Send `tools.skill=false` in every prompt request without rewriting user permission configuration. | Build and send the current system prompt on every new Turn. |
 
 For OpenCode, `tools.skill=false` is a request parameter, not text appended to
 the system prompt.
@@ -653,10 +674,18 @@ at runtime.
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
   most 1,025 entries. Built-ins and combined project/global compatibility
-  inputs each have a separate 1,024-candidate and 8 MiB frontmatter budget, so
-  either class can exhaust its own budget without consuming the other's.
+  inputs each have separate 4,096-direct-child, 1,024-candidate, and 8 MiB
+  frontmatter budgets, so either class can exhaust its own budget without
+  consuming the other's. Cross-root exhaustion follows precedence and the
+  pre-frontmatter path order defined in Section 5.1.
+- Compatibility directory symlinks resolve to their target directory, and
+  replacing either the alias or target after discovery makes load fail.
+- Unquoted YAML comments after `name` or `description` are ignored while `#`
+  inside a quoted scalar remains content.
 - Prompt and `vibe skill list` pagination are stable, limited to 25 entries,
-  remain within the row budget, and do not expose paths or sources.
+  remain within the row budget, and do not expose paths or sources. When later
+  pages exist, the prompt tells the agent to inspect them if page 1 has no
+  matching Skill.
 - Oversized descriptions cannot make the Catalog unbounded, and names with
   whitespace, shell syntax, uppercase characters, or invalid hyphen placement
   are omitted by the parser-backed portable name boundary.
@@ -700,6 +729,9 @@ and verify:
 - the Avibe Catalog is equivalent across all three backends;
 - the native backend Catalog is absent;
 - OpenCode's native Skill tool is disabled; and
+- OpenCode user permission configuration is not rewritten, concurrent active
+  Turn bindings preserve each other, and token-guarded cleanup removes only the
+  binding created by that Turn; and
 - each adapter retains the same native Session when the Catalog changes.
 
 Codex `$skill`, backend TUI commands, and ordinary filesystem reads are not v1
