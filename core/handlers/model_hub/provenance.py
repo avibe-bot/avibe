@@ -531,6 +531,14 @@ class PreparedGatewayRoute:
     source_id: str
 
 
+@dataclass(frozen=True)
+class GatewayRouting:
+    """Where a gateway request goes, and whether a live turn owns it."""
+
+    caller_model_id: Optional[str]
+    claimed_by_live_turn: bool
+
+
 class GatewayTurnTerminalizer:
     """One funnel for every exit after an exact gateway identity is prepared."""
 
@@ -578,12 +586,22 @@ class GatewayTurnTerminalizer:
     def resolution_model(self, gateway_model_id: str) -> Optional[str]:
         """Return the uniquely prepared caller model for this gateway request."""
 
-        self.bind_request_model(gateway_model_id)
-        return self._registry.gateway_resolution_model(
+        routing = self._registry.gateway_routing(
             backend=self._backend,
             token=self._token,
             gateway_model_id=gateway_model_id,
         )
+        if routing.claimed_by_live_turn:
+            self.bind_request_model(gateway_model_id)
+        else:
+            # Routing answered from the scope, so no live turn owns this
+            # request. Binding it anyway would tell the sole live turn that a
+            # model it never asked for arrived on its token, marking it
+            # ambiguous and dropping the provenance of the request it makes
+            # next. This request's own turn has already settled, so it has
+            # nothing left to attribute to.
+            self.turn_id = None
+        return routing.caller_model_id
 
     def fail(
         self,
@@ -977,22 +995,24 @@ class TurnCorrelationRegistry:
             trace.gateway_source_id = source_id
             trace.gateway_model_id = resolved_model_id
 
-    def gateway_resolution_model(
+    def gateway_routing(
         self,
         *,
         backend: str,
         token: str,
         gateway_model_id: str,
-    ) -> Optional[str]:
-        """Resolve the caller model routing this gateway request, if one is knowable."""
+    ) -> GatewayRouting:
+        """Resolve where this gateway request goes and whether a live turn owns it."""
 
         with self._lock:
             key = self._token_scopes.get(token)
             if key is None or key[0] != backend:
-                return None
+                return GatewayRouting(None, claimed_by_live_turn=True)
             scope = self._scopes[key]
             if scope.routing_conflicts.intersection(scope.active_turns):
-                return None
+                # A live turn disagreed with itself about its own route. It owns
+                # the resulting failure, so leave it attributable.
+                return GatewayRouting(None, claimed_by_live_turn=True)
             # Only the caller model is a routing input: `ModelHubService.resolve`
             # takes no source, so two routes differing only in Source — the
             # ordinary shape of a route with fallback hops — are the same
@@ -1003,10 +1023,17 @@ class TurnCorrelationRegistry:
                 if turn_id in scope.active_turns
                 and route.resolved_model_id == gateway_model_id
             }
+            # A live turn claims this model exactly when one of its own prepared
+            # routes resolves to it. Only then may the caller attribute the
+            # request to that turn; every answer below comes from the scope
+            # instead, and belongs to no open turn window.
+            claimed = bool(live_callers)
             if len(live_callers) == 1:
-                return next(iter(live_callers))
+                return GatewayRouting(
+                    next(iter(live_callers)), claimed_by_live_turn=claimed
+                )
             if live_callers:
-                return None
+                return GatewayRouting(None, claimed_by_live_turn=claimed)
             # No live turn claims this model, yet the launched process is alive
             # on this token and keeps issuing requests: CLI tool loops,
             # agent-initiated continuations, and transport retries all land
@@ -1016,10 +1043,15 @@ class TurnCorrelationRegistry:
             # not be read as ambiguity about it.
             scope_callers = scope.route_callers.get(gateway_model_id, set())
             if len(scope_callers) == 1:
-                return next(iter(scope_callers))
+                return GatewayRouting(
+                    next(iter(scope_callers)), claimed_by_live_turn=claimed
+                )
             if scope_callers:
-                return None
-            return gateway_model_id if scope.untracked_use else None
+                return GatewayRouting(None, claimed_by_live_turn=claimed)
+            return GatewayRouting(
+                gateway_model_id if scope.untracked_use else None,
+                claimed_by_live_turn=claimed,
+            )
 
     def gateway_terminalizer(
         self,

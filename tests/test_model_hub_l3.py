@@ -1568,11 +1568,11 @@ def _prepare_route(
 
 
 def _resolution(registry: TurnCorrelationRegistry, token: str, model: str) -> str | None:
-    return registry.gateway_resolution_model(
+    return registry.gateway_routing(
         backend="claude",
         token=token,
         gateway_model_id=model,
-    )
+    ).caller_model_id
 
 
 @pytest.mark.parametrize(
@@ -1698,6 +1698,67 @@ def test_gateway_routing_dies_with_the_process_scope(tmp_path: Path) -> None:
 
     assert registry.authenticates("claude", token) is False
     assert _resolution(registry, token, "hub-model") is None
+
+
+def test_gateway_attributes_a_request_only_to_a_turn_that_claims_its_model(
+    tmp_path: Path,
+) -> None:
+    """Serving a scope-routed request must not cost the live turn its record.
+
+    Routing and attribution share one entry point, so an out-of-turn request is
+    resolved while some unrelated turn is the only open window. Binding it there
+    would tell that turn a model it never asked for arrived on its token, which
+    marks it ambiguous — and an ambiguous trace makes `settle` drop the record
+    for the request the turn goes on to make itself.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-attribution.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+
+    with registry.gateway_terminalizer(backend="claude", token=token) as out_of_turn:
+        assert out_of_turn.resolution_model("hub-settled") == "caller-settled"
+        # Its own turn has already settled, so there is nothing to attribute to.
+        assert out_of_turn.turn_id is None
+
+    with registry.gateway_terminalizer(backend="claude", token=token) as live:
+        assert live.resolution_model("hub-live") == "caller-live"
+        assert live.turn_id == "turn_live01"
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = store.get("turn_live01")
+    assert record is not None
+    assert record["terminal_error"] == {
+        "source_id": "src_primary01",
+        "configured_model_id": "hub-live",
+        "channel": "hub",
+        "reason": "protocol_error",
+        "stream_started": False,
+    }
 
 
 def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(
