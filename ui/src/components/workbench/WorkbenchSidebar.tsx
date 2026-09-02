@@ -33,7 +33,7 @@ import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { SessionPinAction } from './SessionPinAction';
-import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from './sessionRowLayout';
+import { SESSION_ROW_MENU_POSITION_CLASS } from './sessionRowLayout';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -310,8 +310,8 @@ export const SessionRow: React.FC<{
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-[background-color,padding-right] duration-150 ease-out motion-reduce:transition-none',
-            sessionRowActionPaddingClass(menuOpen, session.pinned),
+            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-colors duration-150 ease-out motion-reduce:transition-none',
+            canManageMetadata ? 'pr-11' : 'pr-2.5',
             active
               ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',
