@@ -16,6 +16,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
   },
@@ -70,6 +72,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.1.18",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.3",
