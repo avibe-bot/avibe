@@ -304,6 +304,63 @@ describe('BackendModelCatalogDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('refuses to call a runtime-refresh failure a save, and still lets the user retry it', async () => {
+    const user = userEvent.setup();
+    // The server commits the catalog before it asks the backend to load it, so
+    // `engine_down` leaves the rows on disk and out of use at once. The re-read
+    // finds the intent applied — and that is exactly the answer that must not be
+    // mistaken for success, because the route already said what it did.
+    const settled = agent([model('alpha')]);
+    vi.spyOn(modelsApi, 'getAgentSources')
+      .mockResolvedValueOnce(agent([model('alpha'), model('beta')]))
+      .mockResolvedValue(settled);
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError('engine_down', 'modelHub.errors.engine_down', true))
+      .mockResolvedValueOnce(settled);
+    const { onSaved, onObserved, onClose } = renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('The list was stored, but this backend did not load it, so it is not in use yet. Save again once the backend is back.')).toBeTruthy();
+    expect(screen.queryByText('The model list was not saved. It was re-read from the server; check it and try again.')).toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onObserved).toHaveBeenCalledWith(settled);
+
+    // The re-read left the draft agreeing with the server, so 「nothing to send」
+    // must not read as 「nothing to do」: the write is what failed.
+    const save = screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await user.click(save);
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(settled));
+    expect(onClose).toHaveBeenCalled();
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a refused save named as refused when the server state happens to agree', async () => {
+    const user = userEvent.setup();
+    // Someone else removed beta too, so the re-read matches the draft exactly.
+    // That coincidence says nothing about the write this server refused — only
+    // the runtime-refresh failure can leave a list stored and unloaded.
+    vi.spyOn(modelsApi, 'getAgentSources')
+      .mockResolvedValueOnce(agent([model('alpha'), model('beta')]))
+      .mockResolvedValue(agent([model('alpha')]));
+    vi.spyOn(modelsApi, 'putAgentModels').mockRejectedValue(
+      new ApiCallError('invalid_request', 'modelHub.errors.backend_model_conflict', true),
+    );
+    const { onSaved, onClose } = renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('This list changed elsewhere while you were editing. Your changes were replayed onto the newer list; check it and save again.')).toBeTruthy();
+    expect(screen.queryByText(/The list was stored/)).toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('keeps a reorder-only draft open when an inconclusive save did not land', async () => {
     const user = userEvent.setup();
     const catalog = [model('alpha'), model('beta')];

@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
+import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
 import { applyModelsDevMatch, blankBackendModel } from './backendCatalog';
 import { Field } from './dialogFields';
@@ -70,6 +70,41 @@ const ChipButton: React.FC<{
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <p className="model-hub-model-section-label">{children}</p>
 );
+
+/**
+ * A capability is a three-valued fact, and `null` — 「nobody has said」 — is the
+ * value every shipped row arrives with, because the backend projection simply
+ * omits the flag.
+ *
+ * A switch can only spend that value: the first touch turns an unanswered
+ * question into a stated `false`, and nothing on the surface gives it back. So
+ * all three states are options here, and 「Not set」 is an answer the user can
+ * return to as easily as they left it.
+ */
+const CAPABILITY_CHOICES = ['unset', 'no', 'yes'] as const;
+type CapabilityChoice = (typeof CAPABILITY_CHOICES)[number];
+
+const CapabilityField: React.FC<{
+  label: string;
+  value: boolean | null;
+  onChange: (next: boolean | null) => void;
+}> = ({ label, value, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <p className="model-hub-model-field-label">{label}</p>
+      <SegmentedRadio
+        value={value === null ? 'unset' : value ? 'yes' : 'no'}
+        onChange={(next: CapabilityChoice) => onChange(next === 'unset' ? null : next === 'yes')}
+        options={CAPABILITY_CHOICES.map((id) => ({
+          id,
+          label: t(`settings.models.gateway.modelEditor.capability.${id}`) as string,
+        }))}
+        ariaLabel={label}
+      />
+    </div>
+  );
+};
 
 export const BackendModelEditorDialog: React.FC<{
   open: boolean;
@@ -235,10 +270,11 @@ export const BackendModelEditorDialog: React.FC<{
       display_name: nameText.trim() || null,
       context_window: context.value,
       max_output_tokens: output.value,
-      // Only an explicit "no reasoning" clears the efforts. A row whose support
-      // is unstated still ships efforts the backend uses, and an unrelated edit
-      // must not silently drop them.
-      reasoning_efforts: draft.supports_reasoning === false ? [] : draft.reasoning_efforts,
+      // The efforts are the row's own metadata, never a consequence of the
+      // capability answer above them: 「no reasoning」 hides the list, and
+      // dropping it would make that answer destructive — take it back and the
+      // efforts would be gone with nothing to restore them from. Which efforts
+      // a `false` row projects is the backend's question, not the editor's.
     });
   };
 
@@ -422,35 +458,21 @@ export const BackendModelEditorDialog: React.FC<{
           <section className="model-hub-model-section">
             <SectionLabel>{t('settings.models.gateway.modelEditor.section.capabilities')}</SectionLabel>
             <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
-              <div className="model-hub-model-toggle flex min-w-0 items-center justify-between gap-3">
-                <span className="flex min-w-0 items-baseline gap-1.5">
-                  <span className="model-hub-model-toggle-label truncate">{t('settings.models.gateway.modelEditor.supportsTools')}</span>
-                  {draft.supports_tools === null && (
-                    <span className="model-hub-model-note shrink-0">{t('settings.models.gateway.modelEditor.unspecified')}</span>
-                  )}
-                </span>
-                <Switch
-                  checked={draft.supports_tools === true}
-                  onCheckedChange={(next) => patch({ supports_tools: next })}
-                  label={t('settings.models.gateway.modelEditor.supportsTools') as string}
-                />
-              </div>
-              <div className="model-hub-model-toggle flex min-w-0 items-center justify-between gap-3">
-                <span className="flex min-w-0 items-baseline gap-1.5">
-                  <span className="model-hub-model-toggle-label truncate">{t('settings.models.gateway.modelEditor.supportsReasoning')}</span>
-                  {draft.supports_reasoning === null && (
-                    <span className="model-hub-model-note shrink-0">{t('settings.models.gateway.modelEditor.unspecified')}</span>
-                  )}
-                </span>
-                <Switch
-                  checked={draft.supports_reasoning === true}
-                  onCheckedChange={(next) => patch({ supports_reasoning: next })}
-                  label={t('settings.models.gateway.modelEditor.supportsReasoning') as string}
-                />
-              </div>
+              <CapabilityField
+                label={t('settings.models.gateway.modelEditor.supportsTools') as string}
+                value={draft.supports_tools}
+                onChange={(next) => patch({ supports_tools: next })}
+              />
+              <CapabilityField
+                label={t('settings.models.gateway.modelEditor.supportsReasoning') as string}
+                value={draft.supports_reasoning}
+                onChange={(next) => patch({ supports_reasoning: next })}
+              />
             </div>
             {/* An unstated capability still owns its efforts, so hide the list
-                only when the user has actually said this model cannot reason. */}
+                only when the user has actually said this model cannot reason.
+                Hidden, not dropped: the draft keeps them for the answer that
+                comes back. */}
             {draft.supports_reasoning !== false && (
               <div className="flex flex-col gap-1.5">
                 <p className="model-hub-model-field-label" id="model-hub-efforts">{t('settings.models.gateway.modelEditor.reasoningEfforts')}</p>

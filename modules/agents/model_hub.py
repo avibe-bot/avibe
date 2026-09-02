@@ -901,6 +901,7 @@ class ModelHubRuntimeRouter:
                 reasoning_efforts=(
                     tuple(backend_model.reasoning_efforts)
                     if backend_model is not None
+                    and backend_model.supports_reasoning is not False
                     else ()
                 ),
             )

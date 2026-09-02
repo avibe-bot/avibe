@@ -51,6 +51,15 @@ const renderEditor = (overrides: Partial<React.ComponentProps<typeof BackendMode
 const modalities = (direction: 'Input' | 'Output') =>
   within(screen.getByRole('group', { name: `${direction} modalities` }));
 
+/** Both capabilities answer Yes/No/Not set, so an option only names one of them
+ *  from inside its own group. */
+const capability = (name: 'Tool calling' | 'Reasoning') =>
+  within(screen.getByRole('radiogroup', { name }));
+
+const answered = (name: 'Tool calling' | 'Reasoning'): string | null =>
+  capability(name).getAllByRole('radio').find((radio) => radio.getAttribute('aria-checked') === 'true')?.textContent
+    ?? null;
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -146,7 +155,7 @@ describe('BackendModelEditorDialog', () => {
     expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Claude Sonnet 4.5');
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
     expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByRole('switch', { name: 'Reasoning' }).getAttribute('aria-checked')).toBe('true');
+    expect(answered('Reasoning')).toBe('Yes');
 
     // Every filled field stays the user's: the fill is a starting point.
     await user.click(modalities('Input').getByRole('checkbox', { name: 'Image' }));
@@ -282,7 +291,8 @@ describe('BackendModelEditorDialog', () => {
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
     expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('');
     expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('false');
-    expect(screen.getByRole('switch', { name: 'Reasoning' }).getAttribute('aria-checked')).toBe('false');
+    // Back to the blank row's own answers, not the filled model's.
+    expect(answered('Reasoning')).toBe('No');
     expect(screen.queryByRole('checkbox', { name: 'high' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'Add model' }));
@@ -336,12 +346,12 @@ describe('BackendModelEditorDialog', () => {
     expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ display_name: null }));
   });
 
-  it('sends a custom reasoning effort verbatim and drops the list when reasoning is off', async () => {
+  it('sends a custom reasoning effort verbatim and keeps the list when reasoning is off', async () => {
     const user = userEvent.setup();
     const { onCommit } = renderEditor({ effortSuggestions: ['low'] });
 
     await user.type(screen.getByLabelText('Backend model ID'), 'm');
-    await user.click(screen.getByRole('switch', { name: 'Reasoning' }));
+    await user.click(capability('Reasoning').getByRole('radio', { name: 'Yes' }));
     await user.click(screen.getByRole('checkbox', { name: 'low' }));
     await user.click(screen.getByRole('button', { name: 'Custom effort' }));
     await user.type(screen.getByLabelText('Custom effort'), 'XHIGH-2{Enter}');
@@ -354,11 +364,15 @@ describe('BackendModelEditorDialog', () => {
     }));
 
     onCommit.mockClear();
-    await user.click(screen.getByRole('switch', { name: 'Reasoning' }));
+    // 「No reasoning」 hides the efforts; it does not spend them. Dropping them
+    // here would make the answer destructive — take it back and there would be
+    // nothing left to restore.
+    await user.click(capability('Reasoning').getByRole('radio', { name: 'No' }));
+    expect(screen.queryByRole('checkbox', { name: 'XHIGH-2' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     await waitFor(() => expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
       supports_reasoning: false,
-      reasoning_efforts: [],
+      reasoning_efforts: ['low', 'XHIGH-2'],
     })));
   });
 
@@ -376,8 +390,8 @@ describe('BackendModelEditorDialog', () => {
     };
     const { onCommit } = renderEditor({ model: shipped, takenIds: new Set([shipped.id]) });
 
-    expect(screen.getAllByText('not set')).toHaveLength(2);
-    expect(screen.getByRole('switch', { name: 'Tool calling' }).getAttribute('aria-checked')).toBe('false');
+    expect(answered('Tool calling')).toBe('Not set');
+    expect(answered('Reasoning')).toBe('Not set');
     // An unstated capability still owns its efforts, so they stay visible.
     expect(screen.getByRole('checkbox', { name: 'minimal' }).getAttribute('aria-checked')).toBe('true');
 
@@ -404,18 +418,19 @@ describe('BackendModelEditorDialog', () => {
     };
     const { onCommit } = renderEditor({ model: shipped, takenIds: new Set([shipped.id]) });
 
-    await user.click(screen.getByRole('switch', { name: 'Tool calling' }));
-    expect(screen.getAllByText('not set')).toHaveLength(1);
-    // Saying "no reasoning" is the one answer that retires the efforts.
-    await user.click(screen.getByRole('switch', { name: 'Reasoning' }));
-    await user.click(screen.getByRole('switch', { name: 'Reasoning' }));
+    await user.click(capability('Tool calling').getByRole('radio', { name: 'Yes' }));
+    expect(answered('Tool calling')).toBe('Yes');
+    expect(answered('Reasoning')).toBe('Not set');
+    // Saying "no reasoning" takes the efforts off the surface and leaves them on
+    // the row: what a `false` model projects is the backend's question.
+    await user.click(capability('Reasoning').getByRole('radio', { name: 'No' }));
     expect(screen.queryByRole('checkbox', { name: 'high' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Save model' }));
 
     expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
       supports_tools: true,
       supports_reasoning: false,
-      reasoning_efforts: [],
+      reasoning_efforts: ['high'],
     }));
   });
 
@@ -429,11 +444,44 @@ describe('BackendModelEditorDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Fill from models.dev' }));
     await screen.findByText('models.dev · anthropic/claude-sonnet-4-5');
 
-    expect(screen.getAllByText('not set')).toHaveLength(2);
+    expect(answered('Tool calling')).toBe('Not set');
+    expect(answered('Reasoning')).toBe('Not set');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
       supports_tools: null,
       supports_reasoning: null,
+    }));
+  });
+
+  it('takes a stated capability back to not set', async () => {
+    const user = userEvent.setup();
+    // A capability is three-valued, and the third value is not a starting state
+    // the user can only spend: a row saved as 「no reasoning」 by mistake has to
+    // be able to stop claiming anything at all.
+    const stated: BackendModel = {
+      ...blankBackendModel(),
+      id: 'gpt-5',
+      supports_tools: true,
+      supports_reasoning: false,
+      reasoning_efforts: ['high'],
+    };
+    const { onCommit } = renderEditor({ model: stated, takenIds: new Set([stated.id]) });
+
+    expect(answered('Tool calling')).toBe('Yes');
+    expect(answered('Reasoning')).toBe('No');
+    // 「No reasoning」 is the one answer that hides the efforts, so withdrawing it
+    // brings them back — the row kept them the whole time.
+    expect(screen.queryByRole('checkbox', { name: 'high' })).toBeNull();
+
+    await user.click(capability('Tool calling').getByRole('radio', { name: 'Not set' }));
+    await user.click(capability('Reasoning').getByRole('radio', { name: 'Not set' }));
+    expect(screen.getByRole('checkbox', { name: 'high' }).getAttribute('aria-checked')).toBe('true');
+
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      supports_tools: null,
+      supports_reasoning: null,
+      reasoning_efforts: ['high'],
     }));
   });
 

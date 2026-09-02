@@ -124,6 +124,20 @@ export const catalogSaveFailureKey = (detail: string | undefined): string =>
   CATALOG_SAVE_FAILURE_COPY[detail ?? ''] ?? 'settings.models.gateway.catalog.saveFailed';
 
 /**
+ * Whether a refused save is the one the server can answer AFTER it has already
+ * written.
+ *
+ * `set_agent_models` commits the catalog and only then asks the backend to load
+ * it, so `engine_down` is the single code that arrives with the user's rows on
+ * disk and out of use. Every other code refused the write itself — a re-read
+ * that happens to match the draft only means someone else arrived at the same
+ * list, and reporting THAT as 「stored but not loaded」 would describe a write
+ * this server never made.
+ */
+export const catalogSaveLeftUnloaded = (code: string | undefined, detail: string | undefined): boolean =>
+  code === 'engine_down' || detail === 'modelHub.errors.engine_down';
+
+/**
  * Why a models.dev fill produced nothing.
  *
  * The server names the one cause that is not about this machine: the upstream

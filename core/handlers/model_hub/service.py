@@ -157,10 +157,14 @@ def project_opencode_public_model(
         projected["tool_call"] = model.supports_tools
     if model.supports_reasoning is not None:
         projected["reasoning"] = model.supports_reasoning
-    variants = {
-        effort: {"reasoningEffort": effort}
-        for effort in model.reasoning_efforts
-    }
+    variants = (
+        {
+            effort: {"reasoningEffort": effort}
+            for effort in model.reasoning_efforts
+        }
+        if model.supports_reasoning is not False
+        else {}
+    )
     if variants:
         projected["variants"] = variants
     return projected

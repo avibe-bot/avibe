@@ -2113,19 +2113,6 @@
 .model-hub-model-chip--add { border-style: dashed; }
 .model-hub-model-chip--custom { padding-right: 6px; }
 
-.model-hub-model-toggle {
-  height: var(--model-hub-model-control-height);
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--model-hub-model-control-radius);
-  background: var(--background);
-}
-.model-hub-model-toggle-label {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--foreground);
-}
-
 .model-hub-model-source-strip {
   min-height: var(--model-hub-model-control-height);
   padding: 0 12px;

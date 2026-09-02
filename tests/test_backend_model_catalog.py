@@ -171,6 +171,105 @@ def test_codex_hub_catalog_projects_custom_backend_models_from_native_shape():
     ]
 
 
+def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [
+                {
+                    "id": "gpt-native",
+                    "display_name": "GPT Native",
+                    "input_modalities": [],
+                }
+            ],
+        )
+    )
+
+    assert payload["models"][0]["input_modalities"] == ["text", "image"]
+    assert payload["models"][0]["supports_image_detail_original"] is True
+
+
+def test_codex_hub_catalog_does_not_give_custom_models_template_modalities():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{"id": "custom-model", "input_modalities": []}],
+        )
+    )
+
+    assert payload["models"][0]["input_modalities"] == ["text"]
+    assert payload["models"][0]["supports_image_detail_original"] is False
+
+
+def test_codex_hub_catalog_can_disable_and_restore_native_reasoning():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "default_reasoning_level": "high",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Low"},
+                        {"effort": "high", "description": "High"},
+                    ],
+                }
+            ]
+        }
+    ).encode()
+    configured = {
+        "id": "gpt-native",
+        "reasoning_efforts": ["low", "high"],
+    }
+
+    disabled = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{**configured, "supports_reasoning": False}],
+        )
+    )["models"][0]
+    restored = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{**configured, "supports_reasoning": None}],
+        )
+    )["models"][0]
+
+    assert disabled["default_reasoning_level"] == "none"
+    assert disabled["supported_reasoning_levels"] == [
+        {"effort": "none", "description": "None"}
+    ]
+    assert restored["default_reasoning_level"] == "low"
+    assert restored["supported_reasoning_levels"] == [
+        {"effort": "low", "description": "Low"},
+        {"effort": "high", "description": "High"},
+    ]
+
+
 def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     captured = {}
 

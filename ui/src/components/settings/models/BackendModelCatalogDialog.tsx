@@ -31,7 +31,7 @@ import {
 import { BackendModelEditorDialog } from './BackendModelEditorDialog';
 import { apiFailure, modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
-import { catalogSaveFailureKey } from './serverCopy';
+import { catalogSaveFailureKey, catalogSaveLeftUnloaded } from './serverCopy';
 import type { AgentBackend, AgentSupply, BackendModel } from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
@@ -127,6 +127,10 @@ export const BackendModelCatalogDialog: React.FC<{
   const editable = ready && !legacy;
   const busy = catalogWrite.pending;
   const dirty = editable && !sameCatalog(baseline?.models ?? [], draft);
+  /** A save that failed after the re-read rebased the draft leaves nothing to
+   *  send and everything still to do — a catalog the backend never loaded reads
+   *  as settled, so pressing Save again has to stay possible. */
+  const retryable = editable && saveFailedKey !== null;
   const filtering = query.trim() !== '';
   const displayLabel = (model: BackendModel): string => (
     backend === 'claude' && model.id === 'default' && model.locked && !model.routeable
@@ -245,15 +249,24 @@ export const BackendModelCatalogDialog: React.FC<{
         echoed = await modelsApi.putAgentModels(backend, { baseline: baselineModels, models: requested });
       } catch (error) {
         const failure = apiFailure(error);
-        const reason = failure?.serverNamed
-          ? catalogSaveFailureKey(failure.detail)
+        // A route that named its failure has decided what it did, and for this
+        // endpoint 「decided」 can still mean 「wrote」: the server commits the
+        // catalog and only then asks the backend to load it, so `engine_down`
+        // names rows that reached the disk and never reached the runtime. That
+        // is a failed save with a persisted list behind it, and no re-read can
+        // turn it into a success. Only an answer this client never got to read
+        // leaves the outcome genuinely unknown — and only that may be settled by
+        // reading the server's own catalog back.
+        const decided = failure?.serverNamed === true;
+        const unloaded = decided && catalogSaveLeftUnloaded(failure?.code, failure?.detail);
+        const reason = decided
+          ? catalogSaveFailureKey(failure?.detail)
           : 'settings.models.gateway.catalog.saveFailed';
-        // The PUT may still have committed. Re-read, and let the server's own
-        // catalog decide whether this was a failure or a lost answer.
         try {
           const observed = await readBackendCatalogBaseline(modelsApi, backend);
           const current = observed.models;
-          if (current && backendCatalogIntentApplied(current, intent)) {
+          const landed = current !== null && backendCatalogIntentApplied(current, intent);
+          if (current && landed && !decided) {
             applyBaseline(observed, current);
             await Promise.resolve(onSaved(observed.agent)).catch(() => {});
             onClose();
@@ -261,6 +274,12 @@ export const BackendModelCatalogDialog: React.FC<{
           }
           applyBaseline(observed, current ? applyBackendCatalogIntent(current, intent) : []);
           await Promise.resolve(onObserved(observed.agent)).catch(() => {});
+          // Stored and out of use at the same time, and only for the code that
+          // can leave a list that way: a validation or conflict refusal keeps
+          // its own sentence even when the re-read happens to agree with the
+          // draft, because that write never landed at all.
+          setSaveFailedKey(landed && unloaded ? 'settings.models.gateway.catalog.saveNotApplied' : reason);
+          return;
         } catch {
           setReadState('error');
         }
@@ -461,7 +480,7 @@ export const BackendModelCatalogDialog: React.FC<{
                 variant="brand"
                 className="model-hub-catalog-control rounded-md px-5 text-[12.5px] font-semibold"
                 onClick={save}
-                disabled={!editable || !dirty || busy}
+                disabled={!editable || (!dirty && !retryable) || busy}
               >
                 {busy && <LoaderCircle className="animate-spin" aria-hidden="true" />}
                 {t(busy ? 'settings.models.gateway.catalog.saving' : 'settings.models.gateway.catalog.save')}

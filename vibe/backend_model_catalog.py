@@ -121,7 +121,8 @@ def _codex_hub_catalog_bytes(
             model_id = configured.get("id")
             if not isinstance(model_id, str) or not model_id:
                 raise ValueError("Configured Codex catalog contains an invalid model")
-            row = dict(native_by_slug.get(model_id, template))
+            native_row = native_by_slug.get(model_id)
+            row = dict(native_row or template)
             row["slug"] = model_id
             display_name = configured.get("display_name")
             row["display_name"] = (
@@ -141,23 +142,36 @@ def _codex_hub_catalog_bytes(
                 row["context_window"] = context_window
                 row["max_context_window"] = context_window
             input_modalities = configured.get("input_modalities")
-            if isinstance(input_modalities, list):
+            # Persisted built-ins use an empty list to mean "not overridden".
+            # Custom rows still need a conservative text-only default instead
+            # of inheriting the native template model's image capabilities.
+            if native_row is None or (
+                isinstance(input_modalities, list) and input_modalities
+            ):
                 supported_modalities = [
                     modality
-                    for modality in input_modalities
+                    for modality in (
+                        input_modalities if isinstance(input_modalities, list) else []
+                    )
                     if modality in {"text", "image"}
                 ]
                 row["input_modalities"] = supported_modalities or ["text"]
                 row["supports_image_detail_original"] = "image" in supported_modalities
             efforts = configured.get("reasoning_efforts")
-            if isinstance(efforts, list):
+            supports_reasoning = configured.get("supports_reasoning")
+            if supports_reasoning is False:
+                settled_efforts = ["none"]
+            elif isinstance(efforts, list) and efforts:
                 settled_efforts = [
                     effort
                     for effort in efforts
                     if isinstance(effort, str) and effort
                 ]
-                if not settled_efforts:
-                    settled_efforts = ["none"]
+            elif native_row is None:
+                settled_efforts = ["none"]
+            else:
+                settled_efforts = None
+            if settled_efforts is not None:
                 row["default_reasoning_level"] = (
                     "medium"
                     if "medium" in settled_efforts

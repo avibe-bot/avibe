@@ -1931,6 +1931,39 @@ def test_runtime_launch_carries_claude_catalog_capabilities(tmp_path: Path) -> N
     assert launch.reasoning_efforts == ("low", "high")
 
 
+def test_runtime_launch_suppresses_efforts_when_reasoning_is_disabled(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_noreasoning", "No reasoning")
+    service = _service(tmp_path, sources=[source])
+    agent = service.store.config.agents["claude"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="shared-model",
+            supports_reasoning=False,
+            reasoning_efforts=["low", "high"],
+        )
+    ]
+    agent.routes = {
+        "shared-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "shared-model"),)
+        )
+    }
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000/claude", "gateway-token")
+            )
+        ),
+    )
+
+    launch = asyncio.run(router.resolve("claude", "shared-model"))
+
+    assert launch.supports_reasoning is False
+    assert launch.reasoning_efforts == ()
+
+
 def test_runtime_no_candidate_reinspects_the_full_chain_for_terminal_facts(
     tmp_path: Path,
 ) -> None:
@@ -4585,6 +4618,30 @@ def test_opencode_public_models_follow_persisted_config_without_overlay(
 
     service.store.config.agents["opencode"].mode = "direct"
     assert service.opencode_public_models() == {}
+
+
+def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disabled(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_no_reasoning", "No reasoning", model_id="upstream-model")
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="custom/no-reasoning",
+            supports_reasoning=False,
+            reasoning_efforts=["low", "high"],
+        )
+    ]
+    agent.menu.checked = ["custom/no-reasoning"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+
+    assert service.opencode_public_models()["custom/no-reasoning"] == {
+        "id": "custom/no-reasoning",
+        "name": "custom/no-reasoning",
+        "reasoning": False,
+    }
 
 
 def test_opencode_overlay_private_provider_id_is_credential_scoped(

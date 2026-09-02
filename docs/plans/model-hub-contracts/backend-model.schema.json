@@ -52,7 +52,8 @@
     "input_modalities": {
       "type": "array",
       "items": { "enum": ["text", "image", "audio", "video", "pdf"] },
-      "uniqueItems": true
+      "uniqueItems": true,
+      "description": "Explicitly supported input modalities. An empty array leaves native metadata in place when the backend has it and otherwise uses that backend adapter's safe default."
     },
     "output_modalities": {
       "type": "array",
@@ -71,7 +72,7 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1, "maxLength": 64 },
       "uniqueItems": true,
-      "description": "Effort values are sent verbatim. An empty array means the backend omits the effort parameter."
+      "description": "Effort values are sent verbatim unless supports_reasoning is false. False suppresses their runtime projection without deleting the list, so returning the capability to null is lossless. An empty array means the backend omits the effort parameter."
     },
     "locked": {
       "type": "boolean",

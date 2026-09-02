@@ -964,6 +964,7 @@
           "saving": "Saving…",
           "cancel": "Cancel",
           "saveFailed": "The model list was not saved. It was re-read from the server; check it and try again.",
+          "saveNotApplied": "The list was stored, but this backend did not load it, so it is not in use yet. Save again once the backend is back.",
           "saveRouted": "A model you removed still has a route. The list was re-read from the server; clear the route first, then remove it.",
           "saveConflict": "This list changed elsewhere while you were editing. Your changes were replayed onto the newer list; check it and save again.",
           "saveIdPrefix": "Claude model IDs must start with claude- or anthropic-. Remove the model and add it again with a valid ID.",
@@ -1021,7 +1022,11 @@
           },
           "supportsTools": "Tool calling",
           "supportsReasoning": "Reasoning",
-          "unspecified": "not set",
+          "capability": {
+            "unset": "Not set",
+            "no": "No",
+            "yes": "Yes"
+          },
           "reasoningEfforts": "Reasoning effort",
           "customEffort": "Custom effort",
           "customEffortPlaceholder": "e.g. medium",
