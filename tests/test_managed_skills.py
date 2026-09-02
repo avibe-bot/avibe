@@ -96,6 +96,28 @@ def test_loose_parser_requires_only_portable_name_and_description(tmp_path: Path
     assert skill.body == "# Instructions\n"
 
 
+def test_loose_parser_decodes_quoted_name_escapes_and_plain_description_folding(
+    tmp_path: Path,
+) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        'name: "format\\u002dcode"\n'
+        "description: Formats source files and\n"
+        "  applies repository conventions.\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.name == "format-code"
+    assert skill.description == "Formats source files and applies repository conventions."
+
+
 def test_loose_parser_ignores_nested_required_field_names(tmp_path: Path) -> None:
     skill_file = tmp_path / "skill" / "SKILL.md"
     skill_file.parent.mkdir()
@@ -738,6 +760,21 @@ def test_compatibility_aliases_share_one_candidate_budget_slot(tmp_path: Path, m
     assert skills[0].directory == canonical.parent.resolve()
     assert skills[0].access_backends == ("claude", "opencode", "codex")
     assert skills[1].access_backends == ("opencode",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory symlink fixture requires POSIX semantics")
+def test_native_aliases_merge_access_backends_for_one_directory(tmp_path: Path) -> None:
+    cwd = tmp_path / "project"
+    canonical = _write_skill(tmp_path / "shared-source", "shared", "shared", "Shared")
+    for root in (cwd / ".codex" / "skills", cwd / ".claude" / "skills"):
+        root.mkdir(parents=True)
+        (root / "shared").symlink_to(canonical.parent, target_is_directory=True)
+
+    skills = _isolated_resolve(cwd, tmp_path)
+
+    assert len(skills) == 1
+    assert skills[0].directory == canonical.parent.resolve()
+    assert skills[0].access_backends == ("codex", "claude")
 
 
 def test_distinct_same_name_candidates_keep_the_winners_access_backend(tmp_path: Path) -> None:

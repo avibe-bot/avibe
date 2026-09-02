@@ -17,6 +17,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
+import yaml
+
 from config import paths
 
 try:
@@ -167,7 +169,11 @@ def _decode_scalar(value: str) -> str:
         if quote == "'":
             value = value.replace("''", "'")
         else:
-            value = value.replace(r"\n", "\n").replace(r"\"", '"').replace("\\\\", "\\")
+            try:
+                decoded = yaml.safe_load(f'"{value}"')
+            except yaml.YAMLError:
+                return value.strip()
+            return decoded.strip() if isinstance(decoded, str) else value.strip()
     return value.strip()
 
 
@@ -250,6 +256,16 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
                 if _quoted_scalar_is_closed(combined):
                     break
             value = _strip_yaml_comment(" ".join(part for part in continuation if part))
+        elif field == "description":
+            continuation = [value]
+            index += 1
+            while index < len(lines):
+                line = lines[index].rstrip("\r\n")
+                if line and not line[0].isspace():
+                    break
+                continuation.append(_strip_yaml_comment(line.strip()))
+                index += 1
+            value = " ".join(part for part in continuation if part)
         else:
             index += 1
 
@@ -560,6 +576,7 @@ def _scan_root(
     priority: tuple[int, int, int],
     budget: _DiscoveryBudget,
     seen_directory_identities: set[tuple[int, int]] | None = None,
+    candidates_by_directory_identity: dict[tuple[int, int], ManagedSkill] | None = None,
     ignored_names: frozenset[str] = frozenset(),
     access_backends: tuple[str, ...] = (),
 ) -> list[ManagedSkill]:
@@ -578,6 +595,15 @@ def _scan_root(
         directory, source_identity, directory_identity = resolved_directory
         if seen_directory_identities is not None:
             if directory_identity in seen_directory_identities:
+                if candidates_by_directory_identity is not None:
+                    existing = candidates_by_directory_identity.get(directory_identity)
+                    if existing is not None:
+                        candidates_by_directory_identity[directory_identity] = replace(
+                            existing,
+                            access_backends=tuple(
+                                dict.fromkeys((*existing.access_backends, *access_backends))
+                            ),
+                        )
                 continue
             seen_directory_identities.add(directory_identity)
         budget.candidates += 1
@@ -594,7 +620,11 @@ def _scan_root(
         )
         budget.frontmatter_bytes += consumed
         if skill is not None:
-            skills.append(replace(skill, access_backends=access_backends))
+            skill = replace(skill, access_backends=access_backends)
+            if candidates_by_directory_identity is not None:
+                candidates_by_directory_identity[directory_identity] = skill
+            else:
+                skills.append(skill)
     return skills
 
 
@@ -709,6 +739,7 @@ def resolve_skills(
 
     compatibility_budget = _DiscoveryBudget()
     compatibility_directory_identities: set[tuple[int, int]] = set()
+    compatibility_candidates_by_identity: dict[tuple[int, int], ManagedSkill] = {}
     working_directory = _working_directory(cwd)
     for depth, directory in enumerate(_project_directories(working_directory)):
         for relative_root, family_rank in _PROJECT_FAMILIES:
@@ -720,6 +751,7 @@ def resolve_skills(
                     priority=(1, depth, family_rank),
                     budget=compatibility_budget,
                     seen_directory_identities=compatibility_directory_identities,
+                    candidates_by_directory_identity=compatibility_candidates_by_identity,
                     access_backends=_FAMILY_ACCESS_BACKENDS[family_rank],
                 )
             )
@@ -742,10 +774,13 @@ def resolve_skills(
                 priority=(2, 0, family_rank),
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,
+                candidates_by_directory_identity=compatibility_candidates_by_identity,
                 ignored_names=ignored_names,
                 access_backends=_FAMILY_ACCESS_BACKENDS[family_rank],
             )
         )
+
+    candidates.extend(compatibility_candidates_by_identity.values())
 
     winners: dict[str, ManagedSkill] = {}
     for candidate in candidates:

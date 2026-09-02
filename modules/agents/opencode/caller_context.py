@@ -9,7 +9,7 @@ Avibe-managed binding file and injects the AVIBE_* env vars for that call.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -22,7 +22,6 @@ from core.caller_context import caller_context_from_platform_payload
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
-BINDING_MAX_LIFETIME = timedelta(hours=24)
 
 
 PLUGIN_SOURCE = r"""
@@ -63,12 +62,6 @@ export const AvibeCallerContextPlugin = async () => ({
     } catch {
       return
     }
-    const explicitExpiry = typeof binding.expires_at === "string" ? Date.parse(binding.expires_at) : NaN
-    const updatedAt = typeof binding.updated_at === "string" ? Date.parse(binding.updated_at) : NaN
-    const expiresAt = Number.isFinite(explicitExpiry)
-      ? explicitExpiry
-      : updatedAt + 24 * 60 * 60 * 1000
-    if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) return
     applyEnv(output, binding.env)
   },
 })
@@ -127,22 +120,24 @@ def _load_bindings(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _prune_sessions(sessions: dict[str, Any], now: datetime) -> dict[str, Any]:
+def _prune_sessions(sessions: dict[str, Any]) -> dict[str, Any]:
     pruned: dict[str, Any] = {}
     for key, value in sessions.items():
         if not isinstance(value, dict):
             continue
-        expires_at = value.get("expires_at")
-        updated_at = value.get("updated_at")
         try:
-            expiry = (
-                datetime.fromisoformat(expires_at)
-                if isinstance(expires_at, str)
-                else datetime.fromisoformat(updated_at) + BINDING_MAX_LIFETIME
-            )
+            owner_pid = int(value.get("owner_pid"))
         except (TypeError, ValueError):
             continue
-        if expiry <= now:
+        if owner_pid <= 0:
+            continue
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        except OSError:
             continue
         pruned[str(key)] = value
     return pruned
@@ -218,7 +213,7 @@ def bind_session(
                 return False
             data = _load_bindings(path)
             existing_sessions = data.get("sessions", {})
-            sessions = _prune_sessions(existing_sessions, now)
+            sessions = _prune_sessions(existing_sessions)
             sessions.pop(session_id, None)
             if sessions != existing_sessions:
                 data["sessions"] = sessions
@@ -226,11 +221,10 @@ def bind_session(
             return False
 
         data = _load_bindings(path)
-        sessions = _prune_sessions(data.get("sessions", {}), now)
+        sessions = _prune_sessions(data.get("sessions", {}))
         entry = {
             "env": env,
             "updated_at": now.isoformat(),
-            "expires_at": (now + BINDING_MAX_LIFETIME).isoformat(),
             "binding_token": token,
             "owner_pid": os.getpid(),
         }

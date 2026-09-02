@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -62,20 +61,23 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     assert entry["caller_context"]["session_id"] == "ses123"
     assert entry["owner_pid"] == os.getpid()
     assert isinstance(entry["binding_token"], str)
-    assert datetime.fromisoformat(entry["expires_at"]) > datetime.now(timezone.utc)
+    assert "expires_at" not in entry
 
 
-def test_prune_sessions_bounds_legacy_bindings_by_updated_at() -> None:
-    now = datetime.now(timezone.utc)
+def test_prune_sessions_keeps_live_owners_and_removes_dead_ones(monkeypatch) -> None:
     sessions = {
-        "current-legacy": {"updated_at": (now - timedelta(hours=1)).isoformat()},
-        "expired-legacy": {"updated_at": (now - timedelta(hours=25)).isoformat()},
-        "unbounded-legacy": {"owner_pid": os.getpid()},
+        "current": {"owner_pid": 101},
+        "dead": {"owner_pid": 202},
+        "unbound": {"updated_at": "2026-09-02T00:00:00+00:00"},
     }
 
-    assert bridge._prune_sessions(sessions, now) == {
-        "current-legacy": sessions["current-legacy"]
-    }
+    def check_pid(pid, _signal):
+        if pid == 202:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(bridge.os, "kill", check_pid)
+
+    assert bridge._prune_sessions(sessions) == {"current": sessions["current"]}
 
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:
