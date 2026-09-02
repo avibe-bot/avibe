@@ -146,6 +146,10 @@ def test_g3_malformed_json_and_business_refusals_are_client_errors(
         {"order": None},
     )
     assert malformed_mode.status == malformed_chain.status == 400
+    # B13/D-3 remains open. The mode route currently returns the framework's
+    # unlocalized malformed-JSON shape while the chain route folds it into a
+    # Model Hub business refusal.
+    assert malformed_mode.json() == {"error": "Malformed JSON"}
     assert business_refusal.status == 400
     assert business_refusal.json()["error"] == "invalid_source_order"
 

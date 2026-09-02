@@ -14,6 +14,7 @@ from tests.e2e.test_model_hub_runtime import (
 )
 from tests.e2e.test_model_hub_sources import (
     MENU_MODEL,
+    SYNTHETIC_API_KEY,
     _configure_protocol,
     _create_source,
 )
@@ -181,8 +182,16 @@ def test_d2_healthy_hop_is_served_by_the_real_engine_probe(
         assert body["probe"]["reachable"] is True
         assert body["probe"]["source_id"] == source["id"]
         assert body["probe"]["model_id"] == MENU_MODEL
-        captured = mock_llm_upstream.requests()
-        assert any(item["path"] == "/v1/messages" for item in captured)
+        captured = [
+            item
+            for item in mock_llm_upstream.requests()
+            if item["path"] == "/v1/messages"
+        ]
+        assert captured
+        assert all(
+            item["headers"].get("x-api-key") == SYNTHETIC_API_KEY
+            for item in captured
+        )
 
 
 def _assert_probe_cooldown_and_next_request_selection(

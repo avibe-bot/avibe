@@ -15,6 +15,7 @@ pytestmark = pytest.mark.e2e_model_hub
 
 CONTRACT_VERSION = 6
 MENU_MODEL = "claude-sonnet-4-6"
+SYNTHETIC_API_KEY = "sk-model-hub-e2e-not-real"
 
 
 def _configure_protocol(
@@ -48,7 +49,7 @@ def _source_payload(
         "vendor": vendor,
         "display_name": display_name,
         "base_url": upstream.url,
-        "key": "sk-model-hub-e2e-not-real",
+        "key": SYNTHETIC_API_KEY,
         "protocol": protocol,
         "client_nonce": nonce,
     }
@@ -378,16 +379,38 @@ def test_b7_delete_guard_requires_exact_echo_before_force(
         {"backend": "claude", "model_id": MENU_MODEL, "agents": []}
     ]
 
-    malformed = model_hub_app.client.delete(
+    stale_hops = [dict(hop) for hop in refusal["would_remove_hops"]]
+    stale_hops[0]["model_id"] = "stale-confirmed-model"
+    wrong_hops = model_hub_app.client.delete(
         f"{endpoint}?force=true",
         {
-            "would_remove_hops": refusal["would_remove_hops"][:-1],
+            "would_remove_hops": stale_hops,
             "would_interrupt": refusal["would_interrupt"],
         },
     )
-    assert malformed.status == 409
-    assert malformed.json()["would_remove_hops"] == refusal[
+    wrong_hops_body = wrong_hops.json()
+    assert wrong_hops.status == 409, wrong_hops_body
+    assert wrong_hops_body["would_remove_hops"] == refusal["would_remove_hops"]
+    assert wrong_hops_body["would_interrupt"] == refusal["would_interrupt"]
+
+    stale_interruptions = [
+        dict(interruption) for interruption in refusal["would_interrupt"]
+    ]
+    stale_interruptions[0]["model_id"] = "stale-confirmed-model"
+    wrong_interruptions = model_hub_app.client.delete(
+        f"{endpoint}?force=true",
+        {
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": stale_interruptions,
+        },
+    )
+    wrong_interruptions_body = wrong_interruptions.json()
+    assert wrong_interruptions.status == 409, wrong_interruptions_body
+    assert wrong_interruptions_body["would_remove_hops"] == refusal[
         "would_remove_hops"
+    ]
+    assert wrong_interruptions_body["would_interrupt"] == refusal[
+        "would_interrupt"
     ]
 
     committed = model_hub_app.client.delete(

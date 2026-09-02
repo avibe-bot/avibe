@@ -508,7 +508,7 @@ scenarios:
     layer: ui-e2e
     reason: UI copy is not executable from the pytest API layer
     owning_layer: Playwright lane (ui/e2e)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c15
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c2c5c9c15
     partial_evidence:
       test: tests/e2e/test_model_hub_runtime.py::test_a3_runtime_stop_reports_every_blocking_backend
       covers: structured 409 guard, runtime_in_use code, and exact blocking backend list
@@ -519,7 +519,7 @@ scenarios:
     layer: ui-e2e
     reason: runtime-toggle interaction is not executable from the pytest API layer
     owning_layer: Playwright lane (ui/e2e)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c15
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c2c5c9c15
   - id: A5
     name: Controller restart during OAuth poll reports engine_down
     status: assert

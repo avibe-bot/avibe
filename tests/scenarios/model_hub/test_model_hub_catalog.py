@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import yaml
+from markdown_it import MarkdownIt
 
 
 SCENARIO_ROOT = Path("tests/scenarios/model_hub")
@@ -91,6 +93,56 @@ def _resolve_test_evidence(
     )
 
 
+def _markdown_heading_fragments(path: Path) -> set[str]:
+    tokens = MarkdownIt().parse(path.read_text())
+    counts: dict[str, int] = {}
+    fragments: set[str] = set()
+    for index, token in enumerate(tokens[:-1]):
+        if token.type != "heading_open":
+            continue
+        heading = tokens[index + 1].content.lower()
+        base = re.sub(r"[^\w\- ]", "", heading)
+        base = re.sub(r"\s+", "-", base).strip("-")
+        duplicate = counts.get(base, 0)
+        counts[base] = duplicate + 1
+        fragments.add(base if duplicate == 0 else f"{base}-{duplicate}")
+    return fragments
+
+
+def _resolve_evidence_reference(
+    *,
+    scenario_id: str,
+    reference: object,
+    canonical_tests: set[str],
+    expected_fail: bool,
+) -> None:
+    assert isinstance(reference, str), (
+        f"Scenario {scenario_id} has no evidence reference"
+    )
+    if "::" in reference:
+        _resolve_test_evidence(
+            scenario_id=scenario_id,
+            test_ref=reference,
+            canonical_tests=canonical_tests,
+            expected_fail=expected_fail,
+        )
+        return
+
+    path_text, separator, fragment = reference.partition("#")
+    assert separator and path_text and fragment, (
+        f"Scenario {scenario_id} has malformed document reference "
+        f"{reference!r}"
+    )
+    path = Path(path_text)
+    assert path.is_file(), (
+        f"Scenario {scenario_id} points to missing evidence document {path}"
+    )
+    assert fragment in _markdown_heading_fragments(path), (
+        f"Scenario {scenario_id} points to missing heading #{fragment} in "
+        f"{path}"
+    )
+
+
 def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
     """MH-CATALOG-001: every live row resolves, names its own ID, and is reachable from the project index."""
 
@@ -111,9 +163,9 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         if not status["test_required"]:
             assert test_ref is None
         else:
-            _resolve_test_evidence(
+            _resolve_evidence_reference(
                 scenario_id=scenario["id"],
-                test_ref=test_ref,
+                reference=test_ref,
                 canonical_tests=canonical_tests,
                 expected_fail=status["expected_fail"],
             )
@@ -122,9 +174,17 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         if partial_evidence is not None:
             assert isinstance(partial_evidence, dict)
             assert partial_evidence.get("covers")
-            _resolve_test_evidence(
+            _resolve_evidence_reference(
                 scenario_id=scenario["id"],
-                test_ref=partial_evidence.get("test"),
+                reference=partial_evidence.get("test"),
+                canonical_tests=canonical_tests,
+                expected_fail=False,
+            )
+        evidence_ref = scenario.get("evidence")
+        if evidence_ref is not None:
+            _resolve_evidence_reference(
+                scenario_id=scenario["id"],
+                reference=evidence_ref,
                 canonical_tests=canonical_tests,
                 expected_fail=False,
             )

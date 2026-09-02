@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import logging
 import os
 import signal
 import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,6 +22,8 @@ from urllib.request import (
     Request,
     build_opener,
 )
+
+import psutil
 
 
 _MISSING = object()
@@ -36,6 +40,15 @@ _UI_PORT_START_ATTEMPTS = 3
 _OWNED_PROCESS_GRACE_SECONDS = 3.0
 _OWNED_PROCESS_KILL_SECONDS = 2.0
 _OWNED_PROCESS_POLL_SECONDS = 0.05
+_DEAD_PROCESS_STATUSES = frozenset(
+    status
+    for status in (
+        psutil.STATUS_ZOMBIE,
+        getattr(psutil, "STATUS_DEAD", None),
+    )
+    if status is not None
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,6 +67,16 @@ class HTTPResult:
             raise AssertionError(
                 f"HTTP {self.status} did not return JSON: {preview!r}"
             ) from exc
+
+
+@dataclass(frozen=True)
+class _OwnedProcess:
+    """Stable identity for one running process owned by the harness."""
+
+    pid: int
+    process_group: int
+    create_time: float
+    argv: str
 
 
 class ModelHubHTTPClient:
@@ -427,11 +450,15 @@ class ModelHubTestApp:
 
     @staticmethod
     def _stop_process(process: subprocess.Popen[bytes] | None) -> None:
-        if process is None or process.poll() is not None:
+        if process is None:
+            return
+        if process.poll() is not None:
+            process.wait(timeout=0)
             return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
+            process.wait(timeout=5)
             return
         try:
             process.wait(timeout=10)
@@ -443,69 +470,104 @@ class ModelHubTestApp:
             process.wait(timeout=5)
 
     def _terminate_owned_process_groups(self) -> None:
-        """Prove no process still references this runtime's unique marker."""
+        """Prove no running process still references the runtime marker."""
 
         owned = self._owned_process_groups()
         if not owned:
             return
+        tracked = {
+            process.pid: process
+            for processes in owned.values()
+            for process in processes
+        }
         self._signal_process_groups(owned, signal.SIGTERM)
-        owned = self._wait_for_owned_processes(
+        running, zombies = self._wait_for_owned_processes(
+            tracked,
             _OWNED_PROCESS_GRACE_SECONDS
         )
-        if owned:
-            self._signal_process_groups(owned, signal.SIGKILL)
-            owned = self._wait_for_owned_processes(
+        if running:
+            self._signal_process_groups(
+                self._group_processes(running.values()),
+                signal.SIGKILL,
+            )
+            running, zombies = self._wait_for_owned_processes(
+                tracked,
                 _OWNED_PROCESS_KILL_SECONDS
             )
-        if owned:
+        self._log_persistent_zombies(zombies)
+        if running:
             details = "; ".join(
-                f"pid={pid} pgid={pgid} argv={argv!r}"
-                for pgid, processes in sorted(owned.items())
-                for pid, argv in processes
+                f"pid={process.pid} pgid={process.process_group} "
+                f"argv={process.argv!r}"
+                for process in sorted(
+                    running.values(), key=lambda item: item.pid
+                )
             )
             raise RuntimeError(
-                "hermetic Model Hub cleanup left owned processes: "
+                "hermetic Model Hub cleanup left running owned processes: "
                 f"{details}"
             )
 
     def _owned_process_groups(
         self,
-    ) -> dict[int, list[tuple[int, str]]]:
+    ) -> dict[int, list[_OwnedProcess]]:
         marker = str(self.avibe_home)
         try:
-            result = subprocess.run(
-                ["ps", "-ww", "-axo", "pid=,pgid=,args="],
-                capture_output=True,
-                check=True,
-                text=True,
-                timeout=5,
+            candidates = psutil.process_iter(
+                attrs=["pid", "cmdline", "create_time", "status"],
+                ad_value=None,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except psutil.Error as exc:
             raise RuntimeError(
                 "could not scan the process table for hermetic children"
             ) from exc
 
         current_group = os.getpgrp()
-        owned: dict[int, list[tuple[int, str]]] = {}
-        for raw_line in result.stdout.splitlines():
-            fields = raw_line.strip().split(maxsplit=2)
-            if len(fields) != 3 or marker not in fields[2]:
+        owned: dict[int, list[_OwnedProcess]] = {}
+        for candidate in candidates:
+            info = candidate.info
+            status = info.get("status")
+            if status in _DEAD_PROCESS_STATUSES:
+                continue
+            cmdline = info.get("cmdline")
+            if not isinstance(cmdline, list):
+                continue
+            argv = " ".join(str(part) for part in cmdline)
+            if marker not in argv:
                 continue
             try:
-                pid, process_group = map(int, fields[:2])
-            except ValueError:
+                pid = int(info["pid"])
+                process_group = os.getpgid(pid)
+                create_time = float(info["create_time"])
+            except (KeyError, TypeError, ValueError, ProcessLookupError):
                 continue
             if process_group == current_group:
                 raise RuntimeError(
                     "hermetic child shares the pytest process group; "
                     f"refusing to signal pgid {current_group}"
                 )
-            owned.setdefault(process_group, []).append((pid, fields[2]))
+            owned.setdefault(process_group, []).append(
+                _OwnedProcess(
+                    pid=pid,
+                    process_group=process_group,
+                    create_time=create_time,
+                    argv=argv,
+                )
+            )
         return owned
 
     @staticmethod
+    def _group_processes(
+        processes: Iterable[_OwnedProcess],
+    ) -> dict[int, list[_OwnedProcess]]:
+        grouped: dict[int, list[_OwnedProcess]] = {}
+        for process in processes:
+            grouped.setdefault(process.process_group, []).append(process)
+        return grouped
+
+    @staticmethod
     def _signal_process_groups(
-        owned: Mapping[int, list[tuple[int, str]]],
+        owned: Mapping[int, list[_OwnedProcess]],
         signum: signal.Signals,
     ) -> None:
         for process_group in owned:
@@ -515,14 +577,66 @@ class ModelHubTestApp:
                 pass
 
     def _wait_for_owned_processes(
-        self, timeout: float
-    ) -> dict[int, list[tuple[int, str]]]:
+        self,
+        tracked: dict[int, _OwnedProcess],
+        timeout: float,
+    ) -> tuple[dict[int, _OwnedProcess], dict[int, _OwnedProcess]]:
         deadline = time.monotonic() + timeout
         while True:
-            owned = self._owned_process_groups()
-            if not owned or time.monotonic() >= deadline:
-                return owned
+            for processes in self._owned_process_groups().values():
+                for process in processes:
+                    previous = tracked.get(process.pid)
+                    if (
+                        previous is None
+                        or previous.create_time != process.create_time
+                    ):
+                        tracked[process.pid] = process
+            running: dict[int, _OwnedProcess] = {}
+            zombies: dict[int, _OwnedProcess] = {}
+            for pid, process in tracked.items():
+                state = self._tracked_process_state(process)
+                if state == "running":
+                    running[pid] = process
+                elif state == "zombie":
+                    zombies[pid] = process
+            if not running or time.monotonic() >= deadline:
+                return running, zombies
             time.sleep(_OWNED_PROCESS_POLL_SECONDS)
+
+    @staticmethod
+    def _tracked_process_state(process: _OwnedProcess) -> str:
+        try:
+            candidate = psutil.Process(process.pid)
+            if candidate.create_time() != process.create_time:
+                return "gone"
+            status = candidate.status()
+        except psutil.ZombieProcess:
+            return "zombie"
+        except psutil.NoSuchProcess:
+            return "gone"
+        except psutil.Error as exc:
+            raise RuntimeError(
+                "could not read the status of an owned process: "
+                f"pid={process.pid}"
+            ) from exc
+        if status in _DEAD_PROCESS_STATUSES:
+            return "zombie"
+        return "running"
+
+    @staticmethod
+    def _log_persistent_zombies(
+        zombies: Mapping[int, _OwnedProcess],
+    ) -> None:
+        for process in zombies.values():
+            if ModelHubTestApp._tracked_process_state(process) != "zombie":
+                continue
+            logger.warning(
+                "hermetic Model Hub child is a harmless zombie awaiting its "
+                "parent and holds no resources: pid=%s pgid=%s argv=%r",
+                process.pid,
+                process.process_group,
+                process.argv,
+            )
 
     def __enter__(self) -> "ModelHubTestApp":
         return self.start()

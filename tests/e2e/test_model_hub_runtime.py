@@ -12,10 +12,15 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 import yaml
 
-from tests.e2e.drivers.model_hub_app import HTTPResult, ModelHubTestApp
+from tests.e2e.drivers.model_hub_app import (
+    HTTPResult,
+    ModelHubTestApp,
+    _OwnedProcess,
+)
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -265,8 +270,9 @@ def test_harness_retries_with_fresh_port_after_ui_bind_race(
 
 def test_harness_cleans_detached_child_after_leader_exits(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Harness contract: AVIBE_HOME ownership outlives recorded leaders."""
+    """Harness contract: no running marked child outlives its leader."""
 
     app = ModelHubTestApp(Path.cwd(), tmp_path)
     leader_code = (
@@ -288,16 +294,24 @@ def test_harness_cleans_detached_child_after_leader_exits(
         child_pid = int(leader.stdout.readline())
         leader.wait(timeout=5)
         assert any(
-            pid == child_pid
+            process.pid == child_pid
             for processes in app._owned_process_groups().values()
-            for pid, _argv in processes
+            for process in processes
         )
 
-        app.stop()
+        with caplog.at_level(
+            "WARNING", logger="tests.e2e.drivers.model_hub_app"
+        ):
+            app.stop()
 
         assert app._owned_process_groups() == {}
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        try:
+            child_status = psutil.Process(child_pid).status()
+        except psutil.NoSuchProcess:
+            child_status = None
+        assert child_status in {None, psutil.STATUS_ZOMBIE}
+        if child_status == psutil.STATUS_ZOMBIE:
+            assert f"pid={child_pid}" in caplog.text
     finally:
         if leader.poll() is None:
             os.killpg(leader.pid, signal.SIGKILL)
@@ -306,11 +320,58 @@ def test_harness_cleans_detached_child_after_leader_exits(
             for process_group, processes in (
                 app._owned_process_groups().items()
             ):
-                if any(pid == child_pid for pid, _argv in processes):
+                if any(
+                    process.pid == child_pid for process in processes
+                ):
                     try:
                         os.killpg(process_group, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+
+def test_harness_tracks_pid_status_after_marker_argv_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Harness contract: tracked PID status, not stale argv, proves absence."""
+
+    app = ModelHubTestApp(Path.cwd(), tmp_path)
+    identity = _OwnedProcess(
+        pid=4242,
+        process_group=4242,
+        create_time=123.0,
+        argv=f"synthetic-child {app.avibe_home}",
+    )
+    status = {"value": psutil.STATUS_RUNNING}
+
+    class FakeProcess:
+        def create_time(self) -> float:
+            return identity.create_time
+
+        def status(self) -> str:
+            return status["value"]
+
+    monkeypatch.setattr(app, "_owned_process_groups", lambda: {})
+    monkeypatch.setattr(
+        "tests.e2e.drivers.model_hub_app.psutil.Process",
+        lambda _pid: FakeProcess(),
+    )
+    tracked = {identity.pid: identity}
+
+    running, zombies = app._wait_for_owned_processes(tracked, timeout=0)
+    assert running == tracked
+    assert zombies == {}
+
+    status["value"] = psutil.STATUS_ZOMBIE
+    running, zombies = app._wait_for_owned_processes(tracked, timeout=0)
+    assert running == {}
+    assert zombies == tracked
+    with caplog.at_level(
+        "WARNING", logger="tests.e2e.drivers.model_hub_app"
+    ):
+        app._log_persistent_zombies(zombies)
+    assert "harmless zombie" in caplog.text
 
 
 def test_a1_feature_flag_disables_the_complete_models_api(

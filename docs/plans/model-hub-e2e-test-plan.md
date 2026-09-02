@@ -215,12 +215,22 @@ lane-to-lane.
     no broad host-process killing — on the SUPPORTED MATRIX (macOS + Linux);
     on other platforms the opt-in subprocess harness skips with a platform
     precondition. Regression tests must cover the detached-child escape.
-    STOP CONDITION (refined 2026-09-02): it applies to the PRODUCT process
-    tree the harness spawns (controller, UI, managed engine) on a supported
-    platform — if such an escape survives a reviewed head, DO NOT patch again,
-    reduce the harness to single-process topology and re-scope. Test-owned
-    mock resources (handler threads, sockets) are bounded in test code and are
-    fixed normally.
+    SOUND ABSENCE PROOF (round 7): "absence" means no RUNNING process (state
+    != zombie) references the marker. Direct children are reaped via waitpid;
+    detached PIDs are polled until gone or zombie (use the process-status API,
+    e.g. psutil which the product already depends on — never argv-scan alone,
+    and never kill(pid,0) as an existence proof). A zombie holds no resources
+    and cannot be reaped by a non-parent: a persistent zombie after the poll
+    window is a logged warning, not a failure.
+    STOP CONDITION (refined 2026-09-02, round 7): its substance is a RUNNING
+    product process (controller, UI, managed engine) holding resources after
+    teardown on a supported platform, surviving a reviewed head. If that
+    happens, DO NOT patch again — reduce the owned surface: keep the
+    controller+UI pair under one setsid-owned process group with pgid kill +
+    waitpid, move engine-lifecycle scenarios (A2/A5/D2–D6) to skip rows owned
+    by a dedicated future suite. Evidence-soundness refinements (like the
+    zombie corner) and test-owned mock resources are fixed normally and do
+    not trigger it.
   - *Catalog single resolver (round 4):* scenario references (top-level tests
     AND `partial_evidence.test`, AND skip-row references) resolve through ONE
     resolver shared by the checker and the metadata; the checker may not hold
