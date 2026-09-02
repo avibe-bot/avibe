@@ -1123,7 +1123,7 @@ JSON Schema draft-07 cannot express cross-document or live-state relations. The
 contract harness and API-boundary tests enforce:
 
 <!-- authority-consumer: credential.refresh_once credential.refresh_failed credential.refresh_rejected credential.static_unauthorized credential.account_classified credential.request_nonfallback -->
-<!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.request_unroutable turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.blocked turn.canceled -->
+<!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.blocked turn.canceled -->
 <!-- authority-consumer: mutation.source_metadata mutation.credential_replace mutation.source_refresh mutation.model_create mutation.model_efforts mutation.model_delete mutation.source_delete mutation.route_replace -->
 <!-- authority-consumer: import.keep_native import.copy_key import.reauth import.controlled -->
 <!-- authority-consumer: protocol anthropic openai_responses openai_chat -->

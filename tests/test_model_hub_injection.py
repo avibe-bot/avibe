@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from typing import get_args
 
 import pytest
 
@@ -17,7 +16,6 @@ from core.handlers.model_hub.service import (
     ModelHubError,
 )
 from modules.agents.model_hub import (
-    LaunchChannel,
     ModelHubLaunch,
     build_claude_hub_env,
     build_codex_hub_launch,
@@ -206,32 +204,6 @@ def test_opencode_overlay_never_repeats_add_time_bare_identifier_matching():
     )
     with pytest.raises(ModelHubError):
         opencode_model_for_overlay("gpt-5", overlay)
-
-
-def test_only_a_hub_launch_keeps_the_replaced_hub_scope_alive():
-    """Replacing a Hub runtime must revoke its credential unless the new one owns it.
-
-    A `hub` launch mints its own gateway token before the replaced runtime is
-    torn down, so retiring the scope then would revoke the new token. Every
-    other channel leaves the old credential with no owner, and a surviving
-    subprocess holding it could keep making billable gateway requests.
-
-    The channels come from `LaunchChannel` so a new one is covered here the
-    moment it exists, rather than defaulting to whichever branch it falls into.
-    """
-
-    channels = get_args(LaunchChannel)
-    assert "hub" in channels
-    retiring = {
-        channel
-        for channel in channels
-        if hub_launch(
-            channel=channel,
-            gateway_base_url=None if channel != "hub" else "http://127.0.0.1:15220",
-            gateway_token=None if channel != "hub" else "local-test-token",
-        ).retires_replaced_hub_scope
-    }
-    assert retiring == set(channels) - {"hub"}
 
 
 def test_fallback_launch_identity_is_stable_for_same_route():

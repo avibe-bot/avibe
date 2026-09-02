@@ -910,8 +910,7 @@
       "upstream_protocol_error": "The upstream response did not match the expected protocol.",
       "upstream_request_invalid": "The upstream service rejected the request.",
       "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
-      "upstream_error": "The upstream service returned an error.",
-      "mapping_target_unavailable": "This request's model is not routed for this session."
+      "upstream_error": "The upstream service returned an error."
     },
     "events": {
       "sourceFallback": "source",
@@ -948,8 +947,7 @@
       "waiting_without_retry": "The route for model {model} has recovered. Retry directly.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help.",
-      "request_unroutable": "This request's model is not routed for this session. Open Models to select a routed model."
+      "request_incompatible": "This request is incompatible; switching Sources will not help."
     }
   },
   "remote_access": {

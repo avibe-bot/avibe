@@ -910,8 +910,7 @@
       "upstream_protocol_error": "供应商响应不符合预期协议。",
       "upstream_request_invalid": "供应商拒绝了请求。",
       "upstream_unauthorized": "刷新后供应商仍拒绝授权。",
-      "upstream_error": "供应商返回错误。",
-      "mapping_target_unavailable": "此请求使用的模型未在本会话配置路由。"
+      "upstream_error": "供应商返回错误。"
     },
     "events": {
       "sourceFallback": "供应商",
@@ -948,8 +947,7 @@
       "waiting_without_retry": "模型 {model} 的路由已恢复，直接重试即可。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
-      "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
-      "request_unroutable": "此请求使用的模型未在本会话配置路由。请前往「模型」页选择已配置路由的模型。"
+      "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。"
     }
   },
   "remote_access": {

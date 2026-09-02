@@ -52,8 +52,6 @@ from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
-    REQUEST_NONFALLBACK_TURN_OUTCOME,
-    REQUEST_UNROUTABLE_TURN_OUTCOME,
     TURN_OUTCOME_RENDERING_AUTHORITY,
     TurnOutcomeProductionError,
     TurnCorrelationRegistry,
@@ -1425,289 +1423,6 @@ def test_released_v5_permission_denied_records_degrade_at_read_boundary(
     assert RELEASED_V5_PERMISSION_DENIED["resolution_events"][0]["reason"] == "permission_denied"
 
 
-def _process_route_registry(
-    tmp_path: Path,
-    label: str,
-) -> tuple[TurnCorrelationRegistry, str]:
-    store = BoundedProvenanceStore(tmp_path / f"process-route-{label}.json")
-    registry = TurnCorrelationRegistry(store)
-    return registry, registry.credentials("claude", "/repo", "turn_launch01")
-
-
-def _prepare_route(
-    registry: TurnCorrelationRegistry,
-    token: str,
-    *,
-    turn_id: str,
-    requested: str,
-    resolved: str,
-    source_id: str = "src_primary01",
-) -> None:
-    registry.prepare_gateway_turn(
-        backend="claude",
-        token=token,
-        turn_id=turn_id,
-        requested_model_id=requested,
-        resolved_model_id=resolved,
-        source_id=source_id,
-        via_mapping=True,
-    )
-
-
-def _settle(registry: TurnCorrelationRegistry, turn_id: str) -> None:
-    registry.settle(
-        turn_id,
-        settled_by=SETTLED_BY_TERMINAL_RESULT,
-        ts=NOW.isoformat(),
-    )
-
-
-@pytest.mark.parametrize(
-    "turn_phase",
-    ["route_owned_by_live_turn", "no_turn_owns_a_route", "route_replaced_then_settled"],
-)
-def test_gateway_resolves_every_model_the_live_process_used(
-    tmp_path: Path,
-    turn_phase: str,
-) -> None:
-    """Routing follows the launched process, not one turn's liveness.
-
-    A long-lived CLI keeps issuing requests on its scope token outside any
-    dispatch window — tool loops, agent-initiated continuations, transport
-    retries. Whatever the turn phase, resolution answers exactly the identities
-    the process was seen using: each resolves to its caller identity, and a
-    model the process never used stays unresolvable.
-    """
-
-    registry, token = _process_route_registry(tmp_path, turn_phase)
-
-    def resolve(gateway_model_id: str):
-        return registry.gateway_resolution(
-            backend="claude",
-            token=token,
-            gateway_model_id=gateway_model_id,
-        )
-
-    _prepare_route(
-        registry,
-        token,
-        turn_id="turn_launch01",
-        requested="caller-model",
-        resolved="hub-model",
-    )
-    assert resolve("hub-model").model_id == "caller-model"
-    if turn_phase != "route_owned_by_live_turn":
-        _settle(registry, "turn_launch01")
-    if turn_phase == "route_replaced_then_settled":
-        assert registry.credentials("claude", "/repo", "turn_relaunch1") == token
-        _prepare_route(
-            registry,
-            token,
-            turn_id="turn_relaunch1",
-            requested="caller-next",
-            resolved="hub-next",
-        )
-        assert resolve("hub-next").model_id == "caller-next"
-        _settle(registry, "turn_relaunch1")
-
-    used = (
-        {"hub-next": "caller-next"}
-        if turn_phase == "route_replaced_then_settled"
-        else {"hub-model": "caller-model"}
-    )
-    for gateway_model_id, caller_model_id in used.items():
-        assert resolve(gateway_model_id).model_id == caller_model_id
-    unused = resolve("hub-never-routed")
-    assert unused.model_id is None
-    assert unused.ambiguous is False
-
-
-def test_prepared_route_becomes_the_process_route_only_once_it_is_used(
-    tmp_path: Path,
-) -> None:
-    """A resolution that never reaches a live runtime must not re-point the process.
-
-    Both backends resolve and prepare a launch before activating it: Codex
-    before interrupting the active turn and creating the transport, Claude
-    before setting the model or connecting the replacement client. When any of
-    those fails, the previous process is still running against the previous
-    Source, so it must keep answering there — and the model it never activated
-    must not resolve at all.
-    """
-
-    registry, token = _process_route_registry(tmp_path, "activation")
-    _prepare_route(
-        registry,
-        token,
-        turn_id="turn_launch01",
-        requested="caller-model",
-        resolved="hub-model",
-    )
-    assert (
-        registry.gateway_resolution(
-            backend="claude",
-            token=token,
-            gateway_model_id="hub-model",
-        ).model_id
-        == "caller-model"
-    )
-    _settle(registry, "turn_launch01")
-
-    # A later turn prepares a different Source, then its activation fails, so
-    # the still-running process never issues a request against it.
-    assert registry.credentials("claude", "/repo", "turn_relaunch1") == token
-    _prepare_route(
-        registry,
-        token,
-        turn_id="turn_relaunch1",
-        requested="caller-next",
-        resolved="hub-next",
-        source_id="src_backup001",
-    )
-    _settle(registry, "turn_relaunch1")
-
-    assert (
-        registry.gateway_resolution(
-            backend="claude",
-            token=token,
-            gateway_model_id="hub-model",
-        ).model_id
-        == "caller-model"
-    )
-    unactivated = registry.gateway_resolution(
-        backend="claude",
-        token=token,
-        gateway_model_id="hub-next",
-    )
-    assert unactivated.model_id is None
-    assert unactivated.ambiguous is False
-
-
-@pytest.mark.parametrize("unknowable_by", ["routing_conflict", "scope_retirement"])
-def test_process_route_fails_closed_once_the_scope_stops_being_knowable(
-    tmp_path: Path,
-    unknowable_by: str,
-) -> None:
-    """The process route answers only while the scope's own routing is knowable.
-
-    Both causes stop resolution, but they are not the same failure: a conflicted
-    live turn has the model configured and reselecting cannot help, while a
-    retired scope has no route at all.
-    """
-
-    registry, token = _process_route_registry(tmp_path, unknowable_by)
-    _prepare_route(
-        registry,
-        token,
-        turn_id="turn_launch01",
-        requested="caller-model",
-        resolved="hub-model",
-    )
-    assert (
-        registry.gateway_resolution(
-            backend="claude",
-            token=token,
-            gateway_model_id="hub-model",
-        ).model_id
-        == "caller-model"
-    )
-
-    if unknowable_by == "routing_conflict":
-        _prepare_route(
-            registry,
-            token,
-            turn_id="turn_launch01",
-            requested="caller-other",
-            resolved="hub-model",
-            source_id="src_backup001",
-        )
-    else:
-        _settle(registry, "turn_launch01")
-        registry.retire_scope("claude", "/repo")
-
-    resolution = registry.gateway_resolution(
-        backend="claude",
-        token=token,
-        gateway_model_id="hub-model",
-    )
-    assert resolution.model_id is None
-    assert resolution.ambiguous is (unknowable_by == "routing_conflict")
-
-
-@pytest.mark.parametrize("unresolved_by", ["unrouted_model", "ambiguous_scope"])
-def test_gateway_409_names_the_reason_the_request_could_not_be_routed(
-    tmp_path: Path,
-    unresolved_by: str,
-) -> None:
-    """The 409's copy must match which of the two causes actually happened.
-
-    An unrouted model used to render `request_incompatible`, telling the user
-    the request itself was broken and that switching Sources would not help —
-    the opposite of the truth, since reselecting is exactly the fix. An
-    ambiguous scope is the case that copy does describe: the model is
-    configured, and reselecting cannot resolve the ambiguity.
-    """
-
-    async def exercise() -> None:
-        primary = _source("src_primary01", "Primary")
-        backup = _source("src_backup001", "Backup")
-        service = _service(tmp_path, sources=[primary, backup])
-        requested_model = _canonicalize_fixed_test_routes(service)["claude"]
-        gateway = ModelHubTurnGateway(service)
-        base_url, token = await gateway.endpoint(
-            "claude",
-            process_scope="/repo",
-            turn_id="turn_unresolved1",
-            requested_model_id=requested_model,
-            resolved_model_id="shared-model",
-            source_id=primary.id,
-        )
-        if unresolved_by == "ambiguous_scope":
-            # The same live turn prepares a second identity for one gateway
-            # model, so the scope's routing stops being knowable.
-            await gateway.endpoint(
-                "claude",
-                process_scope="/repo",
-                turn_id="turn_unresolved1",
-                requested_model_id=requested_model,
-                resolved_model_id="shared-model",
-                source_id=backup.id,
-            )
-        posted_model = (
-            "shared-model" if unresolved_by == "ambiguous_scope" else "never-routed"
-        )
-        expected = (
-            REQUEST_NONFALLBACK_TURN_OUTCOME
-            if unresolved_by == "ambiguous_scope"
-            else REQUEST_UNROUTABLE_TURN_OUTCOME
-        )
-        unexpected = (
-            REQUEST_UNROUTABLE_TURN_OUTCOME
-            if unresolved_by == "ambiguous_scope"
-            else REQUEST_NONFALLBACK_TURN_OUTCOME
-        )
-        try:
-            async with aiohttp.ClientSession(trust_env=False) as client:
-                response = await client.post(
-                    f"{base_url}/v1/messages",
-                    json={"model": posted_model, "messages": [], "stream": False},
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                assert response.status == 409
-                payload = await response.json()
-                assert payload["error"]["code"] == "mapping_target_unavailable"
-                assert payload["error"]["message"] == render_turn_outcome_copy(
-                    expected, "en"
-                )
-                assert payload["error"]["message"] != render_turn_outcome_copy(
-                    unexpected, "en"
-                )
-        finally:
-            await gateway.close()
-
-    asyncio.run(exercise())
-
-
 def test_retired_process_scope_revokes_token_and_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -1824,6 +1539,226 @@ def test_terminal_retirement_does_not_restore_ambiguous_scope(
     )
 
     assert store.get("turn_first") is None
+
+
+def _routing_registry(tmp_path: Path, label: str) -> tuple[TurnCorrelationRegistry, str]:
+    store = BoundedProvenanceStore(tmp_path / f"routing-{label}.json")
+    registry = TurnCorrelationRegistry(store)
+    return registry, registry.credentials("claude", "session:/repo", "turn_route01")
+
+
+def _prepare_route(
+    registry: TurnCorrelationRegistry,
+    token: str,
+    *,
+    turn_id: str,
+    requested: str,
+    resolved: str,
+    source_id: str = "src_primary01",
+) -> None:
+    registry.prepare_gateway_turn(
+        backend="claude",
+        token=token,
+        turn_id=turn_id,
+        requested_model_id=requested,
+        resolved_model_id=resolved,
+        source_id=source_id,
+        via_mapping=True,
+    )
+
+
+def _resolution(registry: TurnCorrelationRegistry, token: str, model: str) -> str | None:
+    return registry.gateway_resolution_model(
+        backend="claude",
+        token=token,
+        gateway_model_id=model,
+    )
+
+
+@pytest.mark.parametrize(
+    "arrives",
+    [
+        pytest.param("after_its_turn_settled", id="after_its_turn_settled"),
+        pytest.param("while_another_model_is_live", id="while_another_model_is_live"),
+    ],
+)
+def test_gateway_keeps_a_live_process_routable_outside_its_turn_windows(
+    tmp_path: Path,
+    arrives: str,
+) -> None:
+    """Routing is a property of the process scope, not of an open turn window.
+
+    A launched CLI keeps issuing gateway requests between the turns Avibe
+    dispatches — tool loops, agent-initiated continuations, transport retries.
+    Those requests carry the upstream model id, which only the route that
+    prepared it can translate back into the caller model the resolver routes
+    from, so a scope that forgets its routes at settlement makes every one of
+    them unroutable.
+    """
+
+    registry, token = _routing_registry(tmp_path, arrives)
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route01",
+        requested="caller-model",
+        resolved="hub-model",
+    )
+    registry.settle(
+        "turn_route01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    if arrives == "while_another_model_is_live":
+        # A dispatched turn on a different model is the common case: the CLI
+        # keeps finishing work for the previous one. Its route answers for the
+        # model it prepared and must say nothing about any other.
+        registry.credentials("claude", "session:/repo", "turn_route02")
+        _prepare_route(
+            registry,
+            token,
+            turn_id="turn_route02",
+            requested="other-caller",
+            resolved="other-hub-model",
+        )
+
+    assert _resolution(registry, token, "hub-model") == "caller-model"
+    # Reach follows the routes the scope actually prepared, so a model it never
+    # routed stays unroutable rather than becoming reachable by naming it.
+    assert _resolution(registry, token, "never-routed") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    [
+        pytest.param("two_caller_models", None, id="two_caller_models"),
+        pytest.param("two_sources", "caller-model", id="two_sources"),
+    ],
+)
+def test_gateway_fails_closed_only_when_the_caller_model_is_ambiguous(
+    tmp_path: Path,
+    scenario: str,
+    expected: str | None,
+) -> None:
+    """Only the caller model decides the routing answer, so only it can disagree.
+
+    ``ModelHubService.resolve`` takes a model and no Source, so two routes for
+    one upstream model that differ only in Source — the ordinary shape of a
+    route with fallback hops — are one routing answer and must not fail closed.
+    Two different caller models genuinely cannot be told apart from the wire,
+    which carries the upstream id alone, so that case must.
+    """
+
+    registry, token = _routing_registry(tmp_path, scenario)
+    registry.credentials("claude", "session:/repo", "turn_route02")
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route01",
+        requested="caller-model",
+        resolved="hub-model",
+        source_id="src_primary01",
+    )
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route02",
+        requested="rival-caller" if scenario == "two_caller_models" else "caller-model",
+        resolved="hub-model",
+        source_id="src_primary01" if scenario == "two_caller_models" else "src_backup001",
+    )
+
+    assert _resolution(registry, token, "hub-model") == expected
+    # The scope-level answer is bound by the same rule once the turns settle:
+    # an accumulated disagreement stays a refusal instead of picking a winner.
+    for turn_id in ("turn_route01", "turn_route02"):
+        registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+    assert _resolution(registry, token, "hub-model") == expected
+
+
+def test_gateway_routing_dies_with_the_process_scope(tmp_path: Path) -> None:
+    """A retired scope revokes its token, so its routes must stop answering too."""
+
+    registry, token = _routing_registry(tmp_path, "retired")
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_route01",
+        requested="caller-model",
+        resolved="hub-model",
+    )
+    registry.settle(
+        "turn_route01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert _resolution(registry, token, "hub-model") == "caller-model"
+
+    registry.retire_scope("claude", "session:/repo")
+
+    assert registry.authenticates("claude", token) is False
+    assert _resolution(registry, token, "hub-model") is None
+
+
+def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(
+    tmp_path: Path,
+) -> None:
+    """The 409 this fixes, end to end: same request, before and after settlement.
+
+    ``service.adapter.invocations`` is the evidence that the caller model was
+    the routing input — only the route keyed by it carries this hop.
+    """
+
+    async def exercise() -> None:
+        primary = _source(
+            "src_primary01",
+            "Primary",
+            vendor="anthropic",
+            protocol="anthropic",
+            model_id="hub-model",
+        )
+        service = _service(
+            tmp_path,
+            sources=[primary],
+            outcomes=[_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id)],
+        )
+        service.store.config.agents["claude"].routes["caller-model"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(primary.id, "hub-model"),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "claude",
+            process_scope="session:/repo",
+            turn_id="turn_between_windows",
+            requested_model_id="caller-model",
+            resolved_model_id="hub-model",
+            source_id=primary.id,
+        )
+        gateway.correlation.settle(
+            "turn_between_windows",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/messages",
+                    json={
+                        "model": "hub-model",
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 200
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [(primary.id, "hub-model", "claude")]
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(

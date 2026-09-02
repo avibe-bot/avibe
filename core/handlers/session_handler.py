@@ -473,7 +473,7 @@ class SessionHandler(BaseHandler):
             await self._wait_for_claude_session_idle(composite_key)
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
 
@@ -492,7 +492,7 @@ class SessionHandler(BaseHandler):
             )
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
 
@@ -504,7 +504,7 @@ class SessionHandler(BaseHandler):
             )
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
         git_path_state = self._claude_git_path_state(working_path)
@@ -515,7 +515,7 @@ class SessionHandler(BaseHandler):
             )
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
 
@@ -570,7 +570,7 @@ class SessionHandler(BaseHandler):
             await self._wait_for_claude_session_idle(composite_key)
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
         self.ensure_agent_session_id(
@@ -597,7 +597,7 @@ class SessionHandler(BaseHandler):
             )
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
         caller_env = self._caller_env_for_context(context)
@@ -608,7 +608,7 @@ class SessionHandler(BaseHandler):
             )
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
         git_path_state = self._claude_git_path_state(working_path)
@@ -619,7 +619,7 @@ class SessionHandler(BaseHandler):
             )
             await self._cleanup_session_locked(
                 composite_key,
-                retire_model_hub_scope=model_hub_launch.retires_replaced_hub_scope,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
         if desired_model:

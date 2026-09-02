@@ -32,7 +32,6 @@ from .provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     GatewayTurnTerminalizer,
     REQUEST_NONFALLBACK_TURN_OUTCOME,
-    REQUEST_UNROUTABLE_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
     project_turn_outcome_copy,
@@ -635,8 +634,7 @@ class ModelHubTurnGateway:
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
-        resolution = terminalizer.resolution(model_id)
-        resolution_model = resolution.model_id
+        resolution_model = terminalizer.resolution_model(model_id)
         if resolution_model is None:
             terminalizer.fail("protocol_error")
             return self._terminal_error_response(
@@ -644,14 +642,7 @@ class ModelHubTurnGateway:
                 terminalizer,
                 status=409,
                 code="mapping_target_unavailable",
-                # An ambiguous scope has the model configured, so telling the
-                # user to reselect one is both wrong and no help; that case
-                # keeps the request-scoped copy it has always rendered.
-                turn_outcome=(
-                    REQUEST_NONFALLBACK_TURN_OUTCOME
-                    if resolution.ambiguous
-                    else REQUEST_UNROUTABLE_TURN_OUTCOME
-                ),
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
 
         def observe_attempt(
