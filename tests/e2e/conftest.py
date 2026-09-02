@@ -3,11 +3,18 @@
 import os
 import shutil
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Callable, Iterator, Mapping
 
 import pytest
 import urllib.request
 import urllib.error
+
+from tests.e2e.drivers.model_hub_app import ModelHubTestApp
+from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 
 # E2E tests connect to the Vibe container on this port
 E2E_PORT = int(os.environ.get("VIBE_E2E_PORT", "15123"))
@@ -18,6 +25,66 @@ COMPOSE_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "docker-compo
 
 # When true, skip container teardown (set by run_e2e.sh --keep)
 KEEP_CONTAINER = os.environ.get("VIBE_E2E_KEEP", "false").lower() == "true"
+
+
+@pytest.fixture
+def mock_llm_upstream(monkeypatch):
+    """Run the frozen Model Hub upstream contract on loopback."""
+
+    with MockLLMUpstream() as upstream:
+        monkeypatch.setenv("VIBE_E2E_MOCK_UPSTREAM_URL", upstream.url)
+        yield upstream
+
+
+@pytest.fixture
+def model_hub_app_factory():
+    """Build isolated runtimes, optionally seeding their native HOME."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+
+    @contextmanager
+    def launch(
+        *,
+        enabled: bool = True,
+        extra_env: Mapping[str, str] | None = None,
+        before_start: Callable[[ModelHubTestApp], None] | None = None,
+    ) -> Iterator[ModelHubTestApp]:
+        prefix = (
+            "avibe-model-hub-e2e-"
+            if enabled
+            else "avibe-model-hub-disabled-e2e-"
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=prefix, dir="/tmp"
+        ) as runtime_root:
+            runtime = ModelHubTestApp(
+                repo_root,
+                Path(runtime_root),
+                enabled=enabled,
+                extra_env=extra_env,
+            )
+            if before_start is not None:
+                before_start(runtime)
+            with runtime:
+                yield runtime
+
+    return launch
+
+
+@pytest.fixture
+def model_hub_app(model_hub_app_factory):
+    """Run feature-enabled Avibe over real HTTP and controller IPC."""
+
+    with model_hub_app_factory() as runtime:
+        yield runtime
+
+
+@pytest.fixture
+def disabled_model_hub_app(model_hub_app_factory):
+    """Run feature-disabled Avibe against isolated state."""
+
+    with model_hub_app_factory(enabled=False) as runtime:
+        yield runtime
 
 
 def _docker_available() -> bool:
