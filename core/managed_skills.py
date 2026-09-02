@@ -206,48 +206,7 @@ def _normalize_description(value: str) -> str:
     return " ".join(without_controls.split())
 
 
-class _BoundedSafeLoader(yaml.SafeLoader):
-    """Parse normal YAML first without letting aliases or node count amplify work."""
-
-    def __init__(self, stream: str) -> None:
-        super().__init__(stream)
-        self._composed_nodes = 0
-
-    def compose_node(self, parent, index):
-        if self.check_event(yaml.AliasEvent):
-            raise yaml.YAMLError("frontmatter aliases are not needed for required fields")
-        self._composed_nodes += 1
-        if self._composed_nodes > 1024:
-            raise yaml.YAMLError("frontmatter contains too many YAML nodes")
-        return super().compose_node(parent, index)
-
-
-def _structured_frontmatter_fields(frontmatter: str) -> dict[str, str]:
-    try:
-        parsed = yaml.load(frontmatter, Loader=_BoundedSafeLoader)
-    except Exception:
-        # SafeLoader constructors may raise ordinary Python exceptions (for
-        # example ValueError for an invalid timestamp). Structured parsing is
-        # only an optional fast path; the bounded tolerant parser below still
-        # gets a chance to recover name and description.
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    name = parsed.get("name")
-    description = parsed.get("description")
-    if not isinstance(name, str) or not isinstance(description, str):
-        return {}
-    return {
-        "name": name.strip(),
-        "description": _normalize_description(description),
-    }
-
-
 def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
-    structured = _structured_frontmatter_fields("".join(lines))
-    if structured.get("name") and structured.get("description"):
-        return structured
-
     fields: dict[str, str] = {}
     index = 0
     while index < len(lines):
@@ -318,6 +277,13 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
             fields[field] = decoded
 
     return fields
+
+
+def _body_has_terminal_controls(value: str) -> bool:
+    return any(
+        unicodedata.category(char) == "Cc" and char not in {"\t", "\n", "\r"}
+        for char in value
+    )
 
 
 def _stat_token(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -1109,7 +1075,12 @@ def load_skill(
             include_body=True,
             dir_fd=directory_fd,
         )
-        if loaded is None or loaded.name != name:
+        if (
+            loaded is None
+            or loaded.name != name
+            or loaded.body is None
+            or _body_has_terminal_controls(loaded.body)
+        ):
             return None
         if not _directory_path_still_matches(winner.directory, identity) or not _source_directory_still_matches(
             winner.source_directory or winner.directory,

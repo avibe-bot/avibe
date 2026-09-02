@@ -278,6 +278,47 @@ def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> No
     assert unbound == ["oc-1"]
 
 
+def test_restore_delayed_binding_does_not_replace_a_newer_turn(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    attempts: list[dict] = []
+
+    def bind(*_args, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) <= 3:
+            raise OSError("temporary binding failure")
+        return False
+
+    class _WaitForConditionalAttemptPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            for _ in range(100):
+                if len(attempts) >= 4:
+                    agent.sessions.remove_active_poll("oc-1")
+                    return
+                await asyncio.sleep(0)
+            raise AssertionError("restored binding was not retried")
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS",
+        0,
+    )
+    agent._poll_loop = _WaitForConditionalAttemptPollLoop()
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert len(attempts) == 4
+    assert "replace_existing" not in attempts[2]
+    assert attempts[3]["replace_existing"] is False
+
+
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     poll.processing_indicator = {

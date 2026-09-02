@@ -218,6 +218,34 @@ def test_unbind_session_removes_only_matching_turn_binding(tmp_path: Path, monke
     assert "oc-session" not in json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"]
 
 
+def test_conditional_bind_cannot_replace_a_newer_turn(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    kwargs = {
+        "base_env": {"PATH": "/usr/bin"},
+        "working_dir": tmp_path / "workspace",
+        "extra_env": {"AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace")},
+    }
+    assert bridge.bind_session(
+        "oc-session",
+        {},
+        binding_token="new-turn",
+        **kwargs,
+    )
+
+    assert not bridge.bind_session(
+        "oc-session",
+        {},
+        binding_token="old-restored-turn",
+        replace_existing=False,
+        **kwargs,
+    )
+    entry = json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"][
+        "oc-session"
+    ]
+    assert entry["binding_token"] == "new-turn"
+
+
 def test_refresh_session_extends_only_the_matching_live_binding(
     tmp_path: Path,
     monkeypatch,

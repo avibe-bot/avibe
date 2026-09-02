@@ -756,7 +756,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             if bound:
                 try:
-                    bound = bool(
+                    refreshed = bool(
                         await asyncio.to_thread(
                             refresh_caller_context_session,
                             session_id,
@@ -771,7 +771,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         exc_info=True,
                     )
                     bound = False
-                if bound:
+                else:
+                    if not refreshed:
+                        return
+                    bound = True
                     continue
             try:
                 bound = bool(
@@ -783,11 +786,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         working_dir=working_directory,
                         extra_env=extra_env,
                         binding_token=binding_token,
+                        replace_existing=False,
                         **_binding_path_kwargs(binding_path),
                         message=message,
                         fallback_platform=fallback_platform,
                     )
                 )
+                if not bound:
+                    return
             except Exception:
                 logger.warning(
                     "Failed to republish restored OpenCode caller context for session %s",

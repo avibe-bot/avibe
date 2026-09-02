@@ -167,6 +167,7 @@ def bind_session(
     ttl_hours: int = BINDING_TTL_HOURS,
     extra_env: Mapping[str, str] | None = None,
     binding_token: str | None = None,
+    replace_existing: bool = True,
     path: str | Path | None = None,
     message: object | None = None,
     fallback_platform: object | None = None,
@@ -215,6 +216,13 @@ def bind_session(
 
         data = _load_bindings(path)
         sessions = _prune_sessions(data.get("sessions", {}), now)
+        existing = sessions.get(session_id)
+        if (
+            not replace_existing
+            and isinstance(existing, dict)
+            and existing.get("binding_token") != token
+        ):
+            return False
         expires_at = now + timedelta(hours=max(1, int(ttl_hours)))
         entry = {
             "env": env,

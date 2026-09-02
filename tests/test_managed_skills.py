@@ -142,6 +142,33 @@ def test_invalid_optional_yaml_type_falls_back_to_required_fields(tmp_path: Path
     assert skill.description == "Still portable"
 
 
+def test_loose_parser_never_constructs_ignored_yaml_values(tmp_path: Path, monkeypatch) -> None:
+    skill_file = tmp_path / "typed" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "name: typed\n"
+        "description: Still portable\n"
+        "metadata: &recursive [*recursive]\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        managed_skills.yaml,
+        "load",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("optional YAML must not be constructed")
+        ),
+    )
+
+    skill = parse_skill_file(skill_file, priority=(0,))
+
+    assert skill is not None
+    assert skill.name == "typed"
+    assert skill.description == "Still portable"
+
+
 def test_loose_parser_accepts_quoted_required_keys(tmp_path: Path) -> None:
     skill_file = tmp_path / "skill" / "SKILL.md"
     skill_file.parent.mkdir()
@@ -607,6 +634,22 @@ def test_invalid_utf8_body_is_advertised_but_cannot_be_loaded(
 
     assert [skill.name for skill in resolve_skills(cwd)] == ["binary"]
     assert load_skill("binary", cwd) is None
+
+
+def test_terminal_controls_in_body_are_advertised_but_cannot_be_loaded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    skill_file = cwd / ".agents" / "skills" / "controlled" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_bytes(
+        b"---\nname: controlled\ndescription: Controlled body\n---\n"
+        b"Allowed tabs\tand newlines\nRejected escape: \x1b[31m\n"
+    )
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["controlled"]
+    assert load_skill("controlled", cwd) is None
 
 
 @pytest.mark.skipif(
