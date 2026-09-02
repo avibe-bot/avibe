@@ -132,8 +132,12 @@ test.describe('A · capability gate and runtime lifecycle', () => {
 
   test('A3 · the blocked stop names the backends that block it', async ({ hub, api }) => {
     await requireModelHub(api);
-    const runtime = await api.runtime();
-    test.skip(runtime?.enabled !== true, 'The gateway is off, so stopping cannot be blocked.');
+    // RUNNING, not merely enabled: the UI computes `stopBlocked` from
+    // `runtimeEnabled` plus a Gateway-mode backend without consulting health
+    // (`SettingsModelsPage.tsx`), so an enabled-but-`down` instance would pass
+    // every assertion below while never exercising the guard on a gateway that
+    // could actually be stopped.
+    await requireRuntimeRunning(api);
 
     const restore: string[] = [];
     // Same snapshot discipline as the gateway fixture: the Direct→Gateway
