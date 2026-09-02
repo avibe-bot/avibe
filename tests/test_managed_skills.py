@@ -535,6 +535,21 @@ def test_load_emits_body_only_and_agent_accessible_directory(tmp_path: Path, mon
     )
 
 
+def test_invalid_utf8_body_is_advertised_but_cannot_be_loaded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    skill_file = cwd / ".agents" / "skills" / "binary" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_bytes(
+        b"---\nname: binary\ndescription: Invalid text body\n---\n\xff\n"
+    )
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["binary"]
+    assert load_skill("binary", cwd) is None
+
+
 def test_load_escapes_directory_attribute_controls(tmp_path: Path, monkeypatch) -> None:
     _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
     working_directory = cwd / 'line\nbreak"&'
