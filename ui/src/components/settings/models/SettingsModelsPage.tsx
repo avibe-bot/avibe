@@ -787,6 +787,10 @@ export const SettingsModelsPage: React.FC = () => {
       reconcile: refresh,
     });
   }, [applyAgentEcho, refresh]);
+  const catalogSaved = React.useCallback(async (echoed: AgentSupply) => {
+    await agentSaved(echoed);
+    if (aliveRef.current) showToast(t('settings.models.gateway.catalog.saved') as string, 'success');
+  }, [agentSaved, showToast, t]);
   const switchToDirect = (agent: AgentSupply) => {
     setSwitchFailures((previous) => {
       const next = new Set(previous);
@@ -1383,7 +1387,7 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} onClose={() => setMenuBackend(null)} onSaved={agentSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         sources={sources}

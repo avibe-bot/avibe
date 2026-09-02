@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
 import { catalogModelIds } from './backendCatalog';
-import { collapsedModelRows, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
+import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead } from './regionRead';
 import { agentGroupStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
@@ -137,7 +137,15 @@ const AgentModelCard: React.FC<{
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
-  const allModels = catalogModelIds(agent);
+  const allModels = React.useMemo(() => catalogModelIds(agent), [agent]);
+  const previousModelsRef = React.useRef(allModels);
+  React.useEffect(() => {
+    const previousModels = new Set(previousModelsRef.current);
+    if (allModels.slice(COLLAPSED_MODEL_LIMIT).some((modelId) => !previousModels.has(modelId))) {
+      setExpanded(true);
+    }
+    previousModelsRef.current = allModels;
+  }, [allModels]);
   const chainProjectionLive = agentHasLiveChainProjection(runtime, agent);
   const collapsed = collapsedModelRows(agent, expanded);
   const collapsedAtRest = collapsedModelRows(agent);
