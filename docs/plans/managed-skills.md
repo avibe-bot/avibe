@@ -84,11 +84,17 @@ Built-ins are maintained in the repository at:
 skills/<name>/
 ```
 
-An installed Avibe artifact publishes its complete built-in set beneath:
+An installed Avibe artifact publishes its complete built-in set beneath the
+authoritative runtime home returned by `config.paths.get_vibe_remote_dir()`:
 
 ```text
-${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<runtime-snapshot>/<name>/
+<resolved-avibe-home>/builtin-skills/<runtime-snapshot>/<name>/
 ```
+
+This honors an explicit `AVIBE_HOME` and the existing legacy-home migration
+rules. Snapshot publication must not independently select or create
+`$HOME/.avibe`, because a still-authoritative `$HOME/.vibe_remote` directory
+must remain the single state home when migration cannot complete.
 
 The runtime snapshot is directly readable by the agent. It is separate from
 user-managed Skills and has the highest resolution priority.
