@@ -13,6 +13,8 @@ import shutil
 import stat
 import struct
 import subprocess
+import threading
+import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -319,7 +321,7 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
                 line = lines[index].rstrip("\r\n")
                 if line and not line[0].isspace():
                     break
-                continuation.append(line.strip())
+                continuation.append(_strip_yaml_comment(line.strip()))
                 index += 1
             value = " ".join(part for part in continuation if part)
         elif value[0] in {"'", '"'} and not _quoted_scalar_is_closed(value):
@@ -839,22 +841,17 @@ def _claude_plugin_skill_roots(
         return []
     environment = dict(os.environ)
     environment["CLAUDE_CONFIG_DIR"] = str(claude_home)
-    try:
-        result = subprocess.run(
-            [command, "plugin", "list", "--json"],
-            cwd=working_directory,
-            env=environment,
-            capture_output=True,
-            check=False,
-            timeout=CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError):
-        logger.info("Unable to resolve enabled Claude plugins", exc_info=True)
-        return []
-    if result.returncode != 0 or len(result.stdout) > CLAUDE_PLUGIN_LIST_MAX_BYTES:
+    output = _bounded_subprocess_stdout(
+        [command, "plugin", "list", "--json"],
+        cwd=working_directory,
+        env=environment,
+        timeout=CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS,
+        max_bytes=CLAUDE_PLUGIN_LIST_MAX_BYTES,
+    )
+    if output is None:
         return []
     try:
-        payload = json.loads(result.stdout.decode("utf-8"))
+        payload = json.loads(output.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return []
     if not isinstance(payload, list) or len(payload) > CLAUDE_PLUGIN_LIST_MAX_ENTRIES:
@@ -876,6 +873,87 @@ def _claude_plugin_skill_roots(
             continue
         roots.append((plugin_id, root))
     return [root for _, root in sorted(roots, key=lambda item: (item[0], str(item[1])))]
+
+
+def _bounded_subprocess_stdout(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    max_bytes: int,
+) -> bytes | None:
+    """Capture stdout while bounding combined stdout and stderr in memory."""
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
+        logger.info("Unable to start bounded subprocess", exc_info=True)
+        return None
+
+    stdout = bytearray()
+    total_bytes = 0
+    lock = threading.Lock()
+    limit_exceeded = threading.Event()
+
+    def drain(stream, *, collect: bool) -> None:
+        nonlocal total_bytes
+        try:
+            while chunk := stream.read(64 * 1024):
+                with lock:
+                    total_bytes += len(chunk)
+                    if collect and len(stdout) <= max_bytes:
+                        remaining = max_bytes + 1 - len(stdout)
+                        stdout.extend(chunk[:remaining])
+                    if total_bytes > max_bytes:
+                        limit_exceeded.set()
+        except (OSError, ValueError):
+            return
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    streams = (process.stdout, process.stderr)
+    threads = (
+        threading.Thread(target=drain, args=(process.stdout,), kwargs={"collect": True}, daemon=True),
+        threading.Thread(target=drain, args=(process.stderr,), kwargs={"collect": False}, daemon=True),
+    )
+    for thread in threads:
+        thread.start()
+
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        if limit_exceeded.wait(min(0.02, remaining)):
+            break
+
+    if (timed_out or limit_exceeded.is_set()) and process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+    for thread in threads:
+        thread.join(timeout=1)
+    if any(thread.is_alive() for thread in threads):
+        for stream in streams:
+            stream.close()
+        return None
+    if timed_out or limit_exceeded.is_set() or process.returncode != 0:
+        return None
+    return bytes(stdout)
 
 
 def resolve_skills(
@@ -974,14 +1052,13 @@ def resolve_skills(
         if compatibility_budget.exhausted:
             break
 
-    global_roots = (
+    global_user_roots = (
         (resolved_home / ".agents" / "skills", 1, frozenset()),
         (resolved_codex_home / "skills", 2, frozenset({".system"})),
         (resolved_claude_home / "skills", 3, frozenset()),
         (resolved_xdg_home / "opencode" / "skills", 4, frozenset()),
-        (resolved_codex_home / "skills" / ".system", 5, frozenset()),
     )
-    for root, family_rank, ignored_names in global_roots:
+    for root, family_rank, ignored_names in global_user_roots:
         if compatibility_budget.exhausted:
             break
         candidates.extend(
@@ -1004,6 +1081,16 @@ def resolve_skills(
         candidates.extend(
             _scan_root(
                 root,
+                priority=(2, 0, 5),
+                budget=compatibility_budget,
+                seen_directory_identities=compatibility_directory_identities,
+            )
+        )
+
+    if not compatibility_budget.exhausted:
+        candidates.extend(
+            _scan_root(
+                resolved_codex_home / "skills" / ".system",
                 priority=(2, 0, 6),
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,

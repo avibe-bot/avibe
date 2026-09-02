@@ -245,6 +245,30 @@ def test_loose_parser_accepts_yaml_comments_on_required_scalars(tmp_path: Path) 
     assert skill.description == "Format # headings"
 
 
+def test_loose_parser_ignores_comments_before_continued_required_scalars(tmp_path: Path) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "unknown: [invalid yaml\n"
+        "name:\n"
+        "  # local name\n"
+        "  formatter # callable name\n"
+        "description:\n"
+        "  # catalog copy\n"
+        "  Formats source files. # display text\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.name == "formatter"
+    assert skill.description == "Formats source files."
+
+
 @pytest.mark.parametrize("quote", ["'", '"'])
 def test_loose_parser_consumes_multiline_quoted_description(tmp_path: Path, quote: str) -> None:
     skill_file = tmp_path / "skill" / "SKILL.md"
@@ -1016,29 +1040,22 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
 
     def plugin_list(command, **kwargs):
         captured.update(command=command, **kwargs)
-        return type(
-            "Result",
-            (),
-            {
-                "returncode": 0,
-                "stdout": json.dumps(
-                    [
-                        {
-                            "id": "formatter@example",
-                            "enabled": True,
-                            "installPath": str(plugin),
-                        },
-                        {
-                            "id": "disabled@example",
-                            "enabled": False,
-                            "installPath": str(tmp_path / "disabled"),
-                        },
-                    ]
-                ).encode(),
-            },
-        )()
+        return json.dumps(
+            [
+                {
+                    "id": "formatter@example",
+                    "enabled": True,
+                    "installPath": str(plugin),
+                },
+                {
+                    "id": "disabled@example",
+                    "enabled": False,
+                    "installPath": str(tmp_path / "disabled"),
+                },
+            ]
+        ).encode()
 
-    monkeypatch.setattr(managed_skills.subprocess, "run", plugin_list)
+    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", plugin_list)
 
     skills = resolve_skills(
         cwd,
@@ -1060,9 +1077,42 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
     ]
     assert captured["cwd"] == cwd
     assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(claude_home)
+    assert captured["timeout"] == managed_skills.CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS
+    assert captured["max_bytes"] == managed_skills.CLAUDE_PLUGIN_LIST_MAX_BYTES
 
 
-def test_claude_plugin_discovery_fails_closed_on_oversized_output(
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_bounded_subprocess_capture_rejects_oversized_combined_output(
+    tmp_path: Path,
+    stream: str,
+) -> None:
+    descriptor = 1 if stream == "stdout" else 2
+    limit = 4096
+
+    assert managed_skills._bounded_subprocess_stdout(
+        [
+            sys.executable,
+            "-c",
+            f"import os; os.write({descriptor}, b'x' * {limit + 1})",
+        ],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=1,
+        max_bytes=limit,
+    ) is None
+
+
+def test_bounded_subprocess_capture_rejects_timeout(tmp_path: Path) -> None:
+    assert managed_skills._bounded_subprocess_stdout(
+        [sys.executable, "-c", "import time; time.sleep(1)"],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=0.01,
+        max_bytes=4096,
+    ) is None
+
+
+def test_claude_plugin_discovery_fails_closed_when_capture_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1072,55 +1122,49 @@ def test_claude_plugin_discovery_fails_closed_on_oversized_output(
     registry.parent.mkdir(parents=True)
     registry.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
-    monkeypatch.setattr(
-        managed_skills.subprocess,
-        "run",
-        lambda *args, **kwargs: type(
-            "Result",
-            (),
-            {
-                "returncode": 0,
-                "stdout": b" " * (managed_skills.CLAUDE_PLUGIN_LIST_MAX_BYTES + 1),
-            },
-        )(),
+
+    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", lambda *args, **kwargs: None)
+
+    assert resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    ) == []
+
+
+def test_enabled_claude_plugin_skill_overrides_codex_system_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("{}", encoding="utf-8")
+    plugin = tmp_path / "plugin-cache" / "formatter"
+    plugin_skill = _write_skill(plugin / "skills", "shared", "shared", "Plugin")
+    _write_skill(home / ".codex" / "skills" / ".system", "shared", "shared", "System")
+    payload = json.dumps(
+        [{"id": "formatter@example", "enabled": True, "installPath": str(plugin)}]
+    ).encode()
+    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", lambda *args, **kwargs: payload)
+
+    skills = resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
     )
 
-    assert resolve_skills(
-        cwd,
-        home=home,
-        avibe_home=tmp_path / "avibe",
-        codex_home=home / ".codex",
-        claude_home=claude_home,
-        xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
-    ) == []
-
-
-def test_claude_plugin_discovery_fails_closed_on_timeout(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
-    claude_home = home / ".claude"
-    registry = claude_home / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True)
-    registry.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
-
-    def time_out(*args, **kwargs):
-        raise managed_skills.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-
-    monkeypatch.setattr(managed_skills.subprocess, "run", time_out)
-
-    assert resolve_skills(
-        cwd,
-        home=home,
-        avibe_home=tmp_path / "avibe",
-        codex_home=home / ".codex",
-        claude_home=claude_home,
-        xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
-    ) == []
+    assert len(skills) == 1
+    assert skills[0].directory == plugin_skill.parent.resolve()
 
 
 def test_snapshot_v1_digest_fixture_is_stable(tmp_path: Path) -> None:

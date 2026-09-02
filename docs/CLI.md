@@ -141,14 +141,17 @@ Avibe discovers existing Skills without moving them:
 - project Skills under `.agents/skills`, `.codex/skills`, `.claude/skills`, or
   `.opencode/skills`, from the working directory up to the Git root;
 - global Skills under `~/.agents/skills`, the configured Codex and Claude Skill
-  directories, and the OpenCode directory under `XDG_CONFIG_HOME`; and
+  directories, the OpenCode directory under `XDG_CONFIG_HOME`, and enabled
+  Claude plugin Skill directories; and
 - Avibe built-ins plus Codex's bundled system Skills.
 
 Built-ins win name conflicts, then project Skills, then global Skills. Within a
 project the nearer directory wins; at the same depth the order is `.agents`,
 `.codex`, `.claude`, then `.opencode`. User Skills win over Codex bundled
-defaults. New global installs should use `~/.agents/skills/<name>`; project
-installs should use `<project>/.agents/skills/<name>`.
+defaults; enabled Claude plugin Skills follow the four static user directories
+but also win over those defaults. New global installs should use
+`~/.agents/skills/<name>`; project installs should use
+`<project>/.agents/skills/<name>`.
 
 Every command resolves from disk, and every new Avibe-dispatched Turn rebuilds
 the Catalog. Adding, editing, or deleting a Skill is therefore visible in an

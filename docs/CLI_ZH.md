@@ -120,13 +120,14 @@ Avibe 会直接发现现有 Skill，无需迁移：
 - 项目级：从工作目录到 Git 根目录逐层查找 `.agents/skills`、`.codex/skills`、
   `.claude/skills` 和 `.opencode/skills`；
 - 全局：查找 `~/.agents/skills`、Codex 与 Claude 配置的 Skill 目录，以及
-  `XDG_CONFIG_HOME` 下的 OpenCode 目录；
+  `XDG_CONFIG_HOME` 下的 OpenCode 目录和已启用的 Claude 插件 Skill 目录；
 - Avibe 内置 Skill，以及 Codex 自带的 system Skill。
 
 同名冲突时，内置 Skill 优先，其次是项目级，再次是全局。项目内更近的目录优先；
 同一层级依次为 `.agents`、`.codex`、`.claude`、`.opencode`。用户 Skill 优先于
-Codex 自带的默认项。新的全局 Skill 默认安装到 `~/.agents/skills/<name>`，项目级
-Skill 安装到 `<project>/.agents/skills/<name>`。
+Codex 自带的默认项；已启用的 Claude 插件 Skill 排在四个静态用户目录之后，但同样
+优先于这些默认项。新的全局 Skill 默认安装到 `~/.agents/skills/<name>`，项目级 Skill
+安装到 `<project>/.agents/skills/<name>`。
 
 每次命令都会从磁盘重新解析，每个由 Avibe 发起的新 Turn 也会重新生成 Catalog。
 因此新增、修改或删除 Skill 后，已有 Session 无需重启 Avibe，也无需新建 Session；
