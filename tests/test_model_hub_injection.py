@@ -120,18 +120,23 @@ def test_direct_launch_does_not_inject_provider_credentials():
 
 
 def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
-    launch = hub_launch()
+    launch = hub_launch(context_window=128_000, max_output_tokens=32_000)
     env = build_claude_hub_env(
         {
             "ANTHROPIC_AUTH_TOKEN": "user-token",
             "ANTHROPIC_BASE_URL": "https://user.example",
             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "999999",
             "PATH": "/bin",
         },
         launch,
     )
     assert env["ANTHROPIC_BASE_URL"] == launch.gateway_base_url
     assert env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
+    assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
     assert claude_setting_sources_for_launch(launch) == ["project", "local"]
 

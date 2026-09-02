@@ -103,6 +103,74 @@ def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
     }
 
 
+def test_codex_hub_catalog_projects_custom_backend_models_from_native_shape():
+    raw = json.dumps(
+        {
+            "client_version": "0.149.1",
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "priority": 99,
+                    "visibility": "list",
+                    "supported_in_api": True,
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": True,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "medium", "description": "Medium"}
+                    ],
+                    "use_responses_lite": True,
+                    "multi_agent_version": "v1",
+                    "tool_mode": "code_mode_only",
+                    "prefer_websockets": True,
+                    "model_messages": {"instructions_template": "preserved"},
+                }
+            ],
+        }
+    ).encode()
+    configured = [
+        {
+            "id": "deepseek-v4",
+            "display_name": "DeepSeek V4",
+            "context_window": 1_048_576,
+            "input_modalities": ["text"],
+            "reasoning_efforts": ["low", "high"],
+        }
+    ]
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(raw, configured)
+    )
+
+    assert payload["client_version"] == "0.149.1"
+    assert payload["models"] == [
+        {
+            "slug": "deepseek-v4",
+            "display_name": "DeepSeek V4",
+            "priority": 1,
+            "visibility": "list",
+            "supported_in_api": True,
+            "context_window": 1_048_576,
+            "max_context_window": 1_048_576,
+            "input_modalities": ["text"],
+            "supports_image_detail_original": False,
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+            ],
+            "use_responses_lite": False,
+            "multi_agent_version": None,
+            "tool_mode": None,
+            "prefer_websockets": False,
+            "model_messages": {"instructions_template": "preserved"},
+        }
+    ]
+
+
 def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     captured = {}
 

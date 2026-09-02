@@ -20,7 +20,7 @@
     "catalog_models": {
       "type": "array",
       "description": "The ordered backend Agent model catalog. It controls the Agent menu and capability metadata only; Route configuration remains in routes.",
-      "items": { "$ref": "model-hub/backend-model.schema.json" }
+      "items": { "$ref": "backend-model.schema.json" }
     },
     "selected_by_agent": {
       "type": ["string", "null"],

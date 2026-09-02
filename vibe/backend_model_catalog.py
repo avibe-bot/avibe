@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -80,7 +80,10 @@ def _codex_hub_catalog_path(catalog: bytes) -> Path:
     return paths.get_runtime_dir() / "model-hub" / "codex" / f"standard-responses-{digest}.json"
 
 
-def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
+def _codex_hub_catalog_bytes(
+    raw_catalog: bytes,
+    configured_models: Sequence[Mapping[str, Any]] | None = None,
+) -> bytes:
     """Project a complete Codex catalog onto generic Responses semantics."""
 
     try:
@@ -99,7 +102,7 @@ def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
         "tool_mode": None,
         "prefer_websockets": False,
     }
-    projected: list[dict[str, Any]] = []
+    native_rows: list[dict[str, Any]] = []
     for model in models:
         if not isinstance(model, dict) or not isinstance(model.get("slug"), str):
             raise ValueError("Codex bundled model catalog contains an invalid model")
@@ -107,13 +110,82 @@ def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
         for key, value in provider_private_defaults.items():
             if key in row:
                 row[key] = value
-        projected.append(row)
+        native_rows.append(row)
+    if configured_models is None:
+        projected = native_rows
+    else:
+        native_by_slug = {row["slug"]: row for row in native_rows}
+        template = native_rows[0]
+        projected = []
+        for priority, configured in enumerate(configured_models, start=1):
+            model_id = configured.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                raise ValueError("Configured Codex catalog contains an invalid model")
+            row = dict(native_by_slug.get(model_id, template))
+            row["slug"] = model_id
+            display_name = configured.get("display_name")
+            row["display_name"] = (
+                display_name
+                if isinstance(display_name, str) and display_name
+                else model_id
+            )
+            row["priority"] = priority
+            row["visibility"] = "list"
+            row["supported_in_api"] = True
+            context_window = configured.get("context_window")
+            if (
+                isinstance(context_window, int)
+                and not isinstance(context_window, bool)
+                and context_window > 0
+            ):
+                row["context_window"] = context_window
+                row["max_context_window"] = context_window
+            input_modalities = configured.get("input_modalities")
+            if isinstance(input_modalities, list):
+                supported_modalities = [
+                    modality
+                    for modality in input_modalities
+                    if modality in {"text", "image"}
+                ]
+                row["input_modalities"] = supported_modalities or ["text"]
+                row["supports_image_detail_original"] = "image" in supported_modalities
+            efforts = configured.get("reasoning_efforts")
+            if isinstance(efforts, list):
+                settled_efforts = [
+                    effort
+                    for effort in efforts
+                    if isinstance(effort, str) and effort
+                ]
+                if not settled_efforts:
+                    settled_efforts = ["none"]
+                row["default_reasoning_level"] = (
+                    "medium"
+                    if "medium" in settled_efforts
+                    else settled_efforts[0]
+                )
+                row["supported_reasoning_levels"] = [
+                    {
+                        "effort": effort,
+                        "description": (
+                            _REASONING_LABELS.get(effort)
+                            or effort.replace("_", " ").title()
+                        ),
+                    }
+                    for effort in settled_efforts
+                ]
+            for key, value in provider_private_defaults.items():
+                if key in row:
+                    row[key] = value
+            projected.append(row)
     payload["models"] = projected
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
 
 
-def _publish_codex_hub_catalog(raw_catalog: bytes) -> Path:
-    catalog = _codex_hub_catalog_bytes(raw_catalog)
+def _publish_codex_hub_catalog(
+    raw_catalog: bytes,
+    configured_models: Sequence[Mapping[str, Any]] | None = None,
+) -> Path:
+    catalog = _codex_hub_catalog_bytes(raw_catalog, configured_models)
     path = _codex_hub_catalog_path(catalog)
     write_atomic(path, catalog)
     return path
@@ -164,11 +236,13 @@ def _export_codex_bundled_catalog(
 def prepare_codex_hub_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
+    configured_models: Sequence[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Prepare the exact binary's catalog immediately before a Hub launch."""
 
     return _publish_codex_hub_catalog(
-        _export_codex_bundled_catalog(binary, base_env)
+        _export_codex_bundled_catalog(binary, base_env),
+        configured_models,
     )
 
 

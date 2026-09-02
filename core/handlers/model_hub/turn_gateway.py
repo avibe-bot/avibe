@@ -371,6 +371,7 @@ class ModelHubTurnGateway:
             if self._runner is not None:
                 return
             app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
+            app.router.add_get("/{backend}/v1/models", self._handle_models)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
             runner = web.AppRunner(
                 app,
@@ -403,6 +404,37 @@ class ModelHubTurnGateway:
             if candidate and self.correlation.authenticates(backend, candidate):
                 return candidate
         return None
+
+    async def _handle_models(self, request: web.Request) -> web.StreamResponse:
+        backend = request.match_info["backend"]
+        if self._authorized_token(request, backend) is None:
+            return self._error_response(status=401, code="authentication_error")
+        try:
+            models = self.service.backend_catalog_models(backend)
+        except ModelHubError as exc:
+            return self._error_response(status=exc.status, code=exc.code)
+        rows = [
+            {
+                "id": model["id"],
+                "display_name": model.get("display_name") or model["id"],
+                "type": "model",
+                "created_at": "1970-01-01T00:00:00Z",
+            }
+            for model in models
+            if model.get("routeable") is True
+        ]
+        return web.json_response(
+            {
+                "data": rows,
+                "has_more": False,
+                "first_id": rows[0]["id"] if rows else None,
+                "last_id": rows[-1]["id"] if rows else None,
+            },
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         backend = request.match_info["backend"]

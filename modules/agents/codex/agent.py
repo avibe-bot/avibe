@@ -804,6 +804,11 @@ class CodexAgent(BaseAgent):
         self._model_hub_catalog_path = None
         await self.refresh_auth_state()
 
+    async def invalidate_model_hub_runtime(self) -> None:
+        """Make the next Hub launch rebuild its catalog without touching Direct transports."""
+        self._model_hub_catalog_generation += 1
+        self._model_hub_catalog_path = None
+
     async def prepare_model_hub_runtime(self) -> Path:
         """Bind Hub metadata to this Agent's exact configured Codex binary."""
         from vibe import backend_model_catalog
@@ -813,10 +818,20 @@ class CodexAgent(BaseAgent):
                 return self._model_hub_catalog_path
             generation = self._model_hub_catalog_generation
             binary = self.codex_config.binary
+            configured_models = None
+            model_hub_service = getattr(self.controller, "model_hub_service", None)
+            store = getattr(model_hub_service, "store", None)
+            if store is not None:
+                configured_models = [
+                    model.to_payload()
+                    for model in store.load().agents["codex"].models
+                ]
             try:
                 path = await asyncio.to_thread(
                     backend_model_catalog.prepare_codex_hub_catalog,
                     binary,
+                    None,
+                    configured_models,
                 )
             except Exception as exc:
                 raise CodexModelHubCatalogUnavailableError(

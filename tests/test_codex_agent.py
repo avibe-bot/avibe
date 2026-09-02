@@ -4062,6 +4062,18 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once_with()
 
+    async def test_model_hub_catalog_invalidation_preserves_direct_transports(self):
+        agent = self._agent()
+        transport = SimpleNamespace(stop=AsyncMock())
+        agent._transports["/repo"] = transport
+        agent._model_hub_catalog_path = Path("/runtime/codex-old.json")
+
+        await agent.invalidate_model_hub_runtime()
+
+        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertEqual(agent._model_hub_catalog_generation, 1)
+        transport.stop.assert_not_awaited()
+
     async def test_startup_catalog_preparation_cannot_overwrite_new_runtime_generation(self):
         agent = self._agent()
         previous_config = agent.codex_config
@@ -4073,8 +4085,8 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         release_previous = threading.Event()
         calls = []
 
-        def prepare(binary):
-            calls.append(binary)
+        def prepare(binary, base_env, configured_models):
+            calls.append((binary, base_env, configured_models))
             if binary == previous_config.binary:
                 previous_started.set()
                 release_previous.wait(timeout=2)
@@ -4095,7 +4107,13 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 await startup
             recovered = await agent.prepare_model_hub_runtime()
 
-        self.assertEqual(calls, [previous_config.binary, next_config.binary])
+        self.assertEqual(
+            calls,
+            [
+                (previous_config.binary, None, None),
+                (next_config.binary, None, None),
+            ],
+        )
         self.assertIs(agent.codex_config, next_config)
         self.assertEqual(agent._model_hub_catalog_path, next_catalog)
         self.assertEqual(recovered, next_catalog)
@@ -4150,7 +4168,11 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
                     await agent._get_or_create_transport(cwd, launch)
 
-            prepare_catalog.assert_called_once_with(agent.codex_config.binary)
+            prepare_catalog.assert_called_once_with(
+                agent.codex_config.binary,
+                None,
+                None,
+            )
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
             agent._session_mgr.invalidate_thread.assert_not_called()

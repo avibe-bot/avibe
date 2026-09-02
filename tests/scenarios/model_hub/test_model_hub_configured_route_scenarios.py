@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from config.v2_config import ModelHubConfig, ModelHubRouteConfig, ModelHubRouteHopConfig
+from config.v2_config import (
+    ModelHubBackendModelConfig,
+    ModelHubConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
+)
 from core.handlers.model_hub.adapter import (
     SOURCE_PROTOCOLS,
     ObservationDiscovery,
@@ -288,6 +293,7 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
         agent = config.agents[backend]
         if backend == "opencode":
             agent.menu.checked = [opencode_model]
+            agent.models = [ModelHubBackendModelConfig(id=opencode_model)]
         agent.routes[menu_model] = ModelHubRouteConfig(
             hops=tuple(
                 ModelHubRouteHopConfig(item.id, upstream_model)

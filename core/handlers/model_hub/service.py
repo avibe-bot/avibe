@@ -19,6 +19,7 @@ from config.v2_config import (
     CONFIG_LOCK,
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     model_hub_fixed_menu_ids,
     ModelHubMenuConfig,
@@ -129,35 +130,36 @@ PRE_ATTEMPT_SETTLEMENT_GENERATION = 0
 
 
 def project_opencode_public_model(
-    identifier: str,
-    resolution: ModelHubTurnResolution,
-) -> dict[str, Any] | None:
-    """Project one persisted OpenCode route without transport credentials."""
+    model: ModelHubBackendModelConfig,
+) -> dict[str, Any]:
+    """Project backend-owned metadata without upstream Route details."""
 
-    inspection = (
-        resolution.candidate_hops[0]
-        if resolution.candidate_hops
-        else resolution.projectable_hops[0]
-        if resolution.projectable_hops
-        else None
-    )
-    if inspection is None or inspection.source is None or inspection.model_id is None:
-        return None
-    model = next(
-        (item for item in inspection.source.models if item.id == inspection.model_id),
-        None,
-    )
+    identifier = model.id
     projected: dict[str, Any] = {
         "id": identifier,
-        "name": (
-            model.display_name
-            if model is not None and model.display_name
-            else identifier
-        ),
+        "name": model.display_name or identifier,
     }
+    if model.context_window is not None or model.max_output_tokens is not None:
+        projected["limit"] = {
+            key: value
+            for key, value in (
+                ("context", model.context_window),
+                ("output", model.max_output_tokens),
+            )
+            if value is not None
+        }
+    if model.input_modalities or model.output_modalities:
+        projected["modalities"] = {
+            "input": list(model.input_modalities),
+            "output": list(model.output_modalities),
+        }
+    if model.supports_tools is not None:
+        projected["tool_call"] = model.supports_tools
+    if model.supports_reasoning is not None:
+        projected["reasoning"] = model.supports_reasoning
     variants = {
         effort: {"reasoningEffort": effort}
-        for effort in (model.reasoning_efforts if model is not None else ())
+        for effort in model.reasoning_efforts
     }
     if variants:
         projected["variants"] = variants
@@ -376,21 +378,11 @@ def _project_opencode_public_models(
     unavailable_source_ids: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Any]]:
     agent = config.agents["opencode"]
-    if agent.mode == "direct" or agent.menu is None:
+    if agent.mode == "direct":
         return {}
     projected: dict[str, dict[str, Any]] = {}
-    for identifier in dict.fromkeys(agent.menu.checked):
-        resolution = resolve_model_hub_turn(
-            config,
-            "opencode",
-            identifier,
-            now=now,
-            unavailable_source_ids=unavailable_source_ids,
-            supply_channel="hub",
-        )
-        model = project_opencode_public_model(identifier, resolution)
-        if model is not None:
-            projected[identifier] = model
+    for model in agent.models:
+        projected[model.id] = project_opencode_public_model(model)
     return projected
 
 
@@ -645,6 +637,9 @@ class ModelHubService:
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
         ] = None,
+        backend_catalog_changed: Optional[
+            Callable[[BackendName], Awaitable[None]]
+        ] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -675,6 +670,7 @@ class ModelHubService:
         self.named_agents_override = named_agents_override
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
+        self.backend_catalog_changed = backend_catalog_changed
         self.now = now
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
@@ -721,9 +717,7 @@ class ModelHubService:
         requested_model: str,
     ) -> list[str]:
         primary = (
-            list(_builtin_model_ids(agent.backend))
-            if agent.menu_kind == "fixed"
-            else list(agent.menu.checked if agent.menu else ())
+            [model.id for model in agent.models]
         )
         seen: set[str] = set()
         model_ids: list[str] = []
@@ -1618,9 +1612,7 @@ class ModelHubService:
 
     @staticmethod
     def _agent_menu_model_ids(agent: ModelHubAgentSupplyConfig) -> tuple[str, ...]:
-        if agent.menu_kind == "fixed":
-            return tuple(_builtin_model_ids(agent.backend))
-        return tuple(agent.menu.checked if agent.menu else ())
+        return tuple(model.id for model in agent.models)
 
     def _added_to(self, source_id: str) -> list[dict]:
         config = self.store.load()
@@ -2881,12 +2873,8 @@ class ModelHubService:
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
                 add(pinned_model, name)
-        if agent.menu_kind == "open" and agent.menu is not None:
-            for identifier in agent.menu.checked:
-                add(identifier)
-        else:
-            for model_id in _builtin_model_ids(backend):
-                add(model_id)
+        for model in agent.models:
+            add(model.id)
         for model_id in agent.routes:
             add(model_id)
         return protected
@@ -3371,9 +3359,54 @@ class ModelHubService:
         # deletion may annotate or remove exact hops, but never re-match menus.
         return
 
+    @staticmethod
+    def _catalog_model_payload(model: ModelHubBackendModelConfig) -> dict:
+        return {
+            **model.to_payload(),
+            "locked": False,
+            "routeable": True,
+        }
+
+    @classmethod
+    def _catalog_models_payload(
+        cls,
+        agent: ModelHubAgentSupplyConfig,
+    ) -> list[dict]:
+        models = [cls._catalog_model_payload(model) for model in agent.models]
+        if agent.backend == "claude":
+            models.insert(
+                0,
+                {
+                    "id": "default",
+                    "display_name": "Default",
+                    "origin": "builtin",
+                    "models_dev_id": None,
+                    "context_window": None,
+                    "max_output_tokens": None,
+                    "input_modalities": [],
+                    "output_modalities": [],
+                    "supports_tools": None,
+                    "supports_reasoning": None,
+                    "reasoning_efforts": [],
+                    "locked": True,
+                    "routeable": False,
+                },
+            )
+        return models
+
+    def backend_catalog_models(self, backend: str) -> list[dict]:
+        if backend not in MODEL_HUB_BACKENDS:
+            raise ModelHubError("mapping_target_unavailable", status=404)
+        config = self.store.load()
+        return self._catalog_models_payload(config.agents[backend])
+
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         backend = cast(BackendName, agent.backend)
-        builtin_models = list(_builtin_model_ids(agent.backend)) if agent.menu_kind == "fixed" else None
+        builtin_models = (
+            [model.id for model in agent.models]
+            if agent.menu_kind == "fixed"
+            else None
+        )
         standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
         requested_model = self._requested_model(agent)
         unavailable_source_ids = self._unavailable_native_sources(config, backend)
@@ -3385,9 +3418,7 @@ class ModelHubService:
             now=now,
             unavailable_source_ids=unavailable_source_ids,
         )
-        menu_model_ids = (
-            builtin_models if builtin_models is not None else list(agent.menu.checked if agent.menu else ())
-        )
+        menu_model_ids = [model.id for model in agent.models]
         model_supply = [
             {
                 "model_id": model_id,
@@ -3474,6 +3505,7 @@ class ModelHubService:
                     }
                 )
         agent_payload = agent.to_payload()
+        agent_payload.pop("models", None)
         agent_payload["routes"] = (
             agent_payload["routes"] if agent.mode == "hub" else None
         )
@@ -3493,6 +3525,7 @@ class ModelHubService:
             ),
             "model_supply": model_supply if agent.mode == "hub" else None,
             "named_agents": named_agents,
+            "catalog_models": self._catalog_models_payload(agent),
             "builtin_models": builtin_models,
             "standard_vendors": standard_vendors,
         }
@@ -3634,11 +3667,34 @@ class ModelHubService:
                     ),
                     checked=merged_checked,
                 )
+                current_models = {model.id: model for model in agent.models}
+                for identifier in removed:
+                    route = agent.routes.get(identifier)
+                    if route is not None and route.hops:
+                        raise ModelHubError(
+                            "backend_model_in_route",
+                            status=409,
+                            data={"model_id": identifier},
+                        )
                 candidate = agent.to_payload()
                 candidate["menu"] = merged_menu.to_payload()
-                candidate_routes = cast(dict, candidate["routes"])
-                for identifier in merged_menu.checked:
-                    candidate_routes.setdefault(identifier, ModelHubRouteConfig().to_payload())
+                candidate["models"] = [
+                    (
+                        current_models.get(identifier)
+                        or ModelHubBackendModelConfig(
+                            id=identifier,
+                            origin="manual",
+                        )
+                    ).to_payload()
+                    for identifier in merged_menu.checked
+                ]
+                candidate["routes"] = {
+                    identifier: agent.routes.get(
+                        identifier,
+                        ModelHubRouteConfig(),
+                    ).to_payload()
+                    for identifier in merged_menu.checked
+                }
                 parsed = ModelHubAgentSupplyConfig.from_payload(
                     candidate,
                     expected_backend="opencode",
@@ -3650,8 +3706,196 @@ class ModelHubService:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             agent.menu = parsed.menu
             agent.routes = parsed.routes
+            agent.models = parsed.models
             await self._commit_synced(previous, config)
+            if self.backend_catalog_changed is not None:
+                await self._refresh_backend_catalog("opencode")
             return self._agent_payload(config, agent)
+
+    @staticmethod
+    def _parse_backend_catalog_models(
+        backend: str,
+        payload: object,
+    ) -> tuple[list[ModelHubBackendModelConfig], bool]:
+        if backend not in MODEL_HUB_BACKENDS:
+            raise ModelHubError("mapping_target_unavailable")
+        if not isinstance(payload, list):
+            raise ModelHubError("backend_model_catalog_invalid")
+        has_default = any(
+            isinstance(item, dict) and item.get("id") == "default"
+            for item in payload
+        )
+        if has_default and backend != "claude":
+            raise ModelHubError("backend_model_locked", status=409)
+        rows: list[ModelHubBackendModelConfig] = []
+        for item in payload:
+            if isinstance(item, dict) and item.get("id") == "default":
+                if item.get("locked") is not True or item.get("routeable") is not False:
+                    raise ModelHubError("backend_model_locked", status=409)
+                continue
+            try:
+                model = ModelHubBackendModelConfig.from_payload(item)
+            except (TypeError, ValueError) as exc:
+                raise ModelHubError("backend_model_catalog_invalid") from exc
+            canonical = canonical_model_id(model.id)
+            if canonical is None or canonical != model.id:
+                raise ModelHubError("backend_model_id_invalid")
+            if backend == "opencode":
+                try:
+                    canonical_opencode_menu_identity(model.id)
+                except ValueError as exc:
+                    raise ModelHubError("backend_model_id_invalid") from exc
+            if (
+                backend == "claude"
+                and model.origin != "builtin"
+                and not model.id.startswith(("claude-", "anthropic-"))
+            ):
+                raise ModelHubError("backend_model_id_prefix")
+            rows.append(model)
+        if len({model.id for model in rows}) != len(rows):
+            raise ModelHubError("backend_model_duplicate")
+        return rows, has_default
+
+    async def _refresh_backend_catalog(self, backend: BackendName) -> None:
+        if self.backend_catalog_changed is None:
+            return
+        try:
+            await self.backend_catalog_changed(backend)
+        except ModelHubError:
+            raise
+        except Exception as exc:
+            raise ModelHubError("engine_down", status=503) from exc
+
+    async def set_agent_models(
+        self,
+        backend: str,
+        baseline: object,
+        models: object,
+    ) -> dict:
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            agent = self._agent(config, backend)
+            baseline_models, baseline_default = self._parse_backend_catalog_models(
+                backend,
+                baseline,
+            )
+            desired_models, desired_default = self._parse_backend_catalog_models(
+                backend,
+                models,
+            )
+            expected_default = backend == "claude"
+            if (
+                baseline_default != expected_default
+                or desired_default != expected_default
+            ):
+                raise ModelHubError("backend_model_locked", status=409)
+
+            current_by_id = {model.id: model for model in agent.models}
+            baseline_by_id = {model.id: model for model in baseline_models}
+            desired_by_id = {model.id: model for model in desired_models}
+            for model_id, desired in desired_by_id.items():
+                trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
+                if desired.origin == "builtin" and (
+                    trusted is None or trusted.origin != "builtin"
+                ):
+                    raise ModelHubError("backend_model_locked", status=409)
+                if (
+                    trusted is not None
+                    and trusted.origin == "builtin"
+                    and desired.origin != "builtin"
+                ):
+                    raise ModelHubError("backend_model_locked", status=409)
+            merged_by_id = dict(current_by_id)
+
+            for model_id in baseline_by_id.keys() - desired_by_id.keys():
+                route = agent.routes.get(model_id)
+                if route is not None and route.hops:
+                    raise ModelHubError(
+                        "backend_model_in_route",
+                        status=409,
+                        data={"model_id": model_id},
+                    )
+                current = current_by_id.get(model_id)
+                if current is not None and current != baseline_by_id[model_id]:
+                    raise ModelHubError("backend_model_conflict", status=409)
+                merged_by_id.pop(model_id, None)
+                agent.routes.pop(model_id, None)
+
+            for model_id, desired in desired_by_id.items():
+                baseline_model = baseline_by_id.get(model_id)
+                current = current_by_id.get(model_id)
+                if baseline_model is None:
+                    if current is not None and current != desired:
+                        raise ModelHubError("backend_model_conflict", status=409)
+                    merged_by_id[model_id] = desired
+                    agent.routes.setdefault(model_id, ModelHubRouteConfig())
+                    continue
+                if current is None:
+                    if desired != baseline_model:
+                        raise ModelHubError("backend_model_conflict", status=409)
+                    continue
+                if (
+                    desired != baseline_model
+                    and current != baseline_model
+                    and current != desired
+                ):
+                    raise ModelHubError("backend_model_conflict", status=409)
+                if desired != baseline_model:
+                    merged_by_id[model_id] = desired
+
+            baseline_survivors = [
+                model.id for model in baseline_models if model.id in desired_by_id
+            ]
+            desired_existing = [
+                model.id for model in desired_models if model.id in baseline_by_id
+            ]
+            order_changed = baseline_survivors != desired_existing
+            concurrent_ids = [
+                model.id
+                for model in agent.models
+                if model.id not in baseline_by_id and model.id not in desired_by_id
+            ]
+            if order_changed:
+                ordered_ids = [
+                    model.id for model in desired_models if model.id in merged_by_id
+                ]
+                ordered_ids.extend(
+                    model_id
+                    for model_id in concurrent_ids
+                    if model_id in merged_by_id and model_id not in ordered_ids
+                )
+            else:
+                ordered_ids = [
+                    model.id for model in agent.models if model.id in merged_by_id
+                ]
+                for model in desired_models:
+                    if model.id not in ordered_ids and model.id in merged_by_id:
+                        ordered_ids.append(model.id)
+            agent.models = [merged_by_id[model_id] for model_id in ordered_ids]
+            if agent.backend == "opencode":
+                agent.menu = ModelHubMenuConfig(
+                    view=agent.menu.view if agent.menu else "featured",
+                    checked=list(ordered_ids),
+                )
+            await self._commit_synced(previous, config)
+            await self._refresh_backend_catalog(cast(BackendName, backend))
+            committed = self.store.load()
+            return self._agent_payload(
+                committed,
+                self._agent(committed, backend),
+            )
+
+    @staticmethod
+    def models_dev_matches(query: object) -> list[dict]:
+        if not isinstance(query, str) or not query.strip() or len(query) > 256:
+            raise ModelHubError("mapping_target_unavailable")
+        from vibe.models_dev_catalog import search_models_dev
+
+        try:
+            return search_models_dev(query)
+        except (OSError, RuntimeError, ValueError):
+            raise ModelHubError("models_dev_unavailable", status=502) from None
 
     @staticmethod
     def _validated_reasoning_efforts(
@@ -5738,6 +5982,9 @@ def create_default_service(
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
     ] = None,
+    backend_catalog_changed: Optional[
+        Callable[[BackendName], Awaitable[None]]
+    ] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -5785,4 +6032,5 @@ def create_default_service(
         named_agents_override=named_agents_override,
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
+        backend_catalog_changed=backend_catalog_changed,
     )

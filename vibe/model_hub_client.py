@@ -165,6 +165,24 @@ class ModelHubRemoteService:
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})
 
+    async def set_agent_models(
+        self,
+        backend: str,
+        baseline: object,
+        models: object,
+    ) -> dict:
+        return await _rpc(
+            "set_agent_models",
+            {
+                "backend": backend,
+                "baseline": baseline,
+                "models": models,
+            },
+        )
+
+    def models_dev_matches(self, query: object) -> list[dict]:
+        return _rpc_sync("models_dev_matches", {"query": query})
+
     async def set_agent_chain(self, backend: str, model_id: str, chain: object) -> dict:
         return await _rpc(
             "set_agent_chain",

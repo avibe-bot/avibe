@@ -354,6 +354,18 @@ def test_agent_service_reports_missing_runtime_refresh_contract() -> None:
     assert asyncio.run(service.refresh_runtime_config("claude", object())) is False
 
 
+def test_agent_service_dispatches_model_hub_runtime_invalidation() -> None:
+    service = AgentService(controller=SimpleNamespace())
+    agent = SimpleNamespace(name="codex", invalidate_model_hub_runtime=AsyncMock())
+    service.register(agent)
+
+    handled = asyncio.run(service.invalidate_model_hub_runtime("codex"))
+
+    assert handled is True
+    agent.invalidate_model_hub_runtime.assert_awaited_once_with()
+    assert asyncio.run(service.invalidate_model_hub_runtime("claude")) is False
+
+
 def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() -> None:
     settle = Mock()
     controller = SimpleNamespace(

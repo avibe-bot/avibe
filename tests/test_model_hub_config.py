@@ -19,6 +19,7 @@ from config.v2_config import (
     MODEL_HUB_LEGACY_CREATED_AT,
     ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubMenuConfig,
     ModelHubModelConfig,
@@ -448,6 +449,7 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
             "builtin_models": raw_example.get("builtin_models"),
             "standard_vendors": raw_example.get("standard_vendors"),
         }
+        serialized.pop("models", None)
         if "routes" not in raw_example:
             serialized.pop("routes", None)
         if "sources" not in raw_example:
@@ -2093,10 +2095,21 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     elif invalid_invariant == "subscription-api-key":
         source["base_url"] = "https://api.anthropic.com"
     else:
-        payload["model_hub"]["agents"]["opencode"]["menu"] = {
-            "view": "featured",
-            "checked": ["invalid-opencode-identity"],
-        }
+        payload["model_hub"]["agents"]["opencode"]["models"] = [
+            {
+                "id": "invalid-opencode-identity",
+                "display_name": None,
+                "origin": "manual",
+                "models_dev_id": None,
+                "context_window": None,
+                "max_output_tokens": None,
+                "input_modalities": [],
+                "output_modalities": [],
+                "supports_tools": None,
+                "supports_reasoning": None,
+                "reasoning_efforts": [],
+            }
+        ]
     if invalid_invariant != "opencode-identity":
         payload["model_hub"]["sources"] = [source]
     config_path = tmp_path / "config.json"
@@ -2109,9 +2122,9 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     persisted = json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]
     if invalid_invariant == "opencode-identity":
-        assert persisted["agents"]["opencode"]["menu"]["checked"] == [
+        assert persisted["agents"]["opencode"]["models"][0]["id"] == (
             "invalid-opencode-identity"
-        ]
+        )
     else:
         assert persisted["sources"] == [source]
 
@@ -2856,9 +2869,36 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
         "view": "featured",
         "checked": ["custom/model"],
     }
+    dynamic["agents"]["opencode"]["models"] = [
+        {
+            "id": "custom/model",
+            "display_name": None,
+            "origin": "manual",
+            "models_dev_id": None,
+            "context_window": None,
+            "max_output_tokens": None,
+            "input_modalities": [],
+            "output_modalities": [],
+            "supports_tools": None,
+            "supports_reasoning": None,
+            "reasoning_efforts": [],
+        }
+    ]
     dynamic["agents"]["opencode"]["routes"] = {}
     with pytest.raises(ValueError, match="missing menu model 'custom/model'"):
         ModelHubConfig.from_payload(dynamic)
+
+
+def test_backend_model_modalities_match_the_contract_directions():
+    input_pdf = ModelHubBackendModelConfig.from_payload(
+        {"id": "custom-model", "input_modalities": ["pdf"]}
+    )
+    assert input_pdf.input_modalities == ["pdf"]
+
+    with pytest.raises(ValueError, match="output_modalities"):
+        ModelHubBackendModelConfig.from_payload(
+            {"id": "custom-model", "output_modalities": ["pdf"]}
+        )
 
 
 def test_config_reload_migrates_fixed_routes_when_bundled_catalog_changes(monkeypatch, tmp_path):

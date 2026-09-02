@@ -1,0 +1,488 @@
+// One editor for every backend catalog row, add and edit alike.
+//
+// It writes nothing. The row it commits goes back into the catalog dialog's
+// draft, so the whole list still settles through one `PUT .../models` with one
+// baseline — an editor that saved on its own would make every row its own
+// mutation and leave no way to cancel a list still being arranged.
+//
+// models.dev is a metadata source here, not an authority: it fills fields the
+// user can then change, and it never touches the backend model id, which is the
+// routing identity the user typed.
+import * as React from 'react';
+import { Check, Database, DownloadCloud, LoaderCircle, Plus } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { cn } from '@/lib/utils';
+import { applyModelsDevMatch, blankBackendModel } from './backendCatalog';
+import { Field } from './dialogFields';
+import { apiFailure, modelsApi } from './modelsApi';
+import { modelsDevFillFailureKey } from './serverCopy';
+import {
+  BACKEND_MODEL_EFFORT_MAX_LENGTH,
+  BACKEND_MODEL_ID_MAX_LENGTH,
+  BACKEND_MODEL_INPUT_MODALITIES,
+  BACKEND_MODEL_OUTPUT_MODALITIES,
+  type AgentBackend,
+  type BackendModel,
+  type BackendModelInputModality,
+  type BackendModelOutputModality,
+  type ModelsDevMatch,
+} from './types';
+
+type FillState = 'idle' | 'loading' | 'empty' | 'error';
+
+/** Digits only. A pasted 「163,840」 is the same number as 「163840」, and the
+ *  field renders the grouped form itself, so refusing the separator would refuse
+ *  the value the field just showed. */
+const parseTokens = (text: string): { ok: boolean; value: number | null } => {
+  const trimmed = text.replace(/[\s,]/g, '');
+  if (trimmed === '') return { ok: true, value: null };
+  if (!/^\d+$/.test(trimmed)) return { ok: false, value: null };
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) && value >= 1 ? { ok: true, value } : { ok: false, value: null };
+};
+
+const groupTokens = (value: number | null): string => (value === null ? '' : value.toLocaleString('en-US'));
+
+const ChipButton: React.FC<{
+  on: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}> = ({ on, disabled, onClick, children }) => (
+  <button
+    type="button"
+    role="checkbox"
+    aria-checked={on}
+    disabled={disabled}
+    onClick={onClick}
+    className={cn('model-hub-model-chip', on && 'is-on')}
+  >
+    {on && <Check className="size-[13px] shrink-0" aria-hidden="true" />}
+    {children}
+  </button>
+);
+
+const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <p className="model-hub-model-section-label">{children}</p>
+);
+
+export const BackendModelEditorDialog: React.FC<{
+  open: boolean;
+  backend: AgentBackend;
+  /** null opens the editor in add mode. */
+  model: BackendModel | null;
+  /** Ids the draft catalog already holds; a second row may not claim one. */
+  takenIds: ReadonlySet<string>;
+  /** Effort values this backend's other rows already use. Suggestions, never a
+   *  vocabulary — every effort is sent verbatim and any string is equally valid. */
+  effortSuggestions: readonly string[];
+  onCancel: () => void;
+  onCommit: (model: BackendModel) => void;
+}> = ({ open, backend, model, takenIds, effortSuggestions, onCancel, onCommit }) => {
+  const { t } = useTranslation();
+  const creating = model === null;
+  const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
+  const [contextText, setContextText] = React.useState('');
+  const [outputText, setOutputText] = React.useState('');
+  const [fillState, setFillState] = React.useState<FillState>('idle');
+  /** Which sentence `fillState === 'error'` shows, resolved while the server's
+   *  own answer is still in hand. */
+  const [fillFailedKey, setFillFailedKey] = React.useState('settings.models.gateway.modelEditor.fillFailed');
+  const [matches, setMatches] = React.useState<ModelsDevMatch[]>([]);
+  const [matchesOpen, setMatchesOpen] = React.useState(false);
+  const [customOpen, setCustomOpen] = React.useState(false);
+  const [customEffort, setCustomEffort] = React.useState('');
+  const [submitted, setSubmitted] = React.useState(false);
+  const fillAttempt = React.useRef(0);
+
+  const seed = React.useCallback((next: BackendModel) => {
+    setDraft(next);
+    setContextText(groupTokens(next.context_window));
+    setOutputText(groupTokens(next.max_output_tokens));
+    setFillState('idle');
+    setMatches([]);
+    setMatchesOpen(false);
+    setCustomOpen(false);
+    setCustomEffort('');
+    setSubmitted(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (open) seed(model ?? blankBackendModel());
+    else fillAttempt.current += 1;
+  }, [model, open, seed]);
+
+  const context = parseTokens(contextText);
+  const output = parseTokens(outputText);
+  const trimmedId = draft.id.trim();
+  const duplicate = creating && takenIds.has(trimmedId);
+  const idError = trimmedId === ''
+    ? 'required'
+    : trimmedId.length > BACKEND_MODEL_ID_MAX_LENGTH
+      ? 'tooLong'
+      : duplicate
+        ? 'duplicate'
+        : null;
+  const valid = idError === null && context.ok && output.ok;
+
+  const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
+
+  const toggleInput = (value: BackendModelInputModality) => patch({
+    input_modalities: draft.input_modalities.includes(value)
+      ? draft.input_modalities.filter((entry) => entry !== value)
+      : [...draft.input_modalities, value],
+  });
+  const toggleOutput = (value: BackendModelOutputModality) => patch({
+    output_modalities: draft.output_modalities.includes(value)
+      ? draft.output_modalities.filter((entry) => entry !== value)
+      : [...draft.output_modalities, value],
+  });
+  const toggleEffort = (value: string) => patch({
+    reasoning_efforts: draft.reasoning_efforts.includes(value)
+      ? draft.reasoning_efforts.filter((entry) => entry !== value)
+      : [...draft.reasoning_efforts, value],
+  });
+
+  const applyMatch = (match: ModelsDevMatch) => {
+    // `applyModelsDevMatch` leaves `id` alone: a fill never renames the row, even
+    // when the chosen match is published under a different id.
+    setDraft((current) => applyModelsDevMatch(current, match, creating ? 'models_dev' : current.origin));
+    setContextText(groupTokens(match.context_window));
+    setOutputText(groupTokens(match.max_output_tokens));
+    setMatchesOpen(false);
+    setFillState('idle');
+  };
+
+  const fill = () => {
+    const query = trimmedId;
+    if (query === '') return;
+    const attempt = ++fillAttempt.current;
+    setFillState('loading');
+    setMatchesOpen(false);
+    void (async () => {
+      try {
+        const found = await modelsApi.searchModelsDev(query);
+        if (attempt !== fillAttempt.current) return;
+        setMatches(found);
+        if (found.length === 0) {
+          setFillState('empty');
+          return;
+        }
+        setFillState('idle');
+        if (found.length === 1) applyMatch(found[0]);
+        else setMatchesOpen(true);
+      } catch (error) {
+        if (attempt !== fillAttempt.current) return;
+        setFillFailedKey(modelsDevFillFailureKey(apiFailure(error)?.detail));
+        setFillState('error');
+      }
+    })();
+  };
+
+  const addCustomEffort = () => {
+    const value = customEffort.trim();
+    if (value === '' || value.length > BACKEND_MODEL_EFFORT_MAX_LENGTH) return;
+    if (!draft.reasoning_efforts.includes(value)) patch({ reasoning_efforts: [...draft.reasoning_efforts, value] });
+    setCustomEffort('');
+    setCustomOpen(false);
+  };
+
+  const commit = () => {
+    setSubmitted(true);
+    if (!valid) return;
+    onCommit({
+      ...draft,
+      id: trimmedId,
+      context_window: context.value,
+      max_output_tokens: output.value,
+      // Only an explicit "no reasoning" clears the efforts. A row whose support
+      // is unstated still ships efforts the backend uses, and an unrelated edit
+      // must not silently drop them.
+      reasoning_efforts: draft.supports_reasoning === false ? [] : draft.reasoning_efforts,
+    });
+  };
+
+  const efforts = [...new Set([...effortSuggestions, ...draft.reasoning_efforts])];
+  const backendName = t(`settings.models.backends.${backend}`, { defaultValue: backend });
+  const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
+      <DialogContent
+        mobileSheetHeight="tall"
+        closeLabel={t('settings.models.gateway.modelEditor.cancel') as string}
+        className="model-hub-model-editor flex h-[min(660px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
+      >
+        <DialogHeader className="model-hub-model-editor-head shrink-0 justify-center border-b border-border">
+          <p className="model-hub-model-editor-eyebrow truncate">{t('settings.models.gateway.modelEditor.eyebrow', { backend: backendName })}</p>
+          <DialogTitle className="model-hub-model-editor-title">
+            {t(creating ? 'settings.models.gateway.modelEditor.addTitle' : 'settings.models.gateway.modelEditor.editTitle')}
+          </DialogTitle>
+          <DialogDescription className="sr-only">{t('settings.models.gateway.modelEditor.description')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="model-hub-model-editor-body min-h-0 flex-1 overflow-y-auto">
+          <section className="model-hub-model-section">
+            <SectionLabel>{t('settings.models.gateway.modelEditor.section.basic')}</SectionLabel>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <Field
+                label={t('settings.models.gateway.modelEditor.id.label')}
+                className="min-w-0 flex-1 gap-1.5"
+                labelClassName="model-hub-model-field-label"
+              >
+                {(id) => (
+                  <Input
+                    id={id}
+                    value={draft.id}
+                    readOnly={!creating}
+                    aria-invalid={Boolean(idHint)}
+                    maxLength={BACKEND_MODEL_ID_MAX_LENGTH}
+                    spellCheck={false}
+                    autoComplete="off"
+                    onChange={(event) => patch({ id: event.target.value })}
+                    placeholder={t('settings.models.gateway.modelEditor.id.placeholder') as string}
+                    className="model-hub-model-control w-full font-mono text-[12.5px] read-only:text-muted"
+                  />
+                )}
+              </Field>
+              <Button
+                type="button"
+                variant="outline"
+                className="model-hub-model-control shrink-0 rounded-md px-3.5 text-[12.5px] font-semibold"
+                disabled={trimmedId === '' || fillState === 'loading'}
+                onClick={fill}
+              >
+                {fillState === 'loading'
+                  ? <LoaderCircle className="animate-spin" aria-hidden="true" />
+                  : <DownloadCloud aria-hidden="true" />}
+                {t('settings.models.gateway.modelEditor.fill')}
+              </Button>
+            </div>
+            {idHint && <p className="model-hub-model-error" role="alert">{idHint}</p>}
+            {fillState === 'empty' && <p className="model-hub-model-error" role="status">{t('settings.models.gateway.modelEditor.fillEmpty')}</p>}
+            {fillState === 'error' && <p className="model-hub-model-error" role="status">{t(fillFailedKey)}</p>}
+
+            {draft.models_dev_id && (
+              <div className="model-hub-model-source-strip flex min-w-0 items-center gap-2.5">
+                <Database className="size-[14px] shrink-0 text-muted" aria-hidden="true" />
+                <span className="model-hub-model-source-id shrink-0 font-mono">{`models.dev · ${draft.models_dev_id}`}</span>
+                <span className="model-hub-model-source-note min-w-0 flex-1 truncate">{t('settings.models.gateway.modelEditor.filled')}</span>
+                <button
+                  type="button"
+                  className="model-hub-model-source-view shrink-0"
+                  aria-expanded={matchesOpen}
+                  disabled={matches.length === 0}
+                  onClick={() => setMatchesOpen((value) => !value)}
+                >
+                  {t('settings.models.gateway.modelEditor.viewMatches')}
+                </button>
+              </div>
+            )}
+
+            {matchesOpen && matches.length > 0 && (
+              <div className="model-hub-model-match-list flex flex-col" role="listbox" aria-label={t('settings.models.gateway.modelEditor.matches') as string}>
+                {matches.map((match) => {
+                  const selected = draft.models_dev_id === match.models_dev_id;
+                  return (
+                    <button
+                      key={match.models_dev_id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      onClick={() => applyMatch(match)}
+                      className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', selected && 'is-selected')}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="model-hub-model-match-name block truncate">{match.display_name ?? match.model_id}</span>
+                        <span className="model-hub-model-match-id block truncate font-mono">{match.models_dev_id}</span>
+                      </span>
+                      <span className="model-hub-pill model-hub-fill-0a shrink-0 border border-border text-muted">{match.provider_name}</span>
+                      {selected && <Check className="model-hub-ink-mint size-4 shrink-0" aria-hidden="true" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="model-hub-model-section">
+            <SectionLabel>{t('settings.models.gateway.modelEditor.section.parameters')}</SectionLabel>
+            <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
+              <Field
+                label={t('settings.models.gateway.modelEditor.contextWindow')}
+                className="min-w-0 gap-1.5"
+                labelClassName="model-hub-model-field-label"
+              >
+                {(id) => (
+                  <TokenInput
+                    id={id}
+                    value={contextText}
+                    invalid={!context.ok}
+                    onChange={setContextText}
+                    onBlur={() => context.ok && setContextText(groupTokens(context.value))}
+                  />
+                )}
+              </Field>
+              <Field
+                label={t('settings.models.gateway.modelEditor.maxOutput')}
+                className="min-w-0 gap-1.5"
+                labelClassName="model-hub-model-field-label"
+              >
+                {(id) => (
+                  <TokenInput
+                    id={id}
+                    value={outputText}
+                    invalid={!output.ok}
+                    onChange={setOutputText}
+                    onBlur={() => output.ok && setOutputText(groupTokens(output.value))}
+                  />
+                )}
+              </Field>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <p className="model-hub-model-field-label" id="model-hub-input-modalities">{t('settings.models.gateway.modelEditor.inputModalities')}</p>
+                <div className="flex flex-wrap gap-2" role="group" aria-labelledby="model-hub-input-modalities">
+                  {BACKEND_MODEL_INPUT_MODALITIES.map((modality) => (
+                    <ChipButton key={modality} on={draft.input_modalities.includes(modality)} onClick={() => toggleInput(modality)}>
+                      {t(`settings.models.gateway.modelEditor.modality.${modality}`)}
+                    </ChipButton>
+                  ))}
+                </div>
+              </div>
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <p className="model-hub-model-field-label" id="model-hub-output-modalities">{t('settings.models.gateway.modelEditor.outputModalities')}</p>
+                <div className="flex flex-wrap gap-2" role="group" aria-labelledby="model-hub-output-modalities">
+                  {BACKEND_MODEL_OUTPUT_MODALITIES.map((modality) => (
+                    <ChipButton key={modality} on={draft.output_modalities.includes(modality)} onClick={() => toggleOutput(modality)}>
+                      {t(`settings.models.gateway.modelEditor.modality.${modality}`)}
+                    </ChipButton>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="model-hub-model-section">
+            <SectionLabel>{t('settings.models.gateway.modelEditor.section.capabilities')}</SectionLabel>
+            <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
+              <div className="model-hub-model-toggle flex min-w-0 items-center justify-between gap-3">
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="model-hub-model-toggle-label truncate">{t('settings.models.gateway.modelEditor.supportsTools')}</span>
+                  {draft.supports_tools === null && (
+                    <span className="model-hub-model-note shrink-0">{t('settings.models.gateway.modelEditor.unspecified')}</span>
+                  )}
+                </span>
+                <Switch
+                  checked={draft.supports_tools === true}
+                  onCheckedChange={(next) => patch({ supports_tools: next })}
+                  label={t('settings.models.gateway.modelEditor.supportsTools') as string}
+                />
+              </div>
+              <div className="model-hub-model-toggle flex min-w-0 items-center justify-between gap-3">
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="model-hub-model-toggle-label truncate">{t('settings.models.gateway.modelEditor.supportsReasoning')}</span>
+                  {draft.supports_reasoning === null && (
+                    <span className="model-hub-model-note shrink-0">{t('settings.models.gateway.modelEditor.unspecified')}</span>
+                  )}
+                </span>
+                <Switch
+                  checked={draft.supports_reasoning === true}
+                  onCheckedChange={(next) => patch({ supports_reasoning: next })}
+                  label={t('settings.models.gateway.modelEditor.supportsReasoning') as string}
+                />
+              </div>
+            </div>
+            {/* An unstated capability still owns its efforts, so hide the list
+                only when the user has actually said this model cannot reason. */}
+            {draft.supports_reasoning !== false && (
+              <div className="flex flex-col gap-1.5">
+                <p className="model-hub-model-field-label" id="model-hub-efforts">{t('settings.models.gateway.modelEditor.reasoningEfforts')}</p>
+                <div className="flex flex-wrap gap-2" role="group" aria-labelledby="model-hub-efforts">
+                  {efforts.map((effort) => (
+                    <ChipButton key={effort} on={draft.reasoning_efforts.includes(effort)} onClick={() => toggleEffort(effort)}>
+                      {effort}
+                    </ChipButton>
+                  ))}
+                  {customOpen ? (
+                    <span className="model-hub-model-chip model-hub-model-chip--custom">
+                      <Input
+                        variant="bare"
+                        autoFocus
+                        value={customEffort}
+                        maxLength={BACKEND_MODEL_EFFORT_MAX_LENGTH}
+                        aria-label={t('settings.models.gateway.modelEditor.customEffort') as string}
+                        placeholder={t('settings.models.gateway.modelEditor.customEffortPlaceholder') as string}
+                        onChange={(event) => setCustomEffort(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            addCustomEffort();
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setCustomOpen(false);
+                            setCustomEffort('');
+                          }
+                        }}
+                        onBlur={addCustomEffort}
+                        className="w-[104px] text-[12px]"
+                      />
+                    </span>
+                  ) : (
+                    <button type="button" className="model-hub-model-chip model-hub-model-chip--add" onClick={() => setCustomOpen(true)}>
+                      <Plus className="size-[13px] shrink-0" aria-hidden="true" />
+                      {t('settings.models.gateway.modelEditor.customEffort')}
+                    </button>
+                  )}
+                </div>
+                <p className="model-hub-model-note">{t('settings.models.gateway.modelEditor.effortNote')}</p>
+              </div>
+            )}
+          </section>
+        </div>
+
+        <DialogFooter className="model-hub-model-editor-foot shrink-0 items-center border-t border-border sm:justify-end">
+          <Button type="button" variant="outline" className="model-hub-model-control rounded-md px-5 text-[12.5px] font-semibold" onClick={onCancel}>
+            {t('settings.models.gateway.modelEditor.cancel')}
+          </Button>
+          <Button type="button" variant="brand" className="model-hub-model-control rounded-md px-5 text-[12.5px] font-semibold" onClick={commit}>
+            {t(creating ? 'settings.models.gateway.modelEditor.add' : 'settings.models.gateway.modelEditor.apply')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+const TokenInput: React.FC<{
+  id: string;
+  value: string;
+  invalid: boolean;
+  onChange: (next: string) => void;
+  onBlur: () => void;
+}> = ({ id, value, invalid, onChange, onBlur }) => {
+  const { t } = useTranslation();
+  return (
+    <div className={cn('model-hub-model-control model-hub-model-token flex min-w-0 items-center gap-2', invalid && 'is-invalid')}>
+      <Input
+        id={id}
+        variant="bare"
+        inputMode="numeric"
+        value={value}
+        aria-invalid={invalid}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={onBlur}
+        className="min-w-0 flex-1 font-mono text-[12.5px]"
+      />
+      <span className="model-hub-model-token-suffix shrink-0" aria-hidden="true">{t('settings.models.gateway.modelEditor.tokens')}</span>
+    </div>
+  );
+};
+
+export default BackendModelEditorDialog;

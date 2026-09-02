@@ -15,6 +15,7 @@ import pytest
 from config.v2_config import (
     ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -202,6 +203,12 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
                 for source in eligible_sources
             )
         )
+        if backend == "opencode":
+            agent.models = [
+                ModelHubBackendModelConfig(id=_requested_model(backend))
+            ]
+            assert agent.menu is not None
+            agent.menu.checked = [_requested_model(backend)]
     return config
 
 
@@ -316,8 +323,6 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             ]
         )
         store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
-        assert store.config.agents["opencode"].menu is not None
-        store.config.agents["opencode"].menu.checked = ["anthropic/model-live"]
         service = _service(tmp_path, store, adapter, now=lambda: clock[0])
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)

@@ -5,8 +5,9 @@ Status: implementation contract
 ## Outcome
 
 Every Model Hub backend has one editable model catalog. The catalog controls the models
-the Agent can select and the capability metadata the Agent uses for context budgeting and
-tool/UI decisions. Supplier inventory and Routes keep their current ownership.
+the Agent can select and stores one canonical capability description; each runtime adapter
+consumes the subset its backend can represent. Supplier inventory and Routes keep their
+current ownership.
 
 For example, adding `deepseek-v3.2` to the Codex catalog makes that id appear in Codex.
 It does not choose an upstream provider. The new row appears separately in the Route
@@ -14,14 +15,14 @@ panel, where the user can configure `aihub/deepseek-v3.2` and any fallbacks.
 
 ## One product model
 
-The three backend cards expose the same `Manage models` action and the same list/editor
-interaction. Their runtime adapters remain different:
+The three Gateway backend cards expose the same `Manage models` action and the same
+list/editor interaction. Their runtime adapters remain different:
 
 | Backend | Catalog projection |
 | --- | --- |
-| Claude Code | The Gateway serves the catalog from the authenticated Anthropic Models endpoint while discovery is enabled. Claude Code's own `Default` selector remains visible and locked. |
-| Codex | Avibe writes a content-addressed Codex `model_catalog_json` derived from the running binary's native schema plus the configured rows. |
-| OpenCode | Avibe writes the configured rows into its private runtime provider overlay. |
+| Claude Code | The Gateway serves model ids while discovery is enabled. Context and output limits are injected for the selected Hub model. Claude Code's own `Default` selector remains visible and locked. Other canonical fields remain stored metadata. |
+| Codex | Avibe writes a content-addressed `model_catalog_json` derived from the running binary's native schema. It projects display name, context, supported input modalities, and reasoning efforts; fields Codex cannot represent remain stored metadata. |
+| OpenCode | Avibe writes the configured rows into its private runtime provider overlay, including context/output limits, modalities, tool/reasoning support, and reasoning variants. |
 
 The shared catalog is authoritative. Adapter-specific files are derived runtime artifacts;
 they are never edited by the user and never become another source of product state.
@@ -72,6 +73,10 @@ After a successful catalog mutation, the controller invalidates the affected bac
 runtime projection. The next turn observes the committed catalog; an already running
 OpenCode server is refreshed before the mutation reports success.
 
+Catalog storage is mode-independent so a Direct to Gateway switch preserves prior work.
+The product editor is Gateway-only: Direct mode continues to use each CLI's native model
+menu, so showing this editor there would falsely imply that these rows change Direct mode.
+
 ## Acceptance
 
 - All three backend cards open the same model-list interaction.
@@ -83,4 +88,5 @@ OpenCode server is refreshed before the mutation reports success.
   refresh.
 - Existing Source inventory and Route chains remain byte-for-byte unchanged except when a
   user separately edits them.
-- Direct mode keeps the catalog editable so switching back to Gateway is reversible.
+- Direct mode preserves the catalog unchanged; switching back to Gateway restores the
+  same editable list.

@@ -59,8 +59,14 @@
       "items": { "enum": ["text", "image", "audio", "video"] },
       "uniqueItems": true
     },
-    "supports_tools": { "type": "boolean" },
-    "supports_reasoning": { "type": "boolean" },
+    "supports_tools": {
+      "type": ["boolean", "null"],
+      "description": "True or false explicitly overrides tool support in the backend projection. Null omits that override and preserves the backend's own default."
+    },
+    "supports_reasoning": {
+      "type": ["boolean", "null"],
+      "description": "True or false explicitly overrides reasoning support in the backend projection. Null omits that override and preserves the backend's own default."
+    },
     "reasoning_efforts": {
       "type": "array",
       "items": { "type": "string", "minLength": 1, "maxLength": 64 },
