@@ -13,6 +13,10 @@ from core.managed_skills import (
     CATALOG_PAGE_MAX_BYTES,
     CATALOG_PAGE_SIZE,
     SKILL_BODY_MAX_BYTES,
+    SKILL_CLAUDE_HOME_ENV,
+    SKILL_CODEX_HOME_ENV,
+    SKILL_HOME_ENV,
+    SKILL_XDG_CONFIG_HOME_ENV,
     SKILL_WORKING_DIR_ENV,
     load_skill,
     managed_skill_environment,
@@ -129,6 +133,26 @@ def test_loose_parser_accepts_yaml_comments_on_required_scalars(tmp_path: Path) 
     assert skill.description == "Format # headings"
 
 
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_loose_parser_consumes_multiline_quoted_description(tmp_path: Path, quote: str) -> None:
+    skill_file = tmp_path / "skill" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text(
+        "---\n"
+        "name: formatter\n"
+        f"description: {quote}Formats source files and\n"
+        f"  applies repository conventions.{quote} # catalog copy\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+
+    assert skill is not None
+    assert skill.description == "Formats source files and applies repository conventions."
+
+
 @pytest.mark.parametrize(
     "name",
     ["", "Uppercase", "two words", "-leading", "trailing-", "two--hyphens", "shell;word"],
@@ -193,6 +217,32 @@ def test_global_roots_honor_backend_home_overrides(tmp_path: Path, monkeypatch) 
     _write_skill(xdg_home / "opencode" / "skills", "opencode", "opencode", "OpenCode")
 
     assert [skill.name for skill in resolve_skills(cwd)] == ["claude", "codex", "opencode"]
+
+
+def test_bound_global_roots_do_not_follow_later_relative_overrides(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    other = tmp_path / "other"
+    cwd.mkdir()
+    other.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "bound-codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "bound-claude"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "bound-xdg"))
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    bound = managed_skill_environment(cwd)
+    monkeypatch.setenv("CODEX_HOME", "relative-codex")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative-claude")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative-xdg")
+    monkeypatch.chdir(other)
+    for key, value in bound.items():
+        monkeypatch.setenv(key, value)
+
+    _write_skill(tmp_path / "bound-codex" / "skills", "codex", "codex", "Codex")
+    _write_skill(tmp_path / "bound-claude" / "skills", "claude", "claude", "Claude")
+    _write_skill(tmp_path / "bound-xdg" / "opencode" / "skills", "opencode", "opencode", "OpenCode")
+
+    assert [skill.name for skill in resolve_skills()] == ["claude", "codex", "opencode"]
 
 
 def test_codex_system_skills_are_a_low_priority_global_compatibility_root(
@@ -688,11 +738,21 @@ def test_publication_ignores_install_generated_python_bytecode(tmp_path: Path) -
     cache = source / "alpha" / "scripts" / "__pycache__"
     cache.mkdir(parents=True)
     (cache / "helper.cpython-312.pyc").write_bytes(b"generated")
+    (cache.parent / "helper.py").write_text("print('source')\n", encoding="utf-8")
     destination = tmp_path / "runtime"
 
     snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
 
     assert not (destination / snapshot_id / "alpha" / "scripts" / "__pycache__").exists()
+
+
+def test_publication_rejects_empty_companion_directories(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    (skill_file.parent / "assets").mkdir()
+
+    with pytest.raises(RuntimeError, match="must not be empty"):
+        publish_builtin_skills(source_root=source, destination_root=tmp_path / "runtime")
 
 
 def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
@@ -836,7 +896,7 @@ def test_publication_rejects_symlinks(tmp_path: Path) -> None:
 
 
 def test_bound_working_directory_and_snapshot_are_inherited(monkeypatch, tmp_path: Path) -> None:
-    _, advertised_cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    home, advertised_cwd = _isolate_live_commands(monkeypatch, tmp_path)
     other_cwd = tmp_path / "other"
     other_cwd.mkdir()
     _write_skill(advertised_cwd / ".agents" / "skills", "advertised", "advertised", "Here")
@@ -850,4 +910,8 @@ def test_bound_working_directory_and_snapshot_are_inherited(monkeypatch, tmp_pat
     assert managed_skill_environment(advertised_cwd) == {
         SKILL_WORKING_DIR_ENV: str(advertised_cwd.resolve()),
         BUILTIN_SKILLS_SNAPSHOT_ENV: snapshot_id,
+        SKILL_HOME_ENV: str(home.resolve()),
+        SKILL_CODEX_HOME_ENV: str((home / ".codex").resolve()),
+        SKILL_CLAUDE_HOME_ENV: str((home / ".claude").resolve()),
+        SKILL_XDG_CONFIG_HOME_ENV: str((home / ".config").resolve()),
     }

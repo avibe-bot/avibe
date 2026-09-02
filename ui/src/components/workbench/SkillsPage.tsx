@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Compass, Download, Funnel, Info, Loader2, Lock, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
+import { Compass, Download, Info, Loader2, Lock, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { SkillBrief, SkillCheckItem, SkillScope, WorkbenchProject } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { BACKEND_LABEL, BACKEND_ORDER, backendsFromAgents, type Backend } from '../../lib/backendAccent';
 import { Button } from '../ui/button';
 import { SegmentedRadio } from '../ui/segmented';
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 import { SkillRow } from './skills/SkillRow';
@@ -40,9 +38,7 @@ export const SkillsPage: React.FC = () => {
   const [installingAskill, setInstallingAskill] = useState(false);
   const [projectNoFolder, setProjectNoFolder] = useState(false);
   const [search, setSearch] = useState('');
-  const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [busyBackend, setBusyBackend] = useState<Backend | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showBrowse, setShowBrowse] = useState(false);
   const [checkMap, setCheckMap] = useState<Record<string, SkillCheckItem>>({});
@@ -145,12 +141,11 @@ export const SkillsPage: React.FC = () => {
 
   const matches = useCallback(
     (skill: SkillBrief) => {
-      if (backendFilter !== 'all' && !backendsFromAgents(skill.agents).includes(backendFilter)) return false;
       const q = search.trim().toLowerCase();
       if (!q) return true;
       return skill.name.toLowerCase().includes(q) || (skill.description ?? '').toLowerCase().includes(q);
     },
-    [search, backendFilter],
+    [search],
   );
 
   const filtered = useMemo(() => skills.filter(matches), [skills, matches]);
@@ -164,23 +159,6 @@ export const SkillsPage: React.FC = () => {
     () => new Set(skills.filter((s) => scope !== 'project' || s.scope === 'project').map((s) => s.name)),
     [skills, scope],
   );
-
-  const onToggleBackend = async (backend: Backend, next: boolean) => {
-    if (!selected) return;
-    setBusyBackend(backend);
-    try {
-      const projectArg = selected.scope === 'project' ? projectId ?? undefined : undefined;
-      const res = next
-        ? await api.addSkill({ source: selected.path, scope: selected.scope, projectId: projectArg, backends: [backend] })
-        : await api.removeSkill(selected.name, { scope: selected.scope, projectId: projectArg, backends: [backend] });
-      if (!res.ok) showToast(res.error?.message ?? BACKEND_LABEL[backend], 'error');
-      await refresh();
-    } catch (err) {
-      showToast(errorMessage(err) ?? String(err), 'error');
-    } finally {
-      setBusyBackend(null);
-    }
-  };
 
   const onRemove = async () => {
     if (!selected) return;
@@ -283,8 +261,6 @@ export const SkillsPage: React.FC = () => {
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
-
-        <BackendFilter value={backendFilter} onChange={setBackendFilter} />
 
         {projectCanManage ? (
           <>
@@ -403,11 +379,9 @@ export const SkillsPage: React.FC = () => {
             <SkillDetailPanel
               skill={selected}
               projectName={activeProject?.display_name}
-              busyBackend={busyBackend}
               check={checkMap[skillKey(selected)]}
               updating={updating}
               onClose={() => setSelectedKey(null)}
-              onToggleBackend={onToggleBackend}
               onUpdate={onUpdate}
               onRemove={onRemove}
               canManage={canManage && (selected.scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat))}
@@ -435,53 +409,5 @@ export const SkillsPage: React.FC = () => {
         />
       ) : null}
     </div>
-  );
-};
-
-interface BackendFilterProps {
-  value: Backend | 'all';
-  onChange: (next: Backend | 'all') => void;
-}
-
-// Compact funnel popover, mirroring AgentsPage's BackendFilter idiom.
-const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const label = value === 'all' ? t('skills.backendAll') : BACKEND_LABEL[value];
-  const dot = (key: Backend | 'all') =>
-    key === 'all' ? 'bg-muted' : key === 'claude' ? 'bg-mint' : key === 'opencode' ? 'bg-cyan' : 'bg-violet';
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface px-3 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
-        >
-          <Funnel className="size-3 text-muted" />
-          <span className="text-muted">{t('skills.backendFilter')}:</span>
-          <span>{label}</span>
-          <ChevronDown className="size-3 text-muted" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-[180px] p-1">
-        {(['all', ...BACKEND_ORDER] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => {
-              onChange(key);
-              setOpen(false);
-            }}
-            className={clsx(
-              'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-mint-soft text-mint-ink' : 'text-foreground hover:bg-foreground/[0.04]',
-            )}
-          >
-            <span className={clsx('size-2 rounded-full', dot(key))} />
-            <span>{key === 'all' ? t('skills.backendAll') : BACKEND_LABEL[key as Backend]}</span>
-          </button>
-        ))}
-      </PopoverContent>
-    </Popover>
   );
 };

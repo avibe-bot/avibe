@@ -20,6 +20,14 @@ import aiohttp
 
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
+from core.caller_context import (
+    AVIBE_CALLER_PLATFORM_ENV,
+    AVIBE_CALLER_REMOTE_ENV,
+    AVIBE_CALLER_USER_ID_ENV,
+    AVIBE_SESSION_ID_ENV,
+    caller_env_for_platform_payload,
+    validated_caller_env_snapshot,
+)
 from core.message_output import stop_output_for, terminal_output_for
 from core.managed_skills import managed_skill_environment
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -69,6 +77,7 @@ from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import (
     OpenCodePollLoop,
+    restored_context_from_poll_info,
     restored_platform_from_poll_info,
     restored_session_key_from_poll_info,
 )
@@ -87,6 +96,7 @@ from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
 _MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
+_CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
@@ -1300,6 +1310,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # CLI session scope as a side effect, so a second call per turn would
             # repeat that write.
             memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+            caller_context_env = caller_env_for_platform_payload(
+                request.context.platform_specific or {},
+                message=request.context,
+                fallback_platform=platform,
+            )
 
             system_prompt_injection = build_system_prompt_injection(
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
@@ -1345,6 +1360,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             processing_indicator = self.controller.processing_indicator.snapshot_request(
                 request
             )
+            if caller_context_env:
+                processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = caller_context_env
             target_session_id = _target_agent_session_id(request)
             if target_session_id and logical_turn_id:
                 processing_indicator[_STEERING_SNAPSHOT_KEY] = {
@@ -2297,6 +2314,50 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 f"(thread={poll_info.base_session_id}, cwd={poll_info.working_path})"
             )
 
+            restored_binding_token = secrets.token_hex(16)
+            restored_caller_env = validated_caller_env_snapshot(
+                processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
+            )
+            restored_context = restored_context_from_poll_info(poll_info)
+            if (
+                poll_platform == "avibe"
+                and str(restored_context.user_id or "").startswith("remote:")
+            ):
+                # Legacy persisted polls do not carry the authorization snapshot.
+                # Keep them remote-but-unprivileged instead of silently treating an
+                # absent snapshot as a local caller.
+                restored_caller_env.setdefault(AVIBE_SESSION_ID_ENV, poll_info.base_session_id)
+                restored_caller_env.setdefault(AVIBE_CALLER_PLATFORM_ENV, "avibe")
+                restored_caller_env.setdefault(
+                    AVIBE_CALLER_USER_ID_ENV,
+                    str(restored_context.user_id),
+                )
+                restored_caller_env.setdefault(AVIBE_CALLER_REMOTE_ENV, "1")
+            try:
+                restored_bound = bind_caller_context_session(
+                    poll_info.opencode_session_id,
+                    None,
+                    base_env=os.environ,
+                    working_dir=poll_info.working_path,
+                    extra_env={
+                        **restored_caller_env,
+                        **managed_skill_environment(poll_info.working_path),
+                    },
+                    binding_token=restored_binding_token,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to restore OpenCode caller context for session=%s",
+                    poll_info.opencode_session_id,
+                )
+                continue
+            if not restored_bound:
+                logger.error(
+                    "Restored OpenCode caller context was empty for session=%s",
+                    poll_info.opencode_session_id,
+                )
+                continue
+
             restoration_ready = asyncio.get_running_loop().create_future()
             restoration_published = asyncio.Event()
             task = asyncio.create_task(
@@ -2306,6 +2367,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     reconcile_after_message_ids=reconcile_after_message_ids,
                     restoration_ready=restoration_ready,
                     restoration_published=restoration_published,
+                    caller_context_binding_token=restored_binding_token,
                 )
             )
             restoration_results.append(
@@ -2364,6 +2426,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         reconcile_after_message_ids: set[str] | None = None,
         restoration_ready: asyncio.Future[bool] | None = None,
         restoration_published: asyncio.Event | None = None,
+        caller_context_binding_token: str | None = None,
     ) -> None:
         current_task = asyncio.current_task()
         steer_state = None
@@ -2504,6 +2567,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     err,
                 )
         finally:
+            if caller_context_binding_token:
+                try:
+                    unbind_caller_context_session(
+                        poll_info.opencode_session_id,
+                        binding_token=caller_context_binding_token,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to clear restored OpenCode caller context for session %s",
+                        poll_info.opencode_session_id,
+                        exc_info=True,
+                    )
             if current_task is not None:
                 self._restored_poll_servers.pop(current_task, None)
             if steer_state is not None:

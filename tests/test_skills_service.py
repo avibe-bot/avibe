@@ -132,7 +132,7 @@ def test_list_global_uses_g_no_cwd(monkeypatch):
     assert rec.calls[0]["cwd"] is None
 
 
-def test_runtime_catalog_filter_reuses_backend_specific_listing_acl(monkeypatch) -> None:
+def test_runtime_catalog_filter_reuses_unified_listing_acl(monkeypatch) -> None:
     captured = {}
 
     def filter_listing(result, **kwargs):
@@ -155,13 +155,13 @@ def test_runtime_catalog_filter_reuses_backend_specific_listing_acl(monkeypatch)
 
     assert allowed == {"allowed"}
     assert captured["result"]["skills"] == [
-        {"name": "allowed", "scope": "project", "agents": ["claude"]},
-        {"name": "denied", "scope": "global", "agents": ["claude"]},
+        {"name": "allowed", "scope": "project", "agents": ["claude", "opencode", "codex"]},
+        {"name": "denied", "scope": "global", "agents": ["claude", "opencode", "codex"]},
     ]
     assert captured["scope"] == "all"
     assert captured["project_dir"] == "/project"
     assert captured["project_id"] == "project-1"
-    assert captured["backends"] == ["claude"]
+    assert captured["backends"] is None
 
 
 def test_mixed_runtime_catalog_does_not_grant_global_skills_to_project_editor(
@@ -191,12 +191,11 @@ def test_mixed_runtime_catalog_does_not_grant_global_skills_to_project_editor(
     assert [row["name"] for row in filtered["skills"]] == ["project-skill"]
 
 
-def test_list_project_uses_p_and_cwd_and_agents(monkeypatch):
+def test_list_project_uses_p_and_cwd_and_ignores_legacy_backend_filter(monkeypatch):
     rec = _Recorder({"ok": True, "skills": []})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.list_skills("askill", scope="project", project_dir="/p", backends=["claude", "codex"]))
-    # list supports -p; agents expand to askill ids under ONE variadic -a.
-    assert rec.calls[0]["args"] == ["list", "-p", "-a", "claude-code", "codex"]
+    assert rec.calls[0]["args"] == ["list", "-p"]
     assert rec.calls[0]["cwd"] == "/p"
 
 
@@ -204,7 +203,7 @@ def test_add_global_all(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "gh:o/r", scope="global", backends=["opencode"], all_skills=True))
-    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "opencode", "--all", "-y"]
+    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "--all", "-y"]
 
 
 def test_add_reports_nothing_installed_when_no_skill_matched(monkeypatch):
@@ -239,7 +238,7 @@ def test_add_project_has_no_p_flag_and_uses_cwd(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "./pkg", scope="project", project_dir="/p", copy=True))
-    assert rec.calls[0]["args"] == ["add", "./pkg", "--copy", "-y"]
+    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "--copy", "-y"]
     assert rec.calls[0]["cwd"] == "/p"
 
 
@@ -247,7 +246,7 @@ def test_add_with_skill_selector(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "./pkg", scope="project", project_dir="/p", skill="formatter", backends=["opencode"]))
-    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "opencode", "--skill", "formatter", "-y"]
+    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "--skill", "formatter", "-y"]
 
 
 def test_preview_uses_list_flag(monkeypatch):
@@ -262,7 +261,7 @@ def test_remove_project_no_p_flag(monkeypatch):
     rec = _Recorder({"ok": True})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.remove_skill("askill", "pdf-tools", scope="project", project_dir="/p", backends=["claude"]))
-    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-a", "claude-code"]
+    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-a", "claude-code", "opencode", "codex"]
     assert rec.calls[0]["cwd"] == "/p"
 
 
@@ -270,7 +269,7 @@ def test_remove_global(monkeypatch):
     rec = _Recorder({"ok": True})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.remove_skill("askill", "pdf-tools", scope="global"))
-    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-g"]
+    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-g", "-a", "claude-code", "opencode", "codex"]
     assert rec.calls[0]["cwd"] is None
 
 
@@ -688,7 +687,7 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
             )
         ) == {"ok": True}
         assert [call["args"] for call in member_recorder.calls] == [
-            ["remove", "private-skill", "-g"]
+            ["remove", "private-skill", "-g", "-a", "claude-code", "opencode", "codex"]
         ]
         with engine.connect() as connection:
             assert resource_access_service.get_resource_policy(
@@ -744,6 +743,8 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
                 "gh:owner/repo",
                 "-g",
                 "-a",
+                "claude-code",
+                "opencode",
                 "codex",
                 "--skill",
                 "private-skill",
@@ -754,7 +755,7 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
         engine.dispose()
 
 
-def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tmp_path) -> None:
+def test_remove_skill_deletes_all_legacy_backend_policies(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     try:
         with engine.begin() as connection:
@@ -791,10 +792,10 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
 
     assert result["ok"] is True
     assert [call["args"] for call in recorder.calls] == [
-        ["remove", "shared-skill", "-g", "-a", "codex", "claude-code"]
+        ["remove", "shared-skill", "-g", "-a", "claude-code", "opencode", "codex"]
     ]
     assert codex_policy is None
-    assert claude_policy is not None
+    assert claude_policy is None
 
 
 @pytest.mark.parametrize("operation", ["add", "remove", "update"])
@@ -916,7 +917,7 @@ def test_active_org_member_can_replace_installed_legacy_skill(monkeypatch, tmp_p
         engine.dispose()
 
     assert [call["args"] for call in member_recorder.calls] == [
-        ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"],
+        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "--skill", "legacy-skill", "-y"],
     ]
     assert result == install_result
     assert policy is not None
@@ -953,7 +954,7 @@ def test_instance_owner_skill_add_does_not_require_organization_membership(
 
     assert result == install_result
     assert [call["args"] for call in recorder.calls] == [
-        ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"]
+        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "--skill", "legacy-skill", "-y"]
     ]
 
 

@@ -25,6 +25,24 @@ AVIBE_CALLER_WORKSPACE_ID_ENV = "AVIBE_CALLER_WORKSPACE_ID"
 AVIBE_CALLER_REMOTE_ENV = "AVIBE_CALLER_REMOTE"
 AVIBE_CALLER_RESOURCE_CONTEXT_ENV = "AVIBE_CALLER_RESOURCE_CONTEXT"
 
+CALLER_CONTEXT_ENV_NAMES = frozenset(
+    {
+        AVIBE_SESSION_ID_ENV,
+        AVIBE_RUN_ID_ENV,
+        AVIBE_CALLER_SOURCE_ENV,
+        AVIBE_CALLER_BACKEND_ENV,
+        AVIBE_NATIVE_SESSION_ID_ENV,
+        AVIBE_CALLER_PLATFORM_ENV,
+        AVIBE_CALLER_USER_ID_ENV,
+        AVIBE_CALLER_CHANNEL_ID_ENV,
+        AVIBE_CALLER_SESSION_KEY_ENV,
+        AVIBE_CALLER_MESSAGE_ID_ENV,
+        AVIBE_CALLER_WORKSPACE_ID_ENV,
+        AVIBE_CALLER_REMOTE_ENV,
+        AVIBE_CALLER_RESOURCE_CONTEXT_ENV,
+    }
+)
+
 _RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 
 
@@ -202,6 +220,18 @@ def caller_resource_user_context(context: Optional[CallerContext]) -> Optional[M
     if context is None or not context.is_remote:
         return None
     return dict(context.resource_user_context or {})
+
+
+def validated_caller_env_snapshot(source: object) -> dict[str, str]:
+    """Return only caller-context fields from a persisted internal snapshot."""
+
+    if not isinstance(source, Mapping):
+        return {}
+    return {
+        str(key): value
+        for key, value in source.items()
+        if key in CALLER_CONTEXT_ENV_NAMES and isinstance(value, str) and value
+    }
 
 
 def _scope_id_from_session_key(session_key: str) -> Optional[str]:

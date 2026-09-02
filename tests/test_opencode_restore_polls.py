@@ -149,6 +149,49 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     return agent, status_writes, removed, request_sessions
 
 
+def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "user_id": "remote:user-1",
+        "opencode_caller_context_env": {
+            "AVIBE_SESSION_ID": "ses_wb",
+            "AVIBE_CALLER_PLATFORM": "avibe",
+            "AVIBE_CALLER_USER_ID": "remote:user-1",
+            "AVIBE_CALLER_REMOTE": "1",
+            "AVIBE_CALLER_RESOURCE_CONTEXT": '{"sub":"user-1"}',
+            "IGNORED_ENV": "must-not-pass",
+        },
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    bound: list[dict] = []
+    unbound: list[tuple[str, str]] = []
+
+    def bind(session_id, payload, **kwargs):
+        bound.append({"session_id": session_id, "payload": payload, **kwargs})
+        return True
+
+    def unbind(session_id, *, binding_token):
+        unbound.append((session_id, binding_token))
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr("modules.agents.opencode.agent.unbind_caller_context_session", unbind)
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert len(bound) == 1
+    assert bound[0]["session_id"] == "oc-1"
+    assert bound[0]["payload"] is None
+    assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
+    assert "IGNORED_ENV" not in bound[0]["extra_env"]
+    assert unbound == [("oc-1", bound[0]["binding_token"])]
+
+
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     poll.processing_indicator = {

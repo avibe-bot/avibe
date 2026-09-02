@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 SKILL_WORKING_DIR_ENV = "AVIBE_SKILL_WORKING_DIR"
 BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
+SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
+SKILL_CODEX_HOME_ENV = "AVIBE_SKILL_CODEX_HOME"
+SKILL_CLAUDE_HOME_ENV = "AVIBE_SKILL_CLAUDE_HOME"
+SKILL_XDG_CONFIG_HOME_ENV = "AVIBE_SKILL_XDG_CONFIG_HOME"
 
 CATALOG_PAGE_SIZE = 25
 CATALOG_PAGE_MAX_BYTES = 16 * 1024
@@ -157,6 +161,32 @@ def _decode_scalar(value: str) -> str:
     return value.strip()
 
 
+def _quoted_scalar_is_closed(value: str) -> bool:
+    """Return whether a leading YAML quote has a matching closing quote."""
+
+    if not value or value[0] not in {"'", '"'}:
+        return True
+    quote = value[0]
+    escaped = False
+    index = 1
+    while index < len(value):
+        char = value[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                return True
+        elif char == quote:
+            if index + 1 < len(value) and value[index + 1] == quote:
+                index += 1
+            else:
+                return True
+        index += 1
+    return False
+
+
 def _normalize_description(value: str) -> str:
     without_controls = "".join(" " if unicodedata.category(char).startswith("C") else char for char in value)
     return " ".join(without_controls.split())
@@ -197,6 +227,19 @@ def _frontmatter_fields(lines: Sequence[str]) -> dict[str, str]:
                 continuation.append(line.strip())
                 index += 1
             value = " ".join(part for part in continuation if part)
+        elif value[0] in {"'", '"'} and not _quoted_scalar_is_closed(value):
+            continuation = [value]
+            index += 1
+            while index < len(lines):
+                line = lines[index].rstrip("\r\n")
+                if line and not line[0].isspace():
+                    break
+                continuation.append(line.strip())
+                index += 1
+                combined = " ".join(part for part in continuation if part)
+                if _quoted_scalar_is_closed(combined):
+                    break
+            value = _strip_yaml_comment(" ".join(part for part in continuation if part))
         else:
             index += 1
 
@@ -583,7 +626,11 @@ def resolve_skills(
 ) -> list[ManagedSkill]:
     """Resolve the live Skill catalog using Avibe's v1 precedence rules."""
 
-    resolved_home = Path(home).expanduser().resolve() if home is not None else Path.home().resolve()
+    resolved_home = (
+        Path(home).expanduser().resolve()
+        if home is not None
+        else Path(os.environ.get(SKILL_HOME_ENV) or Path.home()).expanduser().resolve()
+    )
     resolved_avibe_home = (
         Path(avibe_home).expanduser().resolve()
         if avibe_home is not None
@@ -592,18 +639,34 @@ def resolve_skills(
     resolved_codex_home = (
         Path(codex_home).expanduser().resolve()
         if codex_home is not None
-        else Path(os.environ.get("CODEX_HOME") or resolved_home / ".codex").expanduser().resolve()
+        else Path(
+            os.environ.get(SKILL_CODEX_HOME_ENV)
+            or os.environ.get("CODEX_HOME")
+            or resolved_home / ".codex"
+        )
+        .expanduser()
+        .resolve()
     )
     if claude_home is not None:
         resolved_claude_home = Path(claude_home).expanduser().resolve()
     else:
-        from vibe.claude_config import get_claude_home
+        bound_claude_home = os.environ.get(SKILL_CLAUDE_HOME_ENV)
+        if bound_claude_home:
+            resolved_claude_home = Path(bound_claude_home).expanduser().resolve()
+        else:
+            from vibe.claude_config import get_claude_home
 
-        resolved_claude_home = get_claude_home(resolved_home if home is not None else None).expanduser().resolve()
+            resolved_claude_home = get_claude_home(resolved_home if home is not None else None).expanduser().resolve()
     resolved_xdg_home = (
         Path(xdg_config_home).expanduser().resolve()
         if xdg_config_home is not None
-        else Path(os.environ.get("XDG_CONFIG_HOME") or resolved_home / ".config").expanduser().resolve()
+        else Path(
+            os.environ.get(SKILL_XDG_CONFIG_HOME_ENV)
+            or os.environ.get("XDG_CONFIG_HOME")
+            or resolved_home / ".config"
+        )
+        .expanduser()
+        .resolve()
     )
 
     candidates: list[ManagedSkill] = []
@@ -934,10 +997,12 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
                 children = sorted(scanned, key=lambda item: item.name)
         except OSError as exc:
             raise RuntimeError(f"Cannot read built-in Skill source: {directory}") from exc
+        accepted_children = 0
         for child in children:
             # Installers may compile Skill scripts in place; bytecode is not part of the bundled tree.
             if child.name == "__pycache__" or child.name.endswith(_GENERATED_BYTECODE_SUFFIXES):
                 continue
+            accepted_children += 1
             _validate_portable_component(child.name)
             child_parts = (*relative_parts, child.name)
             relative = "/".join(child_parts)
@@ -961,6 +1026,8 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
                 entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, False))
             else:
                 raise RuntimeError(f"Built-in Skill path is not a directory or regular file: {relative}")
+        if relative_parts and accepted_children == 0:
+            raise RuntimeError(f"Built-in Skill directories must not be empty: {'/'.join(relative_parts)}")
 
     visit(root, ())
     entries.sort(key=lambda entry: entry.relative_bytes)
@@ -1100,6 +1167,20 @@ def managed_skill_environment(working_directory: str | Path | None) -> dict[str,
     env: dict[str, str] = {}
     if working_directory is not None:
         env[SKILL_WORKING_DIR_ENV] = str(Path(working_directory).expanduser().resolve())
+    resolved_home = Path.home().resolve()
+    resolved_codex_home = Path(os.environ.get("CODEX_HOME") or resolved_home / ".codex").expanduser().resolve()
+    from vibe.claude_config import get_claude_home
+
+    resolved_claude_home = get_claude_home().expanduser().resolve()
+    resolved_xdg_home = Path(os.environ.get("XDG_CONFIG_HOME") or resolved_home / ".config").expanduser().resolve()
+    env.update(
+        {
+            SKILL_HOME_ENV: str(resolved_home),
+            SKILL_CODEX_HOME_ENV: str(resolved_codex_home),
+            SKILL_CLAUDE_HOME_ENV: str(resolved_claude_home),
+            SKILL_XDG_CONFIG_HOME_ENV: str(resolved_xdg_home),
+        }
+    )
     snapshot_id = os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
     if _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
         env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
