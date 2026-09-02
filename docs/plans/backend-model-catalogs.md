@@ -179,16 +179,25 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
   amended so that "catalog change never repeats matching" reads "a menu-model add matches
   once at that write; refresh, restart, health, and turns still never re-match". Manual
   adds of an id no Source lists therefore still start with an empty route.
+  The success response is the existing `{agent: AgentSupply}`; the seeded hops are visible
+  in `agent.routes[<id>].hops` and `agent.model_supply` in the same response.
 - **C2 — Metadata seeding.** For each added row the server fills `display_name` and
   `reasoning_efforts` from the matched Source model(s) when the client sent them empty
   (union of efforts across matched Sources, Source order), then fills remaining empty
   metadata from models.dev only when exactly one exact match exists, recording
   `models_dev_id` and `origin: "models_dev"`. A models.dev cache miss is silent; the row is
   still written.
-- **C3 — Removal cascades through the guard.** Removing a row whose route has hops returns
-  the guarded `409 backend_model_in_route` with `would_remove_hops`; a `force: true` retry
-  echoing that plan removes the row and its route in one transaction. The hard refusal in
-  v1 is retired. Removing a row with an empty route needs no confirmation.
+- **C3 — Removal cascades through the guard.** `PUT /api/models/agents/<backend>/models`
+  accepts the guarded-mutation fields beside `baseline` and `models`:
+  `{baseline, models, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}`.
+  Removing a row whose route has hops without `force` returns the existing guard-refusal
+  envelope `409 {ok: false, error: "backend_model_in_route", would_remove_hops: RouteHopRef[],
+  would_interrupt: SupplyGap[]}` (`guard-refusal.schema.json`; `RouteHopRef` is
+  `{backend, menu_model, source_id, model_id, position}`). A retry with `force: true` that
+  echoes both arrays unchanged removes the rows and their routes in one transaction and
+  returns `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`.
+  Removing rows whose routes are empty needs no confirmation and returns `{agent}` as
+  today. The v1 hard refusal is retired.
 - **C4 — Candidates are derived, not served.** The picker derives candidates from
   `GET /api/models/sources` and `AgentSupply.sources` eligibility already loaded on the
   page (the same derivation the Route dialog's candidate popover uses), deduplicated by
