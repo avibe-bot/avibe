@@ -145,7 +145,7 @@ budgets as compatibility inputs.
 ### 4.3 Project roots
 
 For each directory `D` from the active working directory up to and including
-the Git project root, Avibe inspects:
+the first project boundary, Avibe inspects:
 
 ```text
 <D>/.agents/skills
@@ -154,12 +154,19 @@ the Git project root, Avibe inspects:
 <D>/.opencode/skills
 ```
 
+The first project boundary is the nearer of the Git project root and the
+Avibe project base bound to the Session. The latter lets a Workbench project
+whose configured directory has no `.git` marker retain project-level Skills
+when an existing Session works in one of its descendants. A standalone command
+has no Avibe project binding and therefore uses the Git root; if neither
+boundary is found, only its active working directory is project scope.
+
 The nearest directory to the active working directory wins within the same
 directory family. Root discovery examines at most 128 directories including
-the active working directory. If no Git root is found within that bound, only
-the active working directory is considered project scope. Thus each Turn
-performs at most 512 project-root probes before the existing candidate and byte
-budgets apply.
+the active working directory and performs at most 512 project-root probes
+before the existing candidate and byte budgets apply. A bound Avibe project
+base is accepted only when it is an absolute ancestor of the bound working
+directory; otherwise it is ignored.
 
 ### 4.4 Global roots
 
@@ -452,6 +459,11 @@ When a backend launches either command, Avibe supplies internal bindings:
 - `AVIBE_SKILL_WORKING_DIR` is the absolute working directory from which Avibe
   rendered that Session's Catalog. Project discovery always starts there, even
   when the agent runs the command from another directory.
+- `AVIBE_SKILL_PROJECT_BASE`, when present, is the normalized absolute Avibe
+  project base that bounded that Session's Catalog. It lets a command launched
+  by an existing Session discover project Skills between a descendant working
+  directory and a configured non-Git project base. Values outside the bound
+  working directory's ancestor chain are ignored.
 - `AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID` selects the version-scoped built-in snapshot
   retained by the Avibe process that created that backend runtime, even if an
   upgrade has since switched the stable `vibe` launcher to another artifact.
@@ -489,6 +501,12 @@ renew, and unbind there until the server is replaced, even when the effective
 `AVIBE_HOME` has changed. A newly started server uses the current runtime path.
 Expired entries are ignored and pruned.
 
+Binding publication and cleanup run outside the controller event loop. A
+restored poll retries publication three times; if the binding store remains
+unavailable, Avibe restores result delivery without the optional shell binding
+rather than stranding the durable poll. The next ordinary Avibe-dispatched Turn
+gets a fresh binding attempt.
+
 ### 8.3 Runtime access boundary
 
 Workbench resource policies continue to authorize the Skills management API:
@@ -514,7 +532,7 @@ Once a Skill body has been loaded, it remains historical context just like any
 other file previously read by the agent. The current Catalog describes current
 availability; it does not retroactively change history.
 
-### 8.4 No watcher in v1
+### 8.5 No watcher in v1
 
 There is no filesystem watcher, change notification, incremental system-prompt
 patch, or long-lived per-Session Catalog. Turn-time rendering is already the
@@ -525,7 +543,9 @@ The initial implementation scans the fixed roots within the candidate and byte
 budgets and reads only enough of each `SKILL.md` to extract frontmatter. A
 reference measurement of six roots, 20 Skill files, and 242 KB total input
 completed in about 1 ms median on a warm local filesystem. This is not a
-latency guarantee; it shows that correctness can precede caching.
+latency guarantee; it shows that correctness can precede caching. Per-Turn
+discovery runs outside the controller event loop so bounded cold-filesystem
+latency cannot stall unrelated dispatch.
 
 V1 does not cache discovery results. A future parsed-frontmatter cache cannot
 treat file identity, size, or timestamps as proof that content is unchanged: it
@@ -591,7 +611,8 @@ directory/file tag, the path length as an unsigned 64-bit big-endian integer,
 and the path bytes. A file record additionally contains its byte length in the
 same integer encoding, its exact bytes, and one byte holding
 `st_mode & 0o111` where POSIX executable bits exist (zero otherwise). Release
-packaging requires relative paths to be valid UTF-8 in NFC form. A fixed
+packaging requires relative paths to be valid UTF-8 in NFC form and every
+built-in `SKILL.md` body to be valid UTF-8. A fixed
 tree-to-digest fixture freezes this encoding without creating a persisted
 manifest. The identifier selects a directory; it is not a runtime integrity
 protocol.
@@ -607,7 +628,8 @@ root entries, any direct child that is not a valid Skill directory, duplicate
 declared Skill names, more than 4,096 directories and regular files across the
 complete tree, more than 32 MiB of regular-file bytes across the complete tree,
 any Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over 256
-KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB. The aggregate
+KiB, any invalid UTF-8 `SKILL.md` body, or a built-in tree whose bounded
+frontmatter exceeds 8 MiB. The aggregate
 entry traversal is capped while enumerating. Hashing and publication also charge
 the size of each regular file at the point it is opened and bound every read to
 that size, so growth after enumeration cannot exceed the aggregate byte budget.
@@ -824,6 +846,12 @@ Catalogs at runtime.
   limit before load produces empty standard output and a non-zero exit.
 - An invalid UTF-8 body may be advertised from its valid frontmatter but load
   produces empty standard output and a non-zero exit without replacement text.
+- Built-in publication rejects an invalid UTF-8 body, so every published
+  built-in that can be advertised is also loadable under the body-encoding
+  contract.
+- A Workbench Session working below its configured non-Git project directory
+  discovers project-level Skills up to that directory on the next Turn and via
+  `vibe skill`; an invalid or non-ancestor project binding is ignored.
 - Workbench resource policies continue to govern management operations but do
   not narrow the runtime Catalog or loaded body, matching the ordinary
   filesystem capability of the agent process.
