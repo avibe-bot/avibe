@@ -218,6 +218,37 @@ def test_unbind_session_removes_only_matching_turn_binding(tmp_path: Path, monke
     assert "oc-session" not in json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"]
 
 
+def test_refresh_session_extends_only_the_matching_live_binding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    initial = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    monkeypatch.setattr(bridge, "_utc_now", lambda: initial)
+    assert bridge.bind_session(
+        "oc-session",
+        {},
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path,
+        extra_env={"AVIBE_SKILL_WORKING_DIR": str(tmp_path)},
+        binding_token="owned-turn",
+    )
+    before = json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"][
+        "oc-session"
+    ]
+
+    monkeypatch.setattr(bridge, "_utc_now", lambda: initial + timedelta(hours=1))
+    assert bridge.refresh_session("oc-session", binding_token="other-turn") is False
+    assert bridge.refresh_session("oc-session", binding_token="owned-turn") is True
+
+    after = json.loads(bridge.binding_path().read_text(encoding="utf-8"))["sessions"][
+        "oc-session"
+    ]
+    assert after["env"] == before["env"]
+    assert datetime.fromisoformat(after["expires_at"]) == initial + timedelta(hours=25)
+
+
 def test_concurrent_bindings_preserve_every_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
     monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)

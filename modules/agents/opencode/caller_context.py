@@ -249,3 +249,36 @@ def unbind_session(opencode_session_id: str, *, binding_token: str) -> bool:
         data["sessions"] = sessions
         _write_bindings(path, data)
     return True
+
+
+def refresh_session(
+    opencode_session_id: str,
+    *,
+    binding_token: str,
+    ttl_hours: int = BINDING_TTL_HOURS,
+) -> bool:
+    """Extend exactly one live binding without changing its environment."""
+
+    session_id = str(opencode_session_id or "").strip()
+    token = str(binding_token or "").strip()
+    if not session_id or not token:
+        return False
+    path = binding_path()
+    now = _utc_now()
+    with _binding_lock(path):
+        if not path.is_file():
+            return False
+        data = _load_bindings(path)
+        sessions = _prune_sessions(data.get("sessions", {}), now)
+        entry = sessions.get(session_id)
+        if not isinstance(entry, dict) or entry.get("binding_token") != token:
+            if sessions != data.get("sessions", {}):
+                data["sessions"] = sessions
+                _write_bindings(path, data)
+            return False
+        entry["updated_at"] = now.isoformat()
+        entry["expires_at"] = (now + timedelta(hours=max(1, int(ttl_hours)))).isoformat()
+        sessions[session_id] = entry
+        data["sessions"] = sessions
+        _write_bindings(path, data)
+    return True

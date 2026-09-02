@@ -1221,7 +1221,7 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
 
         async def abort_session(self, session_id, directory):
             events.append("abort")
-            return True
+            raise OSError("abort status unknown")
 
         async def mark_run_active(self, session_id):
             return None
@@ -1255,10 +1255,14 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
             return False
 
     class _Sessions:
+        active = False
+
         def add_active_poll(self, **kwargs):
+            self.active = True
             events.append("persist_poll")
 
         def remove_active_poll(self, session_id):
+            self.active = False
             events.append("remove_poll")
 
     server = _Server()
@@ -1297,9 +1301,20 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
         "modules.agents.opencode.agent.build_system_prompt_injection",
         lambda **kwargs: "system prompt",
     )
+    binding_tokens: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        binding_tokens.append(kwargs["binding_token"])
+        return True
+
+    unbound: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
-        lambda *args, **kwargs: None,
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token: unbound.append((session_id, binding_token)),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1310,6 +1325,9 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
     await agent._process_message(primary)
 
     assert events == ["persist_poll", "prompt", "abort"]
+    assert agent.sessions.active is True
+    assert len(binding_tokens) == 1
+    assert unbound == []
     backend_failure.assert_awaited_once()
 
 

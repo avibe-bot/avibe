@@ -8,6 +8,7 @@ import pytest
 
 from core import managed_skills
 from core.managed_skills import (
+    BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
     CATALOG_DESCRIPTION_MAX_CHARS,
     CATALOG_PAGE_MAX_BYTES,
@@ -69,6 +70,7 @@ def _isolate_live_commands(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
     monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
     return home, cwd
 
 
@@ -425,7 +427,8 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
 
     assert prompt.count("\n- skill-") == CATALOG_PAGE_SIZE
     assert "`vibe skill list --page 2`" in prompt
-    assert "inspect each subsequent Catalog page in order" in prompt
+    assert "ordinary tasks do not require scanning every page" in prompt
+    assert "load that name directly" in prompt
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
@@ -772,6 +775,26 @@ def test_mode_only_change_produces_a_new_snapshot_id(tmp_path: Path) -> None:
     assert snapshot_tree_digest(root) != first
 
 
+def test_snapshot_digest_charges_file_growth_after_enumeration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_BYTES", 128)
+    original_snapshot_entries = managed_skills._snapshot_entries
+
+    def enumerate_then_grow_file(root: Path):
+        entries = original_snapshot_entries(root)
+        skill_file.write_bytes(b"x" * 129)
+        return entries
+
+    monkeypatch.setattr(managed_skills, "_snapshot_entries", enumerate_then_grow_file)
+
+    with pytest.raises(RuntimeError, match="128 bytes"):
+        snapshot_tree_digest(source)
+
+
 def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
     tmp_path: Path,
 ) -> None:
@@ -958,6 +981,60 @@ def test_publication_bounds_the_complete_builtin_tree(
         publish_builtin_skills(source_root=too_many_bytes, destination_root=destination)
 
 
+def test_publication_copies_only_the_bounded_enumeration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha")
+    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_BYTES", 128)
+    original_snapshot_entries = managed_skills._snapshot_entries
+    source_enumerations = 0
+
+    def enumerate_then_add_late_entry(root: Path):
+        nonlocal source_enumerations
+        entries = original_snapshot_entries(root)
+        if Path(root) == source:
+            source_enumerations += 1
+            if source_enumerations == 3:
+                (source / "late.bin").write_bytes(b"x" * 129)
+        return entries
+
+    monkeypatch.setattr(managed_skills, "_snapshot_entries", enumerate_then_add_late_entry)
+
+    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert source_enumerations == 3
+    assert not (destination / snapshot_id / "late.bin").exists()
+
+
+def test_publication_charges_file_growth_at_copy_time(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_BYTES", 128)
+    original_snapshot_entries = managed_skills._snapshot_entries
+    source_enumerations = 0
+
+    def enumerate_then_grow_file(root: Path):
+        nonlocal source_enumerations
+        entries = original_snapshot_entries(root)
+        if Path(root) == source:
+            source_enumerations += 1
+            if source_enumerations == 3:
+                skill_file.write_bytes(b"x" * 129)
+        return entries
+
+    monkeypatch.setattr(managed_skills, "_snapshot_entries", enumerate_then_grow_file)
+
+    with pytest.raises(RuntimeError, match="128 bytes"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
+
+
 def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(
     tmp_path: Path,
     monkeypatch,
@@ -1028,8 +1105,23 @@ def test_bound_working_directory_and_snapshot_are_inherited(monkeypatch, tmp_pat
     assert managed_skill_environment(advertised_cwd) == {
         SKILL_WORKING_DIR_ENV: str(advertised_cwd.resolve()),
         BUILTIN_SKILLS_SNAPSHOT_ENV: snapshot_id,
+        BUILTIN_SKILLS_ROOT_ENV: str(
+            (Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / snapshot_id).resolve()
+        ),
         SKILL_HOME_ENV: str(home.resolve()),
         SKILL_CODEX_HOME_ENV: str((home / ".codex").resolve()),
         SKILL_CLAUDE_HOME_ENV: str((home / ".claude").resolve()),
         SKILL_XDG_CONFIG_HOME_ENV: str((home / ".config").resolve()),
     }
+
+
+def test_bound_builtin_root_survives_avibe_home_change(monkeypatch, tmp_path: Path) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    snapshot_id = "e" * 64
+    original_root = home / "first-avibe" / "builtin-skills" / snapshot_id
+    _write_skill(original_root, "builtin", "builtin", "Built-in")
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, snapshot_id)
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, str(original_root.resolve()))
+    monkeypatch.setenv("AVIBE_HOME", str(home / "second-avibe"))
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["builtin"]

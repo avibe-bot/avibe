@@ -84,6 +84,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _PollLoop:
         async def run_restored_poll_loop(self, poll_info):
+            active_polls.pop(poll_info.opencode_session_id, None)
             return None
 
         async def remove_restored_ack(self, poll_info):
@@ -109,6 +110,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return dict(active_polls)
 
         def remove_active_poll(self, session_id):
+            active_polls.pop(session_id, None)
             removed.append(session_id)
 
     class _Controller:

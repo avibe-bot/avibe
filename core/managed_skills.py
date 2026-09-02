@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 SKILL_WORKING_DIR_ENV = "AVIBE_SKILL_WORKING_DIR"
 BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
+BUILTIN_SKILLS_ROOT_ENV = "AVIBE_BUILTIN_SKILLS_ROOT"
 SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
 SKILL_CODEX_HOME_ENV = "AVIBE_SKILL_CODEX_HOME"
 SKILL_CLAUDE_HOME_ENV = "AVIBE_SKILL_CLAUDE_HOME"
@@ -669,8 +670,21 @@ def _selected_builtin_root(
     avibe_home: Path,
     *,
     snapshot_id: str | None = None,
+    snapshot_root: str | Path | None = None,
 ) -> Path | None:
     selected = snapshot_id if snapshot_id is not None else os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV)
+    bound_root = snapshot_root if snapshot_root is not None else os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+    if bound_root:
+        raw_root = Path(bound_root).expanduser()
+        if not raw_root.is_absolute():
+            return None
+        root = _absolute_path(raw_root)
+        if selected is None:
+            selected = root.name
+        if selected and root.name != selected:
+            return None
+    else:
+        root = None
     if selected is None:
         try:
             selected = publish_builtin_skills(destination_root=avibe_home / "builtin-skills")
@@ -679,7 +693,8 @@ def _selected_builtin_root(
             return None
     if _SNAPSHOT_ID_RE.fullmatch(selected or "") is None:
         return None
-    root = avibe_home / "builtin-skills" / selected
+    if root is None:
+        root = avibe_home / "builtin-skills" / selected
     try:
         root_stat = root.stat(follow_symlinks=False)
     except OSError:
@@ -696,6 +711,7 @@ def resolve_skills(
     claude_home: str | Path | None = None,
     xdg_config_home: str | Path | None = None,
     builtin_snapshot_id: str | None = None,
+    builtin_snapshot_root: str | Path | None = None,
 ) -> list[ManagedSkill]:
     """Resolve the live Skill catalog using Avibe's v1 precedence rules."""
 
@@ -747,6 +763,7 @@ def resolve_skills(
     builtin_root = _selected_builtin_root(
         resolved_avibe_home,
         snapshot_id=builtin_snapshot_id,
+        snapshot_root=builtin_snapshot_root,
     )
     if builtin_root is not None:
         candidates.extend(_scan_root(builtin_root, priority=(0, 0, 0), budget=builtin_budget))
@@ -846,8 +863,8 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
         return ""
     _, next_page = _page(skills, 1)
     later_page_guidance = (
-        "If no Skill on this page matches the task, inspect each subsequent Catalog page in order "
-        "until a Skill matches or no page remains.\n"
+        "Use `vibe skill list --page 2` only when more discovery is useful; "
+        "ordinary tasks do not require scanning every page.\n"
         if next_page is not None
         else ""
     )
@@ -855,8 +872,8 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
         "\n\n## Skills\n\n"
         "Skills provide specialized instructions and workflows for specific tasks.\n"
         "When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.\n"
-        "If the user requests a skill by name, load it.\n"
-        "Only load skill names listed here or returned by `vibe skill list`; do not guess names.\n\n"
+        "If the user requests a skill by exact name, load that name directly.\n"
+        "Otherwise, only load skill names listed here or returned by `vibe skill list`; do not guess names.\n\n"
         f"{later_page_guidance}"
         "### Available skills\n"
         f"{rows}"
@@ -1085,12 +1102,22 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
     return entries
 
 
-def _update_digest_with_file(digest: object, entry: _SnapshotEntry) -> None:
+def _update_digest_with_file(
+    digest: object,
+    entry: _SnapshotEntry,
+    *,
+    remaining_bytes: int,
+) -> int:
     fd: int | None = None
     try:
         fd, before = _open_regular_file(entry.path)
-        digest.update(struct.pack(">Q", int(before.st_size)))
-        remaining = int(before.st_size)
+        file_size = int(before.st_size)
+        if file_size > remaining_bytes:
+            raise RuntimeError(
+                f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
+            )
+        digest.update(struct.pack(">Q", file_size))
+        remaining = file_size
         while remaining:
             chunk = os.read(fd, min(1024 * 1024, remaining))
             if not chunk:
@@ -1104,6 +1131,7 @@ def _update_digest_with_file(digest: object, entry: _SnapshotEntry) -> None:
             raise RuntimeError(f"Built-in Skill file changed while hashing: {entry.relative}")
         executable = int(before.st_mode & 0o111) if os.name != "nt" else 0
         digest.update(bytes((executable,)))
+        return file_size
     finally:
         if fd is not None:
             os.close(fd)
@@ -1116,13 +1144,79 @@ def snapshot_tree_digest(root: str | Path) -> str:
     if not source.is_dir():
         raise RuntimeError(f"Built-in Skills source does not exist: {source}")
     digest = hashlib.sha256(_SNAPSHOT_DOMAIN)
+    consumed_bytes = 0
     for entry in _snapshot_entries(source):
         digest.update(b"d" if entry.is_directory else b"f")
         digest.update(struct.pack(">Q", len(entry.relative_bytes)))
         digest.update(entry.relative_bytes)
         if not entry.is_directory:
-            _update_digest_with_file(digest, entry)
+            consumed_bytes += _update_digest_with_file(
+                digest,
+                entry,
+                remaining_bytes=BUILTIN_TREE_MAX_BYTES - consumed_bytes,
+            )
     return digest.hexdigest()
+
+
+def _copy_snapshot_entries(entries: Sequence[_SnapshotEntry], destination: Path) -> None:
+    """Copy one pre-enumerated tree while charging bytes actually opened."""
+
+    consumed_bytes = 0
+    for entry in entries:
+        target = destination.joinpath(*entry.relative.split("/"))
+        if entry.is_directory:
+            try:
+                source_stat = entry.path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Cannot inspect built-in Skill path: {entry.relative}"
+                ) from exc
+            if not stat.S_ISDIR(source_stat.st_mode):
+                raise RuntimeError(
+                    f"Built-in Skill directory changed during publication: {entry.relative}"
+                )
+            target.mkdir(mode=0o700)
+            continue
+
+        source_fd: int | None = None
+        target_fd: int | None = None
+        try:
+            source_fd, before = _open_regular_file(entry.path)
+            file_size = int(before.st_size)
+            if file_size > BUILTIN_TREE_MAX_BYTES - consumed_bytes:
+                raise RuntimeError(
+                    f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
+                )
+            consumed_bytes += file_size
+            target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            remaining = file_size
+            while remaining:
+                chunk = os.read(source_fd, min(1024 * 1024, remaining))
+                if not chunk:
+                    raise RuntimeError(
+                        f"Built-in Skill file changed during publication: {entry.relative}"
+                    )
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(target_fd, view)
+                    view = view[written:]
+                remaining -= len(chunk)
+            if os.read(source_fd, 1):
+                raise RuntimeError(
+                    f"Built-in Skill file grew during publication: {entry.relative}"
+                )
+            after = os.fstat(source_fd)
+            if _stat_token(before) != _stat_token(after):
+                raise RuntimeError(
+                    f"Built-in Skill file changed during publication: {entry.relative}"
+                )
+            if os.name != "nt" and callable(getattr(os, "fchmod", None)):
+                os.fchmod(target_fd, 0o755 if before.st_mode & 0o111 else 0o644)
+        finally:
+            if target_fd is not None:
+                os.close(target_fd)
+            if source_fd is not None:
+                os.close(source_fd)
 
 
 def _validate_builtin_catalog(root: Path) -> None:
@@ -1206,13 +1300,7 @@ def publish_builtin_skills(
             return snapshot_id
         staging.mkdir(mode=0o700)
         try:
-            shutil.copytree(
-                source,
-                staging,
-                dirs_exist_ok=True,
-                copy_function=shutil.copy2,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-            )
+            _copy_snapshot_entries(_snapshot_entries(source), staging)
             _validate_builtin_catalog(staging)
             if snapshot_tree_digest(staging) != snapshot_id:
                 raise RuntimeError("Built-in Skill source changed during publication")
@@ -1232,6 +1320,9 @@ def prepare_builtin_skills() -> str:
 
     snapshot_id = publish_builtin_skills()
     os.environ[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
+    os.environ[BUILTIN_SKILLS_ROOT_ENV] = str(
+        (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id).expanduser().resolve()
+    )
     return snapshot_id
 
 
@@ -1258,4 +1349,15 @@ def managed_skill_environment(working_directory: str | Path | None) -> dict[str,
     snapshot_id = os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
     if _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
         env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
+        snapshot_root = os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+        if snapshot_root:
+            root = Path(snapshot_root).expanduser()
+            if root.is_absolute() and root.name == snapshot_id:
+                env[BUILTIN_SKILLS_ROOT_ENV] = str(_absolute_path(root))
+        if BUILTIN_SKILLS_ROOT_ENV not in env:
+            env[BUILTIN_SKILLS_ROOT_ENV] = str(
+                (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id)
+                .expanduser()
+                .resolve()
+            )
     return env
