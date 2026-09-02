@@ -194,6 +194,23 @@ export class HubApi {
   }
 
   /**
+   * Starts the gateway runtime, THROWING when the instance refuses.
+   *
+   * Named rather than toggled, and reached from `restoreRuntimeRunning`: the
+   * caller is teardown, which asks for this precisely when the state it just
+   * read may be wrong, and a start is the one request that means the same thing
+   * whatever the instance currently believes about itself.
+   */
+  async startRuntime(): Promise<void> {
+    const result = await this.mutate('post', '/api/models/runtime/start');
+    if (!result.ok) {
+      throw new Error(
+        `Starting the gateway runtime failed (${result.status}): ${JSON.stringify(result.body)}.`,
+      );
+    }
+  }
+
+  /**
    * THROWS when the instance refuses the switch, rather than resolving over a
    * non-2xx answer.
    *

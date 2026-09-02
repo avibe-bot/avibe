@@ -19,6 +19,7 @@ import type { Agent, Source } from './api';
 import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
 import { expect, requireModelHub, requireMockUpstream, requireRuntimeRunning, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
+import { restoreNativeSources } from './restore';
 
 export type Gateway = {
   /** A backend that is in Gateway mode for the duration of the test. */
@@ -107,7 +108,8 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
     // a native login: `set_agent_mode` appends a `native_cli` subscription
     // source as part of the transition, and the prefix sweep below would leave
     // it — with its placement — on the instance for every later spec. The
-    // source ids present BEFORE the switch name the ones the switch added.
+    // snapshot is what separates that import from a native source the instance
+    // already had; what it is NOT is the test of whether a source is native.
     let sourcesBeforeSwitch: Set<string> | null = null;
     try {
       created = [
@@ -167,23 +169,16 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       try {
         if (switched) await api.setAgentMode(switched, 'direct');
       } finally {
-        // The transition-imported native source (if the switch made one) is
-        // removed by id — before the prefix sweep, because it does not carry
-        // the prefix and the sweep cannot see it. Best-effort per source: a
-        // native source serving a live route refuses until forced, and
-        // deleteSource forces — but one that is already gone is success.
+        // The transition-imported native source (if the switch made one) goes
+        // before the prefix sweep, because it does not carry the prefix and the
+        // sweep cannot see it. `restoreNativeSources` owns which source that is
+        // — by channel, not by "new and unfamiliar" — so this site and A3
+        // cannot answer the question differently.
         // Its own finally: a native deletion that still throws must not skip
         // the prefix sweep, or the suite's own route sources outlive the spec
         // alongside the failure that already stopped it.
         try {
-          if (sourcesBeforeSwitch) {
-            for (const source of await api.sources()) {
-              if (!sourcesBeforeSwitch.has(source.id)
-                  && !source.display_name.startsWith(E2E_SOURCE_PREFIX)) {
-                await api.deleteSource(source.id);
-              }
-            }
-          }
+          if (sourcesBeforeSwitch) await restoreNativeSources(api, sourcesBeforeSwitch);
         } finally {
           await api.removeSuiteSources();
         }

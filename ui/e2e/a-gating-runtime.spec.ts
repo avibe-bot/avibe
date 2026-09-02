@@ -14,7 +14,7 @@ import {
   runtimeIsRunning,
   test,
 } from './support/fixtures';
-import { E2E_SOURCE_PREFIX } from './support/env';
+import { restoreNativeSources, restoreRuntimeRunning } from './support/restore';
 
 test.describe('A · capability gate and runtime lifecycle', () => {
   test('A1 · the capability gate, not the browser, decides the route', async ({ page, hub, api }) => {
@@ -98,36 +98,30 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     await hub.runtimeToggle.click();
     // Wrapped in try/finally — and not just this click — because the gateway is
     // STOPPED at this point: if any assertion from here on fails, the instance
-    // is left without its runtime for every spec after this one. The restart is
-    // fully performed AND verified inside the finally — a click alone only
-    // dispatches the request; the page can close while startup is still in
-    // flight — so the original failure is re-raised over a running instance,
-    // and the run's red is one problem, not one problem plus a dark instance
-    // for every later spec.
+    // is left without its runtime for every spec after this one.
     try {
       await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
       // The page must explain the stopped gateway, not just flip a switch.
       await expect(hub.closedState).toBeVisible();
       expect((await api.runtime())?.enabled).toBe(false);
+
+      // The return half of the round trip is the SCENARIO, so it happens here,
+      // in the body, through the switch the user would use. It used to live in
+      // the finally, which made the spec's own subject a side effect of its
+      // cleanup — and left the assertions below reporting a restart nobody had
+      // asserted as a step.
+      await hub.runtimeToggle.click();
+      await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
+      await expect(hub.closedState).toHaveCount(0);
     } finally {
-      // Conditional, not blind: the first click above may not have taken — the
-      // request refused, or the stop stalled — and the runtime may still be
-      // running. A cleanup click in THAT state performs a real stop and leaves
-      // the shared instance dark for every later spec, which is worse than the
-      // failure already being reported. Only a runtime the API agrees is OFF
-      // gets turned back on.
-      if ((await api.runtime())?.enabled === false) {
-        await hub.runtimeToggle.click().catch(() => {});
-      }
-      // Verified restart, still inside the finally: the API is the authority —
-      // the toggle's own aria state follows a request this browser may never
-      // see answered.
-      await expect
-        .poll(async () => (await api.runtime())?.status?.health, { timeout: 90_000 })
-        .toEqual(expect.stringMatching(/^(ok|degraded)$/));
+      // And the safety net is a postcondition, not a second guess at which
+      // click is owed: `restoreRuntimeRunning` reads BOTH runtime facts and
+      // asks for the target state by name. The old shape read `enabled` alone
+      // and skipped its restart whenever that field disagreed with the engine
+      // — which is precisely the state a stop that disabled the engine and then
+      // failed to persist `enabled=false` leaves behind.
+      await restoreRuntimeRunning(api);
     }
-    await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
-    await expect(hub.closedState).toHaveCount(0);
   });
 
   test('A3 · the blocked stop names the backends that block it', async ({ hub, api }) => {
@@ -184,19 +178,14 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     } finally {
       // Mode first (the switch imported the source into a Gateway context),
       // then the transition-created source — before any sweep, because it does
-      // not carry the prefix. Best-effort per source: one already gone is
-      // success. Two nested blocks keep the two restorations independent.
+      // not carry the prefix. Which source that is belongs to
+      // `restoreNativeSources`, shared with the gateway fixture, so the two
+      // sites cannot drift into two different answers. Two nested blocks keep
+      // the two restorations independent.
       try {
         for (const backend of restore) await api.setAgentMode(backend, 'direct');
       } finally {
-        if (sourcesBeforeSwitch) {
-          for (const source of await api.sources()) {
-            if (!sourcesBeforeSwitch.has(source.id)
-                && !source.display_name.startsWith(E2E_SOURCE_PREFIX)) {
-              await api.deleteSource(source.id);
-            }
-          }
-        }
+        if (sourcesBeforeSwitch) await restoreNativeSources(api, sourcesBeforeSwitch);
         await api.removeSuiteSources();
       }
     }

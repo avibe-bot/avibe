@@ -11,6 +11,7 @@ import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm, labelledButton } from './support/hub';
+import { restoreAgentChain } from './support/restore';
 
 test.describe('G · supply guards and failure copy', () => {
   test.beforeEach(async ({ api, mock }) => {
@@ -93,16 +94,10 @@ test.describe('G · supply guards and failure copy', () => {
         .poll(async () => (await api.sources()).some((s) => s.id === source.id), { timeout: 15_000 })
         .toBe(false);
     } finally {
-      // Same contract as B6's teardown: a refused restoration is a dirty
-      // instance and is reported as one, because the delete that just ran
-      // means nothing downstream can put this chain back.
-      if (original.length) {
-        const restored = await api.putAgentChain(gateway.backend, gateway.model, original);
-        expect(
-          restored,
-          'Teardown failed to restore the original route chain — the instance is left with the scenario\'s arrangement.',
-        ).toBe(true);
-      }
+      // The delete that just ran means nothing downstream can put this chain
+      // back, so `restoreAgentChain`'s refusal-is-a-failure contract is the
+      // whole guarantee here.
+      await restoreAgentChain(api, gateway, original);
     }
   });
 

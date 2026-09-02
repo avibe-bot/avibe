@@ -216,14 +216,27 @@ filed as [#1818](https://github.com/avibe-bot/avibe/issues/1818).
 
 B6 retries that sticky state by rebuilding its arrangement (delete the source,
 recreate it, re-chain, re-settle) up to three times. If all three attempts land
-in the same cooldown, that is #1818's exact signature, and the spec marks itself
-**expected-fail** via a runtime `test.fail` naming #1818 — the run goes green
-with the finding recorded, because an intermittent engine defect does not get to
-burn the suite red on its own schedule. The marker is also the detector: once
-#1818 is fixed, this path stops firing, the test passes while marked should-fail,
-and Playwright reports *"Expected to fail, but passed"* — one loud run, and the
-marker comes out. Any other verdict fails immediately, because a wrong
-classification is exactly what the scenario exists to catch.
+in the same cooldown, that is #1818's exact signature, and the spec retires
+itself via a runtime `test.fixme` naming #1818 — the run reports one skipped
+spec with the issue in its reason, because an intermittent engine defect does
+not get to burn the suite red on its own schedule. Any other verdict fails
+immediately, because a wrong classification is exactly what the scenario exists
+to catch.
+
+`test.fixme` rather than `test.fail`, for two reasons. `test.fail` sets the
+expected status of the whole test — its own `finally`, the suite's `afterEach`,
+and the gateway fixture's teardown included — so a failed restoration would
+have satisfied "expected to fail" and reported green over a displaced route
+chain. And a skip states the outcome: the scenario was not reached, which is
+what happened, where a green tick says it passed.
+
+Neither marker detects its own obsolescence, and an earlier version of this
+note claimed otherwise. A `test.fail(cond)` whose `cond` and whose following
+`expect` read the same verdict can never produce *"Expected to fail, but
+passed"*: when `cond` holds the assertion necessarily fails, and when it does
+not the test is not marked. What signals that #1818 is fixed is the report
+itself — the skip and its reason stop appearing, and the spec runs to its
+assertions.
 
 ## What this suite cannot reach
 

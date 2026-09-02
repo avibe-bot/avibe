@@ -12,6 +12,7 @@ import { hub as copy, hubOrNull } from './support/copy';
 import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
 import { expect, test } from './support/gateway';
 import { labelledButton } from './support/hub';
+import { restoreAgentChain } from './support/restore';
 
 /** The product falls back to the raw backend id for a backend it has no label
  *  for, so this does too rather than throwing on an id the bundle never named. */
@@ -228,10 +229,7 @@ test.describe('D · route chains and priority order', () => {
       await labelledButton(dialog, copy('routeDialog.cancel')).click();
       await expect(dialog).toHaveCount(0);
     } finally {
-      if (original.length) {
-        const restored = await api.putAgentChain(gateway.backend, gateway.model, original);
-        expect(restored, 'Teardown failed to restore the original route chain.').toBe(true);
-      }
+      await restoreAgentChain(api, gateway, original);
     }
   });
 

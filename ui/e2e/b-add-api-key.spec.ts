@@ -16,6 +16,7 @@ import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './s
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm } from './support/hub';
 import { anthropicInventory } from './support/mock';
+import { restoreAgentChain } from './support/restore';
 
 /**
  * Runs the routed dry run until the source has settled on a verdict about its
@@ -282,13 +283,20 @@ test.describe('B · add an API-key source', () => {
       //
       // A defect that survives all three attempts is #1818's exact signature
       // (5xx + the upstream received nothing + the cooldown re-arming), and the
-      // run then marks ITSELF expected-fail via `test.fail` naming #1818, so an
-      // intermittent defect never burns the suite red. That marker is also the
-      // detector: once #1818 is fixed, this path stops firing, the test passes
-      // while marked should-fail, and Playwright reports "Expected to fail, but
-      // passed" — one loud run, and the marker comes out. Any OTHER verdict still
+      // run then retires ITSELF via `test.fixme` naming #1818, so an
+      // intermittent defect never burns the suite red. Any OTHER verdict still
       // fails hard below; a wrong classification is what the scenario exists to
       // catch.
+      //
+      // `test.fixme`, not `test.fail`. `test.fail` sets the expected status of
+      // the whole TEST — its finally, the suite's afterEach, and the gateway
+      // fixture's teardown included — so a restoration that then failed would
+      // satisfy "expected to fail" and the run would report green over a
+      // displaced route chain. Measured, not assumed: a mid-body `test.fail`
+      // with a throwing finally reports PASSED, while `test.fixme` in the same
+      // shape reports the teardown failure. Fixme also states the outcome
+      // honestly — one skipped spec naming the issue, rather than a green tick
+      // over a scenario that was never reached.
       // The #1818 signature is TWO facts together, and both are checked before
       // the marker fires: the source in `cooldown.server_error`, AND the mock
       // having received no DRY RUN while it got there. A cooldown with the dry
@@ -350,7 +358,7 @@ test.describe('B · add an API-key source', () => {
         verdict = await settleKeyVerdict(api, source.id, gateway, 35_000);
         upstreamReceived = await upstreamSawDryRun();
       }
-      test.fail(
+      test.fixme(
         verdict === 'models.source.cooldown.server_error' && !upstreamReceived,
         'Engine 5xx on the routed dry run (#1818): the upstream never received the request and the '
           + 'cooldown re-armed on every retry, so the replace-key flow was never reachable this run.',
@@ -393,16 +401,7 @@ test.describe('B · add an API-key source', () => {
     } finally {
       // Whatever happened above, the instance's chain for this model goes back
       // to what it was — the arrangement was the scenario's, not the user's.
-      // A refused restoration is reported, not swallowed: the source sweep that
-      // follows cannot reconstruct a displaced original chain, so a silent
-      // false here leaves the routing changed while teardown reads clean.
-      if (original.length) {
-        const restored = await api.putAgentChain(gateway.backend, gateway.model, original);
-        expect(
-          restored,
-          'Teardown failed to restore the original route chain — the instance is left with the scenario\'s arrangement.',
-        ).toBe(true);
-      }
+      await restoreAgentChain(api, gateway, original);
     }
   });
 });
