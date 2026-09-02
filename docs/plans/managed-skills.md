@@ -160,6 +160,11 @@ snapshotted with the Session when the Session is created, so moving the Session
 to another scope does not change which project-level Skills it sees. This also
 lets a Workbench project whose configured directory has no `.git` marker retain
 project-level Skills when an existing Session works in one of its descendants.
+For a pre-upgrade Session without this snapshot, resolution safely derives the
+current scope workdir when it is an ancestor; a later scope move first persists
+that derived value. If an already-moved legacy row has no recoverable ancestor,
+Avibe does not guess the former project base and uses the standalone boundary
+rules.
 A standalone command has no Avibe project binding and therefore uses the first
 Git root; if neither boundary is found, only its active working directory is
 project scope.
@@ -168,8 +173,9 @@ The nearest directory to the active working directory wins within the same
 directory family. Root discovery examines at most 128 directories including
 the active working directory and performs at most 512 project-root probes
 before the existing candidate and byte budgets apply. A bound Avibe project
-base is accepted only when it is an absolute ancestor of the bound working
-directory; otherwise it is ignored.
+base is accepted only when it is an absolute ancestor reachable within those
+128 directories; otherwise it is ignored and the standalone boundary rules
+apply.
 
 ### 4.4 Global roots
 
@@ -224,6 +230,9 @@ failing the whole Catalog. The name grammar is the existing Agent Skills
 boundary: 1-64 lowercase ASCII letters, digits, or hyphens; no leading,
 trailing, or consecutive hyphen. This makes every advertised name one literal
 shell token without Avibe-specific quoting or encoding.
+Any failure while constructing optional typed YAML values falls back to the
+same bounded tolerant extraction of `name` and `description`; malformed
+unrelated metadata cannot abort Catalog construction.
 
 Catalog parsing and rendering are bounded independently:
 
@@ -394,7 +403,10 @@ Contract details:
 - `directory` is the absolute, agent-accessible directory containing
   `SKILL.md`. Compatibility candidates whose resolved absolute directory is
   not valid UTF-8 are omitted; v1 does not invent a second path encoding for
-  model-facing output.
+  model-facing output. After ordinary XML attribute escaping, every Unicode
+  control character in the path is emitted as an ASCII numeric character
+  reference such as `&#xA;`, so the command prints no raw terminal controls and
+  the represented path remains reversible.
 - Load retains an open handle to the selected Skill directory, reads
   `SKILL.md` relative to that handle, and verifies immediately before output
   that the reported absolute path still names the same directory identity. If
@@ -621,8 +633,9 @@ ${AVIBE_HOME:-$HOME/.avibe}/builtin-skills/<snapshot-id>/<name>/
 stream. The stream begins with the ASCII domain separator
 `avibe-builtin-snapshot-v1` followed by NUL. It then contains one record for
 every directory except the source root and every regular file, ordered by the
-UTF-8 bytes of its `/`-separated relative path. A record contains a one-byte
-directory/file tag, the path length as an unsigned 64-bit big-endian integer,
+UTF-8 bytes of its `/`-separated relative path. A record contains the ASCII byte
+`d` (`0x64`) for a directory or `f` (`0x66`) for a file, the path length as an
+unsigned 64-bit big-endian integer,
 and the path bytes. A file record additionally contains its byte length in the
 same integer encoding, its exact bytes, and one byte holding
 `st_mode & 0o111` where POSIX executable bits exist (zero otherwise). Release
@@ -848,7 +861,9 @@ Catalogs at runtime.
   are omitted by the parser-backed portable name boundary. YAML-decoded C0 and
   C1 control characters cannot reach terminal Catalog output.
 - `vibe skill load` emits the exact XML wrapper, body only, and an absolute
-  directory from which supporting files can be read.
+  directory from which supporting files can be read. A control-character path
+  fixture proves the wrapper contains only the reversible ASCII references and
+  no raw terminal controls.
 - Parser-backed CLI coverage dispatches the canonical
   `vibe skill load -- pdf-processing` example through the real argument parser
   and reaches the load handler with `pdf-processing` as its single name.
@@ -869,7 +884,9 @@ Catalogs at runtime.
   contract.
 - A Workbench Session working below its configured non-Git project directory
   discovers project-level Skills up to that directory on the next Turn and via
-  `vibe skill`; an invalid or non-ancestor project binding is ignored.
+  `vibe skill`; an invalid, non-ancestor, or over-depth project binding is
+  ignored. Persisted pre-upgrade fixtures cover both deriving an unchanged
+  scope's ancestor and retaining that ancestor across a later scope move.
 - Workbench resource policies continue to govern management operations but do
   not narrow the runtime Catalog or loaded body, matching the ordinary
   filesystem capability of the agent process.
@@ -922,6 +939,9 @@ isolation acceptance gates.
 - a fresh installation mirrors all bundled Skills;
 - a real wheel-install fixture proves bundled Skills exist without a source
   tree and preserves executable modes required by helper scripts;
+- a real sdist-install fixture builds from the source archive, then proves the
+  resulting installation publishes and loads the same bundled Skills without
+  a repository checkout;
 - a fixed snapshot-v1 fixture proves the canonical tree byte stream and
   lowercase SHA-256 identifier remain stable;
 - release packaging accepts only directories and regular files throughout the
