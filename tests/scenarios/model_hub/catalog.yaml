@@ -503,16 +503,23 @@ scenarios:
     test: tests/e2e/test_model_hub_runtime.py::test_a2_offline_engine_install_start_stop_and_hardened_config
   - id: A3
     name: Runtime stop reports blocking Hub backends in API and UI copy
-    status: xfail
+    status: skip
     kind: guard
     layer: ui-e2e
-    test: tests/e2e/test_model_hub_runtime.py::test_a3_runtime_stop_ui_copy_names_every_blocking_backend
+    reason: UI copy is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c15
+    partial_evidence:
+      test: tests/e2e/test_model_hub_runtime.py::test_a3_runtime_stop_reports_every_blocking_backend
+      covers: structured 409 guard, runtime_in_use code, and exact blocking backend list
   - id: A4
     name: Runtime toggle fails closed when the agents read fails
-    status: xfail
+    status: skip
     kind: guard
     layer: ui-e2e
-    test: tests/e2e/test_model_hub_runtime.py::test_a4_agents_read_failure_cannot_silently_disable_runtime
+    reason: runtime-toggle interaction is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c15
   - id: A5
     name: Controller restart during OAuth poll reports engine_down
     status: assert
@@ -581,10 +588,12 @@ scenarios:
     test: tests/e2e/test_model_hub_sources.py::test_b10_custom_models_and_free_text_tiers_obey_ownership_rules
   - id: B11
     name: Model Hub error codes resolve to human-readable copy
-    status: xfail
+    status: skip
     kind: copy
     layer: ui-e2e
-    test: tests/e2e/test_model_hub_sources.py::test_b11_model_hub_error_codes_have_human_copy
+    reason: rendered error copy is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#b-api-key-sources-c16c29
   - id: C1
     name: Hub OAuth starts, presents authorization, polls, and cancels
     status: skip
@@ -622,17 +631,27 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_routing.py::test_d2_healthy_hop_is_served_by_the_real_engine_probe
   - id: D3
-    name: Rate limiting cools hop zero and selects hop one next
-    status: assert
+    name: Rate limiting falls through to hop one within the original turn
+    status: skip
     kind: failover
-    layer: e2e-auto
-    test: tests/e2e/test_model_hub_routing.py::test_d3_rate_limit_moves_the_next_api_probe_to_hop_one
+    layer: turn-gateway
+    reason: same-turn walk requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    partial_evidence:
+      test: tests/e2e/test_model_hub_routing.py::test_d3_rate_limit_moves_the_next_api_probe_to_hop_one
+      covers: cooldown written; next-request selection proven; same-turn hop walk is not covered here
   - id: D4
-    name: Quota exhaustion cools hop zero and selects hop one next
-    status: assert
+    name: Quota exhaustion falls through to hop one within the original turn
+    status: skip
     kind: failover
-    layer: e2e-auto
-    test: tests/e2e/test_model_hub_routing.py::test_d4_quota_moves_the_next_api_probe_to_hop_one
+    layer: turn-gateway
+    reason: same-turn walk requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    partial_evidence:
+      test: tests/e2e/test_model_hub_routing.py::test_d4_quota_moves_the_next_api_probe_to_hop_one
+      covers: cooldown written; next-request selection proven; same-turn hop walk is not covered here
   - id: D5
     name: A nonrefreshable 401 marks the source for repair
     status: assert
@@ -719,10 +738,12 @@ scenarios:
     test: tests/e2e/test_model_hub_migration.py::test_f2_apply_is_copy_only_and_places_native_login_before_keys
   - id: F3
     name: First Model Hub visit surfaces importable native configuration
-    status: xfail
+    status: skip
     kind: migration
     layer: ui-e2e
-    test: tests/e2e/test_model_hub_migration.py::test_f3_first_models_page_visit_surfaces_the_migration_banner
+    reason: first-visit banner rendering is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#f-migration-c61c67
   - id: G1
     name: A guard echo missing agents remains confirmable
     status: assert
@@ -764,15 +785,11 @@ next_priority:
   - MH-RUNTIME-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001
-  - A3
-  - A4
   - B5
   - B8
   - B9
-  - B11
   - D1
   - D6
   - F1
-  - F3
   - G2
   - G3

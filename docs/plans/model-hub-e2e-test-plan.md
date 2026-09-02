@@ -196,6 +196,13 @@ lane-to-lane.
     be broken (e.g. the human-readable error copy). All currently enforceable
     assertions (structured API guards, state transitions, status codes) live
     in separate passing tests. A broad xfail over a mixed test is forbidden.
+  - *Layer honesty:* a scenario this layer cannot execute is a catalog `skip`
+    row with a reason and a pointer to the layer that owns it (unit suite or
+    the Playwright lane) — never an `xfail` and never an unconditional-fail
+    sentinel (sentinels are forbidden: they neither detect a regression nor a
+    fix). Partial evidence is fine when labeled partial: a passing test that
+    covers a subset of a scenario must say so in its docstring, and the
+    scenario's catalog row names the covered subset.
   - *B6 rollback evidence boundary:* the pending-revocation journal at
     `$AVIBE_HOME/state/model_hub_pending_revocations.json` inside the
     test-owned hermetic home is the public evidence surface for rejected

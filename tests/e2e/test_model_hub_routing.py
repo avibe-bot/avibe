@@ -185,7 +185,7 @@ def test_d2_healthy_hop_is_served_by_the_real_engine_probe(
         assert any(item["path"] == "/v1/messages" for item in captured)
 
 
-def _assert_retriable_probe_fallback(
+def _assert_probe_cooldown_and_next_request_selection(
     *,
     app,
     first_upstream,
@@ -229,11 +229,15 @@ def test_d3_rate_limit_moves_the_next_api_probe_to_hop_one(
     model_hub_app_factory,
     mock_llm_upstream,
 ) -> None:
-    """D3 API subset: 429 cools hop zero for 60s; next probe uses hop one."""
+    """D3 partial API evidence: cooldown written; next-request selection proven.
+
+    The same-turn hop walk is not covered here; it requires the private turn
+    gateway credential issued only to a live backend turn.
+    """
 
     with MockLLMUpstream() as second_upstream:
         with _engine_app(model_hub_app_factory) as app:
-            _assert_retriable_probe_fallback(
+            _assert_probe_cooldown_and_next_request_selection(
                 app=app,
                 first_upstream=mock_llm_upstream,
                 second_upstream=second_upstream,
@@ -248,11 +252,15 @@ def test_d4_quota_moves_the_next_api_probe_to_hop_one(
     model_hub_app_factory,
     mock_llm_upstream,
 ) -> None:
-    """D4 API subset: insufficient quota cools hop zero for 300s."""
+    """D4 partial API evidence: cooldown written; next-request selection proven.
+
+    The same-turn hop walk is not covered here; it requires the private turn
+    gateway credential issued only to a live backend turn.
+    """
 
     with MockLLMUpstream() as second_upstream:
         with _engine_app(model_hub_app_factory) as app:
-            _assert_retriable_probe_fallback(
+            _assert_probe_cooldown_and_next_request_selection(
                 app=app,
                 first_upstream=mock_llm_upstream,
                 second_upstream=second_upstream,
@@ -307,7 +315,7 @@ def test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown(
     # server-error cooldown rather than honoring the upstream Retry-After.
     with MockLLMUpstream() as second_upstream:
         with _engine_app(model_hub_app_factory) as app:
-            _assert_retriable_probe_fallback(
+            _assert_probe_cooldown_and_next_request_selection(
                 app=app,
                 first_upstream=mock_llm_upstream,
                 second_upstream=second_upstream,

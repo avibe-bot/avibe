@@ -598,15 +598,3 @@ def test_b10_custom_models_and_free_text_tiers_obey_ownership_rules(
     assert "manual-model" not in {
         model["id"] for model in deleted.json()["source"]["models"]
     }
-
-
-@pytest.mark.xfail(
-    reason=(
-        "B11/D-3 fix-first: browser/Python i18n bundles still expose raw "
-        "modelHub.errors.* keys for several Model Hub errors"
-    )
-)
-def test_b11_model_hub_error_codes_have_human_copy() -> None:
-    """B11: every catalogued error code must resolve to human-facing copy."""
-
-    pytest.fail("D-3 copy coverage is intentionally pending product fixes")

@@ -227,15 +227,3 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
                     hashlib.sha256(credential.encode("utf-8")).hexdigest()
                 )
         assert seeded_api_key_digest in captured_digests
-
-
-@pytest.mark.xfail(
-    reason=(
-        "F3/B2 fix-first: the importable-items banner is mounted in the wizard "
-        "but not on the first upgraded /settings/models visit"
-    )
-)
-def test_f3_first_models_page_visit_surfaces_the_migration_banner() -> None:
-    """F3: importable native configuration is visible on first page open."""
-
-    pytest.fail("F3 requires the pending settings-page banner product change")

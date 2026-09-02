@@ -32,6 +32,7 @@ _SAFE_INHERITED_ENV = (
     "SSL_CERT_FILE",
     "TZ",
 )
+_UI_PORT_START_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,7 @@ class ModelHubTestApp:
         self._ui: subprocess.Popen[bytes] | None = None
         self._controller_log = None
         self._ui_log = None
+        self._ui_log_offset = 0
 
     def _environment(
         self, extra_env: Mapping[str, str]
@@ -231,8 +233,7 @@ class ModelHubTestApp:
             )
             self._initialize_config()
             self._start_controller()
-            self._start_ui()
-            self.wait_ready()
+            self._start_ui_with_port_retry()
         except BaseException as exc:
             self.stop()
             if not isinstance(exc, Exception):
@@ -286,7 +287,11 @@ class ModelHubTestApp:
     def _start_ui(self) -> None:
         if self._ui is not None:
             raise RuntimeError("UI is already running")
-        self._ui_log = (self.logs / "ui.log").open("ab")
+        log_path = self.logs / "ui.log"
+        self._ui_log_offset = (
+            log_path.stat().st_size if log_path.exists() else 0
+        )
+        self._ui_log = log_path.open("ab")
         expression = (
             "from vibe.ui_server import run_ui_server; "
             f"run_ui_server('127.0.0.1', {self.port})"
@@ -298,6 +303,46 @@ class ModelHubTestApp:
             stdout=self._ui_log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+        )
+
+    def _start_ui_with_port_retry(self) -> None:
+        for attempt in range(_UI_PORT_START_ATTEMPTS):
+            self._start_ui()
+            try:
+                self.wait_ready()
+            except RuntimeError:
+                exhausted = attempt + 1 >= _UI_PORT_START_ATTEMPTS
+                if exhausted or not self._ui_lost_address_in_use_race():
+                    raise
+                self._stop_ui()
+                self.port = _ephemeral_port()
+                self.base_url = f"http://127.0.0.1:{self.port}"
+                self.client = ModelHubHTTPClient(self.base_url)
+            else:
+                return
+        raise AssertionError("UI port retry loop exhausted without a result")
+
+    def _ui_lost_address_in_use_race(self) -> bool:
+        if (
+            self._controller is None
+            or self._controller.poll() is not None
+            or self._ui is None
+            or self._ui.poll() is None
+        ):
+            return False
+        try:
+            output = (self.logs / "ui.log").read_bytes()[
+                self._ui_log_offset :
+            ].lower()
+        except OSError:
+            return False
+        return any(
+            marker in output
+            for marker in (
+                b"address already in use",
+                b"errno 48",
+                b"errno 98",
+            )
         )
 
     def wait_ready(self, *, timeout: float = 40) -> None:
@@ -362,15 +407,19 @@ class ModelHubTestApp:
         return "\n".join(sections)
 
     def stop(self) -> None:
-        self._stop_process(self._ui)
+        self._stop_ui()
         self._stop_process(self._controller)
-        self._ui = None
         self._controller = None
-        for stream_name in ("_ui_log", "_controller_log"):
-            stream = getattr(self, stream_name)
-            if stream is not None:
-                stream.close()
-                setattr(self, stream_name, None)
+        if self._controller_log is not None:
+            self._controller_log.close()
+            self._controller_log = None
+
+    def _stop_ui(self) -> None:
+        self._stop_process(self._ui)
+        self._ui = None
+        if self._ui_log is not None:
+            self._ui_log.close()
+            self._ui_log = None
 
     @staticmethod
     def _stop_process(process: subprocess.Popen[bytes] | None) -> None:

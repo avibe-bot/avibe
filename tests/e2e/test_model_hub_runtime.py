@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -169,6 +171,48 @@ def test_harness_cleans_controller_when_startup_is_interrupted(
             process.wait(timeout=5)
 
 
+def test_harness_retries_with_fresh_port_after_ui_bind_race(
+    monkeypatch,
+) -> None:
+    """Harness contract: an occupied UI port retries without child leaks."""
+
+    ui_processes: list[subprocess.Popen[bytes]] = []
+    controller_process: subprocess.Popen[bytes] | None = None
+    with tempfile.TemporaryDirectory(
+        prefix="avibe-model-hub-port-race-", dir="/tmp"
+    ) as runtime_root:
+        app = ModelHubTestApp(Path.cwd(), Path(runtime_root))
+        occupied_port = app.port
+        start_ui = app._start_ui
+
+        def start_and_capture_ui() -> None:
+            start_ui()
+            assert app._ui is not None
+            ui_processes.append(app._ui)
+
+        monkeypatch.setattr(app, "_start_ui", start_and_capture_ui)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+                blocker.bind(("127.0.0.1", occupied_port))
+                blocker.listen(1)
+                with app:
+                    controller_process = app._controller
+                    assert controller_process is not None
+                    assert app.port != occupied_port
+                    assert len(ui_processes) >= 2
+                    assert all(
+                        process.poll() is not None
+                        for process in ui_processes[:-1]
+                    )
+                    assert ui_processes[-1].poll() is None
+        finally:
+            app.stop()
+
+    assert controller_process is not None
+    assert controller_process.poll() is not None
+    assert all(process.poll() is not None for process in ui_processes)
+
+
 def test_a1_feature_flag_disables_the_complete_models_api(
     disabled_model_hub_app,
 ) -> None:
@@ -257,30 +301,6 @@ def test_a3_runtime_stop_reports_every_blocking_backend(
     assert refused.status == 409, body
     assert body["error"] == "runtime_in_use"
     assert body["backends"] == ["claude"]
-
-
-@pytest.mark.xfail(
-    reason=(
-        "A3 fix-first: the current UI still presents a generic stop failure "
-        "instead of naming the structured blocking backends"
-    )
-)
-def test_a3_runtime_stop_ui_copy_names_every_blocking_backend() -> None:
-    """A3: runtime-stop copy names the backends returned by the API guard."""
-
-    pytest.fail("UI blocking-backend copy remains the A3 fix-first gap")
-
-
-@pytest.mark.xfail(
-    reason=(
-        "A4 fix-first: an agents-read failure can still let the runtime toggle "
-        "optimistically disable without authoritative backend state"
-    )
-)
-def test_a4_agents_read_failure_cannot_silently_disable_runtime() -> None:
-    """A4: a failed agents read must fail closed in the runtime toggle."""
-
-    pytest.fail("A4 requires the pending UI fail-closed product change")
 
 
 def test_a5_controller_restart_during_oauth_poll_reports_engine_down(
