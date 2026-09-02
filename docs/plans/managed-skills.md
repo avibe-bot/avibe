@@ -125,8 +125,10 @@ When Claude reports enabled plugins through its supported CLI, their standard
 failure omits only plugin roots; it never prevents static discovery or a
 backend Turn.
 
-Native locations are read in place. Avibe does not migrate, rename, annotate,
-or expose their source identity to the agent.
+Native locations are read in place. Avibe does not migrate or rename them, and
+the Catalog never annotates their source. A successful load still includes the
+selected absolute directory because companion files must remain usable; that
+path may naturally identify the native family or scope.
 
 ### 4.4 Reserved root
 
@@ -150,12 +152,14 @@ Candidates are deduplicated by their declared `name`. Lower numbers win:
 Within the same project depth or global scope, family order is:
 
 ```text
-.avibe > .agents > .codex > .claude > .config/OpenCode
+.avibe > .agents > .codex > .claude > OpenCode
 ```
 
-The `.avibe` family slot is reserved in v1. Enabled Claude plugin roots follow
-the static user roots, and Codex `.system` defaults are last. A final stable
-path order breaks any remaining tie. Winners are sorted by name before Catalog
+Here `OpenCode` maps to `.opencode/skills` for project discovery and
+`${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` for global discovery. The
+`.avibe` family slot is reserved in v1. Enabled Claude plugin roots follow the
+static user roots, and Codex `.system` defaults are last. A final stable path
+order breaks any remaining tie. Winners are sorted by name before Catalog
 pagination.
 
 The agent sees only each winning `name` and `description`. It never sees source
@@ -268,7 +272,8 @@ Therefore, without restarting Avibe or creating a new Session:
 - installing a Skill makes it available on the next Turn;
 - renaming it or changing its description updates the next Catalog;
 - changing its body updates the next load; and
-- deleting it removes it from the next Catalog and load.
+- deleting the winning candidate promotes the next duplicate by precedence, if
+  one exists; otherwise the name disappears from the next Catalog and load.
 
 `vibe skill list` and `vibe skill load` also resolve from disk on every
 invocation. Backend-bound commands use the same Session working directory,
