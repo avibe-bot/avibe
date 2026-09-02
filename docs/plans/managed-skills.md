@@ -579,9 +579,10 @@ An explicitly project-scoped installation targets:
 $PROJECT_BASE/.agents/skills/<name>
 ```
 
-`$PROJECT_BASE` is the Git project root when one exists and the active working
-directory otherwise. This matches the project-scope fallback used by
-discovery.
+`$PROJECT_BASE` is the Git project root when discovery finds it within the
+128-directory ascent bound and the active working directory otherwise. The
+installer and resolver share this bounded project-base rule, so an installed
+project Skill is always in a root that the next Turn scans.
 
 Installing a Skill does not need to copy it into each backend's native
 directory. Existing native directories remain discovery inputs for backward
