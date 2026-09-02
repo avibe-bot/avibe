@@ -64,7 +64,7 @@ status_legend:
     expected_fail: true
     priority: true
   skip:
-    description: the scenario is outside this hermetic API lane or lacks an environmental precondition
+    description: this layer cannot execute the scenario; reason and owning_layer identify the boundary
     test_required: false
     expected_fail: false
     priority: false
@@ -599,24 +599,32 @@ scenarios:
     status: skip
     kind: oauth
     layer: e2e-auto
+    reason: the mock upstream does not implement the managed engine provider-OAuth authorization surface
+    owning_layer: future live OAuth suite (managed engine provider OAuth)
     evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
   - id: C2
     name: OAuth expiry and nonce replay preserve one flow
     status: skip
     kind: oauth
     layer: e2e-auto
+    reason: OAuth expiry and replay require provider-OAuth state issued by the managed engine
+    owning_layer: future live OAuth suite (managed engine provider OAuth)
     evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
   - id: C3
     name: Native OAuth start failures resolve to actionable copy
     status: skip
     kind: oauth
     layer: e2e-auto
+    reason: native start-failure states require a controlled native CLI auth process and credential store
+    owning_layer: native OAuth scenario suite
     evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
   - id: C4
     name: Real-vendor login materializes a source with adoption guidance
     status: skip
     kind: oauth
     layer: manual
+    reason: full provider login requires real vendor accounts and credentials
+    owning_layer: manual live-vendor regression
     evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
   - id: D1
     name: A later native subscription is appended after an API-key source
@@ -668,49 +676,65 @@ scenarios:
     name: A partial stream terminates without replaying another source
     status: skip
     kind: stream
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: same-turn partial-stream handling requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D8
     name: Cooldown expiry recovers hop zero and emits recovery
     status: skip
     kind: recovery
-    layer: e2e-auto
+    layer: contract
+    reason: deterministic cooldown expiry requires a controllable clock across resolution and recovery
+    owning_layer: unit/contract suite (controllable-time resolution)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D9
     name: Exhausting every hop returns mapping_target_unavailable
     status: skip
     kind: failover
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: same-turn route exhaustion requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D10
     name: Undeclared reasoning effort is omitted from the upstream request
     status: skip
     kind: compatibility
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: exact turn request capture requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D11
     name: Claude token counting behavior is documented at the gateway
     status: skip
     kind: compatibility
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: backend count-tokens routing requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D12
     name: Backend injection remains isolated by backend contract
     status: skip
     kind: injection
-    layer: e2e-auto
+    layer: contract
+    reason: backend launch injection is not observable through the browser-visible HTTP API
+    owning_layer: backend injection contract suite
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D13
     name: Member permissions expose explicit Model Hub denials
     status: skip
     kind: authorization
-    layer: e2e-auto
+    layer: ui-e2e
+    reason: member dead-ends require a second authenticated role context unavailable in the local bypass-auth harness
+    owning_layer: Playwright lane (multi-role permissions)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: E1
     name: Metered turns aggregate cache-aware upstream usage
     status: skip
     kind: usage
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: metered turns require the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#e-usage-and-events-c54c60
   - id: E2
     name: Usage windows remain bounded for every days input
@@ -766,19 +790,25 @@ scenarios:
     name: Claude protocol turns complete through an OpenAI Chat source
     status: skip
     kind: cross_protocol
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: cross-protocol turn completion requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
   - id: H2
     name: Parallel tool calls preserve cross-protocol tuple correlation
     status: skip
     kind: cross_protocol
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: parallel tool correlation requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
   - id: H3
     name: Image blocks pass through without breaking terminal framing
     status: skip
     kind: cross_protocol
-    layer: e2e-auto
+    layer: turn-gateway
+    reason: image-block terminal framing requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
 next_priority:
   - MH-PROTOCOL-004

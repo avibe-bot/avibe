@@ -10,11 +10,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from tests.e2e.drivers.model_hub_app import ModelHubTestApp
+from tests.e2e.drivers.model_hub_app import HTTPResult, ModelHubTestApp
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -49,6 +50,15 @@ def _install_engine(app) -> list[str]:
     observed: list[str] = []
     response = app.client.post("/api/models/runtime/install", {})
     body = response.json()
+    if (
+        response.status == 422
+        and body.get("error") == "runtime_platform_unsupported"
+    ):
+        host_reason = body.get("detail") or body["error"]
+        pytest.skip(
+            "managed Model Hub engine unavailable on this host: "
+            f"{host_reason}"
+        )
     assert response.status == 200, body
     observed.append(body["runtime"]["status"]["health"])
     deadline = time.monotonic() + 60
@@ -65,6 +75,45 @@ def _install_engine(app) -> list[str]:
     assert latest["status"]["health"] == "not_started", latest
     assert latest["status"]["verified"] is True
     return observed
+
+
+def _app_with_install_response(
+    status: int, body: bytes
+) -> SimpleNamespace:
+    response = HTTPResult(status=status, headers={}, body=body)
+    client = SimpleNamespace(post=lambda *_args, **_kwargs: response)
+    return SimpleNamespace(client=client)
+
+
+def test_install_engine_skips_exact_unsupported_host_response() -> None:
+    """Harness contract: an unsupported manifest target is a precondition."""
+
+    app = _app_with_install_response(
+        422,
+        b'{"error":"runtime_platform_unsupported","detail":"linux/s390x"}',
+    )
+
+    with pytest.raises(pytest.skip.Exception, match="linux/s390x"):
+        _install_engine(app)
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (422, b'{"error":"engine_down"}'),
+        (500, b'{"error":"runtime_platform_unsupported"}'),
+    ],
+)
+def test_install_engine_keeps_other_installer_failures_red(
+    status: int,
+    body: bytes,
+) -> None:
+    """Harness contract: post-precondition product failures never skip."""
+
+    app = _app_with_install_response(status, body)
+
+    with pytest.raises(AssertionError):
+        _install_engine(app)
 
 
 def test_harness_scrubs_inherited_backend_credentials(

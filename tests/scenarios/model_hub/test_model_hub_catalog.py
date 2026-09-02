@@ -133,6 +133,13 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
             assert missing_layer and missing_layer != scenario["layer"], (
                 f"Scenario {scenario['id']} is partial, so it must name the unproved layer in missing_layer"
             )
+        if scenario["status"] == "skip":
+            for field in ("reason", "owning_layer"):
+                value = scenario.get(field)
+                assert isinstance(value, str) and value.strip(), (
+                    f"Scenario {scenario['id']} is skipped, so {field} must "
+                    "name the blocking boundary"
+                )
 
     entry = _indexed_capability()
     assert entry["catalog"] == (SCENARIO_ROOT / "catalog.yaml").as_posix()

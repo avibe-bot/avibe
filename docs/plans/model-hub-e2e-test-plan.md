@@ -196,6 +196,15 @@ lane-to-lane.
     be broken (e.g. the human-readable error copy). All currently enforceable
     assertions (structured API guards, state transitions, status codes) live
     in separate passing tests. A broad xfail over a mixed test is forbidden.
+  - *Skip vs gap (round 5):* `skip` = this layer CANNOT execute the scenario
+    (state the blocking precondition and the owning layer); `gap` = executable
+    but not yet implemented (actionable; must surface in coverage
+    next_priority). Never use `skip` for "not written yet."
+  - *Self-audit before push (round 5):* before every push, the lane audits
+    EACH spec invariant (skip policy, xfail granularity, layer honesty,
+    ownership, catalog single resolver) across ALL call sites in the diff —
+    invariants bind at their extensions, not at the site a review last named.
+    The report lists the checklist outcome.
   - *Environment ownership invariant (orchestrator ruling 2026-09-02, round 4):*
     the harness owns every process it starts, by invariant, not by leak-list.
     Cleanup must PROVE ABSENCE: after teardown, scan the process table for any
@@ -203,10 +212,15 @@ lane-to-lane.
     `AVIBE_HOME` path) and terminate it, including detached / separately-
     sessioned engine children whose controller leader already exited. Never
     trust the recorded leader alone. Scoped strictly to the unique marker —
-    no broad host-process killing — and cross-platform. Regression tests must
-    cover the detached-child escape. If a further process-escape survives a
-    reviewed head, DO NOT patch again: reduce the harness to own fewer
-    processes (single-process topology) and re-scope the affected scenarios.
+    no broad host-process killing — on the SUPPORTED MATRIX (macOS + Linux);
+    on other platforms the opt-in subprocess harness skips with a platform
+    precondition. Regression tests must cover the detached-child escape.
+    STOP CONDITION (refined 2026-09-02): it applies to the PRODUCT process
+    tree the harness spawns (controller, UI, managed engine) on a supported
+    platform — if such an escape survives a reviewed head, DO NOT patch again,
+    reduce the harness to single-process topology and re-scope. Test-owned
+    mock resources (handler threads, sockets) are bounded in test code and are
+    fixed normally.
   - *Catalog single resolver (round 4):* scenario references (top-level tests
     AND `partial_evidence.test`, AND skip-row references) resolve through ONE
     resolver shared by the checker and the metadata; the checker may not hold

@@ -312,7 +312,9 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
 
     def _write_models_endpoint_failure(self, behavior: str) -> None:
         if behavior == "timeout":
-            time.sleep(MODELS_ENDPOINT_TIMEOUT_SECONDS)
+            self.server.shutdown_event.wait(  # type: ignore[attr-defined]
+                MODELS_ENDPOINT_TIMEOUT_SECONDS
+            )
             return
         if behavior == "malformed_json":
             self._write_bytes(
@@ -404,7 +406,7 @@ class MockLLMUpstream:
         self.host = host
         self.port = port
         self.state = MockUpstreamState()
-        self._server: ThreadingHTTPServer | None = None
+        self._server: _MockThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
     @property
@@ -430,14 +432,27 @@ class MockLLMUpstream:
 
     def stop(self) -> None:
         server, thread = self._server, self._thread
-        self._server = None
-        self._thread = None
         if server is None:
             return
-        server.shutdown()
-        server.server_close()
-        if thread is not None:
-            thread.join(timeout=5)
+        server.shutdown_event.set()
+        try:
+            server.shutdown()
+            if thread is not None:
+                thread.join(timeout=5)
+            server.join_handler_threads(timeout=5)
+            if thread is not None and thread.is_alive():
+                raise RuntimeError("mock upstream serving thread did not stop")
+        finally:
+            server.server_close()
+            self._server = None
+            self._thread = None
+
+    def active_handler_threads(self) -> tuple[threading.Thread, ...]:
+        """Return live request handlers owned by this running server."""
+
+        if self._server is None:
+            return ()
+        return self._server.active_handler_threads()
 
     def configure(self, **update: Any) -> dict[str, Any]:
         return self.state.configure(update)
@@ -456,15 +471,73 @@ class MockLLMUpstream:
 
 
 class _MockThreadingHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
+    daemon_threads = False
     allow_reuse_address = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.shutdown_event = threading.Event()
+        self._handler_threads: set[threading.Thread] = set()
+        self._handler_threads_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def process_request(
+        self, request: Any, client_address: Any
+    ) -> None:
+        thread = threading.Thread(
+            target=self._run_owned_request,
+            args=(request, client_address),
+            name="model-hub-mock-handler",
+            daemon=False,
+        )
+        try:
+            with self._handler_threads_lock:
+                self._handler_threads.add(thread)
+                thread.start()
+        except BaseException:
+            with self._handler_threads_lock:
+                self._handler_threads.discard(thread)
+            self.shutdown_request(request)
+            raise
+
+    def _run_owned_request(
+        self, request: Any, client_address: Any
+    ) -> None:
+        self.process_request_thread(request, client_address)
+
+    def active_handler_threads(self) -> tuple[threading.Thread, ...]:
+        with self._handler_threads_lock:
+            active = tuple(
+                thread
+                for thread in self._handler_threads
+                if thread.is_alive()
+            )
+            self._handler_threads.intersection_update(active)
+            return active
+
+    def join_handler_threads(self, *, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while True:
+            threads = self.active_handler_threads()
+            if not threads:
+                return
+            for thread in threads:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    names = ", ".join(
+                        item.name for item in self.active_handler_threads()
+                    )
+                    raise RuntimeError(
+                        "mock upstream handler threads did not stop: "
+                        f"{names}"
+                    )
+                thread.join(timeout=remaining)
 
 
 def _create_server(
     host: str,
     port: int,
     state: MockUpstreamState | None = None,
-) -> ThreadingHTTPServer:
+) -> _MockThreadingHTTPServer:
     server = _MockThreadingHTTPServer(
         (host, port), MockLLMUpstreamHandler
     )
@@ -840,6 +913,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        server.shutdown_event.set()
+        server.join_handler_threads(timeout=5)
         server.server_close()
     return 0
 

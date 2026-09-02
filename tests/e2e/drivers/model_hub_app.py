@@ -151,7 +151,7 @@ class ModelHubHTTPClient:
 
 
 class ModelHubTestApp:
-    """Start isolated controller and UI processes against test-owned state."""
+    """Start isolated controller and UI processes on macOS or Linux."""
 
     def __init__(
         self,

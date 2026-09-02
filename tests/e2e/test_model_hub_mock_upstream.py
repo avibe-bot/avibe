@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
+
+from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -322,6 +327,36 @@ def test_mock_upstream_models_endpoint_timeout_is_isolated(
     )
     assert status == 200
     assert payload["object"] == "chat.completion"
+
+
+def test_mock_upstream_timeout_teardown_joins_handlers_and_closes_socket(
+) -> None:
+    """Mock lifecycle: timeout handlers and accepted sockets end at stop."""
+
+    upstream = MockLLMUpstream().start()
+    parsed = urlsplit(upstream.url)
+    assert parsed.hostname is not None and parsed.port is not None
+    address = (parsed.hostname, parsed.port)
+    handler_threads = ()
+    try:
+        _configure(upstream.url, models_endpoint="timeout")
+        with pytest.raises((TimeoutError, URLError)):
+            _request(upstream.url, "/v1/models", timeout=0.05)
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            handler_threads = upstream.active_handler_threads()
+            if handler_threads:
+                break
+            time.sleep(0.01)
+        assert handler_threads
+    finally:
+        upstream.stop()
+
+    assert all(not thread.is_alive() for thread in handler_threads)
+    assert upstream.active_handler_threads() == ()
+    with pytest.raises(OSError):
+        socket.create_connection(address, timeout=0.2)
 
 
 def test_mock_upstream_empty_inventory_is_success_not_discovery_failure(

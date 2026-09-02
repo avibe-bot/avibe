@@ -3,6 +3,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -25,22 +26,38 @@ COMPOSE_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "docker-compo
 
 # When true, skip container teardown (set by run_e2e.sh --keep)
 KEEP_CONTAINER = os.environ.get("VIBE_E2E_KEEP", "false").lower() == "true"
+_MODEL_HUB_SUPPORTED_PLATFORMS = frozenset({"darwin", "linux"})
 
 
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Keep Model Hub process suites opt-in during broad E2E runs."""
+    """Keep the macOS/Linux Model Hub process suites opt-in."""
+
+    model_hub_items = [
+        item
+        for item in items
+        if item.get_closest_marker("e2e_model_hub") is not None
+    ]
+    if sys.platform not in _MODEL_HUB_SUPPORTED_PLATFORMS:
+        skip = pytest.mark.skip(
+            reason=(
+                "Model Hub E2E subprocess harness supports macOS and Linux; "
+                f"host platform is {sys.platform}"
+            )
+        )
+        for item in model_hub_items:
+            item.add_marker(skip)
+        return
 
     if "e2e_model_hub" in (config.option.markexpr or ""):
         return
     skip = pytest.mark.skip(
         reason="Model Hub E2E is opt-in; run with -m e2e_model_hub"
     )
-    for item in items:
-        if item.get_closest_marker("e2e_model_hub") is not None:
-            item.add_marker(skip)
+    for item in model_hub_items:
+        item.add_marker(skip)
 
 
 @pytest.fixture
@@ -54,7 +71,7 @@ def mock_llm_upstream(monkeypatch):
 
 @pytest.fixture
 def model_hub_app_factory():
-    """Build isolated runtimes, optionally seeding their native HOME."""
+    """Build macOS/Linux runtimes, optionally seeding native HOME."""
 
     repo_root = Path(__file__).resolve().parents[2]
 
