@@ -144,6 +144,16 @@ for you: A2's round-trip spec skips unless the runtime is already running, and
 the install-entry spec opens and cancels the install dialog without ever
 completing an install.
 
+Finally, return to `ui/` before running the suite — step 2's `cd` to the
+repository root left the shell there, and `npm run e2e` needs `ui/package.json`:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/ui"
+VIBE_E2E_BASE_URL=http://127.0.0.1:5199 \
+VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931 \
+npm run e2e
+```
+
 Set `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH` to a local manifest if the machine
 should not fetch the engine archive from the network.
 

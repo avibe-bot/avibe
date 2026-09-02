@@ -17,7 +17,7 @@
 // failures under their names.
 import type { Agent, Source } from './api';
 import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
-import { expect, requireModelHub, requireSource, test as base } from './fixtures';
+import { expect, requireModelHub, requireMockUpstream, requireRuntimeRunning, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
 
 export type Gateway = {
@@ -37,9 +37,12 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       // `beforeEach` guards, so it cannot lean on them. A disabled capability
       // turns every `/api/models/*` read below into the gate's 404 — which
       // `read()` (correctly) throws on — and reports a skip-with-reason as a
-      // failure in every B, D, and G spec at once. The specs still skip with
-      // their own message; this only keeps the fixture out of their way.
+      // failure in every B, D, and G spec at once. The runtime and mock guards
+      // are here for the same reason: the anchor below CREATES a source, which
+      // a stopped runtime refuses, and a spec whose only problem is a
+      // documented environmental precondition should skip, not fail.
       await requireModelHub(api);
+      await requireRuntimeRunning(api);
       const sources = await api.sources();
       const agents = await api.agents();
       // The product's own condition, read the product's own way round: anything
@@ -65,7 +68,14 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
   ],
 
   gateway: async ({ api, mock }, provide, testInfo) => {
+    // Same ordering rule as `hubSurface`: this fixture is initialized before
+    // the suite's `beforeEach` guards run, so it owns its own preconditions.
+    // Without the mock URL `configure` below throws, and without a running
+    // runtime every source create is refused — both documented skip states,
+    // not failures.
     await requireModelHub(api);
+    await requireMockUpstream(mock);
+    await requireRuntimeRunning(api);
     await mock.configure({
       auth: 'ok',
       protocol: 'anthropic',

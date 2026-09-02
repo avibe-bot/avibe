@@ -142,15 +142,19 @@ test.describe('A · capability gate and runtime lifecycle', () => {
         await api.setAgentMode(candidate!.backend, 'hub');
         // The cleanup boundary is ENTERED the moment the mutation succeeds:
         // every exit from here — including a throwing verification read or the
-        // skip below — passes through the finally, so the backend cannot stay
-        // in Gateway mode any path out of this spec can take.
+        // assertion below — passes through the finally, so the backend cannot
+        // stay in Gateway mode on any path out of this spec.
         restore.push(candidate!.backend);
+        // An accepted switch that a later read does not show is a persistence
+        // or projection regression, not a precondition: the server's
+        // `set_agent_mode` commits the requested mode without requiring an
+        // eligible source, so `hub` here is the contract. A skip would turn
+        // that regression into a green hole.
         const now = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
-        test.skip(
-          now.length === 0,
-          `Backend ${candidate!.backend} could not be switched to Gateway mode — it has no eligible source yet. `
-            + 'Add a source first (see ui/e2e/README.md).',
-        );
+        expect(
+          now,
+          `Backend ${candidate!.backend} accepted the Gateway-mode switch but the next /agents read does not show it.`,
+        ).toContain(candidate!.backend);
       }
 
       const names = (await api.agents()).filter((a) => a.mode === 'hub').map((a) => a.backend).join(', ');
