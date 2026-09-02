@@ -14,6 +14,8 @@ import json
 import os
 from pathlib import Path
 import secrets
+import subprocess
+import sys
 import tempfile
 from typing import Any, Mapping
 
@@ -25,6 +27,7 @@ BINDINGS_FILENAME = "opencode_caller_context.json"
 
 
 PLUGIN_SOURCE = r"""
+import { execFileSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 
 const bindingPath = process.env.AVIBE_OPENCODE_CALLER_CONTEXT_PATH
@@ -49,6 +52,25 @@ function applyEnv(output, env) {
   }
 }
 
+function ownerIdentity(pid) {
+  try {
+    if (process.platform === "linux") {
+      const value = readFileSync(`/proc/${pid}/stat`, "utf8")
+      const fields = value.slice(value.lastIndexOf(")") + 2).trim().split(/\s+/)
+      return fields.length > 19 ? `linux:${fields[19]}` : ""
+    }
+    if (process.platform === "win32") {
+      const script = `[DateTimeOffset]::new((Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`
+      const value = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8" }).trim()
+      return value ? `win32:${value}` : ""
+    }
+    const value = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim().replace(/\s+/g, " ")
+    return value ? `ps:${value}` : ""
+  } catch {
+    return ""
+  }
+}
+
 export const AvibeCallerContextPlugin = async () => ({
   "shell.env": async (input, output) => {
     const sessionID = input && typeof input.sessionID === "string" ? input.sessionID : ""
@@ -57,11 +79,8 @@ export const AvibeCallerContextPlugin = async () => ({
     if (!binding || typeof binding !== "object") return
     const ownerPID = Number(binding.owner_pid)
     if (!Number.isInteger(ownerPID) || ownerPID <= 0) return
-    try {
-      process.kill(ownerPID, 0)
-    } catch {
-      return
-    }
+    const expectedIdentity = typeof binding.owner_identity === "string" ? binding.owner_identity : ""
+    if (!expectedIdentity || ownerIdentity(ownerPID) !== expectedIdentity) return
     applyEnv(output, binding.env)
   },
 })
@@ -120,6 +139,42 @@ def _load_bindings(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def _owner_process_identity(pid: int) -> str | None:
+    if pid <= 0:
+        return None
+    try:
+        if sys.platform.startswith("linux"):
+            value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            fields = value[value.rfind(")") + 2 :].split()
+            return f"linux:{fields[19]}" if len(fields) > 19 else None
+        if sys.platform == "win32":
+            script = (
+                "[DateTimeOffset]::new((Get-Process -Id "
+                f"{pid} -ErrorAction Stop).StartTime.ToUniversalTime())"
+                ".ToUnixTimeMilliseconds()"
+            )
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            value = result.stdout.strip()
+            return f"win32:{value}" if value else None
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        value = " ".join(result.stdout.split())
+        return f"ps:{value}" if value else None
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+        return None
+
+
 def _prune_sessions(sessions: dict[str, Any]) -> dict[str, Any]:
     pruned: dict[str, Any] = {}
     for key, value in sessions.items():
@@ -131,13 +186,8 @@ def _prune_sessions(sessions: dict[str, Any]) -> dict[str, Any]:
             continue
         if owner_pid <= 0:
             continue
-        try:
-            os.kill(owner_pid, 0)
-        except ProcessLookupError:
-            continue
-        except PermissionError:
-            pass
-        except OSError:
+        owner_identity = value.get("owner_identity")
+        if not isinstance(owner_identity, str) or _owner_process_identity(owner_pid) != owner_identity:
             continue
         pruned[str(key)] = value
     return pruned
@@ -222,11 +272,15 @@ def bind_session(
 
         data = _load_bindings(path)
         sessions = _prune_sessions(data.get("sessions", {}))
+        owner_identity = _owner_process_identity(os.getpid())
+        if owner_identity is None:
+            raise RuntimeError("OpenCode caller binding cannot identify its owner process")
         entry = {
             "env": env,
             "updated_at": now.isoformat(),
             "binding_token": token,
             "owner_pid": os.getpid(),
+            "owner_identity": owner_identity,
         }
         if caller is not None:
             entry["caller_context"] = caller.to_metadata()

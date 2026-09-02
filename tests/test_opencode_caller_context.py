@@ -60,24 +60,28 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     }
     assert entry["caller_context"]["session_id"] == "ses123"
     assert entry["owner_pid"] == os.getpid()
+    assert entry["owner_identity"] == bridge._owner_process_identity(os.getpid())
     assert isinstance(entry["binding_token"], str)
     assert "expires_at" not in entry
 
 
 def test_prune_sessions_keeps_live_owners_and_removes_dead_ones(monkeypatch) -> None:
     sessions = {
-        "current": {"owner_pid": 101},
-        "dead": {"owner_pid": 202},
+        "current": {"owner_pid": 101, "owner_identity": "linux:11"},
+        "reused": {"owner_pid": 202, "owner_identity": "linux:22"},
         "unbound": {"updated_at": "2026-09-02T00:00:00+00:00"},
     }
 
-    def check_pid(pid, _signal):
-        if pid == 202:
-            raise ProcessLookupError
+    def identity(pid):
+        return {101: "linux:11", 202: "linux:23"}.get(pid)
 
-    monkeypatch.setattr(bridge.os, "kill", check_pid)
+    monkeypatch.setattr(bridge, "_owner_process_identity", identity)
 
     assert bridge._prune_sessions(sessions) == {"current": sessions["current"]}
+
+
+def test_plugin_requires_the_recorded_owner_process_identity() -> None:
+    assert "ownerIdentity(ownerPID) !== expectedIdentity" in bridge.PLUGIN_SOURCE
 
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:
