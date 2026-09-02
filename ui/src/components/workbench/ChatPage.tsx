@@ -4561,9 +4561,11 @@ export const MessageRow = memo(function MessageRow({
   // carries a NAMED group (``group/message``) so this reveal can't collide with
   // the unnamed ``group-hover`` ChatImage uses for its own overlay button.
   // Coarse pointers (touch) have no hover, so keep it always visible there.
+  // Keep the reveal immediate: scrolling moves rows beneath a stationary pointer,
+  // and an opacity transition would keep restyling and painting after each crossing.
   const time = (
     <span
-      className="inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 px-1 font-mono text-[10px] text-muted opacity-0 transition-opacity duration-150 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100"
+      className="inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 px-1 font-mono text-[10px] text-muted opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100"
     >
       <span className="whitespace-nowrap">{formatLocalDateTime(message.created_at)}</span>
       {resultPresentation.footer ? <span className="min-w-0 break-words">{resultPresentation.footer}</span> : null}
