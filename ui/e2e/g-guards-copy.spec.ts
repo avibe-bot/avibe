@@ -8,7 +8,12 @@
 import type { RouteHop } from './support/api';
 import { hasCopy, hub as copy } from './support/copy';
 import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
-import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
+import {
+  expectVisibleWithout,
+  requireMockUpstream,
+  requireModelHub,
+  requireRuntimeRunning,
+} from './support/fixtures';
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm, labelledButton } from './support/hub';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
@@ -62,7 +67,7 @@ test.describe('G · supply guards and failure copy', () => {
       });
       await expect(guard).toBeVisible({ timeout: 30_000 });
       await expect(guard).toContainText(copy('guard.subtitle.deleteSource'));
-      await expect(guard).not.toContainText(copy('guard.label'));
+      await expectVisibleWithout(guard, copy('guard.label'));
 
       // 2 · confirming ATTEMPTS the delete, and the SERVER refuses it. The same
       // dialog comes back carrying the refusal's own plan — which hops go, and
@@ -133,7 +138,7 @@ test.describe('G · supply guards and failure copy', () => {
     await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
     await expect(hub.addKeyDialog).toContainText(/modelHub\.errors\.|settings\.models\./);
     // The defect: the raw key is what reaches the user.
-    await expect(hub.addKeyDialog).not.toContainText(/modelHub\.errors\./);
+    await expectVisibleWithout(hub.addKeyDialog, /modelHub\.errors\./);
   });
 
   // D13 (assert) — the member-role dead-ends. Reaching them needs a SECOND auth

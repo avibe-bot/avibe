@@ -9,6 +9,7 @@ import { hub as copy } from './support/copy';
 import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import {
   expect,
+  expectVisibleWithout,
   requireMockUpstream,
   requireModelHub,
   requireRuntimeRunning,
@@ -99,8 +100,10 @@ test.describe('B · the source detail panel', () => {
       copy('sourceDetail.refetch.removed', { count: 1, models: 'e2e-drop' }),
     );
     await expect(hub.modelRow('e2e-drop')).toHaveCount(0);
-    // The survivor is not re-announced: "New" means new.
-    await expect(hub.modelRow('e2e-keep')).not.toContainText(copy('sourceDetail.refetch.added'));
+    // The survivor is STILL THERE and is not re-announced: "New" means new.
+    // Both halves, because a refetch that dropped `e2e-keep` alongside `e2e-drop`
+    // satisfies the second one all by itself.
+    await expectVisibleWithout(hub.modelRow('e2e-keep'), copy('sourceDetail.refetch.added'));
 
     // NOTE (spec §3 B9): the other half of B9 — that a surviving model keeps its
     // original `discovered_at` — is not observable from the browser at all. It
@@ -146,7 +149,7 @@ test.describe('B · the source detail panel', () => {
     // the next refetch than a discovered one.
     await expect(row).toContainText(copy('sourceDetail.entry.manual'));
     await expect(row).toContainText('e2e-low');
-    await expect(row).not.toContainText('e2e-high');
+    await expectVisibleWithout(row, 'e2e-high');
     await expect
       .poll(
         async () =>

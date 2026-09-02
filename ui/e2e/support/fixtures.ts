@@ -14,7 +14,7 @@
 // instance will not create, a mode switch that does not take, a forced route
 // PUT that is refused: each of those used to skip, and each of them was a
 // product failure wearing a missing precondition's clothes.
-import { test as base, expect } from '@playwright/test';
+import { type Locator, test as base, expect } from '@playwright/test';
 
 import { HubApi, type Source } from './api';
 import { NO_MOCK_UPSTREAM } from './env';
@@ -99,4 +99,26 @@ export const requireSource = async (
   const source = await api.createApiKeySource(displayName, baseUrl);
   expect(source, `the instance refused to create the precondition source ${displayName}`).not.toBeNull();
   return source!;
+};
+
+/**
+ * Asserts that `locator` IS on the page and does NOT say `text`.
+ *
+ * Both halves, always, because the second is meaningless without the first: a
+ * negated text assertion is satisfied by an element that says something else AND
+ * by an element that is not there at all, and those are opposite verdicts. "The
+ * surviving model is not re-announced as new" passes just as green when the
+ * refetch dropped the survivor along with the model it was supposed to drop —
+ * the row is gone, so it contains nothing, so it does not contain "New".
+ *
+ * Kept as one call rather than as a convention to write two, so that the
+ * presence cannot be the line that gets left out.
+ */
+export const expectVisibleWithout = async (
+  locator: Locator,
+  text: string | RegExp,
+  options?: { timeout?: number },
+): Promise<void> => {
+  await expect(locator).toBeVisible(options);
+  await expect(locator).not.toContainText(text, options);
 };

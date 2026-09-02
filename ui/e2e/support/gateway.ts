@@ -16,7 +16,7 @@
 // those specs a mode-switch test as well, and would report the mode switch's
 // failures under their names.
 import type { Agent, Source } from './api';
-import { routableModels } from './api';
+import { routableModels, surfaceKind } from './api';
 import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
 import { expect, requireModelHub, requireMockUpstream, requireRuntimeRunning, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
@@ -47,10 +47,11 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
       await requireRuntimeRunning(api);
       const sources = await api.sources();
       const agents = await api.agents();
-      // The product's own condition, read the product's own way round: anything
-      // other than "no sources and nothing in Gateway mode" is already the
-      // gateway surface, and an anchor would only add a row nobody asked for.
-      const directEmpty = sources.length === 0 && agents.every((agent) => agent.mode === 'direct');
+      // The product's own condition, asked through the one declaration that
+      // owns it: anything other than the gateway surface needs the anchor, and
+      // BOTH direct forms do — an instance with no backend installed renders
+      // the install prompt, which has no source list either.
+      const directEmpty = surfaceKind(agents, sources) !== 'gateway';
       const anchorName = `${E2E_SOURCE_PREFIX}surface-anchor`;
       let anchor: Source | null = null;
       try {

@@ -9,7 +9,12 @@
 import type { HubApi, RouteHop } from './support/api';
 import { hub as copy } from './support/copy';
 import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
-import { requireMockUpstream, requireModelHub, requireRuntimeRunning } from './support/fixtures';
+import {
+  expectVisibleWithout,
+  requireMockUpstream,
+  requireModelHub,
+  requireRuntimeRunning,
+} from './support/fixtures';
 // `gateway` rather than `fixtures` for the auto `hubSurface` fixture it carries:
 // the Add API key button lives on the gateway surface, and an instance with no
 // sources shows the direct home instead. See support/gateway.ts.
@@ -155,7 +160,7 @@ test.describe('B · add an API-key source', () => {
     // distinction from a credential failure is the whole point of the copy.
     await expect(hub.addKeyDialog).toContainText(copy('addKey.undetermined.title'), { timeout: 30_000 });
     await expect(hub.addKeyDialog).toContainText(copy('addKey.undetermined.detail'));
-    await expect(hub.addKeyDialog).not.toContainText(copy('addKey.fail.auth'));
+    await expectVisibleWithout(hub.addKeyDialog, copy('addKey.fail.auth'));
     // Retry stays available because a different choice is a different probe.
     await expect(
       hub.addKeyDialog.getByRole('button', { name: copy('addKey.retry'), exact: true }),

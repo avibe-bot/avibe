@@ -112,6 +112,33 @@ export const routableModels = (agent: Agent): string[] =>
   agent.model_supply?.map((entry) => entry.model_id)
   ?? (agent.menu_kind === 'fixed' ? agent.builtin_models ?? [] : agent.menu?.checked ?? []);
 
+/** Which body `/settings/models` renders, once the gate and the runtime have
+ *  already let the tab body render at all. */
+export type SurfaceKind = 'gateway' | 'direct-home' | 'direct-no-backend';
+
+/**
+ * The page a spec lands on, answered ONCE from the two decisions the product
+ * makes in `SettingsModelsPage.tsx`.
+ *
+ * A precondition is not a filter over instance facts, it is a claim about which
+ * SURFACE those facts produce — and the product reaches its three surfaces
+ * through two NESTED tests, so a spec that checks only the outer one admits an
+ * instance whose page is a different shape. `directEmpty` (no sources AND every
+ * backend on Direct) chooses `DirectHome` over the gateway overview; `DirectHome`
+ * then renders `.model-hub-direct-empty` — an install prompt with no backend
+ * card and no "Switch to gateway" button — when `installedAgents` is empty.
+ *
+ * Stated as a kind rather than as a boolean because the third case is not a
+ * degenerate second one: "no backend installed" and "already a gateway" send
+ * their reader to do opposite things, and a spec that reports one as the other
+ * is worse than a spec that fails.
+ */
+export const surfaceKind = (agents: Agent[], sources: Source[]): SurfaceKind => {
+  const directEmpty = sources.length === 0 && agents.every((agent) => agent.mode === 'direct');
+  if (!directEmpty) return 'gateway';
+  return agents.some((agent) => agent.cli_present) ? 'direct-home' : 'direct-no-backend';
+};
+
 /**
  * The plan a guarded mutation is refused with, read the way the route actually
  * sends it: `{ok: false, error: "source_in_route_chain", would_remove_hops: [],

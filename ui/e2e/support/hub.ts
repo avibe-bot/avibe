@@ -9,10 +9,36 @@
 // apart; the class says which one, and every assertion inside it still goes
 // through role and copy.
 //
+// Every attribute selector is built by `attr` below, never by interpolation:
+// some of the values are the operator's, not ours.
+//
 // No `data-testid` is added anywhere: this lane makes zero product-code changes.
 import type { Locator, Page } from '@playwright/test';
 
 import { hub } from './copy';
+
+/**
+ * One attribute selector, with the value escaped as the CSS string it is.
+ *
+ * The values here are not all ours. A route row is keyed by a MODEL ID, and for
+ * an `open` menu that id is whatever the operator ticked — `ModelHubMenuConfig`
+ * takes arbitrary non-credential strings. Pasted into a quoted attribute
+ * selector, a `"` closes the string early and the locator either throws as
+ * invalid syntax or, worse, still parses and matches something else: a green
+ * assertion about a row that is not the row.
+ *
+ * Escaping per CSS Syntax §4.3.7 — backslash and quote by backslash, control
+ * characters by hex — rather than rejecting those ids, because refusing to look
+ * at a model the product accepted would be the suite choosing what the product
+ * is allowed to contain.
+ */
+const attr = (name: string, value: string): string => {
+  const escaped = value
+    .replace(/[\\"]/g, '\\$&')
+    // eslint-disable-next-line no-control-regex -- escaping them is exactly the point
+    .replace(/[\u0000-\u001f\u007f]/g, (ch) => `\\${ch.codePointAt(0)!.toString(16)} `);
+  return `[${name}="${escaped}"]`;
+};
 
 export class ModelHubPage {
   readonly page: Page;
@@ -78,7 +104,7 @@ export class ModelHubPage {
   }
 
   sourceRow(sourceId: string): Locator {
-    return this.page.locator(`[data-source-id="${sourceId}"]`);
+    return this.page.locator(attr('data-source-id', sourceId));
   }
 
   sourceRowByName(displayName: string): Locator {
@@ -92,13 +118,11 @@ export class ModelHubPage {
   // --- Gateway routes -------------------------------------------------------
 
   agentCard(backend: string): Locator {
-    return this.page.locator(`[data-agent-backend="${backend}"]`);
+    return this.page.locator(attr('data-agent-backend', backend));
   }
 
   routeRow(backend: string, model: string): Locator {
-    return this.page.locator(
-      `[data-route-backend="${backend}"][data-route-model="${model}"]`,
-    );
+    return this.page.locator(attr('data-route-backend', backend) + attr('data-route-model', model));
   }
 
   /** The card collapses its model list, so a spec that just needs *a* route
@@ -132,7 +156,7 @@ export class ModelHubPage {
   }
 
   manageItem(kind: 'edit_source' | 'delete_source'): Locator {
-    return this.page.locator(`[data-manage-kind="${kind}"]`);
+    return this.page.locator(attr('data-manage-kind', kind));
   }
 
   /** One row of the source's model table. The rows carry no id attribute, but
@@ -168,7 +192,7 @@ export class ModelHubPage {
    *  guard's chrome — deliberately, since it restates the same facts — but it
    *  carries the action it is reporting, which is what tells them apart. */
   mutationReport(action: 'edit' | 'delete'): Locator {
-    return this.page.locator(`[data-source-mutation-report="${action}"]`);
+    return this.page.locator(attr('data-source-mutation-report', action));
   }
 
   get routeDialog(): Locator {

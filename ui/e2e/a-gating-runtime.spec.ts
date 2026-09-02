@@ -6,6 +6,7 @@ import {
   MODEL_HUB_SETTINGS_PATH,
 } from '../src/components/settings/models/modelHubRoutes';
 import type { Agent } from './support/api';
+import { surfaceKind } from './support/api';
 import { hub as copy } from './support/copy';
 import {
   expect,
@@ -14,7 +15,7 @@ import {
   runtimeIsRunning,
   test,
 } from './support/fixtures';
-import { restoreNativeSources, restoreRuntimeRunning } from './support/restore';
+import { restoreNativeSources, withRuntimeRestored } from './support/restore';
 
 test.describe('A · capability gate and runtime lifecycle', () => {
   test('A1 · the capability gate, not the browser, decides the route', async ({ page, hub, api }) => {
@@ -95,11 +96,16 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     await expect(hub.runtimeToggle).toHaveAttribute('aria-label', copy('shell.toggle.turnOff'));
     await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true');
 
-    await hub.runtimeToggle.click();
-    // Wrapped in try/finally — and not just this click — because the gateway is
-    // STOPPED at this point: if any assertion from here on fails, the instance
-    // is left without its runtime for every spec after this one.
-    try {
+    // The stopping click is INSIDE the boundary, not above it. The debt is owed
+    // from the moment the stop is ASKED FOR — the request is already gone when
+    // the click's own promise settles, so a page or browser that disconnects
+    // mid-flight rejects it with the server still completing the stop, and a
+    // boundary opened below this line is skipped on exactly that path.
+    // `support/restore.ts` owns both halves: where the boundary starts, and that
+    // "up" is a postcondition read from BOTH runtime facts rather than a second
+    // guess at which click is owed.
+    await withRuntimeRestored(api, async () => {
+      await hub.runtimeToggle.click();
       await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
       // The page must explain the stopped gateway, not just flip a switch.
       await expect(hub.closedState).toBeVisible();
@@ -107,21 +113,13 @@ test.describe('A · capability gate and runtime lifecycle', () => {
 
       // The return half of the round trip is the SCENARIO, so it happens here,
       // in the body, through the switch the user would use. It used to live in
-      // the finally, which made the spec's own subject a side effect of its
+      // the teardown, which made the spec's own subject a side effect of its
       // cleanup — and left the assertions below reporting a restart nobody had
       // asserted as a step.
       await hub.runtimeToggle.click();
       await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
       await expect(hub.closedState).toHaveCount(0);
-    } finally {
-      // And the safety net is a postcondition, not a second guess at which
-      // click is owed: `restoreRuntimeRunning` reads BOTH runtime facts and
-      // asks for the target state by name. The old shape read `enabled` alone
-      // and skipped its restart whenever that field disagreed with the engine
-      // — which is precisely the state a stop that disabled the engine and then
-      // failed to persist `enabled=false` leaves behind.
-      await restoreRuntimeRunning(api);
-    }
+    });
   });
 
   test('A3 · the blocked stop names the backends that block it', async ({ hub, api }) => {
@@ -196,14 +194,18 @@ test.describe('A · capability gate and runtime lifecycle', () => {
     // The tab body only renders once the runtime is configurable; below that the
     // page owes a closed state, which is scenario A2's subject, not this one's.
     await requireRuntimeRunning(api);
-    const agents = await api.agents();
-    const sources = await api.sources();
-    // The condition is the product's own (`modelsSurfaceKind`): every backend
-    // direct AND no sources. Anything else is the gateway surface, and asserting
-    // the direct home there would only prove the instance was dirty.
+    // Which surface this instance renders, asked once rather than re-derived
+    // here: the direct home has TWO forms, and the one this scenario is about is
+    // the one an installed backend puts a card in.
+    const surface = surfaceKind(await api.agents(), await api.sources());
     test.skip(
-      sources.length > 0 || agents.some((agent) => agent.mode !== 'direct'),
+      surface === 'gateway',
       'This instance already has sources or a Gateway backend, so the direct home is not its surface.',
+    );
+    test.skip(
+      surface === 'direct-no-backend',
+      'No agent backend CLI is installed, so the direct home renders its install prompt — there is no '
+      + 'backend card and no way out of Direct mode to assert. Install a backend CLI (see ui/e2e/README.md).',
     );
 
     await hub.goto();
