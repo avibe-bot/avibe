@@ -347,8 +347,8 @@ Catalog. It does not receive:
 
 ### 6.1 System prompt injection
 
-When at least one Skill is available, Avibe injects this block with the
-resolved rows substituted:
+When at least one model-invocable Skill is available, Avibe injects this block
+with the resolved rows substituted:
 
 ```md
 ## Skills
@@ -373,7 +373,20 @@ finding it in a paged Catalog. If more entries exist, append exactly:
 More skills are available. Run `vibe skill list --page 2` to view more.
 ```
 
-When no Skills are available, omit the entire block.
+When resolved Skills exist but every one declares
+`disable-model-invocation: true`, Avibe omits every name and description but
+retains only this exact-name loading guidance:
+
+```md
+## Skills
+
+If the user requests a skill by exact name, run `vibe skill load -- <name>` before proceeding.
+Otherwise, do not guess skill names.
+```
+
+This keeps an explicitly requested manual-only Skill usable without advertising
+it for model selection. When no Skills of either kind resolve, Avibe omits the
+entire block.
 
 ### 6.2 List command
 
@@ -911,6 +924,9 @@ Catalogs at runtime.
   when unrelated metadata is malformed, deeply nested, or recursively aliased.
 - A Skill declaring `disable-model-invocation: true` is absent from every
   Catalog page but remains loadable by an explicitly supplied portable name.
+  When every resolved Skill has that policy, the prompt retains generic
+  exact-name load guidance without exposing any protected name or description;
+  a truly empty resolver still emits no Skill block.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
   expose paths or sources. A multibyte-description fixture proves that every
