@@ -258,8 +258,8 @@ test.describe('B · add an API-key source', () => {
       expect(arranged, 'The instance refused the arranged route, so the key cannot be rejected.').toBe(true);
     };
 
-    const before = (await api.chains(gateway.backend)).find((chain) => chain.model === gateway.model);
-    const original: RouteHop[] = (before?.hops ?? []).map((hop) => ({
+    const before = (await api.chains(gateway.backend)).find((chain) => chain.model_id === gateway.model);
+    const original: RouteHop[] = (before?.chain ?? []).map((hop) => ({
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));

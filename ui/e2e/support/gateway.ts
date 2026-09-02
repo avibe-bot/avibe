@@ -155,15 +155,21 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
         // the prefix and the sweep cannot see it. Best-effort per source: a
         // native source serving a live route refuses until forced, and
         // deleteSource forces — but one that is already gone is success.
-        if (sourcesBeforeSwitch) {
-          for (const source of await api.sources()) {
-            if (!sourcesBeforeSwitch.has(source.id)
-                && !source.display_name.startsWith(E2E_SOURCE_PREFIX)) {
-              await api.deleteSource(source.id);
+        // Its own finally: a native deletion that still throws must not skip
+        // the prefix sweep, or the suite's own route sources outlive the spec
+        // alongside the failure that already stopped it.
+        try {
+          if (sourcesBeforeSwitch) {
+            for (const source of await api.sources()) {
+              if (!sourcesBeforeSwitch.has(source.id)
+                  && !source.display_name.startsWith(E2E_SOURCE_PREFIX)) {
+                await api.deleteSource(source.id);
+              }
             }
           }
+        } finally {
+          await api.removeSuiteSources();
         }
-        await api.removeSuiteSources();
       }
     }
   },

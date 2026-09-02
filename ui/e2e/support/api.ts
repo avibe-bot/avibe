@@ -89,8 +89,11 @@ const refusedPlan = (body: unknown): { would_remove_hops: unknown[]; would_inter
 
 export type AgentChain = {
   backend: string;
-  model: string;
-  hops: { source_id: string; model_id: string; [key: string]: unknown }[];
+  /** The menu model this chain routes. Named `model_id` on the wire — the
+   *  server writes `{model_id, chain}`, so a reader keying on `model` finds
+   *  nothing and quietly treats every existing route as empty. */
+  model_id: string;
+  chain: { source_id: string; model_id: string; [key: string]: unknown }[];
   [key: string]: unknown;
 };
 

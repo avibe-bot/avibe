@@ -181,8 +181,8 @@ test.describe('D · route chains and priority order', () => {
       { source_id: gateway.sources[1].id, model_id: gateway.sources[1].models[0].id },
       { source_id: gateway.sources[0].id, model_id: gateway.sources[0].models[0].id },
     ];
-    const before = (await api.chains(gateway.backend)).find((chain) => chain.model === gateway.model);
-    const original: RouteHop[] = (before?.hops ?? []).map((hop) => ({
+    const before = (await api.chains(gateway.backend)).find((chain) => chain.model_id === gateway.model);
+    const original: RouteHop[] = (before?.chain ?? []).map((hop) => ({
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));

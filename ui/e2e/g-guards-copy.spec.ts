@@ -31,8 +31,8 @@ test.describe('G · supply guards and failure copy', () => {
     // configured route, so removing it leaves that model with no supply. The
     // chain is captured first and put back in teardown — the instance's real
     // routing is not this spec's to keep.
-    const before = (await api.chains(gateway.backend)).find((chain) => chain.model === gateway.model);
-    const original: RouteHop[] = (before?.hops ?? []).map((hop) => ({
+    const before = (await api.chains(gateway.backend)).find((chain) => chain.model_id === gateway.model);
+    const original: RouteHop[] = (before?.chain ?? []).map((hop) => ({
       source_id: hop.source_id,
       model_id: hop.model_id,
     }));
