@@ -138,6 +138,9 @@ test.describe('D · route chains and priority order', () => {
     try {
       expect(await api.putAgentChain(gateway.backend, gateway.model, arranged)).toBe(true);
       await hub.goto();
+      const card = hub.agentCard(gateway.backend);
+      const expand = card.locator('.model-hub-model-collapse').first();
+      if (await expand.count()) await expand.click();
       await hub.routeRow(gateway.backend, gateway.model).click();
 
       const dialog = hub.routeDialog;
