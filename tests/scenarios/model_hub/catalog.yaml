@@ -26,6 +26,13 @@ capability:
     - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/e2e/test_model_hub_guards.py
+    - tests/e2e/test_model_hub_migration.py
+    - tests/e2e/test_model_hub_mock_upstream.py
+    - tests/e2e/test_model_hub_routing.py
+    - tests/e2e/test_model_hub_runtime.py
+    - tests/e2e/test_model_hub_sources.py
+    - tests/e2e/test_model_hub_usage_events.py
 status_legend:
   covered:
     description: closed-loop coverage exists at the declared layer
@@ -42,6 +49,26 @@ status_legend:
     test_required: false
     expected_fail: false
     priority: true
+  assert:
+    description: the E2E scenario asserts the intended contract when its environmental preconditions are present
+    test_required: true
+    expected_fail: false
+    priority: false
+  baseline:
+    description: the E2E scenario freezes current behavior while its product decision remains open
+    test_required: true
+    expected_fail: false
+    priority: true
+  xfail:
+    description: executable evidence isolates a known broken product surface without weakening passing invariants
+    test_required: true
+    expected_fail: true
+    priority: true
+  skip:
+    description: this layer cannot execute the scenario; reason and owning_layer identify the boundary
+    test_required: false
+    expected_fail: false
+    priority: false
 scenarios:
   - id: MH-CATALOG-001
     name: Every scenario, observation, and canonical test resolves to discoverable executable evidence
@@ -469,8 +496,337 @@ scenarios:
     kind: timeout_cancel
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
+  - id: A1
+    name: Feature-off Model Hub routes remain dormant
+    status: assert
+    kind: gate
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_runtime.py::test_a1_feature_flag_disables_the_complete_models_api
+  - id: A2
+    name: Offline engine install, start, stop, and hardened configuration
+    status: assert
+    kind: runtime_lifecycle
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_runtime.py::test_a2_offline_engine_install_start_stop_and_hardened_config
+  - id: A3
+    name: Runtime stop reports blocking Hub backends in API and UI copy
+    status: skip
+    kind: guard
+    layer: ui-e2e
+    reason: UI copy is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c2c5c9c15
+    partial_evidence:
+      test: tests/e2e/test_model_hub_runtime.py::test_a3_runtime_stop_reports_every_blocking_backend
+      covers: structured 409 guard, runtime_in_use code, and exact blocking backend list
+  - id: A4
+    name: Runtime toggle fails closed when the agents read fails
+    status: skip
+    kind: guard
+    layer: ui-e2e
+    reason: runtime-toggle interaction is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c2c5c9c15
+  - id: A5
+    name: Controller restart during OAuth poll reports engine_down
+    status: assert
+    kind: recovery
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_runtime.py::test_a5_controller_restart_during_oauth_poll_reports_engine_down
+  - id: B1
+    name: Automatic observation selects protocol from response evidence
+    status: assert
+    kind: protocol
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b1_auto_observe_selects_protocol_from_response_shape
+  - id: B2
+    name: Manual protocol mismatch is refused with proof evidence
+    status: assert
+    kind: protocol
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b2_manual_protocol_mismatch_is_refused_with_proof_error
+  - id: B3
+    name: Discovery drops upstream-only inventory extensions
+    status: assert
+    kind: persistence
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b3_discovered_model_persists_only_contract_fields
+  - id: B4
+    name: Unavailable inventory requires explicit acceptance before commit
+    status: assert
+    kind: recovery
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b4_inventory_failure_requires_consent_then_commits_error_source
+  - id: B5
+    name: Replayed source creation nonce is idempotent
+    status: xfail
+    kind: idempotency
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b5_source_create_nonce_is_idempotent_across_http_replay
+  - id: B6
+    name: Credential replacement rolls back or commits atomically
+    status: assert
+    kind: persistence
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b6_replace_key_rolls_back_then_rename_and_retarget_commit
+  - id: B7
+    name: Source deletion requires an exact guard-plan echo
+    status: assert
+    kind: guard
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b7_delete_guard_requires_exact_echo_before_force
+  - id: B8
+    name: Delete and refresh retain their current force-transport asymmetry
+    status: baseline
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b8_delete_force_is_query_only_in_the_current_http_contract
+  - id: B9
+    name: Inventory refetch preserves timestamps for existing models
+    status: xfail
+    kind: persistence
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b9_refetch_preserves_existing_model_discovery_timestamp
+  - id: B10
+    name: Custom-model mutation obeys upstream ownership boundaries
+    status: assert
+    kind: mutation
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b10_custom_models_and_free_text_tiers_obey_ownership_rules
+  - id: B11
+    name: Model Hub error codes resolve to human-readable copy
+    status: skip
+    kind: copy
+    layer: ui-e2e
+    reason: rendered error copy is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#b-api-key-sources-c16c29
+  - id: C1
+    name: Hub OAuth starts, presents authorization, polls, and cancels
+    status: skip
+    kind: oauth
+    layer: e2e-auto
+    reason: the mock upstream does not implement the managed engine provider-OAuth authorization surface
+    owning_layer: future live OAuth suite (managed engine provider OAuth)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: C2
+    name: OAuth expiry and nonce replay preserve one flow
+    status: skip
+    kind: oauth
+    layer: e2e-auto
+    reason: OAuth expiry and replay require provider-OAuth state issued by the managed engine
+    owning_layer: future live OAuth suite (managed engine provider OAuth)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: C3
+    name: Native OAuth start failures resolve to actionable copy
+    status: skip
+    kind: oauth
+    layer: e2e-auto
+    reason: native start-failure states require a controlled native CLI auth process and credential store
+    owning_layer: native OAuth scenario suite
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: C4
+    name: Real-vendor login materializes a source with adoption guidance
+    status: skip
+    kind: oauth
+    layer: manual
+    reason: full provider login requires real vendor accounts and credentials
+    owning_layer: manual live-vendor regression
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: D1
+    name: A later native subscription is appended after an API-key source
+    status: baseline
+    kind: placement
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d1_subscription_added_after_api_key_is_appended_at_tail
+  - id: D2
+    name: A healthy first hop reaches the upstream through the real engine
+    status: assert
+    kind: routing
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d2_healthy_hop_is_served_by_the_real_engine_probe
+  - id: D3
+    name: Rate limiting falls through to hop one within the original turn
+    status: skip
+    kind: failover
+    layer: turn-gateway
+    reason: same-turn walk requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    partial_evidence:
+      test: tests/e2e/test_model_hub_routing.py::test_d3_rate_limit_moves_the_next_api_probe_to_hop_one
+      covers: cooldown written; next-request selection proven; same-turn hop walk is not covered here
+  - id: D4
+    name: Quota exhaustion falls through to hop one within the original turn
+    status: skip
+    kind: failover
+    layer: turn-gateway
+    reason: same-turn walk requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    partial_evidence:
+      test: tests/e2e/test_model_hub_routing.py::test_d4_quota_moves_the_next_api_probe_to_hop_one
+      covers: cooldown written; next-request selection proven; same-turn hop walk is not covered here
+  - id: D5
+    name: A nonrefreshable 401 marks the source for repair
+    status: assert
+    kind: authentication
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
+  - id: D6
+    name: A server error uses the current flat cooldown
+    status: baseline
+    kind: failover
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown
+  - id: D7
+    name: A partial stream terminates without replaying another source
+    status: skip
+    kind: stream
+    layer: turn-gateway
+    reason: same-turn partial-stream handling requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D8
+    name: Cooldown expiry recovers hop zero and emits recovery
+    status: skip
+    kind: recovery
+    layer: contract
+    reason: deterministic cooldown expiry requires a controllable clock across resolution and recovery
+    owning_layer: unit/contract suite (controllable-time resolution)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D9
+    name: Exhausting every hop returns mapping_target_unavailable
+    status: skip
+    kind: failover
+    layer: turn-gateway
+    reason: same-turn route exhaustion requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D10
+    name: Undeclared reasoning effort is omitted from the upstream request
+    status: skip
+    kind: compatibility
+    layer: turn-gateway
+    reason: exact turn request capture requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D11
+    name: Claude token counting behavior is documented at the gateway
+    status: skip
+    kind: compatibility
+    layer: turn-gateway
+    reason: backend count-tokens routing requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D12
+    name: Backend injection remains isolated by backend contract
+    status: skip
+    kind: injection
+    layer: contract
+    reason: backend launch injection is not observable through the browser-visible HTTP API
+    owning_layer: backend injection contract suite
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D13
+    name: Member permissions expose explicit Model Hub denials
+    status: skip
+    kind: authorization
+    layer: ui-e2e
+    reason: member dead-ends require a second authenticated role context unavailable in the local bypass-auth harness
+    owning_layer: Playwright lane (multi-role permissions)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: E1
+    name: Metered turns aggregate cache-aware upstream usage
+    status: skip
+    kind: usage
+    layer: turn-gateway
+    reason: metered turns require the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#e-usage-and-events-c54c60
+  - id: E2
+    name: Usage windows remain bounded for every days input
+    status: assert
+    kind: usage
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_usage_windows_are_bounded
+  - id: E3
+    name: Resolution events paginate without credential material
+    status: assert
+    kind: security
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_usage_events.py::test_e3_event_feed_paginates_and_never_persists_credentials
+  - id: F1
+    name: Native scan produces the copy-only migration action matrix
+    status: xfail
+    kind: migration
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_migration.py::test_f1_unsupported_opencode_provider_ids_are_noted
+  - id: F2
+    name: Migration copies original API-key bytes without changing native files
+    status: assert
+    kind: migration
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_migration.py::test_f2_apply_is_copy_only_and_places_native_login_before_keys
+  - id: F3
+    name: First Model Hub visit surfaces importable native configuration
+    status: skip
+    kind: migration
+    layer: ui-e2e
+    reason: first-visit banner rendering is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#f-migration-c61c67
+  - id: G1
+    name: A guard echo missing agents remains confirmable
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_guards.py::test_g1_guard_echo_missing_agents_does_not_loop
+  - id: G2
+    name: Source-order write and chain reorder retain their current divergence
+    status: baseline
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_guards.py::test_g2_source_order_write_and_chain_reorder_are_divergent
+  - id: G3
+    name: Malformed JSON is distinguishable from business refusals
+    status: xfail
+    kind: contract
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_guards.py::test_g3_malformed_json_is_distinct_from_business_refusals
+  - id: H1
+    name: Claude protocol turns complete through an OpenAI Chat source
+    status: skip
+    kind: cross_protocol
+    layer: turn-gateway
+    reason: cross-protocol turn completion requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
+  - id: H2
+    name: Parallel tool calls preserve cross-protocol tuple correlation
+    status: skip
+    kind: cross_protocol
+    layer: turn-gateway
+    reason: parallel tool correlation requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
+  - id: H3
+    name: Image blocks pass through without breaking terminal framing
+    status: skip
+    kind: cross_protocol
+    layer: turn-gateway
+    reason: image-block terminal framing requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001
+  - B5
+  - B8
+  - B9
+  - D1
+  - D6
+  - F1
+  - G2
+  - G3

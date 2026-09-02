@@ -128,6 +128,13 @@ capabilities:
       - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+      - tests/e2e/test_model_hub_guards.py
+      - tests/e2e/test_model_hub_migration.py
+      - tests/e2e/test_model_hub_mock_upstream.py
+      - tests/e2e/test_model_hub_routing.py
+      - tests/e2e/test_model_hub_runtime.py
+      - tests/e2e/test_model_hub_sources.py
+      - tests/e2e/test_model_hub_usage_events.py
     harness:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
