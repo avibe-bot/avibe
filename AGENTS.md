@@ -221,6 +221,11 @@ Source-of-truth rule:
   contract, require an exact-head Codex review, zero unresolved review threads,
   and passing CI before close-out, apply the review-loop circuit breaker, and
   never merge without explicit owner instruction
+- the fallback change contract names the intended behavior, affected boundaries,
+  and validation evidence; pause patching when one root-cause class appears on
+  two reviewed heads, or after three findings-bearing heads following an
+  architecture or data-model rewrite, then diagnose the whole class before
+  continuing
 - use the `background-watch-hook` skill for managed review and CI waits
 - keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
 - only an explicit owner decision may make Codex findings advisory for an
