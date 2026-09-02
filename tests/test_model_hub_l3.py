@@ -1568,9 +1568,10 @@ def _prepare_route(
 
 
 def _resolution(registry: TurnCorrelationRegistry, token: str, model: str) -> str | None:
-    return registry.gateway_routing(
+    return registry.claim_gateway_request(
         backend="claude",
         token=token,
+        prepared_turn_id=None,
         gateway_model_id=model,
     ).caller_model_id
 
@@ -1759,6 +1760,53 @@ def test_gateway_attributes_a_request_only_to_a_turn_that_claims_its_model(
         "reason": "protocol_error",
         "stream_started": False,
     }
+
+
+def test_an_unclaimed_request_leaves_no_attempt_on_the_live_turn(
+    tmp_path: Path,
+) -> None:
+    """A turn that issued no gateway request must settle as having made none.
+
+    The terminalizer opens the live turn's attempt on the way in, before any
+    model id has been read — `fail` runs before routing and needs a turn to
+    fail. So a request routed from scope history has to give that attempt back
+    on its way out: left armed, it settles the live turn as having canceled or
+    interrupted a Hub attempt that only ever belonged to the settled turn.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-phantom.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_settled01")
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_settled01",
+        requested="caller-settled",
+        resolved="hub-settled",
+    )
+    registry.settle(
+        "turn_settled01",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert registry.credentials("claude", "session:/repo", "turn_live01") == token
+    _prepare_route(
+        registry,
+        token,
+        turn_id="turn_live01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+
+    with registry.gateway_terminalizer(backend="claude", token=token) as out_of_turn:
+        assert out_of_turn.resolution_model("hub-settled") == "caller-settled"
+
+    registry.settle(
+        "turn_live01",
+        settled_by=SETTLED_BY_NO_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert store.get("turn_live01") is None
 
 
 def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(

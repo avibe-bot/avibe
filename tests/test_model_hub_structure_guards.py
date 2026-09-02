@@ -1034,6 +1034,59 @@ def test_g5_terminalizer_fail_is_validation_only() -> None:
             )
 
 
+def test_routing_a_gateway_request_and_attributing_it_are_one_critical_section() -> None:
+    """Review 5092034678: a turn rotation must not land between the two.
+
+    Where a gateway request goes and which turn may be credited with it are one
+    decision about one request. Resolved under one acquisition of the lock and
+    bound under another, a turn can settle in the gap: whichever turn becomes
+    the sole live one is then told a model it never asked for arrived on its
+    token, which marks it ambiguous and drops the provenance of the request it
+    goes on to make itself.
+
+    Stated as "whoever routes also attributes, under one held lock" rather than
+    naming the owner, so splitting the decision back apart fails here however
+    the pieces are renamed or moved.
+    """
+
+    attribution = {"begin_gateway_request", "clear_prepared_attempt"}
+    routing_owners: set[str] = set()
+    for name, fn in _functions(_tree(PROVENANCE)).items():
+        routing = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_route_gateway_model"
+        ]
+        if not routing:
+            continue
+        routing_owners.add(name)
+        held = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.With)
+            and any(
+                isinstance(item.context_expr, ast.Attribute) and item.context_expr.attr == "_lock"
+                for item in node.items
+            )
+        ]
+        assert len(held) == 1, name
+        critical_section = range(held[0].lineno, held[0].end_lineno + 1)
+        bound = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in attribution
+        ]
+        assert bound, name
+        for node in routing + bound:
+            assert node.lineno in critical_section, f"{name}:{node.lineno}"
+    # A rename that leaves nothing to scan must fail here, not pass vacuously.
+    assert routing_owners
+
+
 def test_nonstream_transport_cannot_enter_the_sse_parser() -> None:
     # Finding 3763339612: only the stream fixture may reach _response_stream.
     source = CLIENT.read_text(encoding="utf-8")
