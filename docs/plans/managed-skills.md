@@ -223,7 +223,10 @@ Skill directories, and 8 MiB of frontmatter bytes each. A full built-in root
 therefore cannot consume the capacity reserved for user Skills. Within each
 class, roots are visited in precedence order. Before reading frontmatter,
 direct children of each root are sorted by their absolute entry path; declared
-names participate only after parsing. If a root would exceed the remaining
+names participate only after parsing. Compatibility entries that resolve to the
+same directory identity are visited once in precedence order and consume one
+candidate and frontmatter slot; each alias remains charged to the direct-child
+budget because it was enumerated. If a root would exceed the remaining
 direct-child budget, Avibe observes at most one entry beyond that remainder,
 omits the whole root, and omits all lower-priority roots. Reaching the candidate
 or frontmatter budget likewise omits remaining lower-priority roots. These
@@ -716,7 +719,10 @@ Catalogs at runtime.
   consuming the other's. Cross-root exhaustion follows precedence and the
   pre-frontmatter path order defined in Section 5.1.
 - Compatibility directory symlinks resolve to their target directory, and
-  replacing either the alias or target after discovery makes load fail.
+  replacing either the alias or target after discovery makes load fail. A
+  canonical Skill plus all backend compatibility aliases consumes one candidate
+  and one frontmatter slot while every enumerated alias still consumes one
+  direct-child slot.
 - Unquoted YAML comments after `name` or `description` are ignored while `#`
   inside a quoted scalar remains content.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
