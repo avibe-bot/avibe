@@ -564,6 +564,11 @@ is guarded by a per-Turn token so an older Turn cannot refresh or remove a newer
 binding for the same native Session. Each new or restored Turn makes its initial
 publication before entering the active poll loop. A delayed initial publication
 or renewal lost to a newer token stops instead of replacing that newer binding.
+If the initial publication for a new Turn raises, Avibe logs the auxiliary
+failure, starts its binding maintainer in the unbound state, and still sends the
+prompt to OpenCode. The maintainer retries conditionally for the active Turn's
+lifetime; binding-store availability never becomes a prerequisite for backend
+execution.
 The persisted shape remains readable by
 an already-running OpenCode server that loaded the released plugin: the
 existing `env`, `updated_at`, and `expires_at` fields are unchanged, while the
@@ -1008,8 +1013,9 @@ and verify:
   bind, renew, and unbind operations continue using the absolute binding path
   recorded by that server. Restored polls retain their advertised built-in
   snapshot and continue conditionally retrying a failed binding publication for
-  the poll lifetime; a newer Turn token makes the delayed retry stop without
-  replacing current state; and
+  the poll lifetime; a new Turn likewise reaches OpenCode after an initial
+  binding exception and retries for its active lifetime; a newer Turn token
+  makes the delayed retry stop without replacing current state; and
 - a cached Claude client is recreated and resumes the same native Session when
   its bound Skill roots or built-in snapshot change even if page 1 is identical;
   and
