@@ -139,7 +139,9 @@ run scripts stored beside `SKILL.md`.
 Avibe discovers existing Skills without moving them:
 
 - project Skills under `.agents/skills`, `.codex/skills`, `.claude/skills`, or
-  `.opencode/skills`, from the working directory up to the Git root;
+  `.opencode/skills`, from the working directory up to the Session's bound Avibe
+  project base. This boundary can sit above a nested Git checkout. Standalone
+  commands without a bound project use the first Git root instead;
 - global Skills under `~/.agents/skills`, the configured Codex and Claude Skill
   directories, the OpenCode directory under `XDG_CONFIG_HOME`, and enabled
   Claude plugin Skill directories; and

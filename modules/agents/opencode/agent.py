@@ -767,7 +767,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     )
                 except Exception:
                     logger.warning(
-                        "Failed to renew restored OpenCode caller context for session %s",
+                        "Failed to renew OpenCode caller context for session %s",
                         session_id,
                         exc_info=True,
                     )
@@ -797,7 +797,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     return
             except Exception:
                 logger.warning(
-                    "Failed to republish restored OpenCode caller context for session %s",
+                    "Failed to republish OpenCode caller context for session %s",
                     session_id,
                     exc_info=True,
                 )
@@ -1475,21 +1475,29 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             binding_token = secrets.token_hex(16)
             binding_payload = request.context.platform_specific or {}
-            binding_bound = await asyncio.to_thread(
-                bind_caller_context_session,
-                session_id,
-                binding_payload,
-                base_env=os.environ,
-                working_dir=request.working_path,
-                extra_env=managed_skills_env,
-                binding_token=binding_token,
-                **_binding_path_kwargs(caller_context_binding_path),
-                # The creation origin travels with the identity: an OpenCode shell
-                # command running ``vibe task add`` sources this binding, and it is
-                # the only place the conversation behind the definition is visible.
-                message=request.context,
-                fallback_platform=platform,
-            )
+            binding_bound = False
+            try:
+                binding_bound = await asyncio.to_thread(
+                    bind_caller_context_session,
+                    session_id,
+                    binding_payload,
+                    base_env=os.environ,
+                    working_dir=request.working_path,
+                    extra_env=managed_skills_env,
+                    binding_token=binding_token,
+                    **_binding_path_kwargs(caller_context_binding_path),
+                    # The creation origin travels with the identity: an OpenCode shell
+                    # command running ``vibe task add`` sources this binding, and it is
+                    # the only place the conversation behind the definition is visible.
+                    message=request.context,
+                    fallback_platform=platform,
+                )
+            except Exception:
+                logger.warning(
+                    "Starting OpenCode turn without caller context for session %s",
+                    session_id,
+                    exc_info=True,
+                )
             caller_context_binding_session_id = session_id
             caller_context_binding_token = binding_token
             caller_context_binding_renewal = asyncio.create_task(

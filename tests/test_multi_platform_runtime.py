@@ -898,8 +898,9 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
 
     asyncio.run(_run())
 
-    assert calls == []
-    assert binding_failures == ["OSError: binding unavailable"]
+    assert calls
+    assert calls[0]["tools"] == {"question": False, "skill": False}
+    assert binding_failures == []
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():

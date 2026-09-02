@@ -117,8 +117,9 @@ Agent 可以据此读取 `SKILL.md` 同目录下的 reference 或运行 script�
 
 Avibe 会直接发现现有 Skill，无需迁移：
 
-- 项目级：从工作目录到 Git 根目录逐层查找 `.agents/skills`、`.codex/skills`、
-  `.claude/skills` 和 `.opencode/skills`；
+- 项目级：从工作目录到 Session 绑定的 Avibe 项目根目录逐层查找 `.agents/skills`、
+  `.codex/skills`、`.claude/skills` 和 `.opencode/skills`。该边界可以位于嵌套 Git
+  仓库之上；未绑定项目的独立命令则以遇到的第一个 Git 根目录为边界；
 - 全局：查找 `~/.agents/skills`、Codex 与 Claude 配置的 Skill 目录，以及
   `XDG_CONFIG_HOME` 下的 OpenCode 目录和已启用的 Claude 插件 Skill 目录；
 - Avibe 内置 Skill，以及 Codex 自带的 system Skill。
