@@ -1,3 +1,5 @@
+import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
+import type { AgentSupply } from '../components/settings/models/types';
 import { ApiError, type ApiContextType } from '../context/ApiContext';
 
 export interface BackendModels {
@@ -18,9 +20,35 @@ export function modelOptionLabel(model: string, labels?: Record<string, string>)
   return labels?.[model] || model;
 }
 
+// In Hub mode the persisted catalog is authoritative. A missing catalog uses
+// the native fallback; an explicitly empty catalog remains an empty menu.
+type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>;
+
+const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): BackendModels | null => {
+  if (!agent || agent.backend !== backend || agent.mode !== 'hub') return null;
+  const catalog = agent.catalog_models ?? null;
+  if (!catalog) return null;
+  // A backend-owned selector such as Claude Code's Default is not routeable.
+  const models = routeableCatalogModelIds(catalog);
+  const rows = new Map(catalog.map((model) => [model.id, model]));
+  const modelLabels: Record<string, string> = {};
+  const reasoningOptions: Record<string, { value: string; label: string }[]> = {};
+  for (const id of models) {
+    const row = rows.get(id);
+    if (!row) continue;
+    if (row.display_name) modelLabels[id] = row.display_name;
+    if (row.reasoning_efforts.length) {
+      reasoningOptions[id] = row.reasoning_efforts.map((effort) => ({ value: effort, label: effort }));
+    }
+  }
+  return { models, modelLabels, reasoningOptions };
+};
+
 // Single source of truth for "list the selectable models for a backend",
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
 // new backend (or a fix like OpenCode's provider-prefixing) lands in one place.
+//
+// Ask Hub first because reading OpenCode's live catalog may start OpenCode.
 //
 // claude / codex expose flat model arrays. OpenCode's public options catalog is
 // per-provider and returns RAW model ids (never provider-prefixed), so
@@ -35,6 +63,8 @@ export async function fetchBackendModels(
   api: ApiContextType,
   backend: string,
 ): Promise<BackendModels> {
+  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  if (hub) return hub;
   if (backend === 'claude') {
     const res = await api.claudeModels();
     return {

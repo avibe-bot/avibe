@@ -3732,6 +3732,9 @@ class ModelHubService:
                 raise ModelHubError("backend_model_locked", status=409)
         elif default_indices:
             raise ModelHubError("backend_model_locked", status=409)
+        restorable_claude_ids = (
+            set(_builtin_model_ids("claude")) if backend == "claude" else set()
+        )
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
             if isinstance(item, dict) and item.get("id") == "default":
@@ -3748,6 +3751,7 @@ class ModelHubService:
             if (
                 backend == "claude"
                 and model.origin != "builtin"
+                and model.id not in restorable_claude_ids
                 and not model.id.startswith(("claude-", "anthropic-"))
             ):
                 raise ModelHubError("backend_model_id_prefix")

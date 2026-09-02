@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
+import type { AgentSupply } from '../components/settings/models/types';
 import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
@@ -681,6 +682,10 @@ export type ApiContextType = {
   claudeModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
   codexAgents: (cwd?: string) => Promise<{ ok: boolean; agents?: { id: string; name: string; path: string; source?: string; description?: string }[]; error?: string }>;
   codexModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
+  /** Picker-safe persisted catalog. Null tells pickers to use the native fallback. */
+  readModelHubAgentCatalogForModelPicker: (
+    backend: string,
+  ) => Promise<Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'> | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
   getVersion: () => Promise<VersionInfo>;
   doUpgrade: () => Promise<UpgradeResult>;
@@ -3862,6 +3867,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     claudeModels: () => getJson('/api/claude/models'),
     codexAgents: (cwd) => cwd ? getJson(`/api/codex/agents?cwd=${encodeURIComponent(cwd)}`) : getJson('/api/codex/agents'),
     codexModels: () => getJson('/api/codex/models'),
+    // Direct mode, rolling upgrades, and a temporarily unreadable Hub catalog
+    // all keep the existing native picker behavior without surfacing a toast.
+    readModelHubAgentCatalogForModelPicker: (backend) =>
+      getJson(`/api/models/agents/${encodeURIComponent(backend)}/models`, { handleError: false })
+        .then((payload) => {
+          const agent = payload?.ok === false ? null : payload?.agent;
+          return agent && typeof agent === 'object'
+            ? (agent as Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>)
+            : null;
+        })
+        .catch(() => null),
     getLogs: (lines = 500, source) => postJson('/api/logs', source ? { lines, source } : { lines }),
     getVersion: () => getCachedJson('/api/version', 10_000),
     doUpgrade: () => postJson('/api/upgrade', {}),

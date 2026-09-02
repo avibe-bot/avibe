@@ -507,6 +507,11 @@ class Controller:
                 return
             self.config.model_hub = latest.model_hub
             if latest.model_hub.agents[backend].mode != "hub":
+                if backend == "codex":
+                    agent_service = getattr(self, "agent_service", None)
+                    if agent_service is None:
+                        raise RuntimeError("Agent service is unavailable")
+                    await agent_service.invalidate_model_hub_runtime(backend)
                 return
             runtime_config = getattr(latest.agents, backend, None)
             if runtime_config is None:

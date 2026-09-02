@@ -159,6 +159,17 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     controller.agent_service.invalidate_model_hub_runtime.assert_not_awaited()
     controller.agent_service.refresh_runtime_config.assert_not_awaited()
 
+    latest.model_hub.agents["codex"].mode = "direct"
+    controller.backend_restart_coordinator.request_restart.reset_mock()
+
+    asyncio.run(captured["backend_catalog_changed"]("codex"))
+
+    controller.agent_service.invalidate_model_hub_runtime.assert_awaited_once_with(
+        "codex"
+    )
+    controller.backend_restart_coordinator.request_restart.assert_not_awaited()
+    controller.agent_service.refresh_runtime_config.assert_not_awaited()
+
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 def test_disabled_controller_resolver_is_direct_without_loading_model_hub_config(

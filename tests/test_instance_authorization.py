@@ -293,6 +293,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/show-pages/session-1"),
         # Read-only model catalogs behind Chat's route picker and the Agents
         # detail panel. Editor-tier because the picker is an editor surface.
+        ("GET", "/api/models/agents/claude/models"),
         ("GET", "/api/claude/models"),
         ("GET", "/api/codex/models"),
     )
@@ -478,6 +479,7 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         ("GET", "/api/models/agents/claude/chains"),
     )
     catalog_reads = (
+        ("GET", "/api/models/agents/claude/models"),
         ("GET", "/api/claude/models"),
         ("GET", "/api/codex/models"),
     )

@@ -2246,6 +2246,56 @@ def test_backend_catalog_rejects_client_claimed_builtin_origin(tmp_path):
     assert raised.value.code == "backend_model_locked"
 
 
+@pytest.mark.parametrize("model_id", ["opus", "sonnet[1m]"])
+def test_backend_catalog_restores_a_removed_claude_builtin_alias(
+    tmp_path,
+    model_id,
+):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    without_alias = [model for model in baseline if model["id"] != model_id]
+    removed = asyncio.run(
+        service.set_agent_models("claude", baseline, without_alias)
+    )
+    restored = {
+        **next(model for model in baseline if model["id"] == model_id),
+        "origin": "manual",
+    }
+
+    response = asyncio.run(
+        service.set_agent_models(
+            "claude",
+            removed["catalog_models"],
+            [*removed["catalog_models"], restored],
+        )
+    )
+
+    assert response["catalog_models"][-1] == restored
+
+
+def test_backend_catalog_still_rejects_an_unknown_unprefixed_claude_id(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    unknown = {
+        **baseline[1],
+        "id": "deepseek-v4",
+        "origin": "manual",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, [*baseline, unknown]))
+
+    assert raised.value.code == "backend_model_id_prefix"
+
+
 def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(
@@ -2632,6 +2682,33 @@ def test_agents_route_requests_deep_presence_only_when_explicit(monkeypatch):
         == 200
     )
     assert calls == [False, True]
+
+
+def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
+    class AgentService:
+        def get_agent_sources(self, backend):
+            return {
+                "backend": backend,
+                "mode": "hub",
+                "catalog_models": [{"id": "catalog-model", "routeable": True}],
+                "routes": {"catalog-model": {"hops": [{"source_id": "secret-source"}]}},
+                "sources": {"order": ["secret-source"]},
+            }
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", AgentService)
+
+    response = app.test_client().get("/api/models/agents/codex/models")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": True,
+        "contract_version": 6,
+        "agent": {
+            "backend": "codex",
+            "mode": "hub",
+            "catalog_models": [{"id": "catalog-model", "routeable": True}],
+        },
+    }
 
 
 def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):

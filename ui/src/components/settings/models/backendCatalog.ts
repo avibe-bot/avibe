@@ -44,6 +44,13 @@ export function listedModelIds(agent: AgentSupply): string[] {
  *  a payload the server never sent. */
 export const catalogModels = (agent: AgentSupply): BackendModel[] | null => agent.catalog_models ?? null;
 
+export function routeableCatalogModelIds(catalog: readonly BackendModel[]): string[] {
+  const seen = new Set<string>();
+  return catalog
+    .filter((model) => model.routeable && model.id && !seen.has(model.id) && seen.add(model.id))
+    .map((model) => model.id);
+}
+
 /**
  * The model ids an Agent card enumerates, in catalog order.
  *
@@ -56,10 +63,7 @@ export const catalogModels = (agent: AgentSupply): BackendModel[] | null => agen
 export function catalogModelIds(agent: AgentSupply): string[] {
   const catalog = catalogModels(agent);
   if (catalog) {
-    const seen = new Set<string>();
-    return catalog
-      .filter((model) => model.routeable && model.id && !seen.has(model.id) && seen.add(model.id))
-      .map((model) => model.id);
+    return routeableCatalogModelIds(catalog);
   }
   if (agent.menu_kind !== 'open') return listedModelIds(agent);
   return [...new Set(agent.menu?.checked ?? [])].filter(Boolean);

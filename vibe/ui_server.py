@@ -4636,6 +4636,23 @@ async def model_hub_agent_mode_patch(backend):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/agents/<backend>/models", methods=["GET"])
+def model_hub_agent_models_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = _model_hub_service().get_agent_sources(backend)
+        picker_agent = {
+            "backend": agent["backend"],
+            "mode": agent["mode"],
+        }
+        if "catalog_models" in agent:
+            picker_agent["catalog_models"] = agent["catalog_models"]
+        return _model_hub_success(agent=picker_agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/agents/<backend>/models", methods=["PUT"])
 async def model_hub_agent_models_put(backend):
     from core.handlers.model_hub import ModelHubError
