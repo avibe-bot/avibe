@@ -3371,6 +3371,24 @@ class ModelHubService:
             "routeable": True,
         }
 
+    @staticmethod
+    def _claude_default_catalog_payload() -> dict:
+        return {
+            "id": "default",
+            "display_name": None,
+            "origin": "builtin",
+            "models_dev_id": None,
+            "context_window": None,
+            "max_output_tokens": None,
+            "input_modalities": [],
+            "output_modalities": [],
+            "supports_tools": None,
+            "supports_reasoning": None,
+            "reasoning_efforts": [],
+            "locked": True,
+            "routeable": False,
+        }
+
     @classmethod
     def _catalog_models_payload(
         cls,
@@ -3378,24 +3396,7 @@ class ModelHubService:
     ) -> list[dict]:
         models = [cls._catalog_model_payload(model) for model in agent.models]
         if agent.backend == "claude":
-            models.insert(
-                0,
-                {
-                    "id": "default",
-                    "display_name": None,
-                    "origin": "builtin",
-                    "models_dev_id": None,
-                    "context_window": None,
-                    "max_output_tokens": None,
-                    "input_modalities": [],
-                    "output_modalities": [],
-                    "supports_tools": None,
-                    "supports_reasoning": None,
-                    "reasoning_efforts": [],
-                    "locked": True,
-                    "routeable": False,
-                },
-            )
+            models.insert(0, cls._claude_default_catalog_payload())
         return models
 
     def backend_catalog_models(self, backend: str) -> list[dict]:
@@ -3708,8 +3709,9 @@ class ModelHubService:
                 await self._refresh_backend_catalog("opencode")
             return self._agent_payload(config, agent)
 
-    @staticmethod
+    @classmethod
     def _parse_backend_catalog_models(
+        cls,
         backend: str,
         payload: object,
     ) -> tuple[list[ModelHubBackendModelConfig], bool]:
@@ -3717,17 +3719,22 @@ class ModelHubService:
             raise ModelHubError("mapping_target_unavailable")
         if not isinstance(payload, list):
             raise ModelHubError("backend_model_catalog_invalid")
-        has_default = any(
-            isinstance(item, dict) and item.get("id") == "default"
-            for item in payload
-        )
-        if has_default and backend != "claude":
+        default_indices = [
+            index
+            for index, item in enumerate(payload)
+            if isinstance(item, dict) and item.get("id") == "default"
+        ]
+        if backend == "claude":
+            if (
+                default_indices != [0]
+                or payload[0] != cls._claude_default_catalog_payload()
+            ):
+                raise ModelHubError("backend_model_locked", status=409)
+        elif default_indices:
             raise ModelHubError("backend_model_locked", status=409)
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
             if isinstance(item, dict) and item.get("id") == "default":
-                if item.get("locked") is not True or item.get("routeable") is not False:
-                    raise ModelHubError("backend_model_locked", status=409)
                 continue
             try:
                 model = ModelHubBackendModelConfig.from_payload(item)
@@ -3747,7 +3754,7 @@ class ModelHubService:
             rows.append(model)
         if len({model.id for model in rows}) != len(rows):
             raise ModelHubError("backend_model_duplicate")
-        return rows, has_default
+        return rows, bool(default_indices)
 
     async def _refresh_backend_catalog(self, backend: BackendName) -> None:
         if self.backend_catalog_changed is None:

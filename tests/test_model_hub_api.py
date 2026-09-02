@@ -1966,11 +1966,16 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         assert store.config.agents[backend].menu.checked == [model_id]
 
     edited = {**added, "display_name": "DeepSeek V4 edited", "context_window": 262_144}
+    desired_catalog = (
+        [response["catalog_models"][0], edited, *response["catalog_models"][1:-1]]
+        if backend == "claude"
+        else [edited, *response["catalog_models"][:-1]]
+    )
     edited_response = asyncio.run(
         service.set_agent_models(
             backend,
             response["catalog_models"],
-            [edited, *response["catalog_models"][:-1]],
+            desired_catalog,
         )
     )
     assert next(
@@ -2100,6 +2105,7 @@ def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path):
     assert next(
         model for model in response["catalog_models"] if model["id"] == legacy_id
     )["display_name"] == "Persisted legacy model"
+    _assert_valid("agent-supply.schema.json", response)
 
 
 def test_backend_catalog_rejects_a_new_id_past_the_admission_bound(tmp_path):
@@ -2250,6 +2256,32 @@ def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("claude", baseline, baseline[1:]))
+
+    assert raised.value.code == "backend_model_locked"
+    assert raised.value.status == 409
+
+
+@pytest.mark.parametrize("mutation", ["edit", "duplicate", "reorder"])
+def test_backend_catalog_rejects_any_claude_locked_default_mutation(
+    tmp_path,
+    mutation,
+):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    desired = copy.deepcopy(baseline)
+    if mutation == "edit":
+        desired[0]["display_name"] = "Not the server sentinel"
+    elif mutation == "duplicate":
+        desired.insert(1, copy.deepcopy(desired[0]))
+    else:
+        desired[0], desired[1] = desired[1], desired[0]
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("claude", baseline, desired))
 
     assert raised.value.code == "backend_model_locked"
     assert raised.value.status == 409

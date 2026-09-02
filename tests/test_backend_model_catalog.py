@@ -247,6 +247,9 @@ def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
                 {
                     "slug": "gpt-native",
                     "display_name": "GPT Native",
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "auto_compact_token_limit": 180_000,
                     "input_modalities": ["text", "image"],
                     "supports_image_detail_original": True,
                 }
@@ -269,6 +272,37 @@ def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
 
     assert payload["models"][0]["input_modalities"] == ["text", "image"]
     assert payload["models"][0]["supports_image_detail_original"] is True
+    assert payload["models"][0]["auto_compact_token_limit"] == 180_000
+
+
+def test_codex_hub_catalog_retires_native_compaction_limit_after_context_override():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-native",
+                    "display_name": "GPT Native",
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "auto_compact_token_limit": 180_000,
+                    "effective_context_window_percent": 90,
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [{"id": "gpt-native", "context_window": 400_000}],
+        )
+    )
+    projected = payload["models"][0]
+
+    assert projected["context_window"] == 400_000
+    assert projected["max_context_window"] == 400_000
+    assert projected["effective_context_window_percent"] == 90
+    assert "auto_compact_token_limit" not in projected
 
 
 def test_codex_hub_catalog_does_not_give_custom_models_template_modalities():

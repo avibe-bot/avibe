@@ -24,8 +24,7 @@
     "id": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 256,
-      "description": "The exact identifier shown to and emitted by the backend Agent. OpenCode identifiers use provider/model form."
+      "description": "The exact identifier shown to and emitted by the backend Agent. OpenCode identifiers use provider/model form. Responses may echo longer identifiers persisted by older releases; mutation admission limits newly added identifiers to 256 characters."
     },
     "display_name": {
       "type": ["string", "null"],

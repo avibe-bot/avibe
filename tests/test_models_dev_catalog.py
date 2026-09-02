@@ -35,12 +35,12 @@ def _catalog():
                     "name": "DeepSeek V4",
                     "reasoning": True,
                     "reasoning_options": [
-                        {"type": "effort", "values": ["low", "high"]}
+                        {"type": "effort", "values": ["low", "high", "low"]}
                     ],
                     "tool_call": True,
                     "modalities": {
-                        "input": ["text", "image", "pdf", "unknown"],
-                        "output": ["text", "pdf"],
+                        "input": ["text", "image", "image", "pdf", "unknown"],
+                        "output": ["text", "text", "pdf"],
                     },
                     "limit": {"context": 1_048_576, "output": 131_072},
                 }

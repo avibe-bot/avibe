@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core.handlers.session_handler as session_handler_module
 from config.v2_compat import to_app_config
 from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
+from config.v2_settings import RoutingSettings
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
@@ -179,6 +180,54 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert controller.claude_sessions[f"slack_C123:{tmp_path}"] is client
     assert getattr(client, "_vibe_runtime_base_session_id") == "slack_C123"
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
+
+
+def test_session_handler_uses_native_cli_launch_reasoning_catalog(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    class _Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend,
+                channel="native_cli",
+                requested_model=requested_model,
+                target_model=requested_model,
+                runtime_model=requested_model,
+                source_id="src_native01",
+                reasoning_efforts=("max",),
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
+        lambda *_args: ["low"],
+    )
+
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = _Runtime()
+    controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(
+        model="claude-opus-4-6",
+        reasoning_effort="max",
+    )
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    assert captured["options"].effort == "max"
 
 
 def test_claude_system_prompt_follows_live_memory_enabled_state(tmp_path: Path) -> None:

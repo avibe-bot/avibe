@@ -506,17 +506,15 @@ class Controller:
             except FileNotFoundError:
                 return
             self.config.model_hub = latest.model_hub
-            agent_service = getattr(self, "agent_service", None)
-            if agent_service is None:
-                return
-            if backend == "codex":
-                await agent_service.invalidate_model_hub_runtime(backend)
             if latest.model_hub.agents[backend].mode != "hub":
                 return
             runtime_config = getattr(latest.agents, backend, None)
             if runtime_config is None:
                 return
-            await agent_service.refresh_runtime_config(backend, runtime_config)
+            coordinator = getattr(self, "backend_restart_coordinator", None)
+            if coordinator is None:
+                raise RuntimeError("Backend restart coordinator is unavailable")
+            await coordinator.request_restart(backend)
 
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,

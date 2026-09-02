@@ -172,6 +172,9 @@ def _codex_hub_catalog_bytes(
             ):
                 row["context_window"] = context_window
                 row["max_context_window"] = context_window
+                # Codex derives this from the active window when omitted; a
+                # bundled value belongs to the native window we just replaced.
+                row.pop("auto_compact_token_limit", None)
             input_modalities = configured.get("input_modalities")
             # Persisted built-ins use an empty list to mean "not overridden".
             # Custom rows still need a conservative text-only default instead

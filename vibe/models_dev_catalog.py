@@ -181,11 +181,13 @@ def _reasoning_efforts(model: dict[str, Any]) -> list[str]:
             continue
         values = option.get("values")
         if isinstance(values, list):
-            return [
-                value
-                for value in values
-                if isinstance(value, str) and value
-            ]
+            return list(
+                dict.fromkeys(
+                    value
+                    for value in values
+                    if isinstance(value, str) and value
+                )
+            )
     return []
 
 
@@ -199,11 +201,13 @@ def _modalities(model: dict[str, Any], direction: str) -> list[str]:
         if direction == "input"
         else {"text", "image", "audio", "video"}
     )
-    return [
-        value
-        for value in values
-        if isinstance(value, str) and value in allowed
-    ]
+    return list(
+        dict.fromkeys(
+            value
+            for value in values
+            if isinstance(value, str) and value in allowed
+        )
+    )
 
 
 def search_models_dev(query: str) -> list[dict[str, Any]]:

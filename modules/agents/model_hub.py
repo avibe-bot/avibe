@@ -832,6 +832,24 @@ class ModelHubRuntimeRouter:
             ),
             None,
         )
+        context_window = (
+            backend_model.context_window if backend_model is not None else None
+        )
+        max_output_tokens = (
+            backend_model.max_output_tokens if backend_model is not None else None
+        )
+        supports_tools = (
+            backend_model.supports_tools if backend_model is not None else None
+        )
+        supports_reasoning = (
+            backend_model.supports_reasoning if backend_model is not None else None
+        )
+        reasoning_efforts = (
+            tuple(backend_model.reasoning_efforts)
+            if backend_model is not None
+            and backend_model.supports_reasoning is not False
+            else ()
+        )
         self._last_supply_state[(backend, requested_model)] = ("ok", None)
         if source.supply_channel == "native_cli":
             if self.service.revocations.list():
@@ -847,6 +865,11 @@ class ModelHubRuntimeRouter:
                 target_model=target_model,
                 runtime_model=target_model,
                 source_id=source.id,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_tools=supports_tools,
+                supports_reasoning=supports_reasoning,
+                reasoning_efforts=reasoning_efforts,
                 settlement_generation=self.service._reserve_settlement_generation(
                     source.id
                 ),
@@ -889,28 +912,11 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
-                context_window=(
-                    backend_model.context_window if backend_model is not None else None
-                ),
-                max_output_tokens=(
-                    backend_model.max_output_tokens
-                    if backend_model is not None
-                    else None
-                ),
-                supports_tools=(
-                    backend_model.supports_tools if backend_model is not None else None
-                ),
-                supports_reasoning=(
-                    backend_model.supports_reasoning
-                    if backend_model is not None
-                    else None
-                ),
-                reasoning_efforts=(
-                    tuple(backend_model.reasoning_efforts)
-                    if backend_model is not None
-                    and backend_model.supports_reasoning is not False
-                    else ()
-                ),
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_tools=supports_tools,
+                supports_reasoning=supports_reasoning,
+                reasoning_efforts=reasoning_efforts,
             )
         self._emit_transition(launch, config)
         return launch

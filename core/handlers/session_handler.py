@@ -1458,7 +1458,7 @@ class SessionHandler(BaseHandler):
             model_hub_launch.reasoning_efforts
             if model_hub_launch is not None
             and model_hub_launch.backend == "claude"
-            and model_hub_launch.channel == "hub"
+            and model_hub_launch.channel in {"hub", "native_cli"}
             else backend_model_catalog.catalog_reasoning_efforts_for_model(
                 "claude",
                 effective_model,

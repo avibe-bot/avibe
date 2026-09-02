@@ -1931,6 +1931,46 @@ def test_runtime_launch_carries_claude_catalog_capabilities(tmp_path: Path) -> N
     assert launch.reasoning_efforts == ("low", "high")
 
 
+def test_native_cli_launch_carries_claude_catalog_capabilities(tmp_path: Path) -> None:
+    source = _source(
+        "src_nativecatalog",
+        "Native catalog capability",
+        channel="native_cli",
+        vendor="anthropic",
+        protocol="anthropic",
+    )
+    service = _service(tmp_path, sources=[source])
+    agent = service.store.config.agents["claude"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="shared-model",
+            context_window=128_000,
+            max_output_tokens=32_000,
+            supports_tools=True,
+            supports_reasoning=True,
+            reasoning_efforts=["low", "max"],
+        )
+    ]
+    agent.routes = {
+        "shared-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "shared-model"),)
+        )
+    }
+    router = ModelHubRuntimeRouter(
+        service=service,
+        native_cli_ready=lambda _backend: True,
+    )
+
+    launch = asyncio.run(router.resolve("claude", "shared-model"))
+
+    assert launch.channel == "native_cli"
+    assert launch.context_window == 128_000
+    assert launch.max_output_tokens == 32_000
+    assert launch.supports_tools is True
+    assert launch.supports_reasoning is True
+    assert launch.reasoning_efforts == ("low", "max")
+
+
 def test_runtime_launch_suppresses_efforts_when_reasoning_is_disabled(
     tmp_path: Path,
 ) -> None:
