@@ -283,6 +283,7 @@ class ClaudeAgent(BaseAgent):
                     await self._cleanup_runtime_session(
                         runtime_session_key,
                         preserve_pending_request_state=True,
+                        reason="query_auth_failure",
                     )
                 if not handled:
                     # Third and last emit site that can be holding a claimed
@@ -477,7 +478,10 @@ class ClaudeAgent(BaseAgent):
                 sessions_to_clear.append(composite_id)
 
         for composite_id in sessions_to_clear:
-            await self._cleanup_runtime_session(composite_id)
+            await self._cleanup_runtime_session(
+                composite_id,
+                reason="session_clear",
+            )
 
         # Legacy session manager cleanup (best-effort)
         await self.session_manager.clear_session(session_key)
@@ -586,7 +590,10 @@ class ClaudeAgent(BaseAgent):
         session_ids = self.runtime_turn_keys()
 
         for composite_id in session_ids:
-            await self._cleanup_runtime_session(composite_id)
+            await self._cleanup_runtime_session(
+                composite_id,
+                reason="auth_refresh",
+            )
 
         logger.info("Refreshed Claude auth state across %d runtime session(s)", len(session_ids))
 
@@ -611,7 +618,10 @@ class ClaudeAgent(BaseAgent):
         if composite_key not in self.claude_sessions and composite_key not in self.receiver_tasks:
             return
 
-        await self._cleanup_runtime_session(composite_key)
+        await self._cleanup_runtime_session(
+            composite_key,
+            reason="resume_rebind",
+        )
         logger.info("Prepared Claude runtime for resumed session %s", composite_key)
 
     async def _disconnect_client(self, client, composite_key: str) -> None:
@@ -689,6 +699,7 @@ class ClaudeAgent(BaseAgent):
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
         activation_retired: bool = False,
+        reason: str = "claude_agent_cleanup",
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task."""
 
@@ -700,6 +711,7 @@ class ClaudeAgent(BaseAgent):
                 preserve_pending_request_state=preserve_pending_request_state,
                 runtime_lock_held=runtime_lock_held,
                 activation_retired=activation_retired,
+                reason=reason,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -712,6 +724,7 @@ class ClaudeAgent(BaseAgent):
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
         activation_retired: bool = False,
+        reason: str = "claude_agent_cleanup",
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -734,6 +747,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=current_receiver_task,
                 activation_retired=activation_retired,
+                reason=reason,
             )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
@@ -787,6 +801,7 @@ class ClaudeAgent(BaseAgent):
                     preserve_pending_request_state=True,
                     runtime_lock_held=runtime_lock_held,
                     activation_retired=activation_retired,
+                    reason="stuck_active_eviction",
                 )
             except Exception:
                 if context is not None:
@@ -1283,7 +1298,10 @@ class ClaudeAgent(BaseAgent):
         self._suppress_receiver_runtime_release.add(composite_key)
         try:
             self._mark_session_idle_if_no_pending_requests(composite_key)
-            await self._cleanup_runtime_session(composite_key)
+            await self._cleanup_runtime_session(
+                composite_key,
+                reason="user_stop",
+            )
         except Exception as err:
             logger.error("Failed to clean up stopped Claude session %s: %s", composite_key, err, exc_info=True)
             self._release_service_runtime_turn(request.context)
@@ -1331,7 +1349,10 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     exc_info=True,
                 )
-        await self._cleanup_runtime_session(composite_key)
+        await self._cleanup_runtime_session(
+            composite_key,
+            reason="running_agent_end",
+        )
         return True
 
     async def _receive_messages(
@@ -1411,6 +1432,7 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         current_receiver_task=asyncio.current_task(),
                         preserve_pending_request_state=True,
+                        reason="ambiguous_primary_receiver_failure",
                     )
                     if settling_ambiguous_assistant_text:
                         self._last_assistant_text[composite_key] = (
@@ -2063,6 +2085,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
+                    reason="receiver_eof",
                 )
                 return
             await self._handle_receiver_eof(
@@ -2196,6 +2219,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
+                    reason="receiver_auth_failure",
                 )
                 if pending_request is not None:
                     await self._remove_ack_reaction(pending_request)
@@ -2257,6 +2281,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
+                reason="receiver_eof_without_result",
             )
         try:
             await self._emit_no_result_settlement(
@@ -2310,6 +2335,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
+                    reason="receiver_error_auth_failure",
                 )
                 if pending_request is not None:
                     await self._remove_ack_reaction(pending_request)
@@ -2438,6 +2464,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
+                reason="transport_auth_failure",
             )
             if pending_request is not None:
                 await self._remove_ack_reaction(pending_request)
@@ -4081,6 +4108,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
+                reason="result_auth_failure",
             )
         return handled
 

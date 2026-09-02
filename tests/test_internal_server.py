@@ -6895,6 +6895,91 @@ def test_scheduled_gate_retry_preserves_existing_delivery_owner(monkeypatch, tmp
     assert request_store.get_run(run.id)["status"] == "running"
 
 
+def test_scheduled_gate_cancellation_preserves_transferred_delivery_owner(
+    monkeypatch,
+    tmp_path,
+):
+    """A canceled executor cannot take a natively accepted steer back from Delivery."""
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, _active_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_sched_canceled_handoff",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="steer while active",
+        agent_name="worker",
+    )
+    assert request_store.claim(run.id) is not None
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    native_write_started = asyncio.Event()
+    release_native_write = asyncio.Event()
+
+    async def _natively_accepted_delivery(request, *, context):
+        del request, context
+        native_write = asyncio.create_task(release_native_write.wait())
+        native_write_started.set()
+        try:
+            await asyncio.shield(native_write)
+        except asyncio.CancelledError:
+            # Match the shared steering boundary: native receipt is reconciled
+            # before cancellation propagates to durable admission.
+            await native_write
+            raise
+
+    monkeypatch.setattr(manager, "deliver", _natively_accepted_delivery)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{run.id}",
+        platform_specific={
+            "task_execution_id": run.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        submission = asyncio.create_task(
+            controller.session_turn_gate.submit_scheduled(
+                session_id,
+                context,
+                "steer while active",
+            )
+        )
+        await native_write_started.wait()
+        submission.cancel()
+        await asyncio.sleep(0)
+        assert not submission.done()
+        release_native_write.set()
+        return await submission
+
+    result = asyncio.run(_go())
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+        target_was_busy=True,
+        delivery_status="reserved",
+        delivery_owner_transferred=True,
+    )
+    stored = request_store.get_run(run.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["delivery_id"]
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert delivery is not None
+    assert delivery["state"] == "reserved"
+
+
 def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_path):
     """After ownership transfer, a pre-claim failure belongs to Delivery recovery."""
     from core.scheduled_tasks import TaskExecutionStore

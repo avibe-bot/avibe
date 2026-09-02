@@ -624,7 +624,7 @@ async def _end_claude(controller: "Controller", composite_key: Optional[str], ba
                     await client.interrupt()
             except Exception:  # noqa: BLE001
                 logger.debug("end: claude interrupt failed for %s", ck, exc_info=True)
-            await session_handler.cleanup_session(ck)
+            await session_handler.cleanup_session(ck, reason="running_agent_end")
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: claude cleanup_session failed for %s: %s", ck, exc)
         return {"ok": False, "error": "cleanup_failed", "detail": str(exc)}

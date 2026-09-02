@@ -532,20 +532,8 @@ def create_app(
                 "author_name": delivery_request.author_name,
             }
         )
-        try:
-            result = await manager.deliver(
-                delivery_request,
-                context=context,
-            )
-        except Exception:
-            if not delivery_owner_transferred:
-                raise
-            logger.exception(
-                "Delivery admission deferred to recovery after Agent Run ownership "
-                "transfer: run=%s delivery=%s",
-                execution_id,
-                delivery_id,
-            )
+
+        def _defer_transferred_delivery() -> TurnSubmissionResult:
             delivery_status = "reserved"
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
@@ -584,6 +572,38 @@ def create_app(
                 delivery_status=delivery_status,
                 delivery_owner_transferred=True,
             )
+
+        try:
+            result = await manager.deliver(
+                delivery_request,
+                context=context,
+            )
+        except asyncio.CancelledError:
+            if not delivery_owner_transferred:
+                raise
+            # Once the Run points at this Delivery, the executor wrapper is no
+            # longer its lifecycle owner. In particular, cancellation can race
+            # a shielded native P1 write: the adapter may have accepted the
+            # steer even though admission has not projected that receipt yet.
+            # Leave the durable owner recoverable instead of letting the wrapper
+            # settle the Run before the native turn reaches terminal.
+            logger.warning(
+                "Delivery admission canceled after Agent Run ownership transfer; "
+                "deferring to recovery: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            return _defer_transferred_delivery()
+        except Exception:
+            if not delivery_owner_transferred:
+                raise
+            logger.exception(
+                "Delivery admission deferred to recovery after Agent Run ownership "
+                "transfer: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            return _defer_transferred_delivery()
         delivery_state = str(result.state)
         route = "enqueued" if delivery_state in {
             "queued",
