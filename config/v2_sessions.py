@@ -156,6 +156,25 @@ def infer_platform_from_thread_ids(agent_maps: Dict[str, Dict[str, str]]) -> Opt
     return None
 
 
+def is_legacy_session_mapping_key(key: str, agent_maps: Dict[str, Dict[str, str]]) -> bool:
+    """Whether a ``session_mappings`` key is a legacy raw key needing a platform.
+
+    A legacy raw key is a *non-empty* key with no platform prefix that still
+    holds mappings: it used to be a bare channel or user ID. The empty key is
+    not one of those. ``_legacy_scope_key`` collapses a Session with no Scope
+    onto it, so prefixing it would assert those Sessions belong to some
+    platform, and the rows behind it record no legacy scope key for the
+    migration to act on -- which is why treating it as legacy made every startup
+    re-run the migration and re-save the whole session state.
+
+    This is the single definition of "legacy raw key". Every caller that has to
+    agree on it -- the startup migration and the import preflight that decides
+    whether a platform is required -- must ask this function, or the preflight
+    rejects state that the migration would then leave untouched anyway.
+    """
+    return bool(key) and "::" not in str(key) and bool(agent_maps)
+
+
 def migrate_session_state_active_polls(state: SessionState, default_platform: str) -> bool:
     migrated = False
     for _sid, data in state.active_polls.items():
@@ -177,18 +196,12 @@ def migrate_session_state_active_polls(state: SessionState, default_platform: st
 def migrate_session_state_mappings(state: SessionState, default_platform: str) -> tuple[int, int, int]:
     """Migrate legacy raw session keys to platform-prefixed keys.
 
-    A legacy raw key is a *non-empty* key with no platform prefix: it used to
-    hold a channel or user ID. The empty key is not one of those: it is what a
-    Session with no Scope collapses to, and prefixing it would assert those
-    Sessions belong to ``default_platform``. It is also unfixable by this
-    migration, because the rows behind it keep no legacy scope key, so treating
-    it as legacy made every startup re-run the migration and re-save the whole
-    state.
+    See ``is_legacy_session_mapping_key`` for what counts as legacy.
 
     Returns ``(migrated_entries, legacy_keys, empty_keys_removed)``.
     """
     mappings = state.session_mappings
-    old_keys = [k for k in list(mappings.keys()) if k and "::" not in k and mappings[k]]
+    old_keys = [k for k in list(mappings.keys()) if is_legacy_session_mapping_key(k, mappings[k])]
     if not old_keys:
         empty_keys = [k for k in list(mappings.keys()) if not mappings[k]]
         for key in empty_keys:

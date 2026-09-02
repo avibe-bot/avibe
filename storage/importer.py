@@ -17,6 +17,7 @@ from config.discovered_chats import DiscoveredChatsStore
 from config.v2_sessions import (
     SessionState,
     infer_platform_from_thread_ids,
+    is_legacy_session_mapping_key,
     load_session_state_from_json,
     migrate_session_state_active_polls,
     migrate_session_state_mappings,
@@ -429,7 +430,10 @@ def _migrate_session_state_for_import(state: SessionState, *, primary_platform: 
 
     if not needs_default_platform:
         for scope_key, agent_maps in state.session_mappings.items():
-            if "::" in str(scope_key) or not agent_maps:
+            # Only a legacy raw key can need a platform; ask the one definition
+            # the migration itself uses, so the preflight cannot reject state
+            # that the migration would leave untouched.
+            if not is_legacy_session_mapping_key(scope_key, agent_maps):
                 continue
             if not infer_platform_from_thread_ids(agent_maps):
                 needs_default_platform = True
