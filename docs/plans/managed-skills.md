@@ -248,9 +248,10 @@ failing the whole Catalog. The name grammar is the existing Agent Skills
 boundary: 1-64 lowercase ASCII letters, digits, or hyphens; no leading,
 trailing, or consecutive hyphen. This makes every advertised name one literal
 shell token without Avibe-specific quoting or encoding.
-Any failure while constructing optional typed YAML values falls back to the
-same bounded tolerant extraction of `name` and `description`; malformed
-unrelated metadata cannot abort Catalog construction.
+The parser scans only top-level `name` and `description` syntax. It never
+constructs ignored YAML values, expands aliases, or traverses optional nested
+structures; malformed or recursively aliased unrelated metadata therefore
+cannot amplify work or abort Catalog construction.
 
 Catalog parsing and rendering are bounded independently:
 
@@ -439,7 +440,8 @@ Contract details:
 - XML attribute values are escaped.
 - Only the body after the leading frontmatter is emitted.
 - On a successful load, the body is otherwise unchanged: no generated title,
-  indentation, escaping, summary, or rewrite is added. Invalid UTF-8 fails load
+  indentation, escaping, summary, or rewrite is added. Invalid UTF-8 or a C0/C1
+  terminal control other than tab, line feed, or carriage return fails load
   rather than being replaced or re-encoded.
 - A body larger than 256 KiB is not advertised and cannot be loaded. If a file
   grows beyond the limit between discovery and load, load fails with empty
@@ -530,8 +532,10 @@ loops; after a crash or an ambiguously abandoned poll, the last expiry remains
 the bounded cleanup path. Binding-file updates are serialized across processes,
 use a unique same-directory temporary file and atomic replacement, and cleanup
 is guarded by a per-Turn token so an older Turn cannot refresh or remove a newer
-binding for the same native Session. Each new or restored Turn writes its own
-entry. The persisted shape remains readable by
+binding for the same native Session. Each new or restored Turn makes its initial
+publication before entering the active poll loop. A delayed initial publication
+or renewal lost to a newer token stops instead of replacing that newer binding.
+The persisted shape remains readable by
 an already-running OpenCode server that loaded the released plugin: the
 existing `env`, `updated_at`, and `expires_at` fields are unchanged, while the
 cleanup token and Skill roots are additive. This feature leaves the released
@@ -550,9 +554,11 @@ same-Turn load.
 Binding publication and cleanup run outside the controller event loop. A
 restored poll makes three immediate publication attempts. If the binding store
 remains unavailable, Avibe restores result delivery without waiting, then keeps
-retrying for the lifetime of that active poll and resumes expiry renewal after
-publication succeeds. This preserves the durable result path without
-permanently dropping the Turn's shell binding after a transient failure.
+retrying conditionally for the lifetime of that active poll and resumes expiry
+renewal after publication succeeds. An atomic ownership check at the binding
+store permits the write only while no newer Turn owns the native Session. This
+preserves the durable result path without permanently dropping the Turn's shell
+binding after a transient failure or letting recovery overwrite current state.
 
 ### 8.3 Runtime access boundary
 
@@ -873,8 +879,9 @@ Catalogs at runtime.
   validation, and indented continuation lines in a plain description remain
   part of its normalized Catalog value.
 - Valid quoted `name` and `description` mapping keys are accepted, while the
-  tolerant fallback still extracts required fields when unrelated metadata is
-  malformed.
+  tolerant scanner still extracts required fields when unrelated metadata is
+  malformed, deeply nested, or recursively aliased, without constructing those
+  ignored values.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
   expose paths or sources. A multibyte-description fixture proves that every
@@ -907,6 +914,9 @@ Catalogs at runtime.
   limit before load produces empty standard output and a non-zero exit.
 - An invalid UTF-8 body may be advertised from its valid frontmatter but load
   produces empty standard output and a non-zero exit without replacement text.
+- A body containing C0/C1 terminal controls other than tab, line feed, or
+  carriage return may be advertised from its valid frontmatter but load fails
+  with empty standard output instead of emitting those bytes.
 - Built-in publication rejects an invalid UTF-8 body, so every published
   built-in that can be advertised is also loadable under the body-encoding
   contract.
@@ -952,8 +962,9 @@ and verify:
   Sessions. When a managed server is adopted across an `AVIBE_HOME` change,
   bind, renew, and unbind operations continue using the absolute binding path
   recorded by that server. Restored polls retain their advertised built-in
-  snapshot and continue retrying a failed binding publication for the poll
-  lifetime; and
+  snapshot and continue conditionally retrying a failed binding publication for
+  the poll lifetime; a newer Turn token makes the delayed retry stop without
+  replacing current state; and
 - a cached Claude client is recreated and resumes the same native Session when
   its bound Skill roots or built-in snapshot change even if page 1 is identical;
   and
