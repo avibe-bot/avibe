@@ -1064,7 +1064,10 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         agent.sessions = _CodexProviderBindingSessions()
         agent._session_mgr = SimpleNamespace(set_thread_id=lambda *_args: None)
-        agent._build_thread_developer_instructions = lambda _request: None
+        async def build_thread_developer_instructions(_request):
+            return None
+
+        agent._build_thread_developer_instructions = build_thread_developer_instructions
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(

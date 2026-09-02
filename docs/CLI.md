@@ -119,6 +119,47 @@ vibe status
 }
 ```
 
+### `vibe skill`
+
+Avibe gives Claude, Codex, and OpenCode one managed Skill catalog and suppresses
+their native Skill catalogs on Avibe-dispatched Turns.
+
+```bash
+vibe skill list [--page N]
+vibe skill load -- <name>
+```
+
+`list` prints the currently available names and descriptions in stable order,
+25 per page. Page 1 is also included in the Agent's system prompt; use the
+next-page command shown in the output when more Skills are available. `load`
+prints only the selected Skill body inside a `skill_content` element. Its
+`directory` attribute is an absolute path so the Agent can read references and
+run scripts stored beside `SKILL.md`.
+
+Avibe discovers existing Skills without moving them:
+
+- project Skills under `.agents/skills`, `.codex/skills`, `.claude/skills`, or
+  `.opencode/skills`, from the working directory up to the Session's bound Avibe
+  project base. This boundary can sit above a nested Git checkout. Standalone
+  commands without a bound project use the first Git root instead;
+- global Skills under `~/.agents/skills`, the configured Codex and Claude Skill
+  directories, the OpenCode directory under `XDG_CONFIG_HOME`, and enabled
+  Claude plugin Skill directories; and
+- Avibe built-ins plus Codex's bundled system Skills.
+
+Built-ins win name conflicts, then project Skills, then global Skills. Within a
+project the nearer directory wins; at the same depth the order is `.agents`,
+`.codex`, `.claude`, then `.opencode`. User Skills win over Codex bundled
+defaults; enabled Claude plugin Skills follow the four static user directories
+but also win over those defaults. New global installs should use
+`~/.agents/skills/<name>`; project installs should use
+`<project>/.agents/skills/<name>`.
+
+Every command resolves from disk, and every new Avibe-dispatched Turn rebuilds
+the Catalog. Adding, editing, or deleting a Skill is therefore visible in an
+existing Session without restarting Avibe or creating a new Session. Existing
+conversation history is not rewritten.
+
 ### `vibe memory`
 
 Read scoped local Memory or submit context for best-effort, process-local capture — facts the user explicitly asked to remember, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. Acceptance does not guarantee provider delivery or persistence. This command does not start a service and has no clear, configuration, export, or delete subcommands.

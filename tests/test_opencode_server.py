@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -16,6 +17,7 @@ from modules.agents.opencode.utils import (
     build_opencode_model_option_items,
     resolve_opencode_allowed_providers,
 )
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
@@ -131,17 +133,20 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._clear_pid_file = Mock()  # type: ignore[method-assign]
         manager._apply_resource_governance = Mock()  # type: ignore[method-assign]
         terminate = AsyncMock()
+        create_process = AsyncMock(return_value=process)
+        user_config = '{"permission":"ask"}'
 
         with (
             patch.object(
                 SERVER_MODULE.asyncio,
                 "create_subprocess_exec",
-                AsyncMock(return_value=process),
+                create_process,
             ),
             patch.object(SERVER_MODULE.asyncio, "sleep", AsyncMock()),
             patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 61.0]),
             patch.object(SERVER_MODULE, "server_environment", return_value={}),
             patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
+            patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config}),
         ):
             with self.assertRaisesRegex(RuntimeError, "failed to start within 60s"):
                 await manager._start_server()
@@ -155,6 +160,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._clear_pid_file.call_count, 2)
         self.assertIsNone(manager._process)
         self.assertIsNone(manager._process_loop)
+        self.assertEqual(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"], user_config)
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -520,6 +526,35 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._restart_for_auth_refresh_locked.assert_not_awaited()
         manager._start_server.assert_not_awaited()
         self.assertTrue(manager._caller_context_plugin_refresh_pending)
+
+    async def test_ensure_running_preserves_an_adopted_absolute_caller_context_path(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        adopted_path = "/old-avibe-home/runtime/opencode_caller_context.json"
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": adopted_path,
+            "active_run_sessions": ["ses-active"],
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+        manager._caller_context_path = lambda: "/new-avibe-home/runtime/opencode_caller_context.json"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        self.assertEqual(manager.caller_context_binding_path(), Path(adopted_path))
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+        self.assertFalse(manager._caller_context_plugin_refresh_pending)
 
     async def test_mark_run_active_persists_pid_file_active_sessions(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

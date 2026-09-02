@@ -100,6 +100,40 @@ vibe status
 }
 ```
 
+### `vibe skill`
+
+Avibe 为 Claude、Codex 和 OpenCode 提供统一的托管 Skill Catalog，并在由 Avibe
+发起的 Turn 中关闭各 backend 自带的 Skill Catalog。
+
+```bash
+vibe skill list [--page N]
+vibe skill load -- <name>
+```
+
+`list` 按稳定顺序输出当前可用的名称和描述，每页最多 25 个。第 1 页也会注入
+Agent 的 system prompt；如有更多 Skill，按输出中的命令查看下一页。`load` 只在
+`skill_content` 标签中输出所选 Skill 的正文。标签的 `directory` 属性是绝对路径，
+Agent 可以据此读取 `SKILL.md` 同目录下的 reference 或运行 script。
+
+Avibe 会直接发现现有 Skill，无需迁移：
+
+- 项目级：从工作目录到 Session 绑定的 Avibe 项目根目录逐层查找 `.agents/skills`、
+  `.codex/skills`、`.claude/skills` 和 `.opencode/skills`。该边界可以位于嵌套 Git
+  仓库之上；未绑定项目的独立命令则以遇到的第一个 Git 根目录为边界；
+- 全局：查找 `~/.agents/skills`、Codex 与 Claude 配置的 Skill 目录，以及
+  `XDG_CONFIG_HOME` 下的 OpenCode 目录和已启用的 Claude 插件 Skill 目录；
+- Avibe 内置 Skill，以及 Codex 自带的 system Skill。
+
+同名冲突时，内置 Skill 优先，其次是项目级，再次是全局。项目内更近的目录优先；
+同一层级依次为 `.agents`、`.codex`、`.claude`、`.opencode`。用户 Skill 优先于
+Codex 自带的默认项；已启用的 Claude 插件 Skill 排在四个静态用户目录之后，但同样
+优先于这些默认项。新的全局 Skill 默认安装到 `~/.agents/skills/<name>`，项目级 Skill
+安装到 `<project>/.agents/skills/<name>`。
+
+每次命令都会从磁盘重新解析，每个由 Avibe 发起的新 Turn 也会重新生成 Catalog。
+因此新增、修改或删除 Skill 后，已有 Session 无需重启 Avibe，也无需新建 Session；
+历史对话内容不会被重写。
+
 ### `vibe memory`
 
 通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或提交内容进行尽力而为的进程内捕获——既包括用户明确要求记住的内容，也包括 Agent 从对话以及在本机工作中主动提炼的结论（含在文件或工具输出中遇到的持久环境、账户事实）。接受请求不保证提供方投递或持久化。该命令不会启动服务，也没有清空、配置、导出或删除子命令。

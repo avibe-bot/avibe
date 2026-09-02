@@ -738,6 +738,9 @@ def build_system_prompt_injection(
     fallback_platform: Optional[str] = None,
     enabled_agents: Optional[Iterable[Any]] = None,
     current_agent_backend: Optional[str] = None,
+    skills_cwd: str | Path | None = None,
+    skills_project_base: str | Path | None = None,
+    skills_claude_cli_path: str | None = None,
 ) -> str:
     """Build avibe system prompt additions for an agent backend."""
 
@@ -769,6 +772,16 @@ def build_system_prompt_injection(
         )
     if include_memory_cli:
         prompt += _MEMORY_CLI_PROMPT
+    if skills_cwd is not None:
+        from core.managed_skills import render_skill_catalog_prompt, resolve_skills
+
+        prompt += render_skill_catalog_prompt(
+            resolve_skills(
+                skills_cwd,
+                project_base=skills_project_base,
+                claude_cli_path=skills_claude_cli_path,
+            )
+        )
     if context is not None:
         prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)
     return prompt

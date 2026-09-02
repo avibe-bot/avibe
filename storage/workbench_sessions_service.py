@@ -31,10 +31,13 @@ from vibe.authorization import (
 )
 from storage.agent_session_rows import (
     ASSIGNABLE_SESSION_VISIBILITIES,
+    SESSION_PROJECT_BASE_METADATA_KEY,
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
+    normalize_session_project_base,
     reserve_write_lock,
+    snapshot_scope_workdir,
 )
 from storage.db import escape_sql_like
 from storage.session_reclaim import (
@@ -96,6 +99,7 @@ def _row_to_payload(
     include_local_details: bool = True,
 ) -> dict[str, Any]:
     metadata = _load_metadata(row.get("metadata_json"))
+    metadata.pop(SESSION_PROJECT_BASE_METADATA_KEY, None)
     if not include_local_details:
         metadata = {}
     return {
@@ -643,6 +647,7 @@ def update_session(
             agent_sessions.c.agent_backend,
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
+            agent_sessions.c.workdir,
             agent_sessions.c.metadata_json,
             agent_sessions.c.status,
         ).where(agent_sessions.c.id == session_id)
@@ -824,6 +829,13 @@ def update_session(
             target_scope = scope
         values["scope_id"] = target_scope_id
         if target_scope_id != existing.scope_id:
+            if SESSION_PROJECT_BASE_METADATA_KEY not in existing_metadata:
+                project_base = normalize_session_project_base(
+                    existing.workdir,
+                    snapshot_scope_workdir(conn, existing.scope_id),
+                )
+                if project_base is not None:
+                    existing_metadata[SESSION_PROJECT_BASE_METADATA_KEY] = project_base
             # Legacy IM caches still consult this metadata key first. A scope
             # move must stop pinning the session to the old channel; removing
             # the override lets the loader derive the key from the new scope.

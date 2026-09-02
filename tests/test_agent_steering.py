@@ -653,7 +653,7 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
                 "model": {"providerID": "openai", "modelID": "gpt-5"},
                 "reasoning_effort": "high",
                 "system": "primary system prompt",
-                "tools": {"question": False},
+                "tools": {"question": False, "skill": False},
             }
         ]
         assert server.abort_calls == []
@@ -894,6 +894,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     class _Server:
         prompt_count = 0
 
+        def caller_context_binding_path(self):
+            return "/old-avibe-home/runtime/opencode_caller_context.json"
+
         async def ensure_running(self):
             return None
 
@@ -1002,9 +1005,24 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         "modules.agents.opencode.agent.build_system_prompt_injection",
         lambda **kwargs: "system prompt",
     )
+    binding_tokens: list[str] = []
+    binding_paths: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        binding_tokens.append(kwargs["binding_token"])
+        binding_paths.append(kwargs["path"])
+        return True
+
+    unbound: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
-        lambda *args, **kwargs: None,
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token, path: unbound.append(
+            (session_id, binding_token, path)
+        ),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1040,6 +1058,15 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     assert receipt.outcome is SteerOutcome.ACCEPTED
     assert events == ["primary", "steer", "abort"]
+    assert len(binding_tokens) == 1
+    assert binding_paths == ["/old-avibe-home/runtime/opencode_caller_context.json"]
+    assert unbound == [
+        (
+            "opencode-session",
+            binding_tokens[0],
+            "/old-avibe-home/runtime/opencode_caller_context.json",
+        )
+    ]
     backend_failure.assert_awaited_once()
 
 
@@ -1208,7 +1235,7 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
 
         async def abort_session(self, session_id, directory):
             events.append("abort")
-            return True
+            raise OSError("abort status unknown")
 
         async def mark_run_active(self, session_id):
             return None
@@ -1242,10 +1269,14 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
             return False
 
     class _Sessions:
+        active = False
+
         def add_active_poll(self, **kwargs):
+            self.active = True
             events.append("persist_poll")
 
         def remove_active_poll(self, session_id):
+            self.active = False
             events.append("remove_poll")
 
     server = _Server()
@@ -1284,9 +1315,20 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
         "modules.agents.opencode.agent.build_system_prompt_injection",
         lambda **kwargs: "system prompt",
     )
+    binding_tokens: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        binding_tokens.append(kwargs["binding_token"])
+        return True
+
+    unbound: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
-        lambda *args, **kwargs: None,
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token: unbound.append((session_id, binding_token)),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1297,6 +1339,9 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
     await agent._process_message(primary)
 
     assert events == ["persist_poll", "prompt", "abort"]
+    assert agent.sessions.active is True
+    assert len(binding_tokens) == 1
+    assert unbound == []
     backend_failure.assert_awaited_once()
 
 

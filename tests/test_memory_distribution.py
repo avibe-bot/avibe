@@ -479,6 +479,92 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
         assert str(build_requirement.specifier) == ">=0.11.1"
 
 
+def _assert_core_distribution_mirrors_builtin_skills(
+    distribution: Path,
+    *,
+    environment: Path,
+    tmp_path: Path,
+) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    _run(
+        python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        str(distribution),
+        cwd=tmp_path,
+    )
+    avibe_home = tmp_path / "avibe-home"
+    result = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "from core.managed_skills import "
+                "builtin_skills_source, load_skill, prepare_builtin_skills; "
+                "source = builtin_skills_source(); "
+                "assert source.name == 'builtin_skills_source'; "
+                "snapshot = prepare_builtin_skills(); "
+                "skill = load_skill('use-avibe'); "
+                "assert skill is not None and skill.body; "
+                "assert skill.directory.name == 'use-avibe'; "
+                "print(snapshot)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "AVIBE_HOME": str(avibe_home)},
+        cwd=tmp_path,
+    )
+
+    snapshot_id = result.stdout.strip()
+    assert len(snapshot_id) == 64
+    expected = {
+        path.relative_to(ROOT / "skills").as_posix()
+        for path in (ROOT / "skills").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    mirrored = {
+        path.relative_to(avibe_home / "builtin-skills" / snapshot_id).as_posix()
+        for path in (avibe_home / "builtin-skills" / snapshot_id).rglob("*")
+        if path.is_file()
+    }
+    assert mirrored == expected
+    if os.name != "nt":
+        for relative in expected:
+            source_mode = (ROOT / "skills" / relative).stat().st_mode & 0o111
+            mirrored_mode = (
+                avibe_home / "builtin-skills" / snapshot_id / relative
+            ).stat().st_mode & 0o111
+            assert mirrored_mode == source_mode
+
+
+def test_core_wheel_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_path: Path) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    _assert_core_distribution_mirrors_builtin_skills(
+        core_wheel,
+        environment=tmp_path / "builtin-skills-wheel",
+        tmp_path=tmp_path,
+    )
+
+
+def test_core_sdist_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_path: Path) -> None:
+    core_sdist = _sdist_path(_wheel_path("AVIBE_CORE_WHEEL"), "avibe_os")
+    _assert_core_distribution_mirrors_builtin_skills(
+        core_sdist,
+        environment=tmp_path / "builtin-skills-sdist",
+        tmp_path=tmp_path,
+    )
+
+
 def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:
     core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
     memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")

@@ -838,6 +838,51 @@ def cmd_memory(args) -> int:
     return 0
 
 
+def cmd_skill(args) -> int:
+    """List or load Skills through Avibe's live resolver."""
+
+    from core.managed_skills import (
+        load_skill,
+        render_skill_content,
+        render_skill_list,
+        resolve_skills,
+    )
+
+    language = _configured_cli_language()
+
+    if args.skill_command == "list":
+        try:
+            output = render_skill_list(
+                resolve_skills(),
+                page=args.page,
+                more_notice=i18n_t(
+                    "skill.cli.more",
+                    language,
+                    page=args.page + 1,
+                ),
+            )
+        except ValueError:
+            print(i18n_t("skill.cli.error.invalidPage", language), file=sys.stderr)
+            return 1
+        if output:
+            print(output)
+        return 0
+
+    if args.skill_command == "load":
+        allowed = resolve_skills()
+        if args.name not in {skill.name for skill in allowed}:
+            print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+            return 1
+        skill = load_skill(args.name, resolved_skills=allowed)
+        if skill is None:
+            print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+            return 1
+        print(render_skill_content(skill))
+        return 0
+
+    return 1
+
+
 def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument("--page", type=int, help="Page number to return. Defaults to 1.")
     parser.add_argument(
@@ -15845,6 +15890,34 @@ def build_parser():
         metavar="{status,profile,list,search,remember}",
     )
     memory_subparsers.required = True
+    skill_help_language = _configured_cli_language()
+    skill_parser = subparsers.add_parser(
+        "skill",
+        help=i18n_t("skill.cli.help.command", skill_help_language),
+    )
+    skill_subparsers = skill_parser.add_subparsers(
+        dest="skill_command",
+        metavar="{list,load}",
+    )
+    skill_subparsers.required = True
+    skill_list_parser = skill_subparsers.add_parser(
+        "list",
+        help=i18n_t("skill.cli.help.list", skill_help_language),
+    )
+    skill_list_parser.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help=i18n_t("skill.cli.help.page", skill_help_language),
+    )
+    skill_load_parser = skill_subparsers.add_parser(
+        "load",
+        help=i18n_t("skill.cli.help.load", skill_help_language),
+    )
+    skill_load_parser.add_argument(
+        "name",
+        help=i18n_t("skill.cli.help.name", skill_help_language),
+    )
     memory_status_parser = memory_subparsers.add_parser(
         "status",
         help=i18n_t("memory.cli.help.status", memory_help_language),
@@ -17673,6 +17746,8 @@ def main():
         sys.exit(cmd_status())
     if args.command == "memory":
         sys.exit(cmd_memory(args))
+    if args.command == "skill":
+        sys.exit(cmd_skill(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":

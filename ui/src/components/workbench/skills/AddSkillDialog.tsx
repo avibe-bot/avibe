@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Check, Download, Github, Loader2, PackageCheck, PackagePlus, Search, Terminal, X } from 'lucide-react';
+import { Download, Github, Loader2, PackageCheck, PackagePlus, Search, Terminal, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../../context/ApiContext';
@@ -8,11 +8,8 @@ import { useToast } from '../../../context/ToastContext';
 import { Button } from '../../ui/button';
 import { SegmentedRadio } from '../../ui/segmented';
 import { Checkbox } from '../../ui/checkbox';
-import { BACKEND_CHIP, BACKEND_LABEL, BACKEND_ORDER, type Backend } from '../../../lib/backendAccent';
 import { FileDropzone } from './FileDropzone';
 import { errorMessage } from '@/lib/errorMessage';
-
-const AGENT_OF: Record<Backend, string> = { claude: 'claude-code', opencode: 'opencode', codex: 'codex' };
 
 export interface AddSkillDialogProps {
   defaultScope: SkillScope;
@@ -37,7 +34,6 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
   const [discovered, setDiscovered] = useState<SkillDiscovered[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [scope, setScope] = useState<SkillScope>(projectId ? defaultScope : 'global');
-  const [backends, setBackends] = useState<Set<Backend>>(new Set(BACKEND_ORDER));
   const [busy, setBusy] = useState<'fetch' | 'install' | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Monotonic token: a slow preview that resolves after the source changed must
@@ -98,15 +94,6 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
     }
   };
 
-  const toggleBackend = (backend: Backend) => {
-    setBackends((prev) => {
-      const next = new Set(prev);
-      if (next.has(backend)) next.delete(backend);
-      else next.add(backend);
-      return next;
-    });
-  };
-
   const toggleSkill = (name: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -119,24 +106,27 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
   const cliPreview = useMemo(() => {
     if (!baseSource) return '';
     const allSelected = discovered && selected.size === discovered.length;
-    // askill's -a is variadic — all agents share ONE flag.
-    const selectedAgents = BACKEND_ORDER.filter((b) => backends.has(b)).map((b) => AGENT_OF[b]);
-    const agentsArg = selectedAgents.length ? `-a ${selectedAgents.join(' ')}` : '';
     const selector = allSelected
       ? '--all'
       : selected.size === 1
         ? `--skill ${[...selected][0]}`
         : `--skill … (×${selected.size})`;
-    return ['askill add', baseSource, selector, scope === 'global' ? '-g' : '', agentsArg, '-y']
+    return [
+      'askill add',
+      baseSource,
+      '-a claude-code opencode codex',
+      selector,
+      scope === 'global' ? '-g' : '',
+      '-y',
+    ]
       .filter(Boolean)
       .join(' ');
-  }, [baseSource, discovered, selected, backends, scope]);
+  }, [baseSource, discovered, selected, scope]);
 
   const install = async () => {
-    if (!baseSource || selected.size === 0 || backends.size === 0) return;
+    if (!baseSource || selected.size === 0) return;
     setBusy('install');
     setError(null);
-    const targetBackends = [...backends];
     const targetProject = scope === 'project' ? projectId : undefined;
     const allSelected = discovered != null && selected.size === discovered.length;
     try {
@@ -146,12 +136,12 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
       // per call; --all is a single call covering everything.)
       let failed: Awaited<ReturnType<typeof api.addSkill>> | null = null;
       if (allSelected) {
-        const r = await api.addSkill({ source: baseSource, scope, projectId: targetProject, backends: targetBackends, all: true });
+        const r = await api.addSkill({ source: baseSource, scope, projectId: targetProject, all: true });
         if (!r.ok) failed = r;
       } else {
         for (const name of selected) {
           // --skill keeps local-dir paths unambiguous (paths can contain '@').
-          const r = await api.addSkill({ source: baseSource, skill: name, scope, projectId: targetProject, backends: targetBackends });
+          const r = await api.addSkill({ source: baseSource, skill: name, scope, projectId: targetProject });
           if (!r.ok) {
             failed = r;
             break;
@@ -285,29 +275,6 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
             <SegmentedRadio<SkillScope> value={scope} onChange={setScope} ariaLabel={t('skills.addDialog.installTo')} options={scopeOptions} disabled={!projectId} />
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <span className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('skills.addDialog.backends')}</span>
-            <div className="flex flex-wrap items-center gap-2">
-              {BACKEND_ORDER.map((backend) => {
-                const on = backends.has(backend);
-                return (
-                  <button
-                    key={backend}
-                    type="button"
-                    onClick={() => toggleBackend(backend)}
-                    className={clsx(
-                      'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition',
-                      on ? BACKEND_CHIP[backend] : 'border-border-strong bg-surface text-muted hover:text-foreground',
-                    )}
-                  >
-                    <Check className={clsx('size-3', on ? '' : 'opacity-0')} />
-                    {BACKEND_LABEL[backend]}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           {error ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>
           ) : null}
@@ -327,7 +294,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
               variant="brand"
               size={null}
               onClick={install}
-              disabled={!discovered || selected.size === 0 || backends.size === 0 || busy === 'install'}
+              disabled={!discovered || selected.size === 0 || busy === 'install'}
               className="gap-1.5 px-4 py-2 text-[12px] font-semibold"
             >
               {busy === 'install' ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}

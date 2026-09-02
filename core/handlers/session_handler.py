@@ -44,6 +44,11 @@ from core.agent_tool_policy import (
 from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
+from core.managed_skills import (
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -477,12 +482,13 @@ class SessionHandler(BaseHandler):
             )
             return None
 
-        next_system_prompt = self._build_claude_system_prompt(
+        next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            working_path=working_path,
         )
         cached_system_prompt = self.claude_system_prompts.get(composite_key)
         if cached_system_prompt != next_system_prompt:
@@ -500,6 +506,21 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
+            return None
+        managed_skills_env = managed_skill_environment(
+            working_path,
+            project_base=managed_skill_project_base(context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
+        )
+        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because managed Skill bindings changed",
                 composite_key,
             )
             await self._cleanup_session_locked(
@@ -583,12 +604,13 @@ class SessionHandler(BaseHandler):
         if next_agent_system_prompt is None:
             agent_data = self._load_agent_file(effective_agent, working_path)
             next_agent_system_prompt = agent_data.get("prompt") if agent_data else None
-        next_system_prompt = self._build_claude_system_prompt(
+        next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=next_agent_system_prompt,
+            working_path=working_path,
         )
         if self.claude_system_prompts.get(composite_key) != next_system_prompt:
             logger.info(
@@ -604,6 +626,21 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
+            return None
+        managed_skills_env = managed_skill_environment(
+            working_path,
+            project_base=managed_skill_project_base(context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
+        )
+        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because managed Skill bindings changed",
                 composite_key,
             )
             await self._cleanup_session_locked(
@@ -1474,12 +1511,13 @@ class SessionHandler(BaseHandler):
         # Always append avibe system prompt injection so transport
         # capabilities remain available; reply_enhancements only controls
         # quick-reply button instructions.
-        final_system_prompt = self._build_claude_system_prompt(
+        final_system_prompt = await self._build_claude_system_prompt(
             context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            working_path=working_path,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1512,6 +1550,13 @@ class SessionHandler(BaseHandler):
         if model_hub_launch is not None:
             claude_env = build_claude_hub_env(claude_env, model_hub_launch)
         claude_env.update(self._caller_env_for_context(context))
+        claude_env.update(
+            managed_skill_environment(
+                working_path,
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
+            )
+        )
         prepend_vendored_git_to_path(
             claude_env,
             base_env=os.environ,
@@ -1534,6 +1579,7 @@ class SessionHandler(BaseHandler):
             "extra_args": extra_args,
             "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
             "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
+            "skills": [],
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
             # cannot answer programmatically, plus any session-only background
@@ -1581,6 +1627,15 @@ class SessionHandler(BaseHandler):
         client = ClaudeSDKClient(options=options)
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
+        setattr(
+            client,
+            "_vibe_managed_skills_env",
+            managed_skill_environment(
+                working_path,
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
+            ),
+        )
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(
             client,
@@ -1669,7 +1724,7 @@ class SessionHandler(BaseHandler):
 
         return client
 
-    def _build_claude_system_prompt(
+    async def _build_claude_system_prompt(
         self,
         context: MessageContext,
         *,
@@ -1677,6 +1732,7 @@ class SessionHandler(BaseHandler):
         agent_name: str,
         session_anchor: str,
         agent_system_prompt: Optional[str],
+        working_path: Optional[str] = None,
     ) -> str | Dict[str, str]:
         base_prompt = agent_system_prompt or self.config.claude.system_prompt
         quick_replies_on = getattr(self.config, "reply_enhancements", True)
@@ -1694,7 +1750,8 @@ class SessionHandler(BaseHandler):
         # that write.
         memory_cli_admitted = memory_cli_prompt_admitted(self.controller, context)
 
-        system_prompt_injection = build_system_prompt_injection(
+        system_prompt_injection = await asyncio.to_thread(
+            build_system_prompt_injection,
             include_quick_replies=quick_replies_on and platform != "wechat",
             include_show_pages=getattr(self.config, "show_pages_prompt", True),
             include_memory_cli=memory_cli_admitted,
@@ -1703,6 +1760,9 @@ class SessionHandler(BaseHandler):
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
             current_agent_backend="claude",
+            skills_cwd=working_path,
+            skills_project_base=managed_skill_project_base(context),
+            skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
         )
 
         if base_prompt:

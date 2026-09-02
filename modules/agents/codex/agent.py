@@ -19,6 +19,11 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
+from core.managed_skills import (
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.services.agent_steering import (
@@ -1812,7 +1817,7 @@ class CodexAgent(BaseAgent):
         # this turn's shell needs in order to record where it came from. This env is
         # the only hop it can travel: the CLI runs as a subprocess of the Codex shell.
         context = getattr(request, "context", None)
-        return caller_env_for_platform_payload(
+        env = caller_env_for_platform_payload(
             getattr(context, "platform_specific", None),
             message=context,
             # Defensively resolved: this is reached from payload-shaping helpers that
@@ -1822,6 +1827,16 @@ class CodexAgent(BaseAgent):
                 getattr(getattr(self, "controller", None), "config", None), "platform", None
             ),
         )
+        env.update(
+            managed_skill_environment(
+                getattr(request, "working_path", None),
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
+            )
+        )
+        return env
 
     def _caller_env_script_path(self, request: AgentRequest) -> Path:
         caller_env = self._caller_env_for_request(request)
@@ -1861,6 +1876,8 @@ class CodexAgent(BaseAgent):
 
         env = self._caller_env_for_request(request)
         config = dict(params.get("config") or {})
+        config["skills.include_instructions"] = False
+        params["config"] = config
         shell_policy = dict(config.get("shell_environment_policy") or {})
         set_env = dict(shell_policy.get("set") or {})
         had_path = "PATH" in set_env
@@ -1906,7 +1923,7 @@ class CodexAgent(BaseAgent):
             "sandbox": "danger-full-access",
         }
         self.ensure_agent_session_id(request)
-        developer_instructions = self._build_thread_developer_instructions(request)
+        developer_instructions = await self._build_thread_developer_instructions(request)
         if developer_instructions:
             params["developerInstructions"] = developer_instructions
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
@@ -1954,7 +1971,7 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
-        developer_instructions = self._build_thread_developer_instructions(request)
+        developer_instructions = await self._build_thread_developer_instructions(request)
         if developer_instructions:
             params["developerInstructions"] = developer_instructions
         if effective_model:
@@ -2132,9 +2149,10 @@ class CodexAgent(BaseAgent):
         if persisted:
             try:
                 self.bind_agent_session_id(request, persisted)
+                developer_instructions = await self._build_thread_developer_instructions(request)
                 resume_params: Dict[str, Any] = {
                     "threadId": persisted,
-                    "developerInstructions": self._build_thread_developer_instructions(request),
+                    "developerInstructions": developer_instructions,
                 }
                 git_path_state, git_path_managed = self._inject_caller_env_config(
                     resume_params,
@@ -2289,7 +2307,7 @@ class CodexAgent(BaseAgent):
         # created under the ephemeral Hub provider can resume in Direct mode.
         return _CODEX_DEFAULT_PROVIDER_ID
 
-    def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
+    async def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
         """Build Codex thread-level developer instructions for start/resume.
 
         Codex treats these as session configuration, not appended chat history.
@@ -2313,7 +2331,8 @@ class CodexAgent(BaseAgent):
         memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
 
         instruction_parts.append(
-            build_system_prompt_injection(
+            await asyncio.to_thread(
+                build_system_prompt_injection,
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
@@ -2324,6 +2343,11 @@ class CodexAgent(BaseAgent):
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
                 current_agent_backend="codex",
+                skills_cwd=getattr(request, "working_path", None),
+                skills_project_base=managed_skill_project_base(request.context),
+                skills_claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
             )
         )
 
@@ -2367,7 +2391,7 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh thread-level instructions for already-cached Codex threads."""
         self.ensure_agent_session_id(request)
-        developer_instructions = self._build_thread_developer_instructions(request)
+        developer_instructions = await self._build_thread_developer_instructions(request)
         # Building the instructions also grants/revokes the per-turn Memory CLI
         # capability, so resolve the caller environment only after that decision.
         caller_env = self._caller_env_for_request(request)

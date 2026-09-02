@@ -2,8 +2,6 @@ import { ArrowUp, Ellipsis, Github, Globe, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import type { SkillBrief } from '../../../context/ApiContext';
-import { backendsFromAgents } from '../../../lib/backendAccent';
-import { BackendChip } from './BackendChip';
 
 export interface SkillRowProps {
   skill: SkillBrief;
@@ -15,10 +13,9 @@ export interface SkillRowProps {
   onSelect?: () => void;
 }
 
-/** One installed-skill row: lead icon · name + desc + source/version · backend chips. */
+/** One installed-skill row: lead icon · name + description + source/version. */
 export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect }: SkillRowProps) {
   const { t } = useTranslation();
-  const backends = backendsFromAgents(skill.agents);
   return (
     <button
       type="button"
@@ -63,11 +60,6 @@ export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect
             {skill.version ? <span>v{skill.version}</span> : null}
           </span>
         ) : null}
-      </span>
-      <span className="flex shrink-0 items-center gap-1.5">
-        {backends.map((backend) => (
-          <BackendChip key={backend} backend={backend} />
-        ))}
       </span>
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted opacity-0 transition group-hover:opacity-100">
         <Ellipsis className="size-3.5" />

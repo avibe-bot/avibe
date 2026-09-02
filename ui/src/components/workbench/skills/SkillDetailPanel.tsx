@@ -1,22 +1,16 @@
 import type { ReactNode } from 'react';
-import { ArrowUp, Bot, Loader2, Trash2, WandSparkles, X } from 'lucide-react';
-import clsx from 'clsx';
+import { ArrowUp, Loader2, Trash2, WandSparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { SkillBrief, SkillCheckItem } from '../../../context/ApiContext';
-import { BACKEND_LABEL, BACKEND_ORDER, BACKEND_TEXT, backendsFromAgents, type Backend } from '../../../lib/backendAccent';
 import { Button } from '../../ui/button';
-import { Switch } from '../../ui/switch';
 
 export interface SkillDetailPanelProps {
   skill: SkillBrief;
   projectName?: string;
-  /** Backend currently mid add/remove, to show a spinner on that row. */
-  busyBackend?: Backend | null;
   /** Update status from `askill check`; drives the "Update" affordance. */
   check?: SkillCheckItem | null;
   updating?: boolean;
   onClose: () => void;
-  onToggleBackend: (backend: Backend, next: boolean) => void;
   onUpdate?: () => void;
   onRemove: () => void;
   canManage?: boolean;
@@ -27,26 +21,21 @@ function Eyebrow({ children }: { children: ReactNode }) {
 }
 
 /**
- * Right-hand detail panel for a selected installed skill. The "Available to"
- * switches are the core management surface: ON links the skill to that
- * backend (askill add <path> -a <agent>), OFF unlinks it (askill remove -a).
- * Registry-only data (AI quality, commands) isn't in askill `list --json`
+ * Right-hand detail panel for a selected installed skill. Registry-only data
+ * (AI quality, commands) isn't in askill `list --json`
  * yet (askill#11), so it's intentionally absent for installed skills.
  */
 export function SkillDetailPanel({
   skill,
   projectName,
-  busyBackend,
   check,
   updating,
   onClose,
-  onToggleBackend,
   onUpdate,
   onRemove,
   canManage = true,
 }: SkillDetailPanelProps) {
   const { t } = useTranslation();
-  const linked = new Set(backendsFromAgents(skill.agents));
   const updateAvailable = check?.status === 'update_available';
   const versionDelta =
     check?.localVersion || check?.remoteVersion ? `${check?.localVersion ?? '?'} → ${check?.remoteVersion ?? '?'}` : undefined;
@@ -85,32 +74,6 @@ export function SkillDetailPanel({
       </div>
 
       {skill.description ? <p className="text-[12px] leading-relaxed text-muted">{skill.description}</p> : null}
-
-      <div className="flex flex-col gap-2">
-        <Eyebrow>{t('skills.detail.availableTo')}</Eyebrow>
-        <div className="flex flex-col gap-1.5">
-          {BACKEND_ORDER.map((backend) => {
-            const on = linked.has(backend);
-            const busy = busyBackend === backend;
-            return (
-              <div key={backend} className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
-                <Bot className={clsx('size-3.5', BACKEND_TEXT[backend])} />
-                <span className="flex-1 text-[12.5px] font-medium text-foreground">{BACKEND_LABEL[backend]}</span>
-                {busy ? (
-                  <Loader2 className="size-3.5 animate-spin text-muted" />
-                ) : (
-                  <Switch
-                    checked={on}
-                    disabled={!canManage}
-                    onCheckedChange={(next) => onToggleBackend(backend, next)}
-                    label={BACKEND_LABEL[backend]}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
 
       {canManage ? <div className="flex items-center gap-2 pt-1">
         {updateAvailable ? (

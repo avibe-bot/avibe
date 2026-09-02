@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import secrets
+import tempfile
 from typing import Any, Mapping
 
 from config import paths
@@ -132,9 +134,28 @@ def _prune_sessions(sessions: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 def _write_bindings(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        fchmod = getattr(os, "fchmod", None)
+        if callable(fchmod):
+            fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
+
+
+def _binding_lock(path: Path):
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_suffix(path.suffix + ".lock"))
 
 
 def bind_session(
@@ -144,6 +165,10 @@ def bind_session(
     base_env: Mapping[str, str],
     working_dir: Path | str | None,
     ttl_hours: int = BINDING_TTL_HOURS,
+    extra_env: Mapping[str, str] | None = None,
+    binding_token: str | None = None,
+    replace_existing: bool = True,
+    path: str | Path | None = None,
     message: object | None = None,
     fallback_platform: object | None = None,
 ) -> bool:
@@ -166,36 +191,109 @@ def bind_session(
         fallback_platform=fallback_platform,
     )
     env = caller.to_env() if caller is not None else {}
+    if extra_env:
+        env.update((str(key), str(value)) for key, value in extra_env.items() if str(key) and str(value))
     prepend_vendored_git_to_path(
         env,
         base_env=base_env,
         working_dir=working_dir,
     )
-    path = binding_path()
+    path = Path(path) if path is not None else binding_path()
     now = _utc_now()
-    if not env:
+    token = binding_token or secrets.token_hex(16)
+    with _binding_lock(path):
+        if not env:
+            if not path.is_file():
+                return False
+            data = _load_bindings(path)
+            existing_sessions = data.get("sessions", {})
+            sessions = _prune_sessions(existing_sessions, now)
+            sessions.pop(session_id, None)
+            if sessions != existing_sessions:
+                data["sessions"] = sessions
+                _write_bindings(path, data)
+            return False
+
+        data = _load_bindings(path)
+        sessions = _prune_sessions(data.get("sessions", {}), now)
+        existing = sessions.get(session_id)
+        if (
+            not replace_existing
+            and isinstance(existing, dict)
+            and existing.get("binding_token") != token
+        ):
+            return False
+        expires_at = now + timedelta(hours=max(1, int(ttl_hours)))
+        entry = {
+            "env": env,
+            "updated_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "binding_token": token,
+        }
+        if caller is not None:
+            entry["caller_context"] = caller.to_metadata()
+        sessions[session_id] = entry
+        data["sessions"] = sessions
+        _write_bindings(path, data)
+    return True
+
+
+def unbind_session(
+    opencode_session_id: str,
+    *,
+    binding_token: str,
+    path: str | Path | None = None,
+) -> bool:
+    """Remove exactly the active-Turn binding created by one caller."""
+
+    session_id = str(opencode_session_id or "").strip()
+    token = str(binding_token or "").strip()
+    if not session_id or not token:
+        return False
+    path = Path(path) if path is not None else binding_path()
+    with _binding_lock(path):
         if not path.is_file():
             return False
         data = _load_bindings(path)
-        existing_sessions = data.get("sessions", {})
-        sessions = _prune_sessions(existing_sessions, now)
+        sessions = data.get("sessions", {})
+        entry = sessions.get(session_id)
+        if not isinstance(entry, dict) or entry.get("binding_token") != token:
+            return False
         sessions.pop(session_id, None)
-        if sessions != existing_sessions:
-            data["sessions"] = sessions
-            _write_bindings(path, data)
-        return False
+        data["sessions"] = sessions
+        _write_bindings(path, data)
+    return True
 
-    expires_at = now + timedelta(hours=max(1, int(ttl_hours)))
-    data = _load_bindings(path)
-    sessions = _prune_sessions(data.get("sessions", {}), now)
-    entry = {
-        "env": env,
-        "updated_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-    }
-    if caller is not None:
-        entry["caller_context"] = caller.to_metadata()
-    sessions[session_id] = entry
-    data["sessions"] = sessions
-    _write_bindings(path, data)
+
+def refresh_session(
+    opencode_session_id: str,
+    *,
+    binding_token: str,
+    ttl_hours: int = BINDING_TTL_HOURS,
+    path: str | Path | None = None,
+) -> bool:
+    """Extend exactly one live binding without changing its environment."""
+
+    session_id = str(opencode_session_id or "").strip()
+    token = str(binding_token or "").strip()
+    if not session_id or not token:
+        return False
+    path = Path(path) if path is not None else binding_path()
+    now = _utc_now()
+    with _binding_lock(path):
+        if not path.is_file():
+            return False
+        data = _load_bindings(path)
+        sessions = _prune_sessions(data.get("sessions", {}), now)
+        entry = sessions.get(session_id)
+        if not isinstance(entry, dict) or entry.get("binding_token") != token:
+            if sessions != data.get("sessions", {}):
+                data["sessions"] = sessions
+                _write_bindings(path, data)
+            return False
+        entry["updated_at"] = now.isoformat()
+        entry["expires_at"] = (now + timedelta(hours=max(1, int(ttl_hours)))).isoformat()
+        sessions[session_id] = entry
+        data["sessions"] = sessions
+        _write_bindings(path, data)
     return True

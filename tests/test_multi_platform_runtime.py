@@ -688,7 +688,11 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
     assert wechat.sent == [("clear_typing", "wechat", "user-1", "ctx-1")]
 
 
-def test_opencode_prompt_disables_question_tool_for_all_platforms():
+def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
+    snapshot_id = "f" * 64
+    snapshot_root = f"/old-avibe-home/builtin-skills/{snapshot_id}"
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", snapshot_id)
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_ROOT", snapshot_root)
     calls = []
     active_polls = []
     active_poll_updates = []
@@ -697,6 +701,16 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     configured_overlays = []
     active_registrations = []
     released_reservations = []
+    prompt_skill_cwds = []
+
+    def build_prompt(**kwargs):
+        prompt_skill_cwds.append(kwargs.get("skills_cwd"))
+        return "system prompt"
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        build_prompt,
+    )
 
     class _Server:
         async def configure_model_hub_overlay(self, overlay):
@@ -853,7 +867,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     asyncio.run(_run())
 
     assert calls
-    assert calls[0]["tools"] == {"question": False}
+    assert calls[0]["tools"] == {"question": False, "skill": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
     assert calls[0]["attempt_id"] == ATTEMPT_ID
@@ -866,6 +880,39 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
+    assert active_polls[0]["processing_indicator"][
+        "opencode_managed_skill_builtin_snapshot"
+    ] == {"id": snapshot_id, "root": snapshot_root}
+    assert prompt_skill_cwds == ["/tmp/work"]
+
+    binding_failures = []
+
+    def fail_binding(*args, **kwargs):
+        raise OSError("binding unavailable")
+
+    async def record_failure(context, error_text):
+        binding_failures.append(error_text)
+
+    async def emit_failure(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        fail_binding,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        emit_failure,
+    )
+    agent.record_model_hub_native_failure = record_failure
+    calls.clear()
+
+    asyncio.run(_run())
+
+    assert calls
+    assert calls[0]["tools"] == {"question": False, "skill": False}
+    assert prompt_skill_cwds == ["/tmp/work", None]
+    assert binding_failures == []
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():

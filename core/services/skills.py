@@ -1,10 +1,10 @@
 """Business API for Agent Skills — a thin shell over the ``askill`` CLI.
 
 Wraps ``askill <cmd> --json`` (github.com/avibe-bot/askill, v0.1.13+) so the
-Web UI can manage global + project skills across backends without owning
-install logic. The CLI is the source of truth; this layer maps avibe
-concepts onto askill's flags, runs the binary, and parses the documented
-``--json`` contract into plain dicts.
+Web UI can manage one global or project Skill installation shared by every
+backend without owning install logic. The CLI is the source of truth; this
+layer maps Avibe concepts onto askill's flags, runs the binary, and parses the
+documented ``--json`` contract into plain dicts.
 
 Layering (per ``docs/plans/workbench-dispatch-architecture.md`` §6, and the
 build plan in ``docs/plans/workbench-skills-page.md``):
@@ -30,7 +30,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -378,11 +378,14 @@ def _filter_skill_listing(
     if not result.get("ok") or not isinstance(result.get("skills"), list):
         return result
     context = resolve_resource_access_context(user_context)
-    if _project_role_allows_editor(context, project_id):
+    project_editor = _project_role_allows_editor(context, project_id)
+    instance_editor = context.has_role("editor")
+    if (project_editor and instance_editor) or (project_editor and scope == "project") or (
+        instance_editor and scope == "global"
+    ):
         return result
 
     raw_skills = [dict(skill) for skill in result["skills"] if isinstance(skill, dict)]
-    instance_editor = context.has_role("editor")
     descriptors = _skill_resource_descriptors(
         raw_skills,
         requested_scope=scope,
@@ -390,9 +393,8 @@ def _filter_skill_listing(
         project_id=project_id,
         backends=backends,
     )
-    if not descriptors:
-        filtered_skills: list[dict[str, Any]] = []
-    else:
+    allowed: set[tuple[int, int | None]] = set()
+    if descriptors:
         from storage import resource_access_service
         from storage.db import get_cached_sqlite_engine
 
@@ -405,24 +407,30 @@ def _filter_skill_listing(
                 connection=connection,
             )
         allowed = {(item["skill_index"], item["agent_index"]) for item in accessible}
-        filtered_skills = []
-        for skill_index, skill in enumerate(raw_skills):
-            if instance_editor and _skill_scope(skill, scope) == "global":
-                filtered_skills.append(skill)
+
+    filtered_skills: list[dict[str, Any]] = []
+    for skill_index, skill in enumerate(raw_skills):
+        skill_scope = _skill_scope(skill, scope)
+        if (project_editor and skill_scope == "project") or (
+            instance_editor and skill_scope == "global"
+        ):
+            filtered_skills.append(skill)
+            continue
+        matching = [item for item in descriptors if item["skill_index"] == skill_index]
+        if not matching or not any(
+            (item["skill_index"], item["agent_index"]) in allowed for item in matching
+        ):
+            continue
+        raw_agents = skill.get("agents")
+        if isinstance(raw_agents, list):
+            skill["agents"] = [
+                agent
+                for agent_index, agent in enumerate(raw_agents)
+                if (skill_index, agent_index) in allowed
+            ]
+            if not skill["agents"]:
                 continue
-            matching = [item for item in descriptors if item["skill_index"] == skill_index]
-            if not matching or not any((item["skill_index"], item["agent_index"]) in allowed for item in matching):
-                continue
-            raw_agents = skill.get("agents")
-            if isinstance(raw_agents, list):
-                skill["agents"] = [
-                    agent
-                    for agent_index, agent in enumerate(raw_agents)
-                    if (skill_index, agent_index) in allowed
-                ]
-                if not skill["agents"]:
-                    continue
-            filtered_skills.append(_remote_safe_skill_payload(skill))
+        filtered_skills.append(_remote_safe_skill_payload(skill))
 
     filtered = dict(result)
     filtered["skills"] = filtered_skills
@@ -528,19 +536,24 @@ def _require_skill_management_access(
         return
     engine = get_cached_sqlite_engine()
     with engine.connect() as connection:
+        found_policy = False
         for resource_id in resource_ids:
             policy = resource_access_service.get_resource_policy("skill", resource_id, connection=connection)
             if policy is None:
-                if allow_missing_policy or context.is_instance_owner:
-                    continue
-                raise SkillAccessError()
-            if not resource_access_service.can_manage_resource_acl(
+                continue
+            found_policy = True
+            if resource_access_service.can_manage_resource_acl(
                 context,
                 "skill",
                 resource_id,
                 connection=connection,
             ):
-                raise SkillAccessError()
+                # Backend ids are legacy aliases for one logical Skill. Any
+                # manageable alias grants the same unified operation.
+                return
+        if not found_policy and (allow_missing_policy or context.is_instance_owner):
+            return
+        raise SkillAccessError()
 
 
 def _require_skill_create_access(user_context: Any) -> None:
@@ -622,32 +635,6 @@ def _skill_names_from_payload(payload: dict[str, Any]) -> list[str]:
                     names.append(candidate)
                     break
     return list(dict.fromkeys(name for name in names if name.strip()))
-
-
-def _result_backends(result: dict[str, Any], fallback: Optional[list[str]]) -> list[str]:
-    for key in ("selectedAgents", "agents", "removedAgents"):
-        raw_agents = result.get(key)
-        if not isinstance(raw_agents, list):
-            continue
-        resolved = [backend for agent in raw_agents if (backend := _backend_from_agent_ref(agent)) is not None]
-        if resolved:
-            return list(dict.fromkeys(resolved))
-    return _normalized_backends(fallback) or list(BACKEND_TO_AGENT)
-
-
-def _removed_backends(result: dict[str, Any], fallback: Optional[list[str]]) -> list[str]:
-    if "removedAgents" in result:
-        raw_agents = result.get("removedAgents")
-        if not isinstance(raw_agents, list):
-            return []
-        return list(
-            dict.fromkeys(
-                backend
-                for agent in raw_agents
-                if (backend := _backend_from_agent_ref(agent)) is not None
-            )
-        )
-    return _normalized_backends(fallback) or list(BACKEND_TO_AGENT)
 
 
 def _register_created_skill_policies(
@@ -791,14 +778,15 @@ async def list_skills(
     """
     context = resolve_resource_access_context(user_context)
     _require_skill_use_access(context, scope=scope, project_dir=project_dir)
-    args = ["list", *_list_scope_flag(scope), *_agent_flags(backends)]
+    _agent_flags(backends)  # Retained request field: validate, then apply unified semantics.
+    args = ["list", *_list_scope_flag(scope)]
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
     return _filter_skill_listing(
         result,
         scope=scope,
         project_dir=project_dir,
         project_id=project_id,
-        backends=backends,
+        backends=None,
         user_context=context,
     )
 
@@ -841,7 +829,7 @@ async def add_skill(
 ) -> dict[str, Any]:
     """Install skill(s) from a source. Non-interactive (``-y``).
 
-    ``askill add <source> [-g] [-a <agent>...] [--all|--skill <name>] [--copy] -y``.
+    ``askill add <source> [-g] -a claude-code opencode codex [--all|--skill <name>] [--copy] -y``.
     ``skill`` installs one named skill from a multi-skill source (use this for
     local dirs, where ``source@name`` is ambiguous); ``all_skills`` installs
     every discovered skill. ``scope`` must be ``global`` or ``project``.
@@ -850,6 +838,7 @@ async def add_skill(
         raise SkillsError("missing_source", "no source provided")
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "install scope must be global or project")
+    _agent_flags(backends)  # Backward-compatible input validation; selection is intentionally ignored.
     context = resolve_resource_access_context(user_context)
     if scope == "project":
         require_project_editor_access(context, project_id)
@@ -872,14 +861,14 @@ async def add_skill(
                     scope=scope,
                     project_dir=project_dir,
                     project_id=project_id,
-                    backends=backends,
+                    backends=None,
                 ),
                 user_context=context,
                 allow_missing_policy=True,
             )
         listing = await _run_askill(
             askill_path,
-            ["list", *_list_scope_flag(scope), *_agent_flags(backends)],
+            ["list", *_list_scope_flag(scope)],
             cwd=_cwd_for(scope, project_dir),
         )
         for target_name in target_names:
@@ -889,7 +878,7 @@ async def add_skill(
                 scope=scope,
                 project_dir=project_dir,
                 project_id=project_id,
-                backends=backends,
+                backends=None,
             )
             if installed_resource_ids:
                 _require_skill_management_access(
@@ -897,7 +886,12 @@ async def add_skill(
                     user_context=context,
                     allow_missing_policy=False,
                 )
-    args = ["add", source, *_target_scope_flag(scope), *_agent_flags(backends)]
+    args = [
+        "add",
+        source,
+        *_target_scope_flag(scope),
+        *_agent_flags(list(BACKEND_TO_AGENT)),
+    ]
     if skill:
         args += ["--skill", skill]
     if all_skills:
@@ -935,7 +929,7 @@ async def add_skill(
                 scope=scope,
                 project_dir=project_dir,
                 project_id=project_id,
-                backends=_result_backends(result, backends),
+                backends=list(BACKEND_TO_AGENT),
                 user_context=context,
             )
     return result
@@ -951,14 +945,15 @@ async def remove_skill(
     backends: Optional[list[str]] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
-    """Remove an installed skill, optionally from specific backends only.
+    """Remove one logical Skill installation from every managed backend link.
 
-    Maps to ``askill remove <name> [-g] [-a <agent>...]``.
+    The optional legacy ``backends`` field is validated but no longer narrows removal.
     """
     if not name:
         raise SkillsError("missing_skill", "no skill name provided")
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "remove scope must be global or project")
+    _agent_flags(backends)
     context = resolve_resource_access_context(user_context)
     if scope == "project":
         require_project_editor_access(context, project_id)
@@ -973,24 +968,28 @@ async def remove_skill(
             scope=scope,
             project_dir=project_dir,
             project_id=project_id,
-            backends=backends,
+            backends=None,
         )
         _require_skill_management_access(
             resource_ids,
             user_context=context,
             allow_missing_policy=False,
         )
-    args = ["remove", name, *_target_scope_flag(scope), *_agent_flags(backends)]
+    args = [
+        "remove",
+        name,
+        *_target_scope_flag(scope),
+        *_agent_flags(list(BACKEND_TO_AGENT)),
+    ]
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
     if result.get("ok"):
-        removed_backends = _removed_backends(result, backends)
         _delete_skill_policies(
             _resource_ids_for_skill_name(
                 name,
                 scope=scope,
                 project_dir=project_dir,
                 project_id=project_id,
-                backends=removed_backends,
+                backends=None,
             )
         )
     return result

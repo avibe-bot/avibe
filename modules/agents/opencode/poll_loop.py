@@ -703,7 +703,7 @@ class OpenCodePollLoop:
                                     agent=agent_to_use,
                                     model=model_dict,
                                     reasoning_effort=reasoning_effort,
-                                    tools={"question": False},
+                                    tools={"question": False, "skill": False},
                                     awaiting_after_ids={
                                         str(_message_info(item).get("id"))
                                         for item in messages

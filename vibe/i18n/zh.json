@@ -747,6 +747,22 @@
   "permission": {
     "adminOnly": "🔒 仅管理员可以修改 Bot 设置。如需权限请联系管理员。"
   },
+  "skill": {
+    "cli": {
+      "help": {
+        "command": "通过 Avibe 列出和加载 Skills",
+        "list": "列出可用的 Skills",
+        "load": "加载一个 Skill",
+        "page": "Catalog 页码（默认：1）",
+        "name": "Skill 名称"
+      },
+      "more": "还有更多 Skills。运行 `vibe skill list --page {page}` 查看下一页。",
+      "error": {
+        "invalidPage": "错误：页码必须是正整数",
+        "notFound": "未找到 Skill：{name}"
+      }
+    }
+  },
   "memory": {
     "cli": {
       "help": {

@@ -84,6 +84,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _PollLoop:
         async def run_restored_poll_loop(self, poll_info):
+            active_polls.pop(poll_info.opencode_session_id, None)
             return None
 
         async def remove_restored_ack(self, poll_info):
@@ -109,6 +110,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return dict(active_polls)
 
         def remove_active_poll(self, session_id):
+            active_polls.pop(session_id, None)
             removed.append(session_id)
 
     class _Controller:
@@ -147,6 +149,174 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._test_prompt_calls = prompt_calls
     agent._test_server = server
     return agent, status_writes, removed, request_sessions
+
+
+def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "user_id": "remote:user-1",
+        "opencode_caller_context_env": {
+            "AVIBE_SESSION_ID": "ses_wb",
+            "AVIBE_CALLER_PLATFORM": "avibe",
+            "AVIBE_CALLER_USER_ID": "remote:user-1",
+            "AVIBE_CALLER_REMOTE": "1",
+            "AVIBE_CALLER_RESOURCE_CONTEXT": '{"sub":"user-1"}',
+            "IGNORED_ENV": "must-not-pass",
+        },
+        "opencode_managed_skill_project_base": "/tmp",
+        "opencode_managed_skill_builtin_snapshot": {
+            "id": "d" * 64,
+            "root": "/old-avibe-home/builtin-skills/" + "d" * 64,
+        },
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    binding_path = "/old-avibe-home/runtime/opencode_caller_context.json"
+    agent._test_server.caller_context_binding_path = lambda: binding_path
+    bound: list[dict] = []
+    unbound: list[tuple[str, str, str]] = []
+
+    def bind(session_id, payload, **kwargs):
+        bound.append({"session_id": session_id, "payload": payload, **kwargs})
+        return True
+
+    def unbind(session_id, *, binding_token, path):
+        unbound.append((session_id, binding_token, path))
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr("modules.agents.opencode.agent.unbind_caller_context_session", unbind)
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert len(bound) == 1
+    assert bound[0]["session_id"] == "oc-1"
+    assert bound[0]["payload"] is None
+    assert bound[0]["path"] == binding_path
+    assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
+    assert bound[0]["extra_env"]["AVIBE_SKILL_PROJECT_BASE"] == str(Path("/tmp").resolve())
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "d" * 64
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == (
+        "/old-avibe-home/builtin-skills/" + "d" * 64
+    )
+    assert "IGNORED_ENV" not in bound[0]["extra_env"]
+    assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
+
+
+def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    attempts = 0
+
+    def fail_bind(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("temporary binding failure")
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        fail_bind,
+    )
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert attempts == 3
+    assert removed == []
+
+
+def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    attempts = 0
+    unbound: list[str] = []
+
+    def bind(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 4:
+            raise OSError("temporary binding failure")
+        return True
+
+    class _WaitForBindingPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            for _ in range(100):
+                if attempts >= 4:
+                    agent.sessions.remove_active_poll("oc-1")
+                    return
+                await asyncio.sleep(0)
+            raise AssertionError("restored binding was not retried")
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, **_kwargs: unbound.append(session_id) or True,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS",
+        0,
+    )
+    agent._poll_loop = _WaitForBindingPollLoop()
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert attempts == 4
+    assert unbound == ["oc-1"]
+
+
+def test_restore_delayed_binding_does_not_replace_a_newer_turn(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    attempts: list[dict] = []
+
+    def bind(*_args, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) <= 3:
+            raise OSError("temporary binding failure")
+        return False
+
+    class _WaitForConditionalAttemptPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            for _ in range(100):
+                if len(attempts) >= 4:
+                    agent.sessions.remove_active_poll("oc-1")
+                    return
+                await asyncio.sleep(0)
+            raise AssertionError("restored binding was not retried")
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS",
+        0,
+    )
+    agent._poll_loop = _WaitForConditionalAttemptPollLoop()
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert len(attempts) == 4
+    assert "replace_existing" not in attempts[2]
+    assert attempts[3]["replace_existing"] is False
 
 
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
@@ -320,7 +490,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             },
             "reasoning_effort": "high",
             "system": "restored system prompt",
-            "tools": {"question": False},
+            "tools": {"question": False, "skill": False},
         }
     ]
 
