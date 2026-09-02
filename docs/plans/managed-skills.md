@@ -198,7 +198,8 @@ Discovery is deliberately permissive:
 - ignore every other field;
 - do not reject a Skill because unrelated frontmatter is unknown or malformed;
 - do not require the declared name to match the directory name; and
-- decode standard YAML escapes in quoted required fields; and
+- accept quoted or plain required-field keys and decode standard YAML escapes
+  in quoted required values; and
 - fold plain, quoted, or block `description` continuation lines and whitespace
   into a single-line Catalog value.
 
@@ -464,43 +465,25 @@ identity still match. PID liveness alone is insufficient because an operating
 system can reuse a PID after a crash. The binding does not expire while that
 exact process and Turn remain active, so a long-running Turn keeps its advertised
 working directory and snapshot. Restoring a persisted poll publishes a fresh
-binding with the current process identity, authorization snapshot, and absolute
-Skill roots.
+binding with the current process identity and absolute Skill roots. During the
+short handoff before restoration, a stale remote binding supplies only the
+previously advertised Skill roots plus remote-deny caller context; it never
+replays an old authorization snapshot as current.
 
-### 8.3 Caller authorization
+### 8.3 Runtime access boundary
 
-For a remote Workbench caller, the same `resource_user_context` used by the
-Skills management surface is carried in the backend caller binding. Catalog
-rendering, `vibe skill list`, and `vibe skill load` each resolve the current
-winner and filter it through that context before exposing its description or
-body through the managed product path. Missing, malformed, or unavailable
-remote authorization state fails closed while that remote binding is present.
-Avibe built-ins are product runtime content and remain available without
-per-user resource policies. A command with no Avibe caller binding uses local
-owner semantics.
+Workbench resource policies continue to authorize the Skills management API:
+who may install, remove, or inspect packages through the Web surface. They do
+not filter the runtime Catalog or `vibe skill load`. Once a Session can operate
+an agent on the local machine, that agent can use ordinary filesystem tools to
+read known Skill paths, so an environment-backed runtime filter would create a
+false security boundary that the same shell could bypass.
 
-Authorization belongs to the resolved candidate, not merely its declared name.
-The backend-neutral `.agents` candidate uses the three legacy backend policy
-identifiers for its one logical installation. A backend-native candidate uses
-only its own backend policy identifier: Codex for `.codex` and Codex system,
-Claude for `.claude`, and OpenCode for `.opencode` or the OpenCode config root.
-Compatibility entries that resolve to the same physical Skill directory merge
-their backend policy identifiers while remaining one discovery candidate.
-Distinct backend-family directories that merely declare the same name remain
-distinct policy candidates, so access to a losing Claude candidate cannot
-authorize a winning Codex candidate. Within one backend family and project, the
-policy identity is the logical project Skill name; nearer and farther same-name
-directories are resolution inputs for that one logical resource rather than
-independently managed policy objects. These source and policy details remain
-internal and are never shown in the agent-facing Catalog.
-
-Caller bindings are environment supplied to an agent-controlled shell, not an
-unforgeable security credential. An agent can remove or alter them, and this
-protocol deliberately permits ordinary filesystem access to known Skill paths.
-Resource filtering therefore keeps the managed Catalog, load command, and
-Workbench presentation coherent; it is not a confidentiality boundary against
-the agent process. Enforcing one would require a sandboxed command/filesystem
-broker and is outside v1.
+The runtime Catalog is therefore the same resolved local capability set for
+Claude, Codex, and OpenCode. Backend caller bindings select the advertised
+working directory, compatibility roots, and built-in snapshot only. A real
+per-user confidentiality boundary would require a sandboxed command and
+filesystem broker and is outside v1.
 
 ### 8.4 Historical context is historical
 
@@ -537,7 +520,7 @@ applies the same Avibe Catalog to all three backends.
 
 | Backend | Native Skill isolation | Applying a changed Avibe prompt |
 | --- | --- | --- |
-| Claude Code | Configure the SDK with `skills=[]`. | Build the candidate prompt every Turn. If it changed, recreate the SDK client and resume the same native session; otherwise reuse the client. |
+| Claude Code | Configure the SDK with `skills=[]`. | Build the candidate prompt and complete Skill-binding state every Turn. If either changed, recreate the SDK client and resume the same native session; otherwise reuse the client. |
 | Codex | Set `skills.include_instructions=false`. | Build `developerInstructions` every Turn. Send updated instructions only when they differ, while retaining the same thread/session. |
 | OpenCode | Send `tools.skill=false` in every prompt request without rewriting user permission configuration. | Build and send the current system prompt on every new Turn. |
 
@@ -596,15 +579,17 @@ protocol.
 
 Built-in source paths must be representable without aliases on every supported
 platform. Release packaging rejects absolute or traversal paths, backslashes,
-NUL, drive/UNC prefixes, Windows-reserved components, trailing-dot/space names,
-case-insensitive path collisions, and empty directories. It also rejects more
-than 1,024 built-in root entries, any direct child that is not a valid Skill
-directory, more than 4,096 directories and regular files across the complete
-tree, more than 32 MiB of regular-file bytes across the complete tree, any
-Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over 256
-KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB. The aggregate
-entry and byte checks occur before hashing or copying and abort as soon as a
-limit is crossed.
+NUL and every Win32-forbidden control character (`U+0001`-`U+001F`), plus
+every forbidden component character (`<`, `>`, `:`, `"`, `\`, `|`, `?`,
+`*`), drive/UNC prefixes,
+Windows-reserved components, trailing-dot/space names, case-insensitive path
+collisions, and empty directories. It also rejects more than 1,024 built-in
+root entries, any direct child that is not a valid Skill directory, more than
+4,096 directories and regular files across the complete tree, more than 32 MiB
+of regular-file bytes across the complete tree, any Skill whose closing
+frontmatter delimiter exceeds 64 KiB, any body over 256 KiB, or a built-in tree
+whose bounded frontmatter exceeds 8 MiB. The aggregate entry and byte checks
+occur before hashing or copying and abort as soon as a limit is crossed.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -620,13 +605,16 @@ complete mirror that Avibe itself never mutates:
 - built-ins removed from the artifact are absent from its snapshot.
 
 Publication is serialized by a cross-process lock keyed by snapshot digest.
-The publisher builds and validates a hidden sibling staging directory, then
+The next lock holder first removes the one deterministic hidden staging path
+for that digest, reclaiming any partial tree left by an interrupted publisher.
+It then builds and validates that staging directory and
 recomputes the canonical snapshot-v1 digest from the completed staging tree and
 requires it to equal the target `<snapshot-id>` before atomically renaming it
 once into the previously absent digest path. The staged digest includes every
 file byte and executable mode, so copied bytes cannot diverge from the name
-under which they are published. A process interruption can leave only an
-undiscoverable staging directory. If the digest path already exists,
+under which they are published. A process interruption can leave only that
+undiscoverable, bounded staging directory, and the next attempt safely replaces
+it before retrying. If the digest path already exists,
 concurrent or later publishers reuse that path without
 mutating it. A wrong-type or unreadable path fails safely. Readable external
 changes are unsupported post-publication mutation and may affect later
@@ -687,11 +675,9 @@ compatibility inputs; Avibe does not move or rewrite user files during this
 migration. New backend-neutral installs create all three legacy Workbench
 access-policy identifiers for the one logical `.agents` Skill, and logical
 removal removes all three identifiers and askill-managed links. Existing
-backend-native Skills retain their own backend policy identity; a same-name
-candidate from another backend is never a policy alias. Physical askill links
-and any other compatibility entries that resolve to one physical directory
-merge policy identities as defined in Section 8.3. The API
-may continue accepting a
+backend-native Skills retain their existing management-policy identities.
+These identifiers govern the management surface only and do not narrow the
+runtime Catalog. The API may continue accepting a
 legacy `backends` field for compatibility, but validates and ignores narrowing
 requests. The UI removes backend filters, chips, install selectors, and
 availability switches.
@@ -778,6 +764,9 @@ Catalogs at runtime.
 - Standard escapes in a quoted name are decoded before portable-name
   validation, and indented continuation lines in a plain description remain
   part of its normalized Catalog value.
+- Valid quoted `name` and `description` mapping keys are accepted, while the
+  tolerant fallback still extracts required fields when unrelated metadata is
+  malformed.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
   expose paths or sources. When later pages exist, the prompt tells the agent
@@ -802,11 +791,9 @@ Catalogs at runtime.
   cannot pair the opened body with a different directory identity.
 - A body over 256 KiB is omitted from discovery, and a body that crosses the
   limit before load produces empty standard output and a non-zero exit.
-- With its remote caller binding intact, a caller denied by the resolved
-  candidate's Skill policy sees neither its managed Catalog row nor its loaded
-  body. A same-name accessible candidate from a different backend directory
-  cannot authorize the winner, while physical askill aliases of one
-  backend-neutral directory retain logical access.
+- Workbench resource policies continue to govern management operations but do
+  not narrow the runtime Catalog or loaded body, matching the ordinary
+  filesystem capability of the agent process.
 
 ### 14.2 Live Session behavior
 
@@ -836,7 +823,11 @@ and verify:
   Turn bindings preserve each other, and token-guarded cleanup removes only the
   binding created by that Turn; a binding remains valid for a Turn longer than
   24 hours while its exact owning Avibe process stays alive, while a stale
-  binding is rejected after PID reuse; and
+  binding after PID reuse carries only Skill roots and remote-deny caller
+  context until restoration; and
+- a cached Claude client is recreated and resumes the same native Session when
+  its bound Skill roots or built-in snapshot change even if page 1 is identical;
+  and
 - each adapter retains the same native Session when the Catalog changes.
 
 Codex `$skill`, backend TUI commands, and ordinary filesystem reads are not v1
@@ -849,19 +840,23 @@ isolation acceptance gates.
   tree and preserves executable modes required by helper scripts;
 - a fixed snapshot-v1 fixture proves the canonical tree byte stream and
   lowercase SHA-256 identifier remain stable;
-- release packaging rejects non-portable, Windows-reserved, trailing-dot/space,
-  case-insensitively colliding, or empty built-in paths; more than 1,024 root
-  entries; more than 4,096 total subtree entries; more than 32 MiB of aggregate
-  regular-file bytes; a non-Skill direct child; a Skill whose closing
-  frontmatter delimiter exceeds 64 KiB; a body over 256 KiB; and a tree whose
-  bounded frontmatter exceeds the built-in 8 MiB budget;
+- release packaging rejects all Win32-forbidden component characters and
+  controls (`U+0000`-`U+001F`),
+  Windows-reserved, trailing-dot/space, case-insensitively colliding, or empty
+  built-in paths; more than 1,024 root entries; more than 4,096 total subtree
+  entries; more than 32 MiB of aggregate regular-file bytes; a non-Skill direct
+  child; a Skill whose closing frontmatter delimiter exceeds 64 KiB; a body
+  over 256 KiB; and a tree whose bounded frontmatter exceeds the built-in 8 MiB
+  budget;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - publication recomputes the snapshot-v1 digest from the completed staging
   tree and refuses to rename staging bytes under a different digest;
 - an upgrade's selected snapshot contains changed Skills and omits retired
   Skills;
-- interrupted publication cannot expose a partial snapshot;
+- after an injected interruption leaves partial staging state, the next
+  publisher reclaims it and completes successfully without exposing a partial
+  snapshot;
 - a wrong-type or unreadable pre-existing digest path fails safely without
   being traversed, mutated, or rebuilt by runtime commands;
 - two concurrently running artifacts with different bundled trees resolve
