@@ -194,8 +194,9 @@ Claude root through the existing `vibe.claude_config.get_claude_home()` helper
 so discovery and the live Claude backend honor the same override semantics.
 Codex's `.system` directory is an explicit container root rather than a generic
 recursive exception: Avibe inspects only its direct child Skill directories and
-visits it after every user-managed global root. A same-name project or user
-global Skill therefore wins over the Codex-bundled default. The container entry
+visits it after every user-managed global root, including enabled Claude plugin
+roots. A same-name project or user global Skill therefore wins over the
+Codex-bundled default. The container entry
 counts toward the parent root's raw direct-child enumeration limit, but is not
 a candidate and consumes no frontmatter budget there. Its children are charged
 only when the explicit Codex system root is scanned.
@@ -211,14 +212,16 @@ Disabled plugins and relative installation paths are omitted. This lookup runs
 on every Avibe-dispatched Turn so installing,
 enabling, disabling, or removing a plugin is reflected without restarting Avibe
 or creating a Session. A missing CLI, non-zero exit, timeout after one second,
-invalid UTF-8 or JSON, output over 1 MiB, or more than 256 reported entries
-omits plugin roots without failing the rest of discovery.
+combined standard output and standard error over 1 MiB, invalid UTF-8 or JSON,
+or more than 256 reported entries omits plugin roots without failing the rest
+of discovery. The combined output limit is enforced while both streams are
+drained rather than after either stream has been buffered without a bound.
 
 Enabled Claude plugin roots are compatibility inputs for the shared Avibe
-Catalog, not a Claude-only feature. They are scanned after every static root,
-share the compatibility aggregate budget, and expose only each portable Skill
-name and description. Their plugin ID, installation path, and source are not
-shown to the agent.
+Catalog, not a Claude-only feature. They are scanned after the four user static
+roots and before Codex's bundled `.system` root, share the compatibility
+aggregate budget, and expose only each portable Skill name and description.
+Their plugin ID, installation path, and source are not shown to the agent.
 
 ### 4.5 Reserved root
 
@@ -313,8 +316,8 @@ selected by these rules, in order:
 3. Within project scope, a directory nearer to the working directory over a
    more distant directory.
 4. At the same scope and depth, directory-family priority is:
-   `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode > Codex system >
-   enabled Claude plugins.
+   `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode > enabled Claude
+   plugins > Codex system.
 5. If every preceding dimension ties, the candidate whose absolute directory
    path sorts first by Unicode code-point order wins.
 
@@ -323,8 +326,8 @@ The `.avibe` family reserves the highest family slot for future use, but
 `.opencode` at project scope and `${XDG_CONFIG_HOME:-$HOME/.config}/opencode`
 at global scope. Codex system means the explicit
 `${CODEX_HOME:-$HOME/.codex}/skills/.system` container. Enabled Claude plugin
-roots are last so plugin-bundled defaults cannot shadow any static project or
-global Skill.
+roots follow user static roots but precede Codex system defaults, so no bundled
+default shadows an enabled user plugin.
 
 Resolution must be deterministic. After resolution, entries are sorted by
 name for pagination and prompt rendering.
@@ -848,10 +851,14 @@ Catalogs at runtime.
   container, resolves one entry per final name.
 - Enabled Claude plugins contribute their standard `skills` directories to the
   same Avibe Catalog for all three backends, while disabled plugins do not.
+  Enabled plugin Skills override same-name Codex `.system` defaults but not
+  same-name user Skills from the four static compatibility roots.
   A custom V2 Claude CLI path is used for both Turn-time and bound-command
   plugin enumeration.
   Missing, failing, timed-out, malformed, oversized, or over-count plugin-list
-  results omit only plugin roots, and static compatibility discovery continues.
+  results omit only plugin roots, and static compatibility discovery continues;
+  the combined standard output and standard error limit is enforced during
+  capture.
 - Global-root fixtures override `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
   `XDG_CONFIG_HOME` with relative and absolute values; Turn bindings normalize
   them to the same absolute homes used by their live backends, independent of
@@ -890,6 +897,8 @@ Catalogs at runtime.
   encoded as UTF-8 is omitted before Catalog or load output.
 - Unquoted YAML comments after `name` or `description` are ignored while `#`
   inside a quoted scalar remains content.
+- Comment-only and trailing-comment lines around indented plain continuations
+  of required scalars are ignored by the tolerant fallback parser.
 - Standard escapes in a quoted name are decoded before portable-name
   validation, and indented continuation lines in a plain description remain
   part of its normalized Catalog value.
