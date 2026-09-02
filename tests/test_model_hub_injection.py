@@ -243,3 +243,43 @@ def test_fallback_launch_identity_is_stable_for_same_route():
     second = hub_launch(target_model="model-b", runtime_model="model-b", source_id="src_inject02")
     assert first.fingerprint == second.fingerprint
     assert first.source_id != second.source_id
+
+
+@pytest.mark.parametrize("channel", ["hub", "native_cli"])
+def test_claude_launch_fingerprint_covers_process_bound_catalog_metadata(channel):
+    common = {
+        "channel": channel,
+        "gateway_base_url": "http://127.0.0.1:15220" if channel == "hub" else None,
+        "gateway_token": "local-test-token" if channel == "hub" else None,
+        "source_id": "src_inject01",
+    }
+    baseline = hub_launch(
+        **common,
+        context_window=128_000,
+        max_output_tokens=32_000,
+        reasoning_efforts=("high",),
+    )
+
+    for changed in (
+        hub_launch(**common, context_window=256_000, max_output_tokens=32_000, reasoning_efforts=("high",)),
+        hub_launch(**common, context_window=128_000, max_output_tokens=64_000, reasoning_efforts=("high",)),
+        hub_launch(**common, context_window=128_000, max_output_tokens=32_000, reasoning_efforts=()),
+    ):
+        assert changed.fingerprint != baseline.fingerprint
+
+
+def test_codex_launch_fingerprint_ignores_metadata_loaded_by_the_app_server():
+    baseline = hub_launch(
+        backend="codex",
+        context_window=128_000,
+        max_output_tokens=32_000,
+        reasoning_efforts=("high",),
+    )
+    changed = hub_launch(
+        backend="codex",
+        context_window=256_000,
+        max_output_tokens=64_000,
+        reasoning_efforts=(),
+    )
+
+    assert changed.fingerprint == baseline.fingerprint

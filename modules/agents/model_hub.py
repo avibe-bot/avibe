@@ -88,15 +88,29 @@ class ModelHubLaunch:
         if self.channel == "direct":
             return "direct"
         if self.channel == "native_cli":
-            return f"native_cli:{self.source_id or ''}"
-        token_hash = hashlib.sha256((self.gateway_token or "").encode()).hexdigest()
-        return ":".join(
-            (
-                self.channel,
-                self.gateway_base_url or "",
-                token_hash,
+            identity = f"native_cli:{self.source_id or ''}"
+        else:
+            token_hash = hashlib.sha256((self.gateway_token or "").encode()).hexdigest()
+            identity = ":".join(
+                (
+                    self.channel,
+                    self.gateway_base_url or "",
+                    token_hash,
+                )
             )
+        if self.backend != "claude":
+            return identity
+        process_settings = json.dumps(
+            {
+                "context_window": self.context_window,
+                "max_output_tokens": self.max_output_tokens,
+                "reasoning_efforts": self.reasoning_efforts,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        settings_hash = hashlib.sha256(process_settings.encode()).hexdigest()
+        return f"{identity}:settings:{settings_hash}"
 
 
 @dataclass(frozen=True)

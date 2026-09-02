@@ -2075,13 +2075,18 @@ class CodexAgent(BaseAgent):
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
         effective_model = explicit_model or (agent_definition.model if agent_definition else None)
+        effective_effort = explicit_effort or (agent_definition.reasoning_effort if agent_definition else None)
         if getattr(self.controller, "model_hub_runtime", None) is not None:
             from modules.agents.model_hub import launch_for_context
 
             launch = launch_for_context(getattr(request, "context", None))
             if launch is not None and launch.backend == "codex":
                 effective_model = launch.runtime_model or effective_model
-        effective_effort = explicit_effort or (agent_definition.reasoning_effort if agent_definition else None)
+                if (
+                    launch.channel != "direct"
+                    and effective_effort not in launch.reasoning_efforts
+                ):
+                    effective_effort = None
         developer_instructions = vibe_instructions or (agent_definition.developer_instructions if agent_definition else None)
 
         return effective_agent, effective_model, effective_effort, developer_instructions

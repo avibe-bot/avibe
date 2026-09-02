@@ -2108,6 +2108,28 @@ def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path):
     _assert_valid("agent-supply.schema.json", response)
 
 
+def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    legacy_id = "legacy-opus-alias"
+    agent = store.config.agents["claude"]
+    agent.models.append(ModelHubBackendModelConfig(id=legacy_id, origin="manual"))
+    agent.routes[legacy_id] = ModelHubRouteConfig()
+    baseline = next(
+        projected["catalog_models"]
+        for projected in service.list_agents()
+        if projected["backend"] == "claude"
+    )
+    desired = copy.deepcopy(baseline)
+    desired[1]["display_name"] = "Unrelated edit"
+
+    response = asyncio.run(service.set_agent_models("claude", baseline, desired))
+
+    assert any(model["id"] == legacy_id for model in response["catalog_models"])
+    assert response["catalog_models"][1]["display_name"] == "Unrelated edit"
+
+
 def test_backend_catalog_rejects_a_new_id_past_the_admission_bound(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(
@@ -2292,6 +2314,33 @@ def test_backend_catalog_still_rejects_an_unknown_unprefixed_claude_id(tmp_path)
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("claude", baseline, [*baseline, unknown]))
+
+    assert raised.value.code == "backend_model_id_prefix"
+
+
+def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline(
+    tmp_path,
+):
+    service, _store, _adapter = _service(tmp_path)
+    baseline = next(
+        agent["catalog_models"]
+        for agent in service.list_agents()
+        if agent["backend"] == "claude"
+    )
+    forged = {
+        **baseline[1],
+        "id": "deepseek-v4",
+        "origin": "manual",
+    }
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models(
+                "claude",
+                [*baseline, forged],
+                [*baseline, forged],
+            )
+        )
 
     assert raised.value.code == "backend_model_id_prefix"
 

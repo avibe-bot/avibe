@@ -3734,9 +3734,6 @@ class ModelHubService:
                 raise ModelHubError("backend_model_locked", status=409)
         elif default_indices:
             raise ModelHubError("backend_model_locked", status=409)
-        restorable_claude_ids = (
-            set(_builtin_model_ids("claude")) if backend == "claude" else set()
-        )
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
             if isinstance(item, dict) and item.get("id") == "default":
@@ -3750,13 +3747,6 @@ class ModelHubService:
                     canonical_opencode_menu_identity(model.id)
                 except ValueError as exc:
                     raise ModelHubError("backend_model_id_invalid") from exc
-            if (
-                backend == "claude"
-                and model.origin != "builtin"
-                and model.id not in restorable_claude_ids
-                and not model.id.startswith(("claude-", "anthropic-"))
-            ):
-                raise ModelHubError("backend_model_id_prefix")
             rows.append(model)
         if len({model.id for model in rows}) != len(rows):
             raise ModelHubError("backend_model_duplicate")
@@ -3816,6 +3806,13 @@ class ModelHubService:
                     and desired.origin != "builtin"
                 ):
                     raise ModelHubError("backend_model_locked", status=409)
+            for model_id in desired_by_id.keys() - current_by_id.keys():
+                if (
+                    backend == "claude"
+                    and model_id not in _builtin_model_ids("claude")
+                    and not model_id.startswith(("claude-", "anthropic-"))
+                ):
+                    raise ModelHubError("backend_model_id_prefix")
             merged_by_id = dict(current_by_id)
 
             for model_id in baseline_by_id.keys() - desired_by_id.keys():

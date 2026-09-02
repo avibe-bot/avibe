@@ -3549,6 +3549,111 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def test_model_hub_filters_every_codex_effort_source_at_the_adapter_boundary(self):
+        from modules.agents.model_hub import ModelHubLaunch, bind_launch
+
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(),
+            model_hub_runtime=object(),
+        )
+        launch = ModelHubLaunch(
+            backend="codex",
+            channel="hub",
+            requested_model="no-reasoning-model",
+            target_model="upstream-model",
+            runtime_model="no-reasoning-model",
+            reasoning_efforts=(),
+            supports_reasoning=False,
+        )
+        cases = (
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name=None,
+                    subagent_model=None,
+                    subagent_reasoning_effort="high",
+                ),
+                (None, None, None),
+            ),
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name=None,
+                    subagent_model=None,
+                    subagent_reasoning_effort=None,
+                    vibe_agent_reasoning_effort="high",
+                ),
+                (None, None, None),
+            ),
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name=None,
+                    subagent_model=None,
+                    subagent_reasoning_effort=None,
+                ),
+                (None, None, "high"),
+            ),
+            (
+                SimpleNamespace(
+                    context=SimpleNamespace(),
+                    subagent_name="reviewer",
+                    subagent_model=None,
+                    subagent_reasoning_effort=None,
+                    working_path="/tmp/work",
+                ),
+                (None, None, None),
+            ),
+        )
+
+        with patch.object(
+            _MODULE,
+            "load_codex_subagent",
+            return_value=SimpleNamespace(
+                model=None,
+                reasoning_effort="high",
+                developer_instructions=None,
+            ),
+        ):
+            for request, overrides in cases:
+                agent.controller.get_codex_overrides.return_value = overrides
+                bind_launch(request.context, launch)
+                self.assertIsNone(agent._resolve_codex_agent_settings(request)[2])
+
+    def test_model_hub_keeps_supported_codex_effort_and_does_not_filter_direct(self):
+        from modules.agents.model_hub import ModelHubLaunch, bind_launch
+
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, "high")),
+            model_hub_runtime=object(),
+        )
+        request = SimpleNamespace(
+            context=SimpleNamespace(),
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+        )
+        common = {
+            "backend": "codex",
+            "requested_model": "gpt-5",
+            "target_model": "gpt-5",
+            "runtime_model": "gpt-5",
+        }
+
+        bind_launch(
+            request.context,
+            ModelHubLaunch(channel="hub", reasoning_efforts=("high",), **common),
+        )
+        self.assertEqual(agent._resolve_codex_agent_settings(request)[2], "high")
+
+        bind_launch(
+            request.context,
+            ModelHubLaunch(channel="direct", reasoning_efforts=(), **common),
+        )
+        self.assertEqual(agent._resolve_codex_agent_settings(request)[2], "high")
+
     async def test_start_turn_uses_codex_dm_user_effort_from_shared_overrides(self):
         agent = object.__new__(CodexAgent)
         agent.settings_manager = SimpleNamespace(
