@@ -55,6 +55,7 @@ from storage.workbench_sessions_service import (
     require_enabled_agent_identity,
     set_agent_status,
     touch_session,
+    touch_session_agent_activity,
     update_session,
 )
 from vibe.i18n import t as i18n_t
@@ -78,6 +79,7 @@ __all__ = [
     "set_agent_status",
     "session_archived_message",
     "touch_session",
+    "touch_session_agent_activity",
     "update_session",
     "reserve_agent_session",
     "reserve_standalone_agent_session",

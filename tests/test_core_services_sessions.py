@@ -9,6 +9,7 @@ shape or the public function set must update this file in lock-step.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,7 @@ def test_public_surface_is_stable():
         "list_sessions_page",
         "set_agent_status",
         "touch_session",
+        "touch_session_agent_activity",
         "update_session",
         # Legacy IM-style reservation helpers added in C2 for the CLI:
         "reserve_agent_session",
@@ -117,6 +119,7 @@ def test_each_workbench_function_delegates_to_storage():
         "list_sessions",
         "set_agent_status",
         "touch_session",
+        "touch_session_agent_activity",
         "update_session",
     ):
         assert getattr(sessions_service, name) is getattr(storage_sessions, name)
@@ -882,3 +885,243 @@ def test_workbench_default_action_drops_the_explicit_override_marker(isolated_st
         f"dispatch handed the backend reasoning_effort="
         f"{request.vibe_agent_reasoning_effort!r} instead of the default Agent's"
     )
+
+
+# --- Agent-activity rank (session-list ordering) ----------------------
+#
+# ``touch_session`` records input; ``touch_session_agent_activity`` records the
+# session's own agent producing output, so a session working unattended stops
+# sinking below sessions idle since their last user message. It carries its own
+# rate limit because it is called once per agent message and tool-call event.
+
+
+def _rank_stamp_shapes(instant: datetime) -> dict[str, str]:
+    """One stored ``last_active_at`` text per shape the column holds, each
+    naming the same ``instant``.
+
+    Seeded by shape rather than by case so a writer added later is covered by
+    construction. The shapes come from the writers:
+    ``storage.workbench_sessions_service`` and ``storage.agent_session_rows``
+    write ``strftime("%Y-%m-%dT%H:%M:%SZ")``; ``storage.sessions_service``
+    writes ``datetime.isoformat()``, which omits the fractional part when it is
+    exactly zero — one writer, two shapes. Naive rows predate the tz-aware
+    writers. Text ordering disagrees with instant ordering across these, which
+    is why the throttle compares parsed times instead of strings.
+    """
+
+    return {
+        "z_second": instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "z_microsecond": instant.isoformat().replace("+00:00", "Z"),
+        "offset_second": instant.replace(microsecond=0).isoformat(),
+        "offset_microsecond": instant.isoformat(),
+        "naive_second": instant.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def _seed_session_with_stamp(conn, scope_id: str, title: str, stamp) -> str:
+    session_id = sessions_service.create_session(
+        conn, scope_id=scope_id, agent_backend="claude", title=title
+    )["id"]
+    conn.execute(
+        agent_sessions.update()
+        .where(agent_sessions.c.id == session_id)
+        .values(last_active_at=stamp)
+    )
+    return session_id
+
+
+def _freeze_rank_clock(monkeypatch, instant: datetime) -> None:
+    """Pin the helper's own clock so the assertions describe the interval
+    rather than the wall clock the test happens to run on."""
+
+    monkeypatch.setattr(
+        storage_sessions,
+        "_utc_now_iso",
+        lambda: instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def test_agent_activity_rank_is_throttled_to_its_interval(isolated_state, monkeypatch):
+    """Agent output arrives at tool-call rate, so the rank must move at most
+    once per interval however many messages land inside it — and must move
+    again on the first call past it.
+    """
+    interval = storage_sessions.AGENT_ACTIVITY_RANK_INTERVAL_SECONDS
+    start = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        session_id = _seed_session_with_stamp(
+            conn, scope_id, "working", start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+    def bumps_over(offsets: list[int]) -> list[bool]:
+        moved = []
+        for offset in offsets:
+            _freeze_rank_clock(monkeypatch, start + timedelta(seconds=offset))
+            with engine.begin() as conn:
+                moved.append(sessions_service.touch_session_agent_activity(conn, session_id))
+        return moved
+
+    # A burst inside one interval: the stamp is already that recent, so no write
+    # lands however many messages the agent emits.
+    assert bumps_over([1, 2, 5, interval - 1]) == [False, False, False, False]
+    # First call at/after the interval moves it, and re-arms the window.
+    assert bumps_over([interval, interval + 1, 2 * interval - 1]) == [True, False, False]
+    assert bumps_over([2 * interval]) == [True]
+
+    with engine.connect() as conn:
+        stored = sessions_service.get_session(conn, session_id)
+    assert stored["last_active_at"] == (start + timedelta(seconds=2 * interval)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def test_agent_activity_rank_decides_by_instant_for_every_stored_shape(
+    isolated_state, monkeypatch
+):
+    """The throttle decision follows the instant a stamp names, in every shape
+    the column stores — not the text, which sorts differently across shapes.
+    """
+    interval = storage_sessions.AGENT_ACTIVITY_RANK_INTERVAL_SECONDS
+    now = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
+    fresh = now - timedelta(seconds=5, microseconds=-123456)
+    stale = now - timedelta(seconds=interval * 2, microseconds=-123456)
+
+    engine = create_sqlite_engine()
+    seeded: dict[tuple[str, str], str] = {}
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        for age, instant in (("fresh", fresh), ("stale", stale)):
+            for shape, stamp in _rank_stamp_shapes(instant).items():
+                seeded[(age, shape)] = _seed_session_with_stamp(
+                    conn, scope_id, f"{age}-{shape}", stamp
+                )
+
+    _freeze_rank_clock(monkeypatch, now)
+    moved = {}
+    with engine.begin() as conn:
+        for key, session_id in seeded.items():
+            moved[key] = sessions_service.touch_session_agent_activity(conn, session_id)
+
+    # Every shape, one property: inside the interval the rank holds; past it, it moves.
+    assert moved == {key: key[0] == "stale" for key in seeded}
+
+
+def test_agent_activity_rank_bumps_a_row_it_cannot_date(isolated_state, monkeypatch):
+    """A stamp the database cannot parse must fail open. Holding the rank would
+    freeze such a row at the bottom of the list forever; moving it costs one
+    write per interval, the same as any other row.
+    """
+    engine = create_sqlite_engine()
+    undatable = {"null": None, "empty": "", "garbage": "not-a-timestamp"}
+    seeded = {}
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        for name, stamp in undatable.items():
+            seeded[name] = _seed_session_with_stamp(conn, scope_id, name, stamp)
+
+    _freeze_rank_clock(monkeypatch, datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc))
+    with engine.begin() as conn:
+        moved = {
+            name: sessions_service.touch_session_agent_activity(conn, session_id)
+            for name, session_id in seeded.items()
+        }
+    assert moved == dict.fromkeys(undatable, True)
+
+    with engine.connect() as conn:
+        stamps = {
+            name: sessions_service.get_session(conn, session_id)["last_active_at"]
+            for name, session_id in seeded.items()
+        }
+    assert stamps == dict.fromkeys(undatable, "2026-09-02T12:00:00Z")
+
+
+def test_agent_activity_rank_lifts_a_session_working_unattended(isolated_state, monkeypatch):
+    """The user-facing property this exists for: a session whose agent is still
+    working outranks one whose user spoke more recently but has since gone
+    quiet. Ordering is read through the same list the sidebar renders.
+    """
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        working = _seed_session_with_stamp(conn, scope_id, "agent-working", "2026-09-02T11:00:00Z")
+        replied = _seed_session_with_stamp(conn, scope_id, "user-replied", "2026-09-02T11:30:00Z")
+
+    with engine.connect() as conn:
+        before = [row["title"] for row in sessions_service.list_sessions(conn, scope_id=scope_id)["sessions"]]
+    assert before == ["user-replied", "agent-working"]
+
+    # The unattended session's agent emits one message: no user input at all.
+    _freeze_rank_clock(monkeypatch, datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc))
+    with engine.begin() as conn:
+        assert sessions_service.touch_session_agent_activity(conn, working) is True
+
+    with engine.connect() as conn:
+        after = [row["title"] for row in sessions_service.list_sessions(conn, scope_id=scope_id)["sessions"]]
+    assert after == ["agent-working", "user-replied"]
+    # The session nobody touched kept its rank — the bump is not a global re-sort.
+    with engine.connect() as conn:
+        assert sessions_service.get_session(conn, replied)["last_active_at"] == "2026-09-02T11:30:00Z"
+
+
+# Every value the session lifecycle ``status`` column holds. The rank is one more
+# write against a row whose archived state is terminal, and the repository
+# enforces that with a ``status != 'archived'`` predicate on every write rather
+# than a per-caller check, so the property is stated over the whole domain
+# instead of over the one case a reviewer happened to name.
+SESSION_LIFECYCLE_STATUSES = ("active", "archived")
+
+
+def test_agent_activity_rank_never_writes_an_archived_row(isolated_state, monkeypatch):
+    """Archive is terminal, including for late output.
+
+    ``archive_session`` commits the archive first and cancels the in-flight turn
+    best-effort afterwards, so a turn can still be emitting into an
+    already-archived session. Every seeded row carries the same stale stamp, so
+    the throttle would allow all of them and the status predicate is the only
+    thing deciding — and the expectation is derived from the rule, so a lifecycle
+    status added later is covered rather than silently skipped.
+    """
+    stale = "2020-01-01T00:00:00Z"
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        seeded = {
+            status: _seed_session_with_stamp(conn, scope_id, f"s-{status}", stale)
+            for status in SESSION_LIFECYCLE_STATUSES
+        }
+        for status, session_id in seeded.items():
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == session_id)
+                .values(status=status)
+            )
+
+    def archived_row() -> dict:
+        with engine.connect() as conn:
+            return dict(
+                conn.execute(
+                    agent_sessions.select().where(agent_sessions.c.id == seeded["archived"])
+                )
+                .mappings()
+                .one()
+            )
+
+    before = archived_row()
+
+    _freeze_rank_clock(monkeypatch, datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc))
+    with engine.begin() as conn:
+        moved = {
+            status: sessions_service.touch_session_agent_activity(conn, session_id)
+            for status, session_id in seeded.items()
+        }
+    assert moved == {status: status != "archived" for status in SESSION_LIFECYCLE_STATUSES}
+
+    # Nothing on the archived row moved, not merely its rank: the return value is
+    # a claim about the write, and ``updated_at`` shifting would still be a
+    # mutation of terminal metadata. Compared against the row as it was rather
+    # than against a chosen date, so the assertion holds whatever day it runs on.
+    assert archived_row() == before
+    assert before["last_active_at"] == stale
