@@ -31,7 +31,7 @@
       "back": "Back to home"
     },
     "markdown": {
-      "help": "Every Show Page URL also has an agent-readable representation: request it with Accept: text/markdown.",
+      "help": "Public Show Page links automatically return agent-readable Markdown to Agents and command-line clients. For an authorized private read, request the URL with Accept: text/markdown.",
       "errors": {
         "authenticationRequired": "Authentication is required to read this Show Page.",
         "forbidden": "You do not have permission to read this Show Page.",
