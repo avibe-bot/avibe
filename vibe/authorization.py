@@ -476,6 +476,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("GET", r"^/api/models/agents/[^/]+/sources$"),
         ("PUT", r"^/api/models/agents/[^/]+/sources$"),
         ("PUT", r"^/api/models/agents/[^/]+/models$"),
+        ("GET", r"^/api/models/catalog/models-dev$"),
         ("PUT", r"^/api/models/agents/opencode/menu$"),
         ("PATCH", r"^/api/models/agents/[^/]+/mode$"),
         ("POST", r"^/api/models/agents/[^/]+/chains/reorder$"),

@@ -329,6 +329,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/models/agents/codex/chains"),
         ("PUT", "/api/models/agents/codex/chain"),
         ("PUT", "/api/models/agents/codex/models"),
+        ("GET", "/api/models/catalog/models-dev"),
         ("PUT", "/api/global-prompts"),
         ("POST", "/api/projects"),
         ("PATCH", "/api/projects/project-1"),
@@ -512,9 +513,15 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         assert not _context("member", remote=True).has_role(minimum_role), path
 
 
-def test_backend_catalog_write_follows_the_agent_management_boundary() -> None:
-    path = "/api/models/agents/claude/models"
-    assert http_authorization_policy("PUT", path).minimum_role == "member"
+def test_backend_catalog_surface_follows_the_agent_management_boundary() -> None:
+    catalog_surface = (
+        ("GET", "/api/models/agents/claude/models", "editor"),
+        ("PUT", "/api/models/agents/claude/models", "member"),
+        ("GET", "/api/models/catalog/models-dev", "member"),
+    )
+    for method, path, role in catalog_surface:
+        assert http_authorization_policy(method, path).minimum_role == role
+
     assert not _context("editor", remote=True).has_role("member")
     assert _context("member", remote=True).has_role("member")
 
