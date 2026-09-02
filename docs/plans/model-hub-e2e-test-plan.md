@@ -196,6 +196,22 @@ lane-to-lane.
     be broken (e.g. the human-readable error copy). All currently enforceable
     assertions (structured API guards, state transitions, status codes) live
     in separate passing tests. A broad xfail over a mixed test is forbidden.
+  - *Environment ownership invariant (orchestrator ruling 2026-09-02, round 4):*
+    the harness owns every process it starts, by invariant, not by leak-list.
+    Cleanup must PROVE ABSENCE: after teardown, scan the process table for any
+    process whose argv references this test's unique hermetic marker (its
+    `AVIBE_HOME` path) and terminate it, including detached / separately-
+    sessioned engine children whose controller leader already exited. Never
+    trust the recorded leader alone. Scoped strictly to the unique marker —
+    no broad host-process killing — and cross-platform. Regression tests must
+    cover the detached-child escape. If a further process-escape survives a
+    reviewed head, DO NOT patch again: reduce the harness to own fewer
+    processes (single-process topology) and re-scope the affected scenarios.
+  - *Catalog single resolver (round 4):* scenario references (top-level tests
+    AND `partial_evidence.test`, AND skip-row references) resolve through ONE
+    resolver shared by the checker and the metadata; the checker may not hold
+    a second notion of "what a scenario references." Skip rows without a
+    top-level test remain valid but their refs still resolve.
   - *Layer honesty:* a scenario this layer cannot execute is a catalog `skip`
     row with a reason and a pointer to the layer that owns it (unit suite or
     the Playwright lane) — never an `xfail` and never an unconditional-fail

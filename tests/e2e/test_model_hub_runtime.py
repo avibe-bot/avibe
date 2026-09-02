@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -213,6 +214,56 @@ def test_harness_retries_with_fresh_port_after_ui_bind_race(
     assert all(process.poll() is not None for process in ui_processes)
 
 
+def test_harness_cleans_detached_child_after_leader_exits(
+    tmp_path: Path,
+) -> None:
+    """Harness contract: AVIBE_HOME ownership outlives recorded leaders."""
+
+    app = ModelHubTestApp(Path.cwd(), tmp_path)
+    leader_code = (
+        "import subprocess, sys; "
+        "child = subprocess.Popen("
+        "[sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[1]], "
+        "start_new_session=True); "
+        "print(child.pid, flush=True)"
+    )
+    leader = subprocess.Popen(
+        [sys.executable, "-c", leader_code, str(app.avibe_home)],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child_pid: int | None = None
+    try:
+        assert leader.stdout is not None
+        child_pid = int(leader.stdout.readline())
+        leader.wait(timeout=5)
+        assert any(
+            pid == child_pid
+            for processes in app._owned_process_groups().values()
+            for pid, _argv in processes
+        )
+
+        app.stop()
+
+        assert app._owned_process_groups() == {}
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if leader.poll() is None:
+            os.killpg(leader.pid, signal.SIGKILL)
+            leader.wait(timeout=5)
+        if child_pid is not None:
+            for process_group, processes in (
+                app._owned_process_groups().items()
+            ):
+                if any(pid == child_pid for pid, _argv in processes):
+                    try:
+                        os.killpg(process_group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+
 def test_a1_feature_flag_disables_the_complete_models_api(
     disabled_model_hub_app,
 ) -> None:
@@ -292,15 +343,16 @@ def test_a3_runtime_stop_reports_every_blocking_backend(
 ) -> None:
     """A3: the API guards runtime stop with every blocking backend."""
 
-    changed = model_hub_app.client.patch(
-        "/api/models/agents/claude/mode", {"mode": "hub"}
-    )
-    assert changed.status == 200, changed.json()
+    for backend in ("claude", "codex"):
+        changed = model_hub_app.client.patch(
+            f"/api/models/agents/{backend}/mode", {"mode": "hub"}
+        )
+        assert changed.status == 200, changed.json()
     refused = model_hub_app.client.post("/api/models/runtime/stop", {})
     body = refused.json()
     assert refused.status == 409, body
     assert body["error"] == "runtime_in_use"
-    assert body["backends"] == ["claude"]
+    assert body["backends"] == ["claude", "codex"]
 
 
 def test_a5_controller_restart_during_oauth_poll_reports_engine_down(

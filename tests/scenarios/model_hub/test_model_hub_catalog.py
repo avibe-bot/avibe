@@ -54,6 +54,43 @@ def _decorator_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[st
     return names
 
 
+def _resolve_test_evidence(
+    *,
+    scenario_id: str,
+    test_ref: object,
+    canonical_tests: set[str],
+    expected_fail: bool,
+) -> None:
+    assert isinstance(test_ref, str), (
+        f"Scenario {scenario_id} has no executable test reference"
+    )
+    path_text, separator, function_name = test_ref.partition("::")
+    assert separator and path_text and function_name, (
+        f"Scenario {scenario_id} has malformed test reference {test_ref!r}"
+    )
+    path = Path(path_text)
+    assert path_text in canonical_tests
+    assert path.is_file()
+    if path.suffix in _UI_SUFFIXES:
+        # Expected failures are declared with pytest markers, which UI cases
+        # cannot carry. Vitest validates actual UI collection separately.
+        assert not expected_fail, (
+            f"Scenario {scenario_id} is evidenced by a UI case, which "
+            "cannot carry an expected failure"
+        )
+        evidence = path.read_text()
+    else:
+        function = _test_function(path, function_name)
+        actual_expected_fail = "xfail" in _decorator_names(function)
+        assert actual_expected_fail == expected_fail
+        evidence = ast.get_docstring(function) or ""
+    assert scenario_id in evidence, (
+        f"Scenario {scenario_id} is not named inside {test_ref}; "
+        "state the catalog ID in the test docstring — for a UI case, in "
+        "its name — so the executable evidence is greppable by ID"
+    )
+
+
 def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
     """MH-CATALOG-001: every live row resolves, names its own ID, and is reachable from the project index."""
 
@@ -73,36 +110,24 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         status = statuses[scenario["status"]]
         if not status["test_required"]:
             assert test_ref is None
-            continue
-        assert isinstance(test_ref, str), f"Scenario {scenario['id']} has no executable test"
-        path_text, function_name = test_ref.split("::", 1)
-        path = Path(path_text)
-        assert path_text in canonical_tests
-        assert path.is_file()
-        if path.suffix in _UI_SUFFIXES:
-            # An expected failure is declared here with `pytest.mark.xfail`, which a
-            # UI case cannot carry, so a UI-evidenced row may not claim one.
-            assert not status["expected_fail"], (
-                f"Scenario {scenario['id']} is evidenced by a UI case, which cannot carry an expected failure"
-            )
-            # Whether that ID names a case vitest actually *runs* is a question only
-            # vitest answers; `ui/scripts/validate-scenario-catalog.mjs` asks it in
-            # the `npm test` run CI already does over this suite. Approximating it
-            # here would mean re-deciding, from text, which declarations execute —
-            # the answer would be wrong for a skipped, unreachable, or run-time-named
-            # case, and wrong quietly. So this side stops at what it reads exactly:
-            # the file exists and states the ID.
-            evidence = path.read_text()
         else:
-            function = _test_function(path, function_name)
-            expected_fail = "xfail" in _decorator_names(function)
-            assert expected_fail == status["expected_fail"]
-            evidence = ast.get_docstring(function) or ""
-        assert scenario["id"] in evidence, (
-            f"Scenario {scenario['id']} is not named inside {test_ref}; "
-            "state the catalog ID in the test docstring — for a UI case, in its name — "
-            "so the executable evidence is greppable by ID"
-        )
+            _resolve_test_evidence(
+                scenario_id=scenario["id"],
+                test_ref=test_ref,
+                canonical_tests=canonical_tests,
+                expected_fail=status["expected_fail"],
+            )
+
+        partial_evidence = scenario.get("partial_evidence")
+        if partial_evidence is not None:
+            assert isinstance(partial_evidence, dict)
+            assert partial_evidence.get("covers")
+            _resolve_test_evidence(
+                scenario_id=scenario["id"],
+                test_ref=partial_evidence.get("test"),
+                canonical_tests=canonical_tests,
+                expected_fail=False,
+            )
         if scenario["status"] == "partial":
             missing_layer = scenario.get("missing_layer")
             assert missing_layer and missing_layer != scenario["layer"], (

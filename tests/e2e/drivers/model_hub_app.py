@@ -33,6 +33,9 @@ _SAFE_INHERITED_ENV = (
     "TZ",
 )
 _UI_PORT_START_ATTEMPTS = 3
+_OWNED_PROCESS_GRACE_SECONDS = 3.0
+_OWNED_PROCESS_KILL_SECONDS = 2.0
+_OWNED_PROCESS_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -276,7 +279,7 @@ class ModelHubTestApp:
             raise RuntimeError("controller is already running")
         self._controller_log = (self.logs / "controller.log").open("ab")
         self._controller = subprocess.Popen(
-            [sys.executable, "main.py"],
+            [sys.executable, "main.py", str(self.avibe_home)],
             cwd=self.repo_root,
             env=self.env,
             stdout=self._controller_log,
@@ -297,7 +300,7 @@ class ModelHubTestApp:
             f"run_ui_server('127.0.0.1', {self.port})"
         )
         self._ui = subprocess.Popen(
-            [sys.executable, "-c", expression],
+            [sys.executable, "-c", expression, str(self.avibe_home)],
             cwd=self.repo_root,
             env=self.env,
             stdout=self._ui_log,
@@ -413,6 +416,7 @@ class ModelHubTestApp:
         if self._controller_log is not None:
             self._controller_log.close()
             self._controller_log = None
+        self._terminate_owned_process_groups()
 
     def _stop_ui(self) -> None:
         self._stop_process(self._ui)
@@ -437,6 +441,88 @@ class ModelHubTestApp:
             except ProcessLookupError:
                 pass
             process.wait(timeout=5)
+
+    def _terminate_owned_process_groups(self) -> None:
+        """Prove no process still references this runtime's unique marker."""
+
+        owned = self._owned_process_groups()
+        if not owned:
+            return
+        self._signal_process_groups(owned, signal.SIGTERM)
+        owned = self._wait_for_owned_processes(
+            _OWNED_PROCESS_GRACE_SECONDS
+        )
+        if owned:
+            self._signal_process_groups(owned, signal.SIGKILL)
+            owned = self._wait_for_owned_processes(
+                _OWNED_PROCESS_KILL_SECONDS
+            )
+        if owned:
+            details = "; ".join(
+                f"pid={pid} pgid={pgid} argv={argv!r}"
+                for pgid, processes in sorted(owned.items())
+                for pid, argv in processes
+            )
+            raise RuntimeError(
+                "hermetic Model Hub cleanup left owned processes: "
+                f"{details}"
+            )
+
+    def _owned_process_groups(
+        self,
+    ) -> dict[int, list[tuple[int, str]]]:
+        marker = str(self.avibe_home)
+        try:
+            result = subprocess.run(
+                ["ps", "-ww", "-axo", "pid=,pgid=,args="],
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(
+                "could not scan the process table for hermetic children"
+            ) from exc
+
+        current_group = os.getpgrp()
+        owned: dict[int, list[tuple[int, str]]] = {}
+        for raw_line in result.stdout.splitlines():
+            fields = raw_line.strip().split(maxsplit=2)
+            if len(fields) != 3 or marker not in fields[2]:
+                continue
+            try:
+                pid, process_group = map(int, fields[:2])
+            except ValueError:
+                continue
+            if process_group == current_group:
+                raise RuntimeError(
+                    "hermetic child shares the pytest process group; "
+                    f"refusing to signal pgid {current_group}"
+                )
+            owned.setdefault(process_group, []).append((pid, fields[2]))
+        return owned
+
+    @staticmethod
+    def _signal_process_groups(
+        owned: Mapping[int, list[tuple[int, str]]],
+        signum: signal.Signals,
+    ) -> None:
+        for process_group in owned:
+            try:
+                os.killpg(process_group, signum)
+            except ProcessLookupError:
+                pass
+
+    def _wait_for_owned_processes(
+        self, timeout: float
+    ) -> dict[int, list[tuple[int, str]]]:
+        deadline = time.monotonic() + timeout
+        while True:
+            owned = self._owned_process_groups()
+            if not owned or time.monotonic() >= deadline:
+                return owned
+            time.sleep(_OWNED_PROCESS_POLL_SECONDS)
 
     def __enter__(self) -> "ModelHubTestApp":
         return self.start()

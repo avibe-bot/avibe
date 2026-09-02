@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
 
@@ -50,6 +50,8 @@ PROTOCOL_CASES = {
     },
 }
 
+_NO_PROXY_OPENER = build_opener(ProxyHandler({}))
+
 
 def _request(
     base_url: str,
@@ -72,7 +74,7 @@ def _request(
         method=method,
     )
     try:
-        response = urlopen(request, timeout=timeout)
+        response = _NO_PROXY_OPENER.open(request, timeout=timeout)
     except HTTPError as exc:
         response = exc
     with response:
@@ -404,6 +406,36 @@ def test_mock_upstream_control_validation_capture_envelope_and_reset(
         mock_llm_upstream.url, "/__control/requests"
     )
     assert captured == {"requests": []}
+
+
+def test_mock_upstream_contract_client_ignores_inherited_proxy(
+    monkeypatch,
+    mock_llm_upstream,
+) -> None:
+    """Mock contract: loopback control and data calls never use host proxies."""
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    _configure(mock_llm_upstream.url, protocol="openai_chat")
+    status, _, payload = _json_request(
+        mock_llm_upstream.url,
+        "/v1/chat/completions",
+        method="POST",
+        body=PROTOCOL_CASES["openai_chat"]["body"],
+    )
+    assert status == 200
+    assert payload["object"] == "chat.completion"
+
+    status, _, captured = _json_request(
+        mock_llm_upstream.url, "/__control/requests"
+    )
+    assert status == 200
+    assert [request["path"] for request in captured["requests"]] == [
+        "/v1/chat/completions"
+    ]
 
 
 def test_mock_upstream_starts_standalone_with_bare_python() -> None:
