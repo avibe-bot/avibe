@@ -168,6 +168,41 @@ export type AgentChain = {
   [key: string]: unknown;
 };
 
+/**
+ * The one read failure an operator can act on, spelled as an instruction.
+ *
+ * Worth lifting out of the generic throw because the intuition it contradicts
+ * is a reasonable one: Playwright opens a FRESH browser context and the
+ * `request` fixture keeps its own cookie jar, so being signed in to that
+ * instance in your own browser carries nothing into a run. The refusal then
+ * lands on a precondition read, before any test has named itself, and the
+ * status alone reads like the instance is broken.
+ *
+ * Matched as a family rather than as one string: `vibe/ui_server.py` answers
+ * 401 with `remote_access_login_required`, and `ui/src/lib/apiFetch.ts` treats
+ * `remote_access_authorization_refresh_required`, `remote_access_revoked` and
+ * `remote_access_authorization_unavailable` as the same class — the browser
+ * must go and re-authorize. Not one of them is something this suite can do, so
+ * what the operator needs to hear is the same sentence for all four.
+ */
+export const remoteAuthRefusal = (status: number, bodyText: string): string | null => {
+  if (status !== 401) return null;
+  let error: unknown;
+  try {
+    error = (JSON.parse(bodyText) as { error?: unknown }).error;
+  } catch {
+    return null;
+  }
+  if (typeof error !== 'string' || !error.startsWith('remote_access_')) return null;
+  return (
+    `The instance at ${BASE_URL} refused an unauthenticated read with \`${error}\`. `
+    + 'This suite has no login step: Playwright opens a fresh browser context and its API context '
+    + 'keeps a separate cookie jar, so a session in your own browser is not carried into the run. '
+    + 'Point it at an endpoint that serves without a remote-access login \u2014 loopback, or the VM\'s '
+    + 'own host:port on a network you trust \u2014 rather than at a tunnel fronted by one.'
+  );
+};
+
 export class HubApi {
   private token: string | null = null;
   private readonly request: APIRequestContext;
@@ -200,10 +235,13 @@ export class HubApi {
   async read<T>(path: string): Promise<T> {
     const response = await this.request.get(path);
     if (!response.ok()) {
+      const text = await response.text();
+      const refusal = remoteAuthRefusal(response.status(), text);
+      if (refusal) throw new Error(refusal);
       throw new Error(
         `GET ${path} → ${response.status()} ${response.statusText()}. `
           + `This is the instance at ${BASE_URL} failing a read, not a missing capability: `
-          + `${(await response.text()).slice(0, 300)}`,
+          + `${text.slice(0, 300)}`,
       );
     }
     return (await response.json()) as T;

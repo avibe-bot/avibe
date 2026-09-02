@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test } from '@playwright/test';
 
-import { type Agent, type Source, surfaceKind } from './support/api';
+import { type Agent, remoteAuthRefusal, type Source, surfaceKind } from './support/api';
 
 const E2E_DIR = dirname(fileURLToPath(import.meta.url));
 const SUPPORT_DIR = join(E2E_DIR, 'support');
@@ -126,4 +126,27 @@ test('surfaceKind separates the two direct surfaces, not just direct from gatewa
   expect(surfaceKind([agent('direct', true)], oneSource)).toBe('gateway');
   // An instance with no agents at all is bare, not a gateway.
   expect(surfaceKind([], noSources)).toBe('direct-no-backend');
+});
+
+test('a remote-access refusal is answered with what to do, not with a status', () => {
+  // Four names, one thing the operator can do about any of them. Matching the
+  // family rather than the member is what keeps a fifth from arriving as a bare
+  // 401 — the product owns this list, and the suite does not get told when it
+  // grows.
+  for (const error of [
+    'remote_access_login_required',
+    'remote_access_authorization_refresh_required',
+    'remote_access_revoked',
+    'remote_access_authorization_unavailable',
+  ]) {
+    const message = remoteAuthRefusal(401, JSON.stringify({ ok: false, error }));
+    expect(message, error).toContain('no login step');
+    expect(message, error).toContain(error);
+  }
+
+  // And nothing else is one. A 401 from somewhere else, or any other status,
+  // still owes the caller the status and the body the generic throw carries.
+  expect(remoteAuthRefusal(401, JSON.stringify({ error: 'csrf_token_invalid' }))).toBeNull();
+  expect(remoteAuthRefusal(401, 'Unauthorized')).toBeNull();
+  expect(remoteAuthRefusal(500, JSON.stringify({ error: 'remote_access_revoked' }))).toBeNull();
 });

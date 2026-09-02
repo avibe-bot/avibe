@@ -211,11 +211,17 @@ tell whose machine that is. Which makes the consent yours to mean: a shared
 regression VM accumulates product state on purpose, and this suite deletes
 sources and rewrites routes on whatever it is pointed at.
 
-Two caveats. The browser must reach the instance **without a login**, which is
-true for loopback and for a tunnelled instance you are already authenticated to,
-and not true otherwise. And the mock upstream must be reachable *from the VM* as
-well as from this machine, because the instance is what dials it — a
-`127.0.0.1` mock URL will resolve to the VM's own loopback, not to yours.
+Two caveats. The suite has **no login step**, so the endpoint must be one that
+serves without one — a VM's own `host:port` on a network you trust, not a
+tunnel fronted by a remote-access login. Being signed in to that instance in
+your own browser does not carry: Playwright opens a fresh browser context and
+its API context keeps a separate cookie jar. Pointed at a tunnel that wants a
+login, the run fails on a precondition read and says exactly that; supporting
+one would mean a bootstrap that authenticates the page and the API context
+alike, and this suite does not have it. And the mock upstream must be reachable
+*from the VM* as well as from this machine, because the instance is what dials
+it — a `127.0.0.1` mock URL will resolve to the VM's own loopback, not to
+yours.
 
 ## What it leaves behind
 
