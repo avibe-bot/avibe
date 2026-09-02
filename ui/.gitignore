@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright: every artifact the e2e run writes lands under one directory, so
+# there is one entry to keep rather than four scattered defaults.
+e2e/.artifacts
+playwright-report
+test-results
+blob-report
+.playwright

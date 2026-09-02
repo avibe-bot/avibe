@@ -1,0 +1,145 @@
+// Suite A — the capability gate and the gateway runtime switch.
+//
+// Scenario IDs are from docs/plans/model-hub-e2e-test-plan.md §3.
+import {
+  MODEL_HUB_DISABLED_REDIRECT,
+  MODEL_HUB_SETTINGS_PATH,
+} from '../src/components/settings/models/modelHubRoutes';
+import { hub as copy } from './support/copy';
+import { expect, requireModelHub, requireRuntimeRunning, test } from './support/fixtures';
+
+test.describe('A · capability gate and runtime lifecycle', () => {
+  test('A1 · the capability gate, not the browser, decides the route', async ({ page, hub, api }) => {
+    // One test covers both halves on purpose. Which half runs is a property of
+    // the instance, and the assertion that matters is that the browser obeys
+    // whatever the backend declared — splitting it into an "enabled" spec and a
+    // "disabled" spec would leave one of them permanently skipped and hide the
+    // fact that nobody ever checked the other direction.
+    const enabled = await api.modelHubEnabled();
+    await hub.goto();
+
+    if (enabled) {
+      await expect(page).toHaveURL(new RegExp(`${MODEL_HUB_SETTINGS_PATH}$`));
+      await expect(hub.shell).toBeVisible();
+      await expect(page.getByRole('heading', { name: copy('shell.title'), level: 1 })).toBeVisible();
+      return;
+    }
+    await expect(page).toHaveURL(new RegExp(`${MODEL_HUB_DISABLED_REDIRECT}$`));
+    await expect(hub.shell).toHaveCount(0);
+  });
+
+  test('A2 · the switch offers to install when the gateway is not installed', async ({ hub, api }) => {
+    await requireModelHub(api);
+    const runtime = await api.runtime();
+    test.skip(
+      Boolean(runtime?.status?.installed_version),
+      'The gateway is already installed on this instance, so the install entry point is not reachable. '
+        + 'Point VIBE_E2E_BASE_URL at a fresh hermetic instance to cover it (see ui/e2e/README.md).',
+    );
+
+    await hub.goto();
+    // The closed state has to say the gateway is missing before the switch is
+    // touched: a user who cannot install has to learn that from the page.
+    await expect(hub.closedState).toContainText(copy('shell.closed.notInstalled.title'));
+    await expect(hub.runtimeToggle).toHaveAttribute('aria-label', copy('shell.toggle.turnOn'));
+
+    await hub.runtimeToggle.click();
+    await expect(hub.installDialog).toBeVisible();
+    await expect(hub.installDialog).toContainText(copy('install.section.effects'));
+    // Cancel rather than install: downloading and unpacking a release is the
+    // operator's setup step, not something a UI test should do to a machine.
+    await hub.installDialog.getByRole('button', { name: copy('install.cancel'), exact: true }).first().click();
+    await expect(hub.installDialog).toHaveCount(0);
+  });
+
+  test('A2 · turning the gateway off and back on round-trips', async ({ hub, api }) => {
+    await requireModelHub(api);
+    const runtime = await api.runtime();
+    test.skip(
+      runtime?.status?.health !== 'ok',
+      'The gateway is not running on this instance, so there is no running state to stop.',
+    );
+    const hubBackends = (await api.agents()).filter((agent) => agent.mode === 'hub');
+    test.skip(
+      hubBackends.length > 0,
+      `Stopping is blocked while ${hubBackends.map((a) => a.backend).join(', ')} is in Gateway mode — that is scenario A3.`,
+    );
+
+    await hub.goto();
+    await expect(hub.runtimeToggle).toHaveAttribute('aria-label', copy('shell.toggle.turnOff'));
+    await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true');
+
+    await hub.runtimeToggle.click();
+    await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
+    // The page must explain the stopped gateway, not just flip a switch.
+    await expect(hub.closedState).toBeVisible();
+    expect((await api.runtime())?.enabled).toBe(false);
+
+    await hub.runtimeToggle.click();
+    await expect(hub.runtimeToggle).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
+    await expect(hub.closedState).toHaveCount(0);
+    await expect
+      .poll(async () => (await api.runtime())?.status?.health, { timeout: 90_000 })
+      .toBe('ok');
+  });
+
+  test('A3 · the blocked stop names the backends that block it', async ({ hub, api }) => {
+    await requireModelHub(api);
+    const runtime = await api.runtime();
+    test.skip(runtime?.enabled !== true, 'The gateway is off, so stopping cannot be blocked.');
+
+    const restore: string[] = [];
+    const hubBackends = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
+    if (hubBackends.length === 0) {
+      const candidate = (await api.agents()).find((agent) => agent.cli_present);
+      test.skip(!candidate, 'No agent backend is present on this instance to put into Gateway mode.');
+      await api.setAgentMode(candidate!.backend, 'hub');
+      const now = (await api.agents()).filter((agent) => agent.mode === 'hub').map((a) => a.backend);
+      test.skip(
+        now.length === 0,
+        `Backend ${candidate!.backend} could not be switched to Gateway mode — it has no eligible source yet. `
+          + 'Add a source first (see ui/e2e/README.md).',
+      );
+      restore.push(candidate!.backend);
+    }
+
+    try {
+      const names = (await api.agents()).filter((a) => a.mode === 'hub').map((a) => a.backend).join(', ');
+      await hub.goto();
+      // The product refuses the stop AND says who is holding it. A generic
+      // "cannot stop" would satisfy the disabled state and fail the user.
+      await expect(hub.runtimeToggle).toBeDisabled();
+      await expect(hub.runtimeToggle).toHaveAttribute(
+        'aria-label',
+        copy('shell.toggle.stopBlocked', { names }),
+      );
+    } finally {
+      for (const backend of restore) await api.setAgentMode(backend, 'direct');
+    }
+  });
+
+  test('C6-direct-home · a machine with no sources lands on the direct home', async ({ hub, api }) => {
+    await requireModelHub(api);
+    // The tab body only renders once the runtime is configurable; below that the
+    // page owes a closed state, which is scenario A2's subject, not this one's.
+    await requireRuntimeRunning(api);
+    const agents = await api.agents();
+    const sources = await api.sources();
+    // The condition is the product's own (`modelsSurfaceKind`): every backend
+    // direct AND no sources. Anything else is the gateway surface, and asserting
+    // the direct home there would only prove the instance was dirty.
+    test.skip(
+      sources.length > 0 || agents.some((agent) => agent.mode !== 'direct'),
+      'This instance already has sources or a Gateway backend, so the direct home is not its surface.',
+    );
+
+    await hub.goto();
+    await expect(hub.directHome).toBeVisible();
+    await expect(hub.directHome).toContainText(copy('direct.card.current'));
+    // The point of this surface is the way out of it, so the way out is what
+    // gets asserted — not merely that the card rendered.
+    await expect(
+      hub.directHome.getByRole('button', { name: copy('direct.action.switchToGateway') }).first(),
+    ).toBeVisible();
+  });
+});
