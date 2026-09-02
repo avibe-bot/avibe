@@ -175,7 +175,9 @@ Codex's `.system` directory is an explicit container root rather than a generic
 recursive exception: Avibe inspects only its direct child Skill directories and
 visits it after every user-managed global root. A same-name project or user
 global Skill therefore wins over the Codex-bundled default. The container entry
-is excluded when applying the parent user root's child and candidate limits.
+counts toward the parent root's raw direct-child enumeration limit, but is not
+a candidate and consumes no frontmatter budget there. Its children are charged
+only when the explicit Codex system root is scanned.
 
 ### 4.5 Reserved root
 
@@ -455,20 +457,18 @@ the OpenCode caller-context plugin. They are not prompt text or agent-visible
 command arguments. A standalone command without Avibe bindings uses its own
 current working directory and the snapshot bundled with its own executable.
 
-An OpenCode binding normally lives for the active Avibe-dispatched Turn.
-Binding-file updates are serialized across processes, use a unique
-same-directory temporary file and atomic replacement, and cleanup is guarded
-by a per-Turn token so an older Turn cannot remove a newer binding for the same
-native Session. Normal completion removes the binding, and the plugin rejects
-an entry unless both the owning Avibe PID and its non-reusable process-start
-identity still match. PID liveness alone is insufficient because an operating
-system can reuse a PID after a crash. The binding does not expire while that
-exact process and Turn remain active, so a long-running Turn keeps its advertised
-working directory and snapshot. Restoring a persisted poll publishes a fresh
-binding with the current process identity and absolute Skill roots. During the
-short handoff before restoration, a stale remote binding supplies only the
-previously advertised Skill roots plus remote-deny caller context; it never
-replays an old authorization snapshot as current.
+An OpenCode binding normally lives for the active Avibe-dispatched Turn and
+retains the released bridge's 24-hour expiry as crash cleanup. Binding-file
+updates are serialized across processes, use a unique same-directory temporary
+file and atomic replacement, and cleanup is guarded by a per-Turn token so an
+older Turn cannot remove a newer binding for the same native Session. Each new
+or restored Turn refreshes the entry. The persisted shape remains readable by
+an already-running OpenCode server that loaded the released plugin: the
+existing `env`, `updated_at`, and `expires_at` fields are unchanged, while the
+cleanup token and Skill roots are additive. This feature leaves the released
+plugin source unchanged, so an upgrade can adopt its active server and restore
+polls without requesting a plugin refresh. Expired entries are ignored and
+pruned.
 
 ### 8.3 Runtime access boundary
 
@@ -584,12 +584,13 @@ every forbidden component character (`<`, `>`, `:`, `"`, `\`, `|`, `?`,
 `*`), drive/UNC prefixes,
 Windows-reserved components, trailing-dot/space names, case-insensitive path
 collisions, and empty directories. It also rejects more than 1,024 built-in
-root entries, any direct child that is not a valid Skill directory, more than
-4,096 directories and regular files across the complete tree, more than 32 MiB
-of regular-file bytes across the complete tree, any Skill whose closing
-frontmatter delimiter exceeds 64 KiB, any body over 256 KiB, or a built-in tree
-whose bounded frontmatter exceeds 8 MiB. The aggregate entry and byte checks
-occur before hashing or copying and abort as soon as a limit is crossed.
+root entries, any direct child that is not a valid Skill directory, duplicate
+declared Skill names, more than 4,096 directories and regular files across the
+complete tree, more than 32 MiB of regular-file bytes across the complete tree,
+any Skill whose closing frontmatter delimiter exceeds 64 KiB, any body over 256
+KiB, or a built-in tree whose bounded frontmatter exceeds 8 MiB. The aggregate
+entry and byte checks occur before hashing or copying and abort as soon as a
+limit is crossed.
 
 The runtime directory is deliberately separate from user-managed Skills and
 is directly accessible to the agent so loaded built-ins can use their own
@@ -753,7 +754,10 @@ Catalogs at runtime.
   inputs each have separate 4,096-direct-child, 1,024-candidate, and 8 MiB
   frontmatter budgets, so either class can exhaust its own budget without
   consuming the other's. Cross-root exhaustion follows precedence and the
-  pre-frontmatter path order defined in Section 5.1.
+  pre-frontmatter path order defined in Section 5.1. The Codex `.system`
+  container counts toward its parent's raw 1,024-child limit regardless of
+  enumeration order, while its contents are scanned only as the explicit
+  system root.
 - Compatibility directory symlinks resolve to their target directory, and
   replacing either the alias or target after discovery makes load fail. A
   canonical Skill plus all backend compatibility aliases consumes one candidate
@@ -819,12 +823,12 @@ and verify:
 - the Avibe Catalog is equivalent across all three backends;
 - the native backend Catalog is absent;
 - OpenCode's native Skill tool is disabled; and
-- OpenCode user permission configuration is not rewritten, concurrent active
+- OpenCode user permission configuration and released caller-context plugin
+  source are not rewritten, concurrent active
   Turn bindings preserve each other, and token-guarded cleanup removes only the
-  binding created by that Turn; a binding remains valid for a Turn longer than
-  24 hours while its exact owning Avibe process stays alive, while a stale
-  binding after PID reuse carries only Skill roots and remote-deny caller
-  context until restoration; and
+  binding created by that Turn; a released-shape binding remains usable during
+  an upgrade until its existing expiry, and each restored Turn replaces its own
+  entry without pruning other unexpired Sessions; and
 - a cached Claude client is recreated and resumes the same native Session when
   its bound Skill roots or built-in snapshot change even if page 1 is identical;
   and
@@ -848,6 +852,8 @@ isolation acceptance gates.
   child; a Skill whose closing frontmatter delimiter exceeds 64 KiB; a body
   over 256 KiB; and a tree whose bounded frontmatter exceeds the built-in 8 MiB
   budget;
+- release packaging rejects duplicate declared Skill names even when their
+  directories differ;
 - a mode-only built-in change produces a different snapshot and published
   digest;
 - publication recomputes the snapshot-v1 digest from the completed staging
