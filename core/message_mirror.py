@@ -30,6 +30,7 @@ from typing import Any, Optional
 from sqlalchemy.exc import IntegrityError
 
 from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
+from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
@@ -326,6 +327,7 @@ def persist_agent_message(
         appended_row = None
         tool_event_row = None
         message_type = None
+        activity_ranked = False
         is_tool_call = _is_tool_call_type(canonical_type)
         with engine.begin() as conn:
             if context.platform == "avibe":
@@ -445,6 +447,31 @@ def persist_agent_message(
                 # scoped to avibe sessions (IM rows persist but aren't shown there).
                 if context.platform == "avibe" and session_id and not suppress_delivery:
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
+            # Both branches rejoin here: a chat row and a tool-call trace event are
+            # equally proof the agent is working, and the session list ranked on
+            # input alone, so an unattended session sank while it worked. Every
+            # platform, because the rank is read by the Web list, ``vibe session
+            # list``, the run graph, and the running-agents view alike. Not a
+            # background Session: it is absent from all of them, so its rank is
+            # dead weight. Rides the open transaction — no extra commit, no extra
+            # fsync — and self-throttles in the row (see the storage helper).
+            if row_session_id and not suppress_delivery:
+                activity_ranked = workbench_sessions_service.touch_session_agent_activity(
+                    conn, row_session_id
+                )
+        # A rank change means the list has to re-sort, so tell an open browser the
+        # same way an accepted user send does. Gated on the bump having actually
+        # landed, which bounds this to one event per minute per session — strictly
+        # cheaper than the per-message ``inbox.session.updated`` below. avibe-only
+        # for the reason the publishes below are: an IM session has no open Chat or
+        # sidebar consumer, so publishing it would be dead traffic.
+        if activity_ranked and context.platform == "avibe":
+            from core.inbox_events import bus
+
+            bus.publish(
+                "session.activity",
+                {"session_id": row_session_id, "scope_id": scope_id, "event": "agent_activity"},
+            )
         # tool_call rows never enter ``messages``/TRANSCRIPT_TYPES; when the Chat
         # activity panel is enabled they fan out here as a synthesized
         # ``message.new`` so an open Chat page shows the step live. Default off →
