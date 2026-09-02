@@ -198,7 +198,9 @@ Discovery is deliberately permissive:
 - ignore every other field;
 - do not reject a Skill because unrelated frontmatter is unknown or malformed;
 - do not require the declared name to match the directory name; and
-- fold whitespace in `description` into a single-line Catalog value.
+- decode standard YAML escapes in quoted required fields; and
+- fold plain, quoted, or block `description` continuation lines and whitespace
+  into a single-line Catalog value.
 
 If either required value cannot be extracted, omit that candidate without
 failing the whole Catalog. The name grammar is the existing Agent Skills
@@ -456,35 +458,47 @@ An OpenCode binding normally lives for the active Avibe-dispatched Turn.
 Binding-file updates are serialized across processes, use a unique
 same-directory temporary file and atomic replacement, and cleanup is guarded
 by a per-Turn token so an older Turn cannot remove a newer binding for the same
-native Session. Normal completion removes the binding. Every entry also has a
-bounded 24-hour safety expiry, so an operating-system PID reused after a crash
-cannot make an abandoned binding valid indefinitely; the plugin rejects an
-entry when either its owner process is gone or its expiry has passed. Restoring
-a persisted poll publishes a fresh binding with the current process identity,
-authorization snapshot, absolute Skill roots, and a new expiry.
+native Session. Normal completion removes the binding, and the plugin rejects
+an entry whose owning Avibe process is no longer alive. The binding does not
+expire while that process and Turn remain active, so a long-running Turn keeps
+its advertised working directory and snapshot. Restoring a persisted poll
+publishes a fresh binding with the current process identity, authorization
+snapshot, and absolute Skill roots.
 
 ### 8.3 Caller authorization
 
-For a remote Workbench caller, the same trusted `resource_user_context` used by
-the Skills management surface is carried in the backend caller binding. Catalog
+For a remote Workbench caller, the same `resource_user_context` used by the
+Skills management surface is carried in the backend caller binding. Catalog
 rendering, `vibe skill list`, and `vibe skill load` each resolve the current
 winner and filter it through that context before exposing its description or
-body. Missing, malformed, or unavailable remote authorization state fails
-closed for compatibility Skills. Avibe built-ins are product runtime content
-and remain available without per-user resource policies. A genuinely local
-caller retains local owner access.
+body through the managed product path. Missing, malformed, or unavailable
+remote authorization state fails closed while that remote binding is present.
+Avibe built-ins are product runtime content and remain available without
+per-user resource policies. A command with no Avibe caller binding uses local
+owner semantics.
 
 Authorization belongs to the resolved candidate, not merely its declared name.
 The backend-neutral `.agents` candidate uses the three legacy backend policy
 identifiers for its one logical installation. A backend-native candidate uses
 only its own backend policy identifier: Codex for `.codex` and Codex system,
 Claude for `.claude`, and OpenCode for `.opencode` or the OpenCode config root.
-askill compatibility links that resolve back to the selected backend-neutral
-`.agents` directory do not add candidates or policy identities. Distinct
-directories that declare the same name remain distinct candidates, so access
-to a losing Claude candidate cannot authorize a winning Codex candidate. These
-source and policy details remain internal and are never shown in the
-agent-facing Catalog.
+Compatibility entries that resolve to the same physical Skill directory merge
+their backend policy identifiers while remaining one discovery candidate.
+Distinct backend-family directories that merely declare the same name remain
+distinct policy candidates, so access to a losing Claude candidate cannot
+authorize a winning Codex candidate. Within one backend family and project, the
+policy identity is the logical project Skill name; nearer and farther same-name
+directories are resolution inputs for that one logical resource rather than
+independently managed policy objects. These source and policy details remain
+internal and are never shown in the agent-facing Catalog.
+
+Caller bindings are environment supplied to an agent-controlled shell, not an
+unforgeable security credential. An agent can remove or alter them, and this
+protocol deliberately permits ordinary filesystem access to known Skill paths.
+Resource filtering therefore keeps the managed Catalog, load command, and
+Workbench presentation coherent; it is not a confidentiality boundary against
+the agent process. Enforcing one would require a sandboxed command/filesystem
+broker and is outside v1.
 
 ### 8.4 Historical context is historical
 
@@ -671,9 +685,10 @@ compatibility inputs; Avibe does not move or rewrite user files during this
 migration. New backend-neutral installs create all three legacy Workbench
 access-policy identifiers for the one logical `.agents` Skill, and logical
 removal removes all three identifiers and askill-managed links. Existing
-backend-native Skills retain their own backend policy identity; same-name
-directories are never policy aliases. Physical askill links back to the selected
-backend-neutral directory are deduplicated as defined in Section 8.3. The API
+backend-native Skills retain their own backend policy identity; a same-name
+candidate from another backend is never a policy alias. Physical askill links
+and any other compatibility entries that resolve to one physical directory
+merge policy identities as defined in Section 8.3. The API
 may continue accepting a
 legacy `backends` field for compatibility, but validates and ignores narrowing
 requests. The UI removes backend filters, chips, install selectors, and
@@ -758,6 +773,9 @@ Catalogs at runtime.
   direct-child slot.
 - Unquoted YAML comments after `name` or `description` are ignored while `#`
   inside a quoted scalar remains content.
+- Standard escapes in a quoted name are decoded before portable-name
+  validation, and indented continuation lines in a plain description remain
+  part of its normalized Catalog value.
 - Prompt and `vibe skill list` pagination are deterministic for an unchanged
   filesystem, limited to 25 entries, remain within the row budget, and do not
   expose paths or sources. When later pages exist, the prompt tells the agent
@@ -782,10 +800,11 @@ Catalogs at runtime.
   cannot pair the opened body with a different directory identity.
 - A body over 256 KiB is omitted from discovery, and a body that crosses the
   limit before load produces empty standard output and a non-zero exit.
-- A remote caller denied by the resolved candidate's Skill policy sees neither
-  its Catalog row nor its loaded body. A same-name accessible candidate from a
-  different backend directory cannot authorize the winner, while physical
-  askill aliases of one backend-neutral directory retain logical access.
+- With its remote caller binding intact, a caller denied by the resolved
+  candidate's Skill policy sees neither its managed Catalog row nor its loaded
+  body. A same-name accessible candidate from a different backend directory
+  cannot authorize the winner, while physical askill aliases of one
+  backend-neutral directory retain logical access.
 
 ### 14.2 Live Session behavior
 
@@ -813,7 +832,8 @@ and verify:
 - OpenCode's native Skill tool is disabled; and
 - OpenCode user permission configuration is not rewritten, concurrent active
   Turn bindings preserve each other, and token-guarded cleanup removes only the
-  binding created by that Turn; and
+  binding created by that Turn; a binding remains valid for a Turn longer than
+  24 hours while its owning Avibe process stays alive; and
 - each adapter retains the same native Session when the Catalog changes.
 
 Codex `$skill`, backend TUI commands, and ordinary filesystem reads are not v1
