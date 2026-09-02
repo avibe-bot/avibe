@@ -254,6 +254,52 @@ def test_run_ui_server_retries_when_prebind_reports_port_in_use(monkeypatch):
     assert len(run_calls) == 1
 
 
+def test_run_ui_server_keepalive_outlives_upstream_proxy_pool(monkeypatch):
+    """The UI's idle keep-alive must outlive any proxy pooling its connections.
+
+    cloudflared reuses idle origin connections for up to its own keep-alive
+    timeout. If the server expires them first, a reused connection races the
+    close and the browser gets a 502 from a perfectly healthy service. Assert
+    the ordering property rather than a specific number, so retuning either
+    constant cannot silently reintroduce the race.
+    """
+
+    from vibe import ui_server
+    from core.services import settings as settings_service
+
+    captured: dict = {}
+
+    class DummySocket:
+        def close(self):
+            return None
+
+    class DummyServer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, sockets=None):
+            return None
+
+    def capture_config(*args, **kwargs):
+        captured.update(kwargs)
+        return (args, kwargs)
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.Config = capture_config
+    fake_uvicorn.Server = DummyServer
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+    monkeypatch.setattr(ui_server.paths, "ensure_data_dirs", lambda: None)
+    # Keep the probe hermetic: no real config load, no remote-access reconcile.
+    monkeypatch.setattr(settings_service, "load_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui_server, "_bind_ui_socket", lambda _host, _port: DummySocket())
+    monkeypatch.setattr(ui_server, "_reconcile_remote_access_for_ui_start", lambda _config: None)
+
+    ui_server.run_ui_server("127.0.0.1", 5123)
+
+    assert captured["timeout_keep_alive"] > ui_server._CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT_SECONDS
+
+
 def test_ui_error_handler_does_not_explicitly_capture_exceptions():
     source = Path("vibe/ui_server.py").read_text(encoding="utf-8")
     module = ast.parse(source)
