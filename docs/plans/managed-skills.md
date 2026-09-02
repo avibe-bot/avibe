@@ -376,7 +376,9 @@ Contract details:
 
 - `name` is the resolved Skill name.
 - `directory` is the absolute, agent-accessible directory containing
-  `SKILL.md`.
+  `SKILL.md`. Compatibility candidates whose resolved absolute directory is
+  not valid UTF-8 are omitted; v1 does not invent a second path encoding for
+  model-facing output.
 - Load retains an open handle to the selected Skill directory, reads
   `SKILL.md` relative to that handle, and verifies immediately before output
   that the reported absolute path still names the same directory identity. If
@@ -481,8 +483,11 @@ an already-running OpenCode server that loaded the released plugin: the
 existing `env`, `updated_at`, and `expires_at` fields are unchanged, while the
 cleanup token and Skill roots are additive. This feature leaves the released
 plugin source unchanged, so an upgrade can adopt its active server and restore
-polls without requesting a plugin refresh. Expired entries are ignored and
-pruned.
+polls without requesting a plugin refresh. The adopting process reads the
+binding-file path recorded for that managed server and continues to bind,
+renew, and unbind there until the server is replaced, even when the effective
+`AVIBE_HOME` has changed. A newly started server uses the current runtime path.
+Expired entries are ignored and pruned.
 
 ### 8.3 Runtime access boundary
 
@@ -762,10 +767,11 @@ Catalogs at runtime.
 - A fixture that replaces a regular `SKILL.md` with a FIFO between enumeration
   and open cannot block discovery: handle-level type validation omits it before
   any read, and load follows the same descriptor-bound contract.
-- An in-place rewrite, truncation, or replacement of `SKILL.md` during the
-  verified read is never accepted: discovery omits it and load exits non-zero
-  with empty standard output. Atomic namespace replacement after the file is
-  opened is covered separately from in-place handle mutation.
+- A filesystem-observable in-place rewrite, truncation, or replacement of
+  `SKILL.md` during the verified read is rejected: discovery omits it and load
+  exits non-zero with empty standard output. Atomic namespace replacement after
+  the file is opened is covered separately from in-place handle mutation, and
+  coarse filesystems retain the best-effort boundary stated in Section 4.1.
 - Frontmatter parsing reads no more than 64 KiB before accepting or omitting a
   candidate, including for oversized or unterminated input.
 - A root with more than 1,024 direct children is omitted after enumerating at
@@ -781,7 +787,8 @@ Catalogs at runtime.
   replacing either the alias or target after discovery makes load fail. A
   canonical Skill plus all backend compatibility aliases consumes one candidate
   and one frontmatter slot while every enumerated alias still consumes one
-  direct-child slot.
+  direct-child slot. A candidate whose resolved absolute directory cannot be
+  encoded as UTF-8 is omitted before Catalog or load output.
 - Unquoted YAML comments after `name` or `description` are ignored while `#`
   inside a quoted scalar remains content.
 - Standard escapes in a quoted name are decoded before portable-name
@@ -851,7 +858,9 @@ and verify:
   binding created by that Turn; active original and restored polls renew their
   released-shape expiry, an abandoned binding expires without a live renewer,
   and each restored Turn replaces its own entry without pruning other unexpired
-  Sessions; and
+  Sessions. When a managed server is adopted across an `AVIBE_HOME` change,
+  bind, renew, and unbind operations continue using the absolute binding path
+  recorded by that server; and
 - a cached Claude client is recreated and resumes the same native Session when
   its bound Skill roots or built-in snapshot change even if page 1 is identical;
   and
