@@ -555,13 +555,13 @@ def _root_children(
     try:
         with os.scandir(root) as entries:
             for entry in entries:
-                if entry.name in ignored_names:
-                    continue
                 enumerated += 1
                 if enumerated > limit:
                     if budget is not None:
                         budget.direct_children += enumerated
                     return None
+                if entry.name in ignored_names:
+                    continue
                 try:
                     entry_stat = entry.stat(follow_symlinks=False)
                 except OSError:
@@ -1130,6 +1130,7 @@ def _validate_builtin_catalog(root: Path) -> None:
     if children is None:
         raise RuntimeError("Avibe packages at most 1,024 built-in Skills")
     frontmatter_bytes = 0
+    declared_names: set[str] = set()
     for name, child, child_stat in children:
         if not stat.S_ISDIR(child_stat.st_mode):
             raise RuntimeError(f"Built-in Skill root entry is not a directory: {name}")
@@ -1140,6 +1141,9 @@ def _validate_builtin_catalog(root: Path) -> None:
         )
         if skill is None:
             raise RuntimeError(f"Built-in Skill is invalid: {name}")
+        if skill.name in declared_names:
+            raise RuntimeError(f"Built-in Skills must have unique declared names: {skill.name}")
+        declared_names.add(skill.name)
         frontmatter_bytes += consumed
         if frontmatter_bytes > DISCOVERY_CLASS_MAX_FRONTMATTER_BYTES:
             raise RuntimeError("Built-in Skill frontmatter exceeds the 8 MiB catalog budget")

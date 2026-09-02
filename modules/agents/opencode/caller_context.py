@@ -9,13 +9,11 @@ Avibe-managed binding file and injects the AVIBE_* env vars for that call.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
-import sys
 import tempfile
 from typing import Any, Mapping
 
@@ -24,10 +22,10 @@ from core.caller_context import caller_context_from_platform_payload
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
+BINDING_TTL_HOURS = 24
 
 
 PLUGIN_SOURCE = r"""
-import { execFileSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 
 const bindingPath = process.env.AVIBE_OPENCODE_CALLER_CONTEXT_PATH
@@ -52,57 +50,14 @@ function applyEnv(output, env) {
   }
 }
 
-function ownerIdentity(pid) {
-  try {
-    if (process.platform === "linux") {
-      const value = readFileSync(`/proc/${pid}/stat`, "utf8")
-      const fields = value.slice(value.lastIndexOf(")") + 2).trim().split(/\s+/)
-      return fields.length > 19 ? `linux:${fields[19]}` : ""
-    }
-    if (process.platform === "win32") {
-      const script = `[DateTimeOffset]::new((Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`
-      const value = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8" }).trim()
-      return value ? `win32:${value}` : ""
-    }
-    const value = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim().replace(/\s+/g, " ")
-    return value ? `ps:${value}` : ""
-  } catch {
-    return ""
-  }
-}
-
-function applyStaleBindingEnv(output, binding) {
-  const env = binding && typeof binding.env === "object" ? binding.env : {}
-  const safe = {}
-  for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith("AVIBE_SKILL_") || key === "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID") {
-      safe[key] = value
-    }
-  }
-  if (env.AVIBE_CALLER_REMOTE === "1" && typeof env.AVIBE_SESSION_ID === "string") {
-    safe.AVIBE_SESSION_ID = env.AVIBE_SESSION_ID
-    safe.AVIBE_CALLER_PLATFORM = "avibe"
-    safe.AVIBE_CALLER_REMOTE = "1"
-  }
-  applyEnv(output, safe)
-}
-
 export const AvibeCallerContextPlugin = async () => ({
   "shell.env": async (input, output) => {
     const sessionID = input && typeof input.sessionID === "string" ? input.sessionID : ""
     if (!sessionID) return
     const binding = readBindings()[sessionID]
     if (!binding || typeof binding !== "object") return
-    const ownerPID = Number(binding.owner_pid)
-    if (!Number.isInteger(ownerPID) || ownerPID <= 0) {
-      applyStaleBindingEnv(output, binding)
-      return
-    }
-    const expectedIdentity = typeof binding.owner_identity === "string" ? binding.owner_identity : ""
-    if (!expectedIdentity || ownerIdentity(ownerPID) !== expectedIdentity) {
-      applyStaleBindingEnv(output, binding)
-      return
-    }
+    const expiresAt = typeof binding.expires_at === "string" ? Date.parse(binding.expires_at) : 0
+    if (expiresAt && Date.now() > expiresAt) return
     applyEnv(output, binding.env)
   },
 })
@@ -161,56 +116,18 @@ def _load_bindings(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _owner_process_identity(pid: int) -> str | None:
-    if pid <= 0:
-        return None
-    try:
-        if sys.platform.startswith("linux"):
-            value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            fields = value[value.rfind(")") + 2 :].split()
-            return f"linux:{fields[19]}" if len(fields) > 19 else None
-        if sys.platform == "win32":
-            script = (
-                "[DateTimeOffset]::new((Get-Process -Id "
-                f"{pid} -ErrorAction Stop).StartTime.ToUniversalTime())"
-                ".ToUnixTimeMilliseconds()"
-            )
-            result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            value = result.stdout.strip()
-            return f"win32:{value}" if value else None
-        result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        value = " ".join(result.stdout.split())
-        return f"ps:{value}" if value else None
-    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
-        return None
-
-
-def _prune_sessions(sessions: dict[str, Any]) -> dict[str, Any]:
+def _prune_sessions(sessions: dict[str, Any], now: datetime) -> dict[str, Any]:
     pruned: dict[str, Any] = {}
     for key, value in sessions.items():
         if not isinstance(value, dict):
             continue
-        try:
-            owner_pid = int(value.get("owner_pid"))
-        except (TypeError, ValueError):
-            continue
-        if owner_pid <= 0:
-            continue
-        owner_identity = value.get("owner_identity")
-        if not isinstance(owner_identity, str) or _owner_process_identity(owner_pid) != owner_identity:
-            continue
+        expires_at = value.get("expires_at")
+        if isinstance(expires_at, str):
+            try:
+                if datetime.fromisoformat(expires_at) <= now:
+                    continue
+            except ValueError:
+                continue
         pruned[str(key)] = value
     return pruned
 
@@ -247,6 +164,7 @@ def bind_session(
     *,
     base_env: Mapping[str, str],
     working_dir: Path | str | None,
+    ttl_hours: int = BINDING_TTL_HOURS,
     extra_env: Mapping[str, str] | None = None,
     binding_token: str | None = None,
     message: object | None = None,
@@ -287,7 +205,7 @@ def bind_session(
                 return False
             data = _load_bindings(path)
             existing_sessions = data.get("sessions", {})
-            sessions = _prune_sessions(existing_sessions)
+            sessions = _prune_sessions(existing_sessions, now)
             sessions.pop(session_id, None)
             if sessions != existing_sessions:
                 data["sessions"] = sessions
@@ -295,16 +213,13 @@ def bind_session(
             return False
 
         data = _load_bindings(path)
-        sessions = _prune_sessions(data.get("sessions", {}))
-        owner_identity = _owner_process_identity(os.getpid())
-        if owner_identity is None:
-            raise RuntimeError("OpenCode caller binding cannot identify its owner process")
+        sessions = _prune_sessions(data.get("sessions", {}), now)
+        expires_at = now + timedelta(hours=max(1, int(ttl_hours)))
         entry = {
             "env": env,
             "updated_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
             "binding_token": token,
-            "owner_pid": os.getpid(),
-            "owner_identity": owner_identity,
         }
         if caller is not None:
             entry["caller_context"] = caller.to_metadata()

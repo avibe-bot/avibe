@@ -307,7 +307,7 @@ def test_codex_system_skills_are_a_low_priority_global_compatibility_root(
     assert by_name["imagegen"].directory == system.parent.resolve()
 
 
-def test_codex_system_container_does_not_consume_the_user_root_limit(
+def test_codex_system_container_counts_toward_the_user_root_enumeration_limit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -323,7 +323,7 @@ def test_codex_system_container_does_not_consume_the_user_root_limit(
     _write_skill(codex_home / "skills", "user-skill", "user-skill", "User")
     _write_skill(codex_home / "skills" / ".system", "system-skill", "system-skill", "System")
 
-    assert [skill.name for skill in resolve_skills(cwd)] == ["system-skill", "user-skill"]
+    assert [skill.name for skill in resolve_skills(cwd)] == ["system-skill"]
 
 
 def test_empty_backend_home_overrides_fall_back_to_default_roots(tmp_path: Path, monkeypatch) -> None:
@@ -871,6 +871,15 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
     (destination / snapshot_id).write_text("not a directory", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not a directory|unavailable"):
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
+
+
+def test_publication_rejects_duplicate_declared_builtin_names(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_skill(source, "first", "shared-name", "First")
+    _write_skill(source, "second", "shared-name", "Second")
+
+    with pytest.raises(RuntimeError, match="unique declared names"):
+        publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows cannot create forbidden fixture names")

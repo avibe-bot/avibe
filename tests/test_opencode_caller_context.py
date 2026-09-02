@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
 import threading
 
@@ -59,31 +59,60 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
         "AVIBE_SKILL_WORKING_DIR": str(tmp_path / "workspace"),
     }
     assert entry["caller_context"]["session_id"] == "ses123"
-    assert entry["owner_pid"] == os.getpid()
-    assert entry["owner_identity"] == bridge._owner_process_identity(os.getpid())
     assert isinstance(entry["binding_token"], str)
-    assert "expires_at" not in entry
+    assert "expires_at" in entry
 
 
-def test_prune_sessions_keeps_live_owners_and_removes_dead_ones(monkeypatch) -> None:
+def test_prune_sessions_keeps_unexpired_released_entries() -> None:
+    now = datetime(2026, 9, 2, tzinfo=timezone.utc)
     sessions = {
-        "current": {"owner_pid": 101, "owner_identity": "linux:11"},
-        "reused": {"owner_pid": 202, "owner_identity": "linux:22"},
-        "unbound": {"updated_at": "2026-09-02T00:00:00+00:00"},
+        "current": {"expires_at": (now + timedelta(hours=1)).isoformat()},
+        "expired": {"expires_at": (now - timedelta(seconds=1)).isoformat()},
+        "legacy": {"updated_at": "2026-09-02T00:00:00+00:00"},
     }
 
-    def identity(pid):
-        return {101: "linux:11", 202: "linux:23"}.get(pid)
-
-    monkeypatch.setattr(bridge, "_owner_process_identity", identity)
-
-    assert bridge._prune_sessions(sessions) == {"current": sessions["current"]}
+    assert bridge._prune_sessions(sessions, now) == {
+        "current": sessions["current"],
+        "legacy": sessions["legacy"],
+    }
 
 
-def test_plugin_requires_the_recorded_owner_process_identity() -> None:
-    assert "ownerIdentity(ownerPID) !== expectedIdentity" in bridge.PLUGIN_SOURCE
-    assert "applyStaleBindingEnv(output, binding)" in bridge.PLUGIN_SOURCE
-    assert 'safe.AVIBE_CALLER_REMOTE = "1"' in bridge.PLUGIN_SOURCE
+def test_plugin_keeps_the_released_expiry_protocol() -> None:
+    assert "binding.expires_at" in bridge.PLUGIN_SOURCE
+    assert "execFileSync" not in bridge.PLUGIN_SOURCE
+
+
+def test_new_binding_preserves_an_unexpired_released_binding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    path = bridge.binding_path()
+    bridge._write_bindings(
+        path,
+        {
+            "version": 1,
+            "sessions": {
+                "released-session": {
+                    "env": {"AVIBE_SESSION_ID": "released"},
+                    "updated_at": bridge._utc_now().isoformat(),
+                    "expires_at": (bridge._utc_now() + timedelta(hours=1)).isoformat(),
+                }
+            },
+        },
+    )
+
+    assert bridge.bind_session(
+        "new-session",
+        None,
+        base_env={},
+        working_dir=tmp_path,
+        extra_env={"AVIBE_SKILL_WORKING_DIR": str(tmp_path)},
+    )
+
+    sessions = json.loads(path.read_text(encoding="utf-8"))["sessions"]
+    assert set(sessions) == {"released-session", "new-session"}
 
 
 def test_binding_write_does_not_require_posix_fchmod(tmp_path: Path, monkeypatch) -> None:
