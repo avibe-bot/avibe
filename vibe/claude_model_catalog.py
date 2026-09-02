@@ -8,6 +8,7 @@ from typing import Iterable
 
 DEFAULT_CLAUDE_MODEL_ALIASES: tuple[str, ...] = ("opus", "sonnet", "haiku")
 FALLBACK_CLAUDE_MODELS: tuple[str, ...] = (
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-5",
     "claude-opus-4-8",
@@ -82,11 +83,17 @@ def infer_models_from_bundle(bundle_path: Path) -> list[str]:
 
 def sort_catalog_models(models: Iterable[str]) -> list[str]:
     normalized = [model for model in _dedupe_str_values(models) if _is_public_catalog_model(model)]
+    max_version_parts = max(
+        (len(_model_version(model)) for model in normalized),
+        default=0,
+    )
 
     def sort_key(model: str) -> tuple[int, tuple[int, ...], str]:
         parts = model.split("-")
         family = parts[1] if len(parts) > 1 else ""
-        version_numbers = tuple(-int(part) for part in parts[2:] if part.isdigit())
+        version = _model_version(model)
+        padded_version = version + (0,) * (max_version_parts - len(version))
+        version_numbers = tuple(-part for part in padded_version)
         return (
             _CLAUDE_FAMILY_ORDER.get(family, len(_CLAUDE_FAMILY_ORDER)),
             version_numbers,
@@ -137,3 +144,7 @@ def _int_or_none(value: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _model_version(model: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in model.split("-")[2:] if part.isdigit())
