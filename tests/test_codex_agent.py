@@ -1679,7 +1679,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent = object.__new__(CodexAgent)
         agent.sessions = SimpleNamespace(get_agent_session_id=Mock(return_value="thread-old"))
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
-        agent._build_thread_developer_instructions = Mock(return_value=None)
+        agent._build_thread_developer_instructions = AsyncMock(return_value=None)
         agent._start_thread = AsyncMock()
         request = SimpleNamespace(session_key="settings-1", base_session_id="session-1")
         transport = SimpleNamespace(send_request=AsyncMock(side_effect=ConnectionError("Codex app-server stdout closed")))
@@ -2116,7 +2116,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(get_agent_session_id=Mock(return_value="thread-projection"))
         agent.bind_agent_session_id = Mock()
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
-        agent._build_thread_developer_instructions = Mock(return_value=None)
+        agent._build_thread_developer_instructions = AsyncMock(return_value=None)
         agent._resolve_resume_model_provider_override = AsyncMock(return_value=None)
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -2959,7 +2959,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(get_agent_session_id=Mock(return_value="thread-subagent"))
         agent.bind_agent_session_id = Mock()
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
-        agent._build_thread_developer_instructions = Mock(return_value=None)
+        agent._build_thread_developer_instructions = AsyncMock(return_value=None)
         agent._resolve_resume_model_provider_override = AsyncMock(return_value=None)
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -2993,7 +2993,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.bind_agent_session_id = Mock()
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent._start_thread = AsyncMock()
-        agent._build_thread_developer_instructions = Mock(return_value=None)
+        agent._build_thread_developer_instructions = AsyncMock(return_value=None)
         agent._resolve_resume_model_provider_override = AsyncMock(return_value=None)
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -3186,9 +3186,13 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             subagent_name=None,
         )
 
-        disabled_instructions = agent._build_thread_developer_instructions(request)
+        disabled_instructions = asyncio.run(
+            agent._build_thread_developer_instructions(request)
+        )
         agent.controller.config.memory.enabled = True
-        enabled_instructions = agent._build_thread_developer_instructions(request)
+        enabled_instructions = asyncio.run(
+            agent._build_thread_developer_instructions(request)
+        )
 
         self.assertNotIn("## Personal Memory", disabled_instructions)
         self.assertIn("## Personal Memory", enabled_instructions)
@@ -3290,7 +3294,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent = object.__new__(CodexAgent)
         agent.sessions = SimpleNamespace(ensure_agent_session_id=Mock(return_value="sesk8m4q2p7x"))
         agent._resolve_resume_model_provider_override = AsyncMock(return_value=None)
-        agent._build_thread_developer_instructions = Mock(return_value="stable instructions")
+        agent._build_thread_developer_instructions = AsyncMock(return_value="stable instructions")
         agent._thread_developer_instructions = {
             "session-1": ("thread-existing", "stable instructions")
         }
@@ -3342,7 +3346,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent = object.__new__(CodexAgent)
         agent.sessions = SimpleNamespace(ensure_agent_session_id=Mock(return_value="sesk8m4q2p7x"))
         agent._resolve_resume_model_provider_override = AsyncMock(return_value=None)
-        agent._build_thread_developer_instructions = Mock(return_value="stable instructions")
+        agent._build_thread_developer_instructions = AsyncMock(return_value="stable instructions")
         agent._thread_developer_instructions = {
             "session-1": ("thread-existing", "stable instructions")
         }

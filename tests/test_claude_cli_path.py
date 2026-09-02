@@ -194,20 +194,24 @@ def test_claude_system_prompt_follows_live_memory_enabled_state(tmp_path: Path) 
         platform_specific={"memory_cli_admitted": True},
     )
 
-    disabled = handler._build_claude_system_prompt(
-        context,
-        session_key="test::C123",
-        agent_name="claude",
-        session_anchor="slack_C123",
-        agent_system_prompt=None,
+    disabled = asyncio.run(
+        handler._build_claude_system_prompt(
+            context,
+            session_key="test::C123",
+            agent_name="claude",
+            session_anchor="slack_C123",
+            agent_system_prompt=None,
+        )
     )
     controller.config.memory.enabled = True
-    enabled = handler._build_claude_system_prompt(
-        context,
-        session_key="test::C123",
-        agent_name="claude",
-        session_anchor="slack_C123",
-        agent_system_prompt=None,
+    enabled = asyncio.run(
+        handler._build_claude_system_prompt(
+            context,
+            session_key="test::C123",
+            agent_name="claude",
+            session_anchor="slack_C123",
+            agent_system_prompt=None,
+        )
     )
 
     assert "## Personal Memory" not in disabled["append"]
@@ -640,7 +644,7 @@ def test_session_handler_recreates_cached_claude_client_when_skill_bindings_chan
     monkeypatch.setattr(
         session_handler_module,
         "managed_skill_environment",
-        lambda _working_path: dict(skill_env),
+        lambda _working_path, **_kwargs: dict(skill_env),
     )
 
     controller = _Controller(tmp_path)

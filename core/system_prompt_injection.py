@@ -739,6 +739,7 @@ def build_system_prompt_injection(
     enabled_agents: Optional[Iterable[Any]] = None,
     current_agent_backend: Optional[str] = None,
     skills_cwd: str | Path | None = None,
+    skills_project_base: str | Path | None = None,
 ) -> str:
     """Build avibe system prompt additions for an agent backend."""
 
@@ -774,7 +775,7 @@ def build_system_prompt_injection(
         from core.managed_skills import render_skill_catalog_prompt, resolve_skills
 
         prompt += render_skill_catalog_prompt(
-            resolve_skills(skills_cwd)
+            resolve_skills(skills_cwd, project_base=skills_project_base)
         )
     if context is not None:
         prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)

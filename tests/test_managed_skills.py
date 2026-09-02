@@ -18,6 +18,7 @@ from core.managed_skills import (
     SKILL_CLAUDE_HOME_ENV,
     SKILL_CODEX_HOME_ENV,
     SKILL_HOME_ENV,
+    SKILL_PROJECT_BASE_ENV,
     SKILL_XDG_CONFIG_HOME_ENV,
     SKILL_WORKING_DIR_ENV,
     load_skill,
@@ -782,6 +783,50 @@ def test_compatibility_aliases_share_one_candidate_budget_slot(tmp_path: Path, m
     assert skills[0].directory == canonical.parent.resolve()
 
 
+def test_bound_non_git_project_base_is_discovered_from_descendant(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "project"
+    working_directory = project / "packages" / "app"
+    working_directory.mkdir(parents=True)
+    _write_skill(project / ".agents" / "skills", "root-skill", "root-skill", "Root")
+
+    assert _isolated_resolve(working_directory, tmp_path) == []
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            working_directory,
+            tmp_path,
+            project_base=project,
+        )
+    ] == ["root-skill"]
+
+    monkeypatch.setenv(SKILL_WORKING_DIR_ENV, str(working_directory))
+    monkeypatch.setenv(SKILL_PROJECT_BASE_ENV, str(project))
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            working_directory,
+            tmp_path,
+            project_base=None,
+        )
+    ] == ["root-skill"]
+
+
+def test_project_base_outside_working_directory_is_ignored(tmp_path: Path) -> None:
+    working_directory = tmp_path / "project" / "child"
+    other = tmp_path / "other"
+    working_directory.mkdir(parents=True)
+    _write_skill(other / ".agents" / "skills", "other", "other", "Other")
+
+    assert _isolated_resolve(
+        working_directory,
+        tmp_path,
+        project_base=other,
+    ) == []
+
+
 def test_distinct_same_name_candidates_keep_precedence_winner(tmp_path: Path) -> None:
     cwd = tmp_path / "project"
     _write_skill(cwd / ".codex" / "skills", "shared", "shared", "Codex")
@@ -866,6 +911,19 @@ def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
     assert (destination / new_id / "current" / "SKILL.md").is_file()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX executable mode")
+def test_publication_preserves_each_executable_bit(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    helper = _write_skill(source, "alpha", "alpha", "Alpha").parent / "run.sh"
+    helper.write_text("echo alpha\n", encoding="utf-8")
+    helper.chmod(0o744)
+
+    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert (destination / snapshot_id / "alpha" / "run.sh").stat().st_mode & 0o111 == 0o100
+
+
 def test_publication_ignores_install_generated_python_bytecode(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _write_skill(source, "alpha", "alpha", "Alpha")
@@ -945,6 +1003,17 @@ def test_publication_rejects_duplicate_declared_builtin_names(tmp_path: Path) ->
     _write_skill(source, "second", "shared-name", "Second")
 
     with pytest.raises(RuntimeError, match="unique declared names"):
+        publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
+
+
+def test_publication_rejects_invalid_utf8_builtin_body(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    skill_file.write_bytes(
+        b"---\nname: alpha\ndescription: Alpha\n---\ninvalid:\xff\n"
+    )
+
+    with pytest.raises(RuntimeError, match="Built-in Skill is invalid"):
         publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
 
 
@@ -1156,6 +1225,21 @@ def test_bound_working_directory_and_snapshot_are_inherited(monkeypatch, tmp_pat
         SKILL_CLAUDE_HOME_ENV: str((home / ".claude").resolve()),
         SKILL_XDG_CONFIG_HOME_ENV: str((home / ".config").resolve()),
     }
+
+
+def test_managed_skill_environment_binds_valid_project_base(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    working_directory = project / "child"
+    working_directory.mkdir(parents=True)
+
+    env = managed_skill_environment(working_directory, project_base=project)
+
+    assert env[SKILL_WORKING_DIR_ENV] == str(working_directory.resolve())
+    assert env[SKILL_PROJECT_BASE_ENV] == str(project.resolve())
+    assert SKILL_PROJECT_BASE_ENV not in managed_skill_environment(
+        working_directory,
+        project_base=tmp_path / "other",
+    )
 
 
 def test_bound_builtin_root_survives_avibe_home_change(monkeypatch, tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ import struct
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import yaml
 
@@ -29,6 +29,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 logger = logging.getLogger(__name__)
 
 SKILL_WORKING_DIR_ENV = "AVIBE_SKILL_WORKING_DIR"
+SKILL_PROJECT_BASE_ENV = "AVIBE_SKILL_PROJECT_BASE"
 BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
 BUILTIN_SKILLS_ROOT_ENV = "AVIBE_BUILTIN_SKILLS_ROOT"
 SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
@@ -655,20 +656,51 @@ def _scan_root(
     return skills
 
 
-def _project_directories(cwd: Path) -> list[Path]:
+def _project_directories(
+    cwd: Path,
+    *,
+    project_base: str | Path | None = None,
+) -> list[Path]:
     current = cwd.expanduser().resolve()
     if not current.is_dir():
         return []
+    boundary = _project_base_for_working_directory(current, project_base)
     directories: list[Path] = []
     directory = current
     for _ in range(PROJECT_ROOT_MAX_DIRECTORIES):
         directories.append(directory)
-        if (directory / ".git").exists():
+        if directory == boundary or (directory / ".git").exists():
             return directories
         if directory.parent == directory:
             break
         directory = directory.parent
     return [current]
+
+
+def _project_base_for_working_directory(
+    working_directory: Path,
+    project_base: str | Path | None,
+) -> Path | None:
+    if project_base is None:
+        return None
+    raw = Path(project_base).expanduser()
+    if not raw.is_absolute():
+        return None
+    resolved = raw.resolve()
+    try:
+        working_directory.relative_to(resolved)
+    except ValueError:
+        return None
+    return resolved
+
+
+def managed_skill_project_base(context: Any) -> str | None:
+    """Return the project base bound to a resolved Avibe run target."""
+
+    payload = getattr(context, "platform_specific", None) or {}
+    target = payload.get("agent_run_target") if isinstance(payload, dict) else None
+    value = target.get("project_base") if isinstance(target, dict) else None
+    return str(value) if isinstance(value, str) and value else None
 
 
 def _working_directory(cwd: str | Path | None) -> Path:
@@ -717,6 +749,7 @@ def _selected_builtin_root(
 def resolve_skills(
     cwd: str | Path | None = None,
     *,
+    project_base: str | Path | None = None,
     home: str | Path | None = None,
     avibe_home: str | Path | None = None,
     codex_home: str | Path | None = None,
@@ -783,7 +816,17 @@ def resolve_skills(
     compatibility_budget = _DiscoveryBudget()
     compatibility_directory_identities: set[tuple[int, int]] = set()
     working_directory = _working_directory(cwd)
-    for depth, directory in enumerate(_project_directories(working_directory)):
+    selected_project_base = (
+        project_base
+        if project_base is not None
+        else os.environ.get(SKILL_PROJECT_BASE_ENV)
+    )
+    for depth, directory in enumerate(
+        _project_directories(
+            working_directory,
+            project_base=selected_project_base,
+        )
+    ):
         for relative_root, family_rank in _PROJECT_FAMILIES:
             if compatibility_budget.exhausted:
                 break
@@ -1223,7 +1266,7 @@ def _copy_snapshot_entries(entries: Sequence[_SnapshotEntry], destination: Path)
                     f"Built-in Skill file changed during publication: {entry.relative}"
                 )
             if os.name != "nt" and callable(getattr(os, "fchmod", None)):
-                os.fchmod(target_fd, 0o755 if before.st_mode & 0o111 else 0o644)
+                os.fchmod(target_fd, 0o644 | int(before.st_mode & 0o111))
         finally:
             if target_fd is not None:
                 os.close(target_fd)
@@ -1243,7 +1286,7 @@ def _validate_builtin_catalog(root: Path) -> None:
         skill, consumed = _read_skill_path(
             child / "SKILL.md",
             priority=(0, 0, 0, str(_absolute_path(child))),
-            include_body=False,
+            include_body=True,
         )
         if skill is None:
             raise RuntimeError(f"Built-in Skill is invalid: {name}")
@@ -1338,12 +1381,23 @@ def prepare_builtin_skills() -> str:
     return snapshot_id
 
 
-def managed_skill_environment(working_directory: str | Path | None) -> dict[str, str]:
+def managed_skill_environment(
+    working_directory: str | Path | None,
+    *,
+    project_base: str | Path | None = None,
+) -> dict[str, str]:
     """Return the per-backend shell bindings consumed by ``vibe skill``."""
 
     env: dict[str, str] = {}
     if working_directory is not None:
-        env[SKILL_WORKING_DIR_ENV] = str(Path(working_directory).expanduser().resolve())
+        resolved_working_directory = Path(working_directory).expanduser().resolve()
+        env[SKILL_WORKING_DIR_ENV] = str(resolved_working_directory)
+        resolved_project_base = _project_base_for_working_directory(
+            resolved_working_directory,
+            project_base,
+        )
+        if resolved_project_base is not None:
+            env[SKILL_PROJECT_BASE_ENV] = str(resolved_project_base)
     resolved_home = Path.home().resolve()
     resolved_codex_home = Path(os.environ.get("CODEX_HOME") or resolved_home / ".codex").expanduser().resolve()
     from vibe.claude_config import get_claude_home

@@ -29,7 +29,7 @@ from core.caller_context import (
     validated_caller_env_snapshot,
 )
 from core.message_output import stop_output_for, terminal_output_for
-from core.managed_skills import managed_skill_environment
+from core.managed_skills import managed_skill_environment, managed_skill_project_base
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.native_dispatch_phase import (
     mark_backend_dispatch_attempted,
@@ -98,6 +98,7 @@ logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
 _MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
 _CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
+_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
@@ -1391,7 +1392,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 fallback_platform=platform,
             )
 
-            system_prompt_injection = build_system_prompt_injection(
+            project_base = managed_skill_project_base(request.context)
+            system_prompt_injection = await asyncio.to_thread(
+                build_system_prompt_injection,
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
@@ -1402,17 +1405,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
                 current_agent_backend="opencode",
                 skills_cwd=request.working_path,
+                skills_project_base=project_base,
             )
             if request.vibe_agent_system_prompt:
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
             binding_token = secrets.token_hex(16)
-            if bind_caller_context_session(
+            if await asyncio.to_thread(
+                bind_caller_context_session,
                 session_id,
                 request.context.platform_specific or {},
                 base_env=os.environ,
                 working_dir=request.working_path,
-                extra_env=managed_skill_environment(request.working_path),
+                extra_env=managed_skill_environment(
+                    request.working_path,
+                    project_base=project_base,
+                ),
                 binding_token=binding_token,
                 **_binding_path_kwargs(caller_context_binding_path),
                 # The creation origin travels with the identity: an OpenCode shell
@@ -1442,6 +1450,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             if caller_context_env:
                 processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = caller_context_env
+            if project_base:
+                processing_indicator[_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY] = project_base
             target_session_id = _target_agent_session_id(request)
             if target_session_id and logical_turn_id:
                 processing_indicator[_STEERING_SNAPSHOT_KEY] = {
@@ -1726,7 +1736,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 and not active_poll_persisted
             ):
                 try:
-                    unbind_caller_context_session(
+                    await asyncio.to_thread(
+                        unbind_caller_context_session,
                         caller_context_binding_session_id,
                         binding_token=caller_context_binding_token,
                         **_binding_path_kwargs(caller_context_binding_path),
@@ -2423,31 +2434,49 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     str(restored_context.user_id),
                 )
                 restored_caller_env.setdefault(AVIBE_CALLER_REMOTE_ENV, "1")
-            try:
-                restored_bound = bind_caller_context_session(
-                    poll_info.opencode_session_id,
-                    None,
-                    base_env=os.environ,
-                    working_dir=poll_info.working_path,
-                    extra_env={
-                        **restored_caller_env,
-                        **managed_skill_environment(poll_info.working_path),
-                    },
-                    binding_token=restored_binding_token,
-                    **_binding_path_kwargs(restored_binding_path),
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to restore OpenCode caller context for session=%s",
-                    poll_info.opencode_session_id,
-                )
-                continue
+            restored_project_base = processing_snapshot.get(
+                _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY
+            )
+            restored_project_base = (
+                restored_project_base
+                if isinstance(restored_project_base, str) and restored_project_base
+                else None
+            )
+            restored_bound = False
+            for attempt in range(3):
+                try:
+                    restored_bound = await asyncio.to_thread(
+                        bind_caller_context_session,
+                        poll_info.opencode_session_id,
+                        None,
+                        base_env=os.environ,
+                        working_dir=poll_info.working_path,
+                        extra_env={
+                            **restored_caller_env,
+                            **managed_skill_environment(
+                                poll_info.working_path,
+                                project_base=restored_project_base,
+                            ),
+                        },
+                        binding_token=restored_binding_token,
+                        **_binding_path_kwargs(restored_binding_path),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to restore OpenCode caller context for session=%s (attempt %s/3)",
+                        poll_info.opencode_session_id,
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                if restored_bound:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0)
             if not restored_bound:
                 logger.error(
-                    "Restored OpenCode caller context was empty for session=%s",
+                    "Restoring OpenCode poll without caller context for session=%s",
                     poll_info.opencode_session_id,
                 )
-                continue
 
             restoration_ready = asyncio.get_running_loop().create_future()
             restoration_published = asyncio.Event()
@@ -2458,7 +2487,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     reconcile_after_message_ids=reconcile_after_message_ids,
                     restoration_ready=restoration_ready,
                     restoration_published=restoration_published,
-                    caller_context_binding_token=restored_binding_token,
+                    caller_context_binding_token=(
+                        restored_binding_token if restored_bound else None
+                    ),
                     caller_context_binding_path=restored_binding_path,
                 )
             )
@@ -2678,7 +2709,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 poll_info.opencode_session_id
             ):
                 try:
-                    unbind_caller_context_session(
+                    await asyncio.to_thread(
+                        unbind_caller_context_session,
                         poll_info.opencode_session_id,
                         binding_token=caller_context_binding_token,
                         **_binding_path_kwargs(caller_context_binding_path),

@@ -164,6 +164,7 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
             "AVIBE_CALLER_RESOURCE_CONTEXT": '{"sub":"user-1"}',
             "IGNORED_ENV": "must-not-pass",
         },
+        "opencode_managed_skill_project_base": "/tmp",
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
     binding_path = "/old-avibe-home/runtime/opencode_caller_context.json"
@@ -193,8 +194,34 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
     assert bound[0]["payload"] is None
     assert bound[0]["path"] == binding_path
     assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
+    assert bound[0]["extra_env"]["AVIBE_SKILL_PROJECT_BASE"] == str(Path("/tmp").resolve())
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
     assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
+
+
+def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    attempts = 0
+
+    def fail_bind(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("temporary binding failure")
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        fail_bind,
+    )
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert attempts == 3
+    assert removed == []
 
 
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
