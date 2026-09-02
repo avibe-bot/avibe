@@ -120,8 +120,9 @@ with empty standard output. This consistency rule is owned once by the resolver
 rather than reimplemented by Catalog and load call sites.
 
 Backend-bundled or system Skills other than the explicitly listed Codex
-`.system` compatibility root, plugin caches, administrator-only Skills, and
-`.claude/commands` are not discovery sources.
+`.system` compatibility root and enabled Claude plugin roots are not discovery
+sources. Avibe does not crawl plugin caches or marketplaces, import
+administrator-only Skills, or treat `.claude/commands` as Skills.
 
 ### 4.2 Built-in root
 
@@ -198,6 +199,23 @@ global Skill therefore wins over the Codex-bundled default. The container entry
 counts toward the parent root's raw direct-child enumeration limit, but is not
 a candidate and consumes no frontmatter budget there. Its children are charged
 only when the explicit Codex system root is scanned.
+
+If `${CLAUDE_CONFIG_DIR}/plugins/installed_plugins.json` exists, Avibe invokes
+the official `claude plugin list --json` command in the Turn's bound working
+directory and scans `<installPath>/skills` for each entry whose `enabled` field
+is exactly `true`. It does not crawl the installation cache or trust stale
+registry entries directly. Disabled plugins and relative installation paths are
+omitted. This lookup runs on every Avibe-dispatched Turn so installing,
+enabling, disabling, or removing a plugin is reflected without restarting Avibe
+or creating a Session. A missing CLI, non-zero exit, timeout after one second,
+invalid UTF-8 or JSON, output over 1 MiB, or more than 256 reported entries
+omits plugin roots without failing the rest of discovery.
+
+Enabled Claude plugin roots are compatibility inputs for the shared Avibe
+Catalog, not a Claude-only feature. They are scanned after every static root,
+share the compatibility aggregate budget, and expose only each portable Skill
+name and description. Their plugin ID, installation path, and source are not
+shown to the agent.
 
 ### 4.5 Reserved root
 
@@ -283,7 +301,8 @@ selected by these rules, in order:
 3. Within project scope, a directory nearer to the working directory over a
    more distant directory.
 4. At the same scope and depth, directory-family priority is:
-   `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode > Codex system.
+   `.avibe` > `.agents` > `.codex` > `.claude` > OpenCode > Codex system >
+   enabled Claude plugins.
 5. If every preceding dimension ties, the candidate whose absolute directory
    path sorts first by Unicode code-point order wins.
 
@@ -291,8 +310,9 @@ The `.avibe` family reserves the highest family slot for future use, but
 `${AVIBE_HOME:-$HOME/.avibe}/skills` is inactive in v1. OpenCode means
 `.opencode` at project scope and `${XDG_CONFIG_HOME:-$HOME/.config}/opencode`
 at global scope. Codex system means the explicit
-`${CODEX_HOME:-$HOME/.codex}/skills/.system` container; it is last so bundled
-defaults cannot shadow user-managed Skills.
+`${CODEX_HOME:-$HOME/.codex}/skills/.system` container. Enabled Claude plugin
+roots are last so plugin-bundled defaults cannot shadow any static project or
+global Skill.
 
 Resolution must be deterministic. After resolution, entries are sorted by
 name for pagination and prompt rendering.
@@ -574,6 +594,10 @@ latency guarantee; it shows that correctness can precede caching. Per-Turn
 discovery runs outside the controller event loop so bounded cold-filesystem
 latency cannot stall unrelated dispatch.
 
+The common path performs no subprocess lookup when Claude has no installed
+plugin registry. When that registry exists, the official plugin-list lookup is
+also live per Turn and has the one-second failure boundary in Section 4.4.
+
 V1 does not cache discovery results. A future parsed-frontmatter cache cannot
 treat file identity, size, or timestamps as proof that content is unchanged: it
 must read and digest the bounded frontmatter on that Turn before reusing a
@@ -803,6 +827,10 @@ Catalogs at runtime.
 
 - A fixture covering every discovery root, including Codex's `.system`
   container, resolves one entry per final name.
+- Enabled Claude plugins contribute their standard `skills` directories to the
+  same Avibe Catalog for all three backends, while disabled plugins do not.
+  Missing, failing, timed-out, malformed, oversized, or over-count plugin-list
+  results omit only plugin roots, and static compatibility discovery continues.
 - Global-root fixtures override `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
   `XDG_CONFIG_HOME` with relative and absolute values; Turn bindings normalize
   them to the same absolute homes used by their live backends, independent of
