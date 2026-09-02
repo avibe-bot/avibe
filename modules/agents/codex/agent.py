@@ -19,7 +19,11 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
-from core.managed_skills import managed_skill_environment, managed_skill_project_base
+from core.managed_skills import (
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.services.agent_steering import (
@@ -1812,6 +1816,9 @@ class CodexAgent(BaseAgent):
             managed_skill_environment(
                 getattr(request, "working_path", None),
                 project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
             )
         )
         return env
@@ -2318,6 +2325,9 @@ class CodexAgent(BaseAgent):
                 current_agent_backend="codex",
                 skills_cwd=getattr(request, "working_path", None),
                 skills_project_base=managed_skill_project_base(request.context),
+                skills_claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
             )
         )
 

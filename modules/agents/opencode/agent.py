@@ -32,6 +32,7 @@ from core.message_output import stop_output_for, terminal_output_for
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
+    managed_skill_claude_cli_path,
     managed_skill_environment,
     managed_skill_project_base,
 )
@@ -1448,6 +1449,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             managed_skills_env = managed_skill_environment(
                 request.working_path,
                 project_base=project_base,
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
             )
             system_prompt_injection = await asyncio.to_thread(
                 build_system_prompt_injection,
@@ -1462,6 +1466,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 current_agent_backend="opencode",
                 skills_cwd=request.working_path,
                 skills_project_base=project_base,
+                skills_claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
             )
             if request.vibe_agent_system_prompt:
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
@@ -2529,6 +2536,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             restored_managed_skills_env = managed_skill_environment(
                 poll_info.working_path,
                 project_base=restored_project_base,
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
                 **restored_snapshot_kwargs,
             )
             restored_bound = False

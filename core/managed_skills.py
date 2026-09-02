@@ -37,6 +37,7 @@ BUILTIN_SKILLS_ROOT_ENV = "AVIBE_BUILTIN_SKILLS_ROOT"
 SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
 SKILL_CODEX_HOME_ENV = "AVIBE_SKILL_CODEX_HOME"
 SKILL_CLAUDE_HOME_ENV = "AVIBE_SKILL_CLAUDE_HOME"
+SKILL_CLAUDE_CLI_PATH_ENV = "AVIBE_SKILL_CLAUDE_CLI_PATH"
 SKILL_XDG_CONFIG_HOME_ENV = "AVIBE_SKILL_XDG_CONFIG_HOME"
 
 CATALOG_PAGE_SIZE = 25
@@ -680,6 +681,17 @@ def managed_skill_project_base(context: Any) -> str | None:
     return str(value) if isinstance(value, str) and value else None
 
 
+def managed_skill_claude_cli_path(config: Any) -> str | None:
+    """Return the Claude executable selected by the live runtime config."""
+
+    claude = getattr(config, "claude", None)
+    if claude is None:
+        claude = getattr(getattr(config, "agents", None), "claude", None)
+    value = getattr(claude, "cli_path", None)
+    normalized = str(value).strip() if value is not None else ""
+    return os.path.expanduser(normalized) if normalized else None
+
+
 def _working_directory(cwd: str | Path | None) -> Path:
     if cwd is not None:
         return Path(cwd).expanduser().resolve()
@@ -726,6 +738,7 @@ def _selected_builtin_root(
 def _claude_plugin_skill_roots(
     working_directory: Path,
     claude_home: Path,
+    claude_cli_path: str | None,
 ) -> list[Path]:
     registry = claude_home / "plugins" / "installed_plugins.json"
     try:
@@ -734,7 +747,12 @@ def _claude_plugin_skill_roots(
     except OSError:
         return []
 
-    command = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
+    command = (
+        claude_cli_path
+        or os.environ.get(SKILL_CLAUDE_CLI_PATH_ENV)
+        or os.environ.get("CLAUDE_CLI_PATH")
+        or shutil.which("claude")
+    )
     if not command:
         return []
     environment = dict(os.environ)
@@ -786,6 +804,7 @@ def resolve_skills(
     avibe_home: str | Path | None = None,
     codex_home: str | Path | None = None,
     claude_home: str | Path | None = None,
+    claude_cli_path: str | None = None,
     xdg_config_home: str | Path | None = None,
     builtin_snapshot_id: str | None = None,
     builtin_snapshot_root: str | Path | None = None,
@@ -893,7 +912,11 @@ def resolve_skills(
             )
         )
 
-    for root in _claude_plugin_skill_roots(working_directory, resolved_claude_home):
+    for root in _claude_plugin_skill_roots(
+        working_directory,
+        resolved_claude_home,
+        claude_cli_path,
+    ):
         if compatibility_budget.exhausted:
             break
         candidates.extend(
@@ -1436,6 +1459,7 @@ def managed_skill_environment(
     project_base: str | Path | None = None,
     builtin_snapshot_id: str | None = None,
     builtin_snapshot_root: str | Path | None = None,
+    claude_cli_path: str | None = None,
 ) -> dict[str, str]:
     """Return the per-backend shell bindings consumed by ``vibe skill``."""
 
@@ -1463,6 +1487,11 @@ def managed_skill_environment(
             SKILL_XDG_CONFIG_HOME_ENV: str(resolved_xdg_home),
         }
     )
+    normalized_claude_cli_path = str(claude_cli_path or "").strip()
+    if normalized_claude_cli_path:
+        env[SKILL_CLAUDE_CLI_PATH_ENV] = os.path.expanduser(
+            normalized_claude_cli_path
+        )
     explicit_builtin_snapshot = builtin_snapshot_id is not None or builtin_snapshot_root is not None
     snapshot_id = (
         builtin_snapshot_id

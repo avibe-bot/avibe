@@ -16,6 +16,7 @@ from core.managed_skills import (
     CATALOG_PAGE_MAX_BYTES,
     CATALOG_PAGE_SIZE,
     SKILL_BODY_MAX_BYTES,
+    SKILL_CLAUDE_CLI_PATH_ENV,
     SKILL_CLAUDE_HOME_ENV,
     SKILL_CODEX_HOME_ENV,
     SKILL_HOME_ENV,
@@ -993,7 +994,6 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
             },
         )()
 
-    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
     monkeypatch.setattr(managed_skills.subprocess, "run", plugin_list)
 
     skills = resolve_skills(
@@ -1002,12 +1002,18 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
         avibe_home=tmp_path / "avibe",
         codex_home=home / ".codex",
         claude_home=claude_home,
+        claude_cli_path="/opt/claude-custom",
         xdg_config_home=home / ".config",
         builtin_snapshot_id="",
     )
 
     assert [skill.name for skill in skills] == ["format-code"]
-    assert captured["command"] == ["/usr/bin/claude", "plugin", "list", "--json"]
+    assert captured["command"] == [
+        "/opt/claude-custom",
+        "plugin",
+        "list",
+        "--json",
+    ]
     assert captured["cwd"] == cwd
     assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(claude_home)
 
@@ -1474,6 +1480,19 @@ def test_managed_skill_environment_binds_valid_project_base(tmp_path: Path) -> N
     assert SKILL_PROJECT_BASE_ENV not in managed_skill_environment(
         working_directory,
         project_base=tmp_path / "other",
+    )
+
+
+def test_managed_skill_environment_binds_configured_claude_cli_path(
+    tmp_path: Path,
+) -> None:
+    env = managed_skill_environment(
+        tmp_path,
+        claude_cli_path="~/tools/claude-custom",
+    )
+
+    assert env[SKILL_CLAUDE_CLI_PATH_ENV] == str(
+        Path("~/tools/claude-custom").expanduser()
     )
 
 

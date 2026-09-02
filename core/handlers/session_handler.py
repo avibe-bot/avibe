@@ -44,7 +44,11 @@ from core.agent_tool_policy import (
 from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
-from core.managed_skills import managed_skill_environment, managed_skill_project_base
+from core.managed_skills import (
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -512,6 +516,7 @@ class SessionHandler(BaseHandler):
         managed_skills_env = managed_skill_environment(
             working_path,
             project_base=managed_skill_project_base(context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
         )
         if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
             logger.info(
@@ -631,6 +636,7 @@ class SessionHandler(BaseHandler):
         managed_skills_env = managed_skill_environment(
             working_path,
             project_base=managed_skill_project_base(context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
         )
         if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
             logger.info(
@@ -1538,6 +1544,7 @@ class SessionHandler(BaseHandler):
             managed_skill_environment(
                 working_path,
                 project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
             )
         )
         prepend_vendored_git_to_path(
@@ -1616,6 +1623,7 @@ class SessionHandler(BaseHandler):
             managed_skill_environment(
                 working_path,
                 project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
             ),
         )
         setattr(client, "_vibe_git_path_state", git_path_state)
@@ -1744,6 +1752,7 @@ class SessionHandler(BaseHandler):
             current_agent_backend="claude",
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
+            skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
         )
 
         if base_prompt:
