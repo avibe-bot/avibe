@@ -168,6 +168,14 @@ def _source_by_id(app, source_id: str):
     )
 
 
+def _request_credential(request: dict) -> str | None:
+    headers = request["headers"]
+    if key := headers.get("x-api-key"):
+        return key
+    authorization = headers.get("authorization", "")
+    return authorization.removeprefix("Bearer ") or None
+
+
 def test_d2_healthy_hop_is_served_by_the_real_engine_probe(
     model_hub_app_factory,
     mock_llm_upstream,
@@ -197,6 +205,133 @@ def test_d2_healthy_hop_is_served_by_the_real_engine_probe(
         )
         assert all(
             item["headers"].get("anthropic-version") for item in captured
+        )
+
+
+def test_replaced_shared_key_keeps_source_identity_and_reaches_upstream_once(
+    model_hub_app_factory,
+    mock_llm_upstream,
+) -> None:
+    """A replaced duplicate key keeps each Source's own model registration."""
+
+    route_model = "e2e-route-1"
+    original_key = "sk-model-hub-e2e-original"
+    replacement_key = "sk-model-hub-e2e-replacement"
+    with _engine_app(model_hub_app_factory) as app:
+        _install_engine(app)
+
+        _configure_protocol(
+            mock_llm_upstream,
+            "anthropic",
+            models=[{"id": MENU_MODEL}],
+        )
+        _create_source(
+            app,
+            mock_llm_upstream,
+            nonce="scn_1818anchor000001",
+            vendor="anthropic",
+            display_name="Shared-key anchor",
+            extra={"key": replacement_key},
+        )
+
+        _configure_protocol(
+            mock_llm_upstream,
+            "anthropic",
+            models=[{"id": route_model}],
+        )
+        routed, _ = _create_source(
+            app,
+            mock_llm_upstream,
+            nonce="scn_1818route0000001",
+            vendor="anthropic",
+            display_name="Replaced routed source",
+            extra={"key": original_key},
+        )
+        _create_source(
+            app,
+            mock_llm_upstream,
+            nonce="scn_1818sibling00001",
+            vendor="anthropic",
+            display_name="Shared-key sibling",
+            extra={"key": replacement_key},
+        )
+
+        mode = app.client.patch(
+            "/api/models/agents/claude/mode",
+            {"mode": "hub"},
+        )
+        assert mode.status == 200, mode.json()
+        chain = app.client.put(
+            f"/api/models/agents/claude/chain?model={MENU_MODEL}",
+            {
+                "hops": [
+                    {
+                        "source_id": routed["id"],
+                        "model_id": route_model,
+                    }
+                ]
+            },
+        )
+        assert chain.status == 200, chain.json()
+        started = app.client.post("/api/models/runtime/start", {})
+        assert started.status == 200, started.json()
+        first_port = started.json()["runtime"]["status"]["listening"][
+            "port"
+        ]
+
+        original_ref = routed["credential_ref"]
+        replaced = app.client.put(
+            f"/api/models/sources/{routed['id']}/credential",
+            {"key": replacement_key},
+        )
+        replaced_body = replaced.json()
+        assert replaced.status == 200, replaced_body
+        assert replaced_body["source"]["id"] == routed["id"]
+        assert replaced_body["source"]["credential_ref"] != original_ref
+        after_replace = app.client.get("/api/models/runtime/status")
+        assert after_replace.status == 200, after_replace.json()
+        replaced_port = after_replace.json()["runtime"]["status"][
+            "listening"
+        ]["port"]
+        assert replaced_port != first_port
+
+        app.restart_controller()
+        mock_llm_upstream.reset_requests()
+        response = _probe(app)
+        body = response.json()
+        assert response.status == 200, body
+        captured = [
+            item
+            for item in mock_llm_upstream.requests()
+            if item["path"] == "/v1/messages"
+        ]
+        assert body["probe"]["reachable"] is True, {
+            "probe": body["probe"],
+            "upstream_request_count": len(captured),
+        }
+        assert body["probe"]["source_id"] == routed["id"]
+        assert body["probe"]["model_id"] == route_model
+        assert len(captured) == 1
+        assert _request_credential(captured[0]) == replacement_key
+        assert _source_by_id(app, routed["id"])["state"] == {
+            "status": "standby",
+            "retry_at": None,
+            "detail_key": None,
+        }
+
+        mock_llm_upstream.reset_requests()
+        repeated = _probe(app)
+        assert repeated.status == 200, repeated.json()
+        assert repeated.json()["probe"]["reachable"] is True
+        repeated_requests = [
+            item
+            for item in mock_llm_upstream.requests()
+            if item["path"] == "/v1/messages"
+        ]
+        assert len(repeated_requests) == 1
+        assert (
+            _source_by_id(app, routed["id"])["state"]["retry_at"]
+            is None
         )
 
 

@@ -27,7 +27,6 @@ from tests.e2e.drivers.model_hub_app import (
 
 pytestmark = pytest.mark.e2e_model_hub
 
-
 def _local_engine_manifest() -> str:
     raw = os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", "").strip()
     if not raw:
@@ -44,8 +43,10 @@ def _local_engine_manifest() -> str:
 
 
 def _engine_app(model_hub_app_factory):
-    _local_engine_manifest()
-    return model_hub_app_factory()
+    manifest = _local_engine_manifest()
+    return model_hub_app_factory(
+        extra_env={"VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest}
+    )
 
 
 def _install_engine(app) -> list[str]:
@@ -208,6 +209,35 @@ def test_harness_inherits_only_the_engine_manifest_path(
     )
     assert "VIBE_MODEL_HUB_ENGINE_MANIFEST_URL" not in app.env
     assert app.env["VIBE_MODEL_HUB_ENGINE_OFFLINE"] == "1"
+
+
+def test_engine_app_passes_the_normalized_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Harness contract: child paths retain the validated parent meaning."""
+
+    manifest = tmp_path / "fixture" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH",
+        str(manifest.relative_to(tmp_path)),
+    )
+    captured: dict = {}
+    launched = object()
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return launched
+
+    assert _engine_app(factory) is launched
+    assert captured == {
+        "extra_env": {
+            "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": str(manifest.resolve())
+        }
+    }
 
 
 def test_harness_seeds_a_verified_file_archive_before_child_start(
