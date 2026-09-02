@@ -150,6 +150,14 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         discriminator="request_nonfallback",
         copy_keys=(("default", "modelHub.launch.request_incompatible"),),
     ),
+    # A well-formed request naming a model this process never routed. Distinct
+    # from request_nonfallback: the request is valid and reselecting the model
+    # does help, so it must not borrow that copy's "switching will not help".
+    "turn.request_unroutable": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="request_unroutable",
+        copy_keys=(("default", "modelHub.launch.request_unroutable"),),
+    ),
     "turn.engine_down": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
         discriminator="engine_down",
@@ -334,6 +342,7 @@ def produce_turn_outcome(
 REQUEST_NONFALLBACK_TURN_OUTCOME = produce_turn_outcome(
     "turn.request_nonfallback"
 )
+REQUEST_UNROUTABLE_TURN_OUTCOME = produce_turn_outcome("turn.request_unroutable")
 ENGINE_DOWN_TURN_OUTCOME = produce_turn_outcome("turn.engine_down")
 
 
@@ -513,6 +522,10 @@ class ProcessScope:
     prepared_routes: dict[str, "PreparedGatewayRoute"] = field(default_factory=dict)
     routing_conflicts: set[str] = field(default_factory=set)
     untracked_use: bool = False
+    # The launched process keeps this route for its whole life, so requests it
+    # issues outside any dispatched turn window stay routable. Turn-keyed
+    # routes above own attribution; this owns routing.
+    launch_route: Optional["PreparedGatewayRoute"] = None
 
 
 @dataclass(frozen=True)
@@ -930,8 +943,14 @@ class TurnCorrelationRegistry:
             if existing is not None and existing != prepared:
                 scope.prepared_routes.pop(route_turn_id, None)
                 scope.routing_conflicts.add(route_turn_id)
+                # One turn prepared two identities: the process route is no
+                # longer knowable, so stop answering from it.
+                scope.launch_route = None
             elif route_turn_id not in scope.routing_conflicts:
                 scope.prepared_routes[route_turn_id] = prepared
+                # A later turn may relaunch the process against another Source;
+                # the newest accepted route is the one the process now carries.
+                scope.launch_route = prepared
 
             exact = self._exact_turn(backend, token)
             if exact is None:
@@ -972,7 +991,7 @@ class TurnCorrelationRegistry:
         token: str,
         gateway_model_id: str,
     ) -> Optional[str]:
-        """Resolve only a route identity that the launching turn prepared."""
+        """Resolve a route identity the launching turn or process prepared."""
 
         with self._lock:
             key = self._token_scopes.get(token)
@@ -1003,6 +1022,17 @@ class TurnCorrelationRegistry:
                 return matching[0].requested_model_id
             if active_routes:
                 return None
+            # No turn owns a route right now, but the launched process is still
+            # alive on this token and keeps issuing requests: tool loops,
+            # agent-initiated continuations, and transport retries all land
+            # here. Routing follows the process, so its launch identity answers
+            # them; only a model this process never routed stays unresolvable.
+            launch_route = scope.launch_route
+            if (
+                launch_route is not None
+                and launch_route.resolved_model_id == gateway_model_id
+            ):
+                return launch_route.requested_model_id
             return gateway_model_id if scope.untracked_use else None
 
     def gateway_terminalizer(

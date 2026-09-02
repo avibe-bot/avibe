@@ -52,6 +52,8 @@ from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
+    REQUEST_NONFALLBACK_TURN_OUTCOME,
+    REQUEST_UNROUTABLE_TURN_OUTCOME,
     TURN_OUTCOME_RENDERING_AUTHORITY,
     TurnOutcomeProductionError,
     TurnCorrelationRegistry,
@@ -1421,6 +1423,176 @@ def test_released_v5_permission_denied_records_degrade_at_read_boundary(
     _assert_valid("resolution-event.schema.json", event)
     assert RELEASED_V5_PERMISSION_DENIED["provenance"][0]["failed_attempts"][0]["reason"] == "permission_denied"
     assert RELEASED_V5_PERMISSION_DENIED["resolution_events"][0]["reason"] == "permission_denied"
+
+
+@pytest.mark.parametrize(
+    "turn_phase",
+    ["route_owned_by_live_turn", "no_turn_owns_a_route", "route_replaced_then_settled"],
+)
+def test_gateway_resolves_every_model_the_live_process_routed(
+    tmp_path: Path,
+    turn_phase: str,
+) -> None:
+    """Routing follows the launched process, not one turn's liveness.
+
+    A long-lived CLI keeps issuing requests on its scope token outside any
+    dispatch window — tool loops, agent-initiated continuations, transport
+    retries. Whatever the turn phase, resolution answers exactly the identities
+    the process routed: the routed model resolves to its caller identity, and a
+    model the process never routed stays unresolvable.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / f"process-route-{turn_phase}.json")
+    registry = TurnCorrelationRegistry(store)
+
+    def route(turn_id: str, requested: str, resolved: str) -> str:
+        token = registry.credentials("claude", "/repo", turn_id)
+        registry.prepare_gateway_turn(
+            backend="claude",
+            token=token,
+            turn_id=turn_id,
+            requested_model_id=requested,
+            resolved_model_id=resolved,
+            source_id="src_primary01",
+            via_mapping=True,
+        )
+        return token
+
+    token = route("turn_launch01", "caller-model", "hub-model")
+    if turn_phase != "route_owned_by_live_turn":
+        registry.settle(
+            "turn_launch01",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+    if turn_phase == "route_replaced_then_settled":
+        assert route("turn_relaunch1", "caller-next", "hub-next") == token
+        registry.settle(
+            "turn_relaunch1",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+
+    routed = (
+        {"hub-next": "caller-next"}
+        if turn_phase == "route_replaced_then_settled"
+        else {"hub-model": "caller-model"}
+    )
+    for gateway_model_id, caller_model_id in routed.items():
+        assert (
+            registry.gateway_resolution_model(
+                backend="claude",
+                token=token,
+                gateway_model_id=gateway_model_id,
+            )
+            == caller_model_id
+        )
+    assert (
+        registry.gateway_resolution_model(
+            backend="claude",
+            token=token,
+            gateway_model_id="hub-never-routed",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("unknowable_by", ["routing_conflict", "scope_retirement"])
+def test_process_route_fails_closed_once_the_scope_stops_being_knowable(
+    tmp_path: Path,
+    unknowable_by: str,
+) -> None:
+    """The process route answers only while the scope's identity is unambiguous."""
+
+    store = BoundedProvenanceStore(tmp_path / f"closed-{unknowable_by}.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "/repo", "turn_launch01")
+    registry.prepare_gateway_turn(
+        backend="claude",
+        token=token,
+        turn_id="turn_launch01",
+        requested_model_id="caller-model",
+        resolved_model_id="hub-model",
+        source_id="src_primary01",
+        via_mapping=True,
+    )
+
+    if unknowable_by == "routing_conflict":
+        registry.prepare_gateway_turn(
+            backend="claude",
+            token=token,
+            turn_id="turn_launch01",
+            requested_model_id="caller-other",
+            resolved_model_id="hub-model",
+            source_id="src_backup001",
+            via_mapping=True,
+        )
+        registry.settle(
+            "turn_launch01",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+    else:
+        registry.settle(
+            "turn_launch01",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        registry.retire_scope("claude", "/repo")
+
+    assert (
+        registry.gateway_resolution_model(
+            backend="claude",
+            token=token,
+            gateway_model_id="hub-model",
+        )
+        is None
+    )
+
+
+def test_unroutable_request_does_not_borrow_incompatible_request_copy(
+    tmp_path: Path,
+) -> None:
+    """A model this session never routed is not an incompatible request.
+
+    The 409 used to render `request_incompatible`, telling the user the request
+    itself was broken and that switching Sources would not help — the opposite
+    of the truth for an unrouted model, which reselecting does fix.
+    """
+
+    async def exercise() -> None:
+        primary = _source("src_primary01", "Primary")
+        service = _service(tmp_path, sources=[primary])
+        requested_model = _canonicalize_fixed_test_routes(service)["claude"]
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "claude",
+            process_scope="/repo",
+            turn_id="turn_unroutable1",
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=primary.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/messages",
+                    json={"model": "never-routed", "messages": [], "stream": False},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 409
+                payload = await response.json()
+                assert payload["error"]["code"] == "mapping_target_unavailable"
+                assert payload["error"]["message"] == render_turn_outcome_copy(
+                    REQUEST_UNROUTABLE_TURN_OUTCOME, "en"
+                )
+                assert payload["error"]["message"] != render_turn_outcome_copy(
+                    REQUEST_NONFALLBACK_TURN_OUTCOME, "en"
+                )
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
 
 
 def test_retired_process_scope_revokes_token_and_fails_closed(

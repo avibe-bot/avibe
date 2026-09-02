@@ -32,6 +32,7 @@ from .provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     GatewayTurnTerminalizer,
     REQUEST_NONFALLBACK_TURN_OUTCOME,
+    REQUEST_UNROUTABLE_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
     project_turn_outcome_copy,
@@ -642,7 +643,7 @@ class ModelHubTurnGateway:
                 terminalizer,
                 status=409,
                 code="mapping_target_unavailable",
-                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                turn_outcome=REQUEST_UNROUTABLE_TURN_OUTCOME,
             )
 
         def observe_attempt(
