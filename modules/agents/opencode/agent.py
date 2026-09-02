@@ -1453,26 +1453,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     getattr(getattr(self, "controller", None), "config", None)
                 ),
             )
-            system_prompt_injection = await asyncio.to_thread(
-                build_system_prompt_injection,
-                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
-                and platform != "wechat",
-                include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
-                include_memory_cli=memory_cli_admitted,
-                avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
-                context=request.context,
-                fallback_platform=platform,
-                enabled_agents=get_enabled_agents_for_prompt(self.controller),
-                current_agent_backend="opencode",
-                skills_cwd=request.working_path,
-                skills_project_base=project_base,
-                skills_claude_cli_path=managed_skill_claude_cli_path(
-                    getattr(getattr(self, "controller", None), "config", None)
-                ),
-            )
-            if request.vibe_agent_system_prompt:
-                system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
-
             binding_token = secrets.token_hex(16)
             binding_payload = request.context.platform_specific or {}
             binding_bound = False
@@ -1513,6 +1493,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     fallback_platform=platform,
                 )
             )
+
+            system_prompt_injection = await asyncio.to_thread(
+                build_system_prompt_injection,
+                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
+                and platform != "wechat",
+                include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
+                include_memory_cli=memory_cli_admitted,
+                avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
+                context=request.context,
+                fallback_platform=platform,
+                enabled_agents=get_enabled_agents_for_prompt(self.controller),
+                current_agent_backend="opencode",
+                skills_cwd=request.working_path if binding_bound else None,
+                skills_project_base=project_base,
+                skills_claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
+            )
+            if request.vibe_agent_system_prompt:
+                system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}

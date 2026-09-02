@@ -701,6 +701,16 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
     configured_overlays = []
     active_registrations = []
     released_reservations = []
+    prompt_skill_cwds = []
+
+    def build_prompt(**kwargs):
+        prompt_skill_cwds.append(kwargs.get("skills_cwd"))
+        return "system prompt"
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        build_prompt,
+    )
 
     class _Server:
         async def configure_model_hub_overlay(self, overlay):
@@ -873,6 +883,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
     assert active_polls[0]["processing_indicator"][
         "opencode_managed_skill_builtin_snapshot"
     ] == {"id": snapshot_id, "root": snapshot_root}
+    assert prompt_skill_cwds == ["/tmp/work"]
 
     binding_failures = []
 
@@ -900,6 +911,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
 
     assert calls
     assert calls[0]["tools"] == {"question": False, "skill": False}
+    assert prompt_skill_cwds == ["/tmp/work", None]
     assert binding_failures == []
 
 
