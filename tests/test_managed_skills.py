@@ -202,6 +202,25 @@ def test_codex_system_skills_are_a_low_priority_global_compatibility_root(
     assert by_name["imagegen"].directory == system.parent.resolve()
 
 
+def test_codex_system_container_does_not_consume_the_user_root_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    codex_home = home / ".codex"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setattr(managed_skills, "DISCOVERY_ROOT_MAX_CHILDREN", 1)
+
+    _write_skill(codex_home / "skills", "user-skill", "user-skill", "User")
+    _write_skill(codex_home / "skills" / ".system", "system-skill", "system-skill", "System")
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["system-skill", "user-skill"]
+
+
 def test_empty_backend_home_overrides_fall_back_to_default_roots(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "project"
@@ -225,8 +244,8 @@ def test_final_path_tie_breaker_is_independent_of_enumeration_order(tmp_path: Pa
     _write_skill(root, "z-dir", "same", "Last")
     original = managed_skills._root_children
 
-    def reversed_children(path: Path):
-        children = original(path)
+    def reversed_children(path: Path, **kwargs):
+        children = original(path, **kwargs)
         return list(reversed(children)) if children else children
 
     monkeypatch.setattr(managed_skills, "_root_children", reversed_children)

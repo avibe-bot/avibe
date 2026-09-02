@@ -366,11 +366,17 @@ def parse_skill_file(
     return skill
 
 
-def _root_children(root: Path) -> list[tuple[str, Path, os.stat_result]] | None:
+def _root_children(
+    root: Path,
+    *,
+    ignored_names: frozenset[str] = frozenset(),
+) -> list[tuple[str, Path, os.stat_result]] | None:
     children: list[tuple[str, Path, os.stat_result]] = []
     try:
         with os.scandir(root) as entries:
             for entry in entries:
+                if entry.name in ignored_names:
+                    continue
                 if len(children) >= DISCOVERY_ROOT_MAX_CHILDREN:
                     return None
                 try:
@@ -389,8 +395,9 @@ def _scan_root(
     *,
     priority: tuple[int, int, int],
     budget: _DiscoveryBudget,
+    ignored_names: frozenset[str] = frozenset(),
 ) -> list[ManagedSkill]:
-    children = _root_children(root)
+    children = _root_children(root, ignored_names=ignored_names)
     if children is None:
         logger.info("Omitting oversized Skill root: %s", root)
         return []
@@ -526,16 +533,23 @@ def resolve_skills(
             break
 
     global_roots = (
-        (resolved_home / ".agents" / "skills", 1),
-        (resolved_codex_home / "skills", 2),
-        (resolved_claude_home / "skills", 3),
-        (resolved_xdg_home / "opencode" / "skills", 4),
-        (resolved_codex_home / "skills" / ".system", 5),
+        (resolved_home / ".agents" / "skills", 1, frozenset()),
+        (resolved_codex_home / "skills", 2, frozenset({".system"})),
+        (resolved_claude_home / "skills", 3, frozenset()),
+        (resolved_xdg_home / "opencode" / "skills", 4, frozenset()),
+        (resolved_codex_home / "skills" / ".system", 5, frozenset()),
     )
-    for root, family_rank in global_roots:
+    for root, family_rank, ignored_names in global_roots:
         if compatibility_budget.exhausted:
             break
-        candidates.extend(_scan_root(root, priority=(2, 0, family_rank), budget=compatibility_budget))
+        candidates.extend(
+            _scan_root(
+                root,
+                priority=(2, 0, family_rank),
+                budget=compatibility_budget,
+                ignored_names=ignored_names,
+            )
+        )
 
     winners: dict[str, ManagedSkill] = {}
     for candidate in candidates:
