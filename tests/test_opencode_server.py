@@ -527,6 +527,35 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._start_server.assert_not_awaited()
         self.assertTrue(manager._caller_context_plugin_refresh_pending)
 
+    async def test_ensure_running_preserves_an_adopted_absolute_caller_context_path(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        adopted_path = "/old-avibe-home/runtime/opencode_caller_context.json"
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": adopted_path,
+            "active_run_sessions": ["ses-active"],
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+        manager._caller_context_path = lambda: "/new-avibe-home/runtime/opencode_caller_context.json"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        self.assertEqual(manager.caller_context_binding_path(), Path(adopted_path))
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+        self.assertFalse(manager._caller_context_plugin_refresh_pending)
+
     async def test_mark_run_active_persists_pid_file_active_sessions(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         with tempfile.TemporaryDirectory() as tmp_dir:

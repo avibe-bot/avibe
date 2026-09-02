@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -548,6 +549,33 @@ def test_invalid_utf8_body_is_advertised_but_cannot_be_loaded(
 
     assert [skill.name for skill in resolve_skills(cwd)] == ["binary"]
     assert load_skill("binary", cwd) is None
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "darwin",
+    reason="fixture requires raw-byte filenames supported by the host filesystem",
+)
+def test_non_utf8_resolved_directory_is_not_advertised(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    root = cwd / ".agents" / "skills"
+    root.mkdir(parents=True)
+    raw_directory = os.path.join(os.fsencode(root), b"raw-\xff")
+    os.mkdir(raw_directory)
+    skill_fd = os.open(
+        os.path.join(raw_directory, b"SKILL.md"),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        os.write(skill_fd, b"---\nname: raw\ndescription: Raw path\n---\nBody\n")
+    finally:
+        os.close(skill_fd)
+
+    assert resolve_skills(cwd) == []
+    assert load_skill("raw", cwd) is None
 
 
 def test_load_escapes_directory_attribute_controls(tmp_path: Path, monkeypatch) -> None:

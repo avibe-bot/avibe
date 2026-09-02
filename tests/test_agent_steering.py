@@ -894,6 +894,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     class _Server:
         prompt_count = 0
 
+        def caller_context_binding_path(self):
+            return "/old-avibe-home/runtime/opencode_caller_context.json"
+
         async def ensure_running(self):
             return None
 
@@ -1003,19 +1006,23 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         lambda **kwargs: "system prompt",
     )
     binding_tokens: list[str] = []
+    binding_paths: list[str] = []
 
     def bind_caller_context(*args, **kwargs):
         binding_tokens.append(kwargs["binding_token"])
+        binding_paths.append(kwargs["path"])
         return True
 
-    unbound: list[tuple[str, str]] = []
+    unbound: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
         bind_caller_context,
     )
     monkeypatch.setattr(
         "modules.agents.opencode.agent.unbind_caller_context_session",
-        lambda session_id, *, binding_token: unbound.append((session_id, binding_token)),
+        lambda session_id, *, binding_token, path: unbound.append(
+            (session_id, binding_token, path)
+        ),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1052,7 +1059,14 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     assert receipt.outcome is SteerOutcome.ACCEPTED
     assert events == ["primary", "steer", "abort"]
     assert len(binding_tokens) == 1
-    assert unbound == [("opencode-session", binding_tokens[0])]
+    assert binding_paths == ["/old-avibe-home/runtime/opencode_caller_context.json"]
+    assert unbound == [
+        (
+            "opencode-session",
+            binding_tokens[0],
+            "/old-avibe-home/runtime/opencode_caller_context.json",
+        )
+    ]
     backend_failure.assert_awaited_once()
 
 

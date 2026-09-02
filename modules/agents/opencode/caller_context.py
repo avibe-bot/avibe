@@ -167,6 +167,7 @@ def bind_session(
     ttl_hours: int = BINDING_TTL_HOURS,
     extra_env: Mapping[str, str] | None = None,
     binding_token: str | None = None,
+    path: str | Path | None = None,
     message: object | None = None,
     fallback_platform: object | None = None,
 ) -> bool:
@@ -196,7 +197,7 @@ def bind_session(
         base_env=base_env,
         working_dir=working_dir,
     )
-    path = binding_path()
+    path = Path(path) if path is not None else binding_path()
     now = _utc_now()
     token = binding_token or secrets.token_hex(16)
     with _binding_lock(path):
@@ -229,14 +230,19 @@ def bind_session(
     return True
 
 
-def unbind_session(opencode_session_id: str, *, binding_token: str) -> bool:
+def unbind_session(
+    opencode_session_id: str,
+    *,
+    binding_token: str,
+    path: str | Path | None = None,
+) -> bool:
     """Remove exactly the active-Turn binding created by one caller."""
 
     session_id = str(opencode_session_id or "").strip()
     token = str(binding_token or "").strip()
     if not session_id or not token:
         return False
-    path = binding_path()
+    path = Path(path) if path is not None else binding_path()
     with _binding_lock(path):
         if not path.is_file():
             return False
@@ -256,6 +262,7 @@ def refresh_session(
     *,
     binding_token: str,
     ttl_hours: int = BINDING_TTL_HOURS,
+    path: str | Path | None = None,
 ) -> bool:
     """Extend exactly one live binding without changing its environment."""
 
@@ -263,7 +270,7 @@ def refresh_session(
     token = str(binding_token or "").strip()
     if not session_id or not token:
         return False
-    path = binding_path()
+    path = Path(path) if path is not None else binding_path()
     now = _utc_now()
     with _binding_lock(path):
         if not path.is_file():

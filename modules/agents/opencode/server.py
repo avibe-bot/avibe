@@ -309,6 +309,13 @@ class OpenCodeServerManager:
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
 
+    def caller_context_binding_path(self) -> Path:
+        info = self._read_pid_file()
+        recorded = info.get("caller_context_path") if isinstance(info, dict) else None
+        if isinstance(recorded, str) and recorded and os.path.isabs(recorded):
+            return Path(recorded)
+        return Path(self._caller_context_path())
+
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
         current_loop = asyncio.get_event_loop()
@@ -859,7 +866,8 @@ class OpenCodeServerManager:
     def _pid_file_has_caller_context_binding(self, info: Optional[Dict[str, Any]]) -> bool:
         if not self._pid_file_references_current_server(info):
             return False
-        return bool(isinstance(info, dict) and info.get("caller_context_path") == self._caller_context_path())
+        recorded = info.get("caller_context_path") if isinstance(info, dict) else None
+        return bool(isinstance(recorded, str) and recorded and os.path.isabs(recorded))
 
     def _pid_file_was_started_by_current_process(self, info: Optional[Dict[str, Any]]) -> bool:
         return bool(isinstance(info, dict) and info.get("owner_pid") == _CURRENT_OWNER_PID)

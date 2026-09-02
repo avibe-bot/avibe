@@ -114,6 +114,21 @@ _RESTORED_IM_PLATFORMS = {"slack", "discord", "telegram", "lark", "wechat"}
 _CALLER_CONTEXT_BINDING_REFRESH_SECONDS = 60 * 60
 
 
+def _caller_context_path_for_server(server: object) -> str | None:
+    resolver = getattr(server, "caller_context_binding_path", None)
+    if not callable(resolver):
+        return None
+    try:
+        value = os.fspath(resolver())
+    except (TypeError, OSError):
+        return None
+    return value or None
+
+
+def _binding_path_kwargs(path: str | None) -> dict[str, str]:
+    return {"path": path} if path else {}
+
+
 def _task_is_stopping(task: asyncio.Task) -> bool:
     cancelling = getattr(task, "cancelling", None)
     return task.done() or bool(cancelling and cancelling())
@@ -713,6 +728,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self,
         session_id: str,
         binding_token: str,
+        binding_path: str | None = None,
     ) -> None:
         while True:
             await asyncio.sleep(_CALLER_CONTEXT_BINDING_REFRESH_SECONDS)
@@ -721,6 +737,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     refresh_caller_context_session,
                     session_id,
                     binding_token=binding_token,
+                    **_binding_path_kwargs(binding_path),
                 )
             except Exception:
                 logger.warning(
@@ -1078,6 +1095,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         activation_identity: RuntimeActivationIdentity | None = None
         caller_context_binding_session_id: str | None = None
         caller_context_binding_token: str | None = None
+        caller_context_binding_path: str | None = None
         caller_context_binding_renewal: asyncio.Task[None] | None = None
         active_poll_persisted = False
 
@@ -1104,6 +1122,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     model_hub_overlay
                 )
             await server.ensure_running()
+            caller_context_binding_path = _caller_context_path_for_server(server)
             activation_identity = self._attach_server_activation(server)
         except asyncio.CancelledError:
             await self._finish_prestart_cancellation(
@@ -1395,6 +1414,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 working_dir=request.working_path,
                 extra_env=managed_skill_environment(request.working_path),
                 binding_token=binding_token,
+                **_binding_path_kwargs(caller_context_binding_path),
                 # The creation origin travels with the identity: an OpenCode shell
                 # command running ``vibe task add`` sources this binding, and it is
                 # the only place the conversation behind the definition is visible.
@@ -1404,7 +1424,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 caller_context_binding_session_id = session_id
                 caller_context_binding_token = binding_token
                 caller_context_binding_renewal = asyncio.create_task(
-                    self._renew_caller_context_binding(session_id, binding_token)
+                    self._renew_caller_context_binding(
+                        session_id,
+                        binding_token,
+                        caller_context_binding_path,
+                    )
                 )
 
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
@@ -1705,6 +1729,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     unbind_caller_context_session(
                         caller_context_binding_session_id,
                         binding_token=caller_context_binding_token,
+                        **_binding_path_kwargs(caller_context_binding_path),
                     )
                 except Exception:
                     logger.warning(
@@ -2379,6 +2404,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
 
             restored_binding_token = secrets.token_hex(16)
+            restored_binding_path = _caller_context_path_for_server(server)
             restored_caller_env = validated_caller_env_snapshot(
                 processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
             )
@@ -2408,6 +2434,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         **managed_skill_environment(poll_info.working_path),
                     },
                     binding_token=restored_binding_token,
+                    **_binding_path_kwargs(restored_binding_path),
                 )
             except Exception:
                 logger.exception(
@@ -2432,6 +2459,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     restoration_ready=restoration_ready,
                     restoration_published=restoration_published,
                     caller_context_binding_token=restored_binding_token,
+                    caller_context_binding_path=restored_binding_path,
                 )
             )
             restoration_results.append(
@@ -2491,6 +2519,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         restoration_ready: asyncio.Future[bool] | None = None,
         restoration_published: asyncio.Event | None = None,
         caller_context_binding_token: str | None = None,
+        caller_context_binding_path: str | None = None,
     ) -> None:
         current_task = asyncio.current_task()
         steer_state = None
@@ -2501,6 +2530,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 self._renew_caller_context_binding(
                     poll_info.opencode_session_id,
                     caller_context_binding_token,
+                    caller_context_binding_path,
                 )
             )
             if caller_context_binding_token
@@ -2651,6 +2681,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     unbind_caller_context_session(
                         poll_info.opencode_session_id,
                         binding_token=caller_context_binding_token,
+                        **_binding_path_kwargs(caller_context_binding_path),
                     )
                 except Exception:
                     logger.warning(

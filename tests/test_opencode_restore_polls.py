@@ -166,15 +166,17 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
         },
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
+    binding_path = "/old-avibe-home/runtime/opencode_caller_context.json"
+    agent._test_server.caller_context_binding_path = lambda: binding_path
     bound: list[dict] = []
-    unbound: list[tuple[str, str]] = []
+    unbound: list[tuple[str, str, str]] = []
 
     def bind(session_id, payload, **kwargs):
         bound.append({"session_id": session_id, "payload": payload, **kwargs})
         return True
 
-    def unbind(session_id, *, binding_token):
-        unbound.append((session_id, binding_token))
+    def unbind(session_id, *, binding_token, path):
+        unbound.append((session_id, binding_token, path))
         return True
 
     monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
@@ -189,9 +191,10 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
     assert len(bound) == 1
     assert bound[0]["session_id"] == "oc-1"
     assert bound[0]["payload"] is None
+    assert bound[0]["path"] == binding_path
     assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
-    assert unbound == [("oc-1", bound[0]["binding_token"])]
+    assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
 
 
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:

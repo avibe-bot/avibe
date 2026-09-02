@@ -249,6 +249,38 @@ def test_refresh_session_extends_only_the_matching_live_binding(
     assert datetime.fromisoformat(after["expires_at"]) == initial + timedelta(hours=25)
 
 
+def test_binding_operations_can_target_an_adopted_server_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "new-avibe-home"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    adopted_path = tmp_path / "old-avibe-home" / "runtime" / "opencode_caller_context.json"
+
+    assert bridge.bind_session(
+        "oc-session",
+        {},
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path,
+        extra_env={"AVIBE_SKILL_WORKING_DIR": str(tmp_path)},
+        binding_token="adopted-turn",
+        path=adopted_path,
+    )
+    assert adopted_path.is_file()
+    assert not bridge.binding_path().exists()
+    assert bridge.refresh_session(
+        "oc-session",
+        binding_token="adopted-turn",
+        path=adopted_path,
+    )
+    assert bridge.unbind_session(
+        "oc-session",
+        binding_token="adopted-turn",
+        path=adopted_path,
+    )
+    assert "oc-session" not in json.loads(adopted_path.read_text(encoding="utf-8"))["sessions"]
+
+
 def test_concurrent_bindings_preserve_every_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
     monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)

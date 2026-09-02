@@ -328,6 +328,14 @@ def _absolute_path(path: str | Path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
 
+def _path_is_utf8(path: Path) -> bool:
+    try:
+        os.fspath(path).encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _regular_open_flags() -> int:
     flags = os.O_RDONLY
     for name in ("O_BINARY", "O_CLOEXEC", "O_NONBLOCK", "O_NOFOLLOW"):
@@ -488,6 +496,8 @@ def _read_skill_path(
             return None, body_start
 
     directory = _absolute_path(skill_file.parent)
+    if not _path_is_utf8(directory):
+        return None, body_start
     source = _absolute_path(source_directory or directory)
     try:
         directory_stat = directory.stat(follow_symlinks=False)
@@ -621,6 +631,8 @@ def _scan_root(
         if resolved_directory is None:
             continue
         directory, source_identity, directory_identity = resolved_directory
+        if not _path_is_utf8(directory):
+            continue
         if seen_directory_identities is not None:
             if directory_identity in seen_directory_identities:
                 continue
