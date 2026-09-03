@@ -1086,7 +1086,7 @@ describe('SourceDetailPanel', () => {
   // re-applied on every refresh. There is nothing to add and nothing to delete,
   // so the cell stops being a way in rather than becoming a disabled one — and
   // it says which rung, because a row that just refused to open would leave
-  // 「why」 as the user's problem.
+  // "why" as the user's problem.
   it.each(MANAGED_TIER_SOURCES)('locks a %s-declared row down to what it already carries', async (provenance) => {
     renderProtocol('anthropic', [{ ...source.models[0], reasoning_efforts_source: provenance }]);
 
@@ -1138,8 +1138,8 @@ describe('SourceDetailPanel', () => {
 
   // Defensive, and reachable: a refresh can apply a rung while the editor is
   // open, another surface can change the source, and the call can come from
-  // outside this page. The generic 「档位没保存上」 would offer a retry that
-  // cannot succeed, which is the one thing this user must not be invited to do.
+  // outside this page. The generic "The tier was not saved" would offer a retry
+  // that cannot succeed, which is the one thing this user must not be invited to do.
   it('explains a refusal that says the server owns the list, and offers no retry', async () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(
       new ApiCallError('bad_request', 'modelHub.errors.source_model_tiers_managed', true, [], [], [], 409),
@@ -1271,8 +1271,8 @@ describe('SourceDetailPanel', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /high/i }));
   });
 
-  // A write that was rolled back is the row's unfinished business, and 重试 is
-  // the only answer to it — so moving the editor elsewhere, which answers
+  // A write that was rolled back is the row's unfinished business, and "Try again"
+  // is the only answer to it — so moving the editor elsewhere, which answers
   // nothing, cannot be what takes the answer away.
   it('keeps a failed write answerable after the editor moves to another row', async () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));

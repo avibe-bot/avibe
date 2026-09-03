@@ -145,8 +145,9 @@ export const catalogSaveLeftUnloaded = (code: string | undefined, detail: string
  * two disagreed: a refresh applied a rung while the editor was open, another
  * surface changed the source, or the call came from outside this page. That is
  * a state race, not a transport failure, which is why it needs copy of its own:
- * the generic 「档位没保存上」 offers a retry that cannot succeed, and retrying a
- * decision the server has already made is the one thing this user must not do.
+ * the generic "The tier was not saved" offers a retry that cannot succeed, and
+ * retrying a decision the server has already made is the one thing this user
+ * must not do.
  *
  * Matched on the code AND on the backend i18n key, because the two response
  * shapes in this API put the same fact in different fields (`error` for

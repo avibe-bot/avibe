@@ -162,10 +162,10 @@ const TIER_PROVENANCE_LABEL_KEY: Readonly<Record<ManagedTierSource, string>> = {
 /**
  * A tier write that did not land, and whether anything is left to try.
  *
- * `retryable` carries the intent because 重试 has to replay the exact write the
- * rollback undid. `managed` carries none on purpose: the server owns that
- * model's declaration, so there is no version of this write that succeeds, and
- * offering a button that re-asks a settled question would be the one wrong
+ * `retryable` carries the intent because "Try again" has to replay the exact
+ * write the rollback undid. `managed` carries none on purpose: the server owns
+ * that model's declaration, so there is no version of this write that succeeds,
+ * and offering a button that re-asks a settled question would be the one wrong
  * affordance to put in front of this user.
  */
 type TierFailure =
@@ -259,9 +259,9 @@ const TierEditor: React.FC<{
     if (await commit(intent) && intent.kind === 'add' && draft.trim() === intent.tier) setDraft('');
   };
   // A rolled-back write is the row's own unfinished business: the tier list is
-  // already back to what the server holds, and 重试 is the only way forward from
-  // there. So the notice renders in whichever state the row is in and leaves only
-  // through a write that lands — never because the editor closed or moved on.
+  // already back to what the server holds, and "Try again" is the only way forward
+  // from there. So the notice renders in whichever state the row is in and leaves
+  // only through a write that lands — never because the editor closed or moved on.
   //
   // A refusal is the exception, and the one that outlives the editor: the re-read
   // it triggers turns the row into the locked one below, so its notice has to be
