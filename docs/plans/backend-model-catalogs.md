@@ -173,24 +173,32 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    2. **`From your providers`** — every configuration-eligible, non-retired Source model
       not already in the menu, deduplicated by the identity rule in question 1, with its
       supplying providers as read-only chips in Source order.
-   3. **`models.dev`** — search-driven: with an empty query the group shows one muted line
-      `Type to search models.dev`; with a query it lists exact and fuzzy matches (name,
-      mono id, models.dev provider chip). A models.dev pick carries its metadata snapshot.
-   4. **`By ID`** — one input row (`Model ID` · `Add`). When the query matches nothing in
-      any group, the row reads `Add "{{query}}" by ID`. A By-ID entry joins the selection
-      like any checked row.
+   3. **`models.dev`** — a browsable catalogue, never a blank box. With an empty query the
+      group shows one row of vendor chips (`Anthropic` `OpenAI` `Google` `DeepSeek` `Zhipu`
+      `Moonshot` `Qwen` `xAI` `Mistral` … `More`); choosing a vendor lists that vendor's
+      models as ordinary rows (the chip stays selected; choosing it again clears). With a
+      query the group lists matching models ranked first-party first (the vendor that makes
+      the model), then exact-id, then name matches. One row per model: when several
+      models.dev providers list the same model, only the first-party entry is shown and the
+      aggregator copies are collapsed, because for Claude Code and Codex the menu id is the
+      bare model id either way, and for OpenCode the id is `vendor/model` with the
+      first-party vendor. A row shows the display name, the mono id, and the vendor as muted
+      text (omitted when a vendor chip already filters the list); it never shows a chip.
+   4. **`Add "{{query}}" by ID`** — not a group and not an input box: one fallback row that
+      appears at the end of the list only while a query is typed, offering the typed text as
+      a model id. Its checkbox joins the selection like any row; it is disabled when the text
+      is not a valid id for the backend. With an empty query there is nothing to add by id,
+      so the row is absent.
    Rules that hold across all groups: a provider chip on any row — built-in included — means
    exactly "one of your providers supplies this id", in Source order, and nothing else ever
-   renders as a chip; a models.dev row shows its models.dev identity as the mono id
-   (`google/gemini-2.5-pro`) and no chip. With an empty query the list shows only what can
-   be added; with a query, models already in the list also appear in their group as
-   disabled rows tagged `In list`, so a search never dead-ends on something that exists.
-   The By-ID row always offers the current query and its `Add` is enabled only when that
-   text is a valid id for the backend. The models.dev group shows `Type to search
-   models.dev` on an empty query, a loading state while a query is in flight, and
-   `models.dev unavailable` when the catalog cannot be reached; it is omitted when a query
-   matches nothing there.
-   Checked rows and By-ID entries commit together through the footer (`{{count}} selected`
+   renders as a chip; models.dev vendor chips are the one exception and live only in the
+   models.dev group's browse row, where they are filters, not suppliers. With an empty query
+   the list shows only what can be added; with a query, models already in the list also
+   appear in their group as disabled rows tagged `In list`, so a search never dead-ends on
+   something that exists. The models.dev group shows a loading state while a query is in
+   flight and `models.dev unavailable` when the catalogue cannot be reached; it is omitted
+   when a query matches nothing there.
+   Checked rows — including a checked `Add "{{query}}" by ID` row — commit together through the footer (`{{count}} selected`
    · `Add {{count}} models`; with nothing selected the primary button reads `Add models`
    and is disabled, so the footer never moves) into the catalog draft; the list's single `Save` still writes
    everything with one `PUT`. Whatever the origin, adding a row runs the same one-time
@@ -256,6 +264,14 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
   id that is neither in the menu nor hidden, at the position question 9 defines, running C1
   and C2 for it, and invalidates the backend's runtime projection. It never removes a row.
   Claude Code's locked `default` row is not a built-in candidate and cannot be hidden.
+- **C7 — models.dev read serves browse and ranked search.** `GET /api/models/catalog/models-dev`
+  gains `vendor=<provider_id>` beside `query=`, and returns `{vendors: [{id, name, model_count}],
+  models: [...]}`. `models` is deduplicated by model id, ranked first-party vendor first, then
+  exact-id, then name matches; each item carries `vendor_id`, `vendor_name`, `first_party:
+  boolean`, and the existing metadata fields. With neither parameter the response carries only
+  `vendors`, first-party vendors ordered by model count. First-party means the provider that
+  makes the model; aggregator providers (openrouter, together, fireworks, groq, deepinfra, …)
+  never win the ranking when a first-party entry exists.
 - **C5 — Unchanged.** Source inventories, Source-side manual add, Route dialog, Source
   order, direct/gateway modes, and every runtime projection are byte-for-byte unchanged
   except through C1–C3.
@@ -266,15 +282,16 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 | --- | --- |
 | Catalog dialog add action (the only one) | `Add models` |
 | Picker title | `Add {{backend}} models` |
-| Picker search placeholder | `Search models, providers, or models.dev` |
-| Group headers | `{{backend}} built-in` · `From your providers` · `models.dev` · `By ID` |
+| Picker search placeholder | `Search models or vendors` |
+| Group headers | `{{backend}} built-in` · `From your providers` · `models.dev` |
+| models.dev browse row | vendor chips by display name, then `More` |
 | models.dev group, empty query | `Type to search models.dev` |
-| By-ID row | input placeholder `Model ID` · button `Add`; with an unmatched query the row reads `Add "{{query}}" by ID` |
+| Fallback row (query only) | `Add "{{query}}" by ID` |
 | Group with nothing to offer | the group is omitted, never an empty header |
 | Picker footer count | `{{count}} selected` |
 | Picker confirm | `Add {{count}} models`; disabled `Add models` when nothing is selected |
 | Already-in-list row (search only) | `In list` |
-| models.dev group states | `Type to search models.dev` · loading · `models.dev unavailable` |
+| models.dev group states | vendor chips (empty query) · loading · `models.dev unavailable` |
 | Remove with route | `Also removes its route: {{hops}}` · button `Remove` |
 
 Every other existing string in `settings.models.gateway.catalog.*` and
