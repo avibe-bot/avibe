@@ -1651,6 +1651,7 @@
         "fail": {
           "refetch": "The fetch did not come back. The list below is the last one this page actually read",
           "tier": "The tier was not saved",
+          "tierManaged": "This model's tiers are set automatically, so the change was not saved",
           "addModel": "The model was not added",
           "removeModel": "The model was not removed",
           "deleteSource": "The source was not removed",
@@ -1676,14 +1677,19 @@
           "inputHint": "Enter to add · any text",
           "remove": "Remove {{tier}}",
           "suggest": "Add {{tier}}",
-          "note": "Tiers are sent exactly as typed. A model with no tiers is still routable — its requests are sent without the effort parameter."
+          "note": "Tiers are sent exactly as typed. A model with no tiers is still routable — its requests are sent without the effort parameter.",
+          "managedHint": "Set automatically — these cannot be added or removed",
+          "managed": {
+            "upstream": "From provider",
+            "catalog": "Built-in catalog"
+          }
         },
         "addRow": {
           "hint": "Use this when a model is not discoverable, or when you only want one of them"
         },
         "empty": "This source returned no models. Add one by hand, or refetch.",
         "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
-        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is confirmed when the source is added, shown here, and not editable."
+        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers the provider or the catalog declared cannot be edited; the rest are yours to type. The interface type is confirmed when the source is added, shown here, and not editable."
       },
       "guard": {
         "label": "Hops that will be removed",
@@ -2043,6 +2049,11 @@
     "provider_unavailable": "The provider is unavailable.",
     "provider_error": "The provider rejected the request.",
     "endpoint_not_configured": "The provider endpoint is not configured."
+  },
+  "modelHub": {
+    "errors": {
+      "source_model_tiers_managed": "This model's tiers are set automatically, so the change was not saved"
+    }
   },
   "apps": {
     "title": "Apps",

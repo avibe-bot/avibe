@@ -180,6 +180,68 @@ export class ModelHubPage {
     return this.sourceDetailDialog.locator('[data-manual-model-draft]');
   }
 
+  // --- Reasoning tiers ------------------------------------------------------
+
+  /**
+   * The tiers cell of one model row.
+   *
+   * One name for two renderings on purpose. An editable cell is a button that
+   * opens the editor; a cell whose tiers the server declared is a plain div with
+   * no way in. A spec asserting "there is no way in here" has to be able to name
+   * the cell without already knowing which of the two it got.
+   */
+  tierCell(modelId: string): Locator {
+    return this.modelRow(modelId).locator('.model-hub-source-tier-cell');
+  }
+
+  /** The tiers the row carries right now, in the order the product lists them. */
+  tierChips(modelId: string): Locator {
+    return this.modelRow(modelId).locator('.model-hub-source-tier-chip');
+  }
+
+  /** The ghost tiers an open editor proposes — the protocol's vocabulary, minus
+   *  whatever the model already has. */
+  tierSuggestions(modelId: string): Locator {
+    return this.modelRow(modelId).locator('.model-hub-source-tier-suggest');
+  }
+
+  /**
+   * The cell of a model whose tiers the SERVER declared, named by the rung that
+   * declared them.
+   *
+   * The attribute is absent on an editable row rather than carrying some other
+   * value, which is what makes `toHaveCount(0)` here a real assertion instead of
+   * a spelling of "the rung is something else".
+   */
+  managedTierCell(modelId: string, rung: 'upstream' | 'catalog'): Locator {
+    return this.modelRow(modelId).locator(attr('data-tier-provenance', rung));
+  }
+
+  /**
+   * The note a tier write that did not land leaves on its row.
+   *
+   * Named by kind rather than found by looking for a retry button: `retryable`
+   * and `managed` are two verdicts about whether the write could ever succeed,
+   * and the button is only one of the things that follows from that.
+   */
+  tierFailure(modelId: string, kind: 'managed' | 'retryable'): Locator {
+    return this.modelRow(modelId).locator(attr('data-tier-failure', kind));
+  }
+
+  /**
+   * The "+ Add tier" / "+ Tier" pill. Present on an editable resting row (even
+   * when CSS hides it until hover) and absent on a locked one, which is the
+   * distinction a lock assertion needs — a disabled pill would still be a door.
+   */
+  tierAddAffordance(modelId: string): Locator {
+    return this.modelRow(modelId).locator('.model-hub-source-tier-add');
+  }
+
+  /** The free-text field an open editor types a new tier into. */
+  tierInput(modelId: string): Locator {
+    return this.modelRow(modelId).getByPlaceholder(hub('sourceDetail.tiers.inputHint'), { exact: true });
+  }
+
   /**
    * The confirm-before-destroy dialog raised from the source panel.
    *

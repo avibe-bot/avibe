@@ -47,8 +47,14 @@ import {
 import { handOffProviderTab } from './providerTab';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
+import { tierEditRefusedAsManaged } from './serverCopy';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
-import { tierMutationPayload, type TierMutationIntent } from './tierMutation';
+import {
+  managedTierSource,
+  tierMutationPayload,
+  type ManagedTierSource,
+  type TierMutationIntent,
+} from './tierMutation';
 import { TIER_SUGGESTIONS } from './tierSuggestions';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
@@ -147,6 +153,25 @@ type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
 
+/** The badge that says which rung declared a locked model's tiers. */
+const TIER_PROVENANCE_LABEL_KEY: Readonly<Record<ManagedTierSource, string>> = {
+  upstream: 'settings.models.sourceDetail.tiers.managed.upstream',
+  catalog: 'settings.models.sourceDetail.tiers.managed.catalog',
+};
+
+/**
+ * A tier write that did not land, and whether anything is left to try.
+ *
+ * `retryable` carries the intent because 重试 has to replay the exact write the
+ * rollback undid. `managed` carries none on purpose: the server owns that
+ * model's declaration, so there is no version of this write that succeeds, and
+ * offering a button that re-asks a settled question would be the one wrong
+ * affordance to put in front of this user.
+ */
+type TierFailure =
+  | { kind: 'retryable'; intent: TierMutationIntent }
+  | { kind: 'managed' };
+
 const TierEditor: React.FC<{
   model: SuppliedModel;
   protocol: SourceProtocol;
@@ -157,10 +182,11 @@ const TierEditor: React.FC<{
   trackMutation: TrackSourceMutation;
 }> = ({ model, protocol, editing, onEdit, onClose, onMutating, trackMutation }) => {
   const { t } = useTranslation();
+  const managed = managedTierSource(model.reasoning_efforts_source);
   const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
   const [draft, setDraft] = React.useState('');
   const [saving, setSaving] = React.useState(false);
-  const [failedNext, setFailedNext] = React.useState<TierMutationIntent | null>(null);
+  const [failed, setFailed] = React.useState<TierFailure | null>(null);
   const [returnFocus, setReturnFocus] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const cellRef = React.useRef<HTMLButtonElement>(null);
@@ -195,7 +221,7 @@ const TierEditor: React.FC<{
         }
         const { previous, next } = payload;
         onMutating();
-        setFailedNext(null);
+        setFailed(null);
         setTiers(next);
         if (previous.length === next.length && previous.every((tier, index) => tier === next[index])) {
           settlement.release();
@@ -207,8 +233,13 @@ const TierEditor: React.FC<{
           return true;
         } catch (error) {
           setTiers(previous);
-          setFailedNext(intent);
-          if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
+          const refusal = apiFailure(error);
+          setFailed(tierEditRefusedAsManaged(refusal) ? { kind: 'managed' } : { kind: 'retryable', intent });
+          if (refusal?.code === 'source_not_found') await settlement.gone(latest.id);
+          // A managed refusal re-reads for the same reason every other failed
+          // write does, and one more: this client believed the row was editable
+          // and the server says otherwise, so the read is what replaces the
+          // stale editor with the provenance the server actually holds.
           else await settlement.unread();
           return false;
         }
@@ -223,19 +254,52 @@ const TierEditor: React.FC<{
     if (await commit({ kind: 'add', tier: value })) setDraft('');
   };
   const retry = async () => {
-    if (!failedNext) return;
-    if (await commit(failedNext) && failedNext.kind === 'add' && draft.trim() === failedNext.tier) setDraft('');
+    if (failed?.kind !== 'retryable') return;
+    const { intent } = failed;
+    if (await commit(intent) && intent.kind === 'add' && draft.trim() === intent.tier) setDraft('');
   };
   // A rolled-back write is the row's own unfinished business: the tier list is
   // already back to what the server holds, and 重试 is the only way forward from
   // there. So the notice renders in whichever state the row is in and leaves only
   // through a write that lands — never because the editor closed or moved on.
-  const failure = failedNext && (
-    <span className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
+  //
+  // A refusal is the exception, and the one that outlives the editor: the re-read
+  // it triggers turns the row into the locked one below, so its notice has to be
+  // rendered by that branch too, or the only explanation the user gets would
+  // disappear at the moment the row changes under them.
+  const failure = failed && (failed.kind === 'managed' ? (
+    <span data-tier-failure="managed" className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
+      {t('settings.models.sourceDetail.fail.tierManaged')}
+    </span>
+  ) : (
+    <span data-tier-failure="retryable" className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
       {t('settings.models.sourceDetail.fail.tier')}
       <button type="button" disabled={saving} onClick={() => void retry()} className="font-semibold underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceDetail.retry')}</button>
     </span>
-  );
+  ));
+  // Rung 1 and 2 of the provenance ladder are the server's declaration, re-applied
+  // on every refresh: there is nothing for the user to add and nothing to delete,
+  // so the cell stops being a way in rather than becoming a disabled one. It says
+  // which rung instead — a row that simply refused to open would leave "why" as
+  // the user's problem.
+  if (managed) {
+    return (
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <div data-tier-provenance={managed} className="model-hub-source-tier-cell flex min-w-0 flex-wrap items-center gap-1.5">
+          {tiers.length > 0 ? tiers.map((tier) => (
+            <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border font-mono text-foreground">{tier}</span>
+          )) : <span className="model-hub-source-tier-empty">{t('settings.models.sourceDetail.tiers.empty')}</span>}
+          <span
+            title={t('settings.models.sourceDetail.tiers.managedHint') as string}
+            className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border font-semibold"
+          >
+            {t(TIER_PROVENANCE_LABEL_KEY[managed])}
+          </span>
+        </div>
+        {failure}
+      </div>
+    );
+  }
   if (!editing) {
     // The whole cell is the edit entry, which is what lets the add affordance be
     // drawn only under a pointer: 20 rows each carrying a permanent 「+ 添加档位」
@@ -925,7 +989,11 @@ export const SourceDetailPanel: React.FC<{
                     .finally(() => setBusy(false));
                 }
               }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
-              {model.origin === 'manual' && <><button type="button" disabled={busy} aria-label={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} title={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} className="model-hub-source-row-action grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground" onClick={() => setEditingTiers(model.id)}><Pencil className="size-3.5" /></button><ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} /></>}
+              {/* The pencil is a second door into the same tier editor, so a locked
+                  row has to close it too — a manual entry whose id matches a
+                  catalog model is locked exactly like a discovered one. Removing
+                  the model itself is a different question and stays offered. */}
+              {model.origin === 'manual' && <>{!managedTierSource(model.reasoning_efforts_source) && <button type="button" disabled={busy} aria-label={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} title={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} className="model-hub-source-row-action grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground" onClick={() => setEditingTiers(model.id)}><Pencil className="size-3.5" /></button>}<ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} /></>}
             </div>
           </div>
         ))}
