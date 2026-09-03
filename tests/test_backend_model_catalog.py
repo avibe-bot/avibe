@@ -785,7 +785,13 @@ def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp
 
 @pytest.mark.parametrize("timestamp_key", ["fetched_at", "checked_at"])
 def test_remote_catalog_revalidates_after_five_minutes(monkeypatch, timestamp_key):
-    payload = {timestamp_key: 100.0, "catalog": {"schema_version": 1, "backends": {}}}
+    payload = {
+        timestamp_key: 100.0,
+        "catalog": {"schema_version": 1, "backends": {}},
+        "source_key": backend_model_catalog._remote_catalog_source_key(
+            backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
+        ),
+    }
 
     monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 399.0)
     assert backend_model_catalog._remote_cache_stale(payload) is False
@@ -1079,7 +1085,12 @@ def test_builtin_snapshot_requires_each_catalog_once_when_cli_is_installed(
 
     def remote(_path):
         reads["remote"] += 1
-        return {"catalog": {}}
+        return {
+            "catalog": {},
+            "source_key": backend_model_catalog._remote_catalog_source_key(
+                backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
+            ),
+        }
 
     def bundled(_path):
         reads["bundled"] += 1
@@ -1111,7 +1122,12 @@ def test_builtin_snapshot_does_not_require_cli_cache_when_cli_is_absent(monkeypa
     monkeypatch.setattr(
         backend_model_catalog,
         "_read_cached_remote_payload",
-        lambda _path: {"catalog": {}},
+        lambda _path: {
+            "catalog": {},
+            "source_key": backend_model_catalog._remote_catalog_source_key(
+                backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
+            ),
+        },
     )
     monkeypatch.setattr(backend_model_catalog, "_read_complete_catalog", lambda _path: {})
     monkeypatch.setattr(
@@ -1127,6 +1143,52 @@ def test_builtin_snapshot_does_not_require_cli_cache_when_cli_is_absent(monkeypa
     )
 
     assert snapshot["complete"] is True
+
+
+def test_builtin_snapshot_rejects_remote_cache_from_previous_url(monkeypatch):
+    old_url = "https://old.example.test/catalog.json"
+    new_url = "https://new.example.test/catalog.json"
+    refreshes = []
+    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, new_url)
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_read_cached_remote_payload",
+        lambda _path: {
+            "catalog": {
+                "schema_version": 1,
+                "backends": {
+                    "codex": {"models": [{"id": "gpt-from-old-source"}]}
+                },
+            },
+            "source_key": backend_model_catalog._remote_catalog_source_key(old_url),
+        },
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "schedule_remote_catalog_refresh",
+        lambda: refreshes.append(True) or True,
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_read_complete_catalog",
+        lambda _path: {},
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_read_codex_models_cache_with_status",
+        lambda: ([], False),
+    )
+
+    snapshot = backend_model_catalog.backend_builtin_snapshot(
+        "codex",
+        cli_installed=False,
+    )
+
+    assert snapshot["complete"] is False
+    assert "gpt-from-old-source" not in {
+        item["id"] for item in snapshot["models"]
+    }
+    assert refreshes == [True]
 
 
 def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
@@ -1147,6 +1209,9 @@ def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
         remote_path.write_text(
             json.dumps(
                 {
+                    "source_key": backend_model_catalog._remote_catalog_source_key(
+                        backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
+                    ),
                     "catalog": {
                         "schema_version": 1,
                         "backends": {

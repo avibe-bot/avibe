@@ -3422,6 +3422,31 @@ class ModelHubBackendModelConfig:
         }
 
 
+def normalize_storable_backend_model_text(
+    value: object,
+    *,
+    field_name: Literal["display_name", "reasoning_efforts"],
+) -> Optional[str]:
+    """Normalize one proposed metadata value through the persisted model contract."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > 64:
+        return None
+    candidate = {
+        "id": "metadata-proposal",
+        field_name: (
+            normalized if field_name == "display_name" else [normalized]
+        ),
+    }
+    try:
+        ModelHubBackendModelConfig.from_payload(candidate)
+    except (TypeError, ValueError):
+        return None
+    return normalized
+
+
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
     if backend not in {"claude", "codex"}:
         return []

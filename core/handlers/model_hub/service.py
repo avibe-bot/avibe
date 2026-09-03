@@ -32,6 +32,7 @@ from config.v2_config import (
     ModelHubSourceUsageConfig,
     V2Config,
     canonical_opencode_menu_identity,
+    normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
     validate_model_hub_source_client_nonce,
@@ -128,30 +129,37 @@ def _storable_backend_model_metadata(
     display_name: object,
     reasoning_efforts: object,
 ) -> tuple[Optional[str], list[str]]:
-    def normalized(value: object, field: str) -> Optional[str]:
-        if not isinstance(value, str):
-            return None
-        value = value.strip()
-        if not value or len(value) > 64:
-            return None
-        candidate = {
-            "id": "metadata-proposal",
-            field: value if field == "display_name" else [value],
-        }
-        try:
-            ModelHubBackendModelConfig.from_payload(candidate)
-        except (TypeError, ValueError):
-            return None
-        return value
-
-    proposed_display_name = normalized(display_name, "display_name")
+    proposed_display_name = normalize_storable_backend_model_text(
+        display_name,
+        field_name="display_name",
+    )
     proposed_efforts: list[str] = []
     if isinstance(reasoning_efforts, (list, tuple)):
         for effort in reasoning_efforts:
-            proposed = normalized(effort, "reasoning_efforts")
+            proposed = normalize_storable_backend_model_text(
+                effort,
+                field_name="reasoning_efforts",
+            )
             if proposed is not None and proposed not in proposed_efforts:
                 proposed_efforts.append(proposed)
     return proposed_display_name, proposed_efforts
+
+
+@dataclass(frozen=True)
+class _BuiltinReconcilePreconditions:
+    store_writable: bool
+    snapshot_complete: bool
+    baseline_initialized: bool
+
+    @property
+    def satisfied(self) -> bool:
+        return (
+            self.store_writable
+            and self.snapshot_complete
+            and self.baseline_initialized
+        )
+
+
 AGENT_CHAIN_CONTRACT_VERSION = 7
 PROBE_RESULT_CONTRACT_VERSION = 7
 _REORDER_ORDER_UNSET = object()
@@ -4200,8 +4208,6 @@ class ModelHubService:
         changed: list[BackendName] = []
         for backend in ("claude", "codex"):
             agent = config.agents[backend]
-            if not agent.builtin_baseline_initialized:
-                continue
             raw_snapshot = snapshots.get(backend, {})
             snapshot = [
                 item
@@ -4260,6 +4266,27 @@ class ModelHubService:
             if backend != "opencode"
         }
 
+    def _reconcile_preconditions(
+        self,
+        config: ModelHubConfig,
+        snapshots: Mapping[str, Mapping[str, Any]],
+    ) -> dict[BackendName, _BuiltinReconcilePreconditions]:
+        store_writable = True
+        try:
+            self._ensure_config_writable()
+        except ModelHubError as exc:
+            if exc.code != "config_recovery":
+                raise
+            store_writable = False
+        return {
+            cast(BackendName, backend): _BuiltinReconcilePreconditions(
+                store_writable=store_writable,
+                snapshot_complete=snapshot.get("complete") is True,
+                baseline_initialized=config.agents[backend].builtin_baseline_initialized,
+            )
+            for backend, snapshot in snapshots.items()
+        }
+
     @staticmethod
     def _builtin_snapshot_generation(snapshot: Mapping[str, Any]) -> str:
         generation = snapshot.get("generation")
@@ -4304,9 +4331,11 @@ class ModelHubService:
             # so one request cannot apply an older pre-migration generation.
             previous = self.store.load()
             snapshots = self._builtin_snapshots(selected_backends)
+            preconditions = self._reconcile_preconditions(previous, snapshots)
             changed_snapshots = {
                 backend: snapshot
                 for backend, snapshot in snapshots.items()
+                if preconditions[cast(BackendName, backend)].satisfied
                 if self._builtin_snapshot_generations.get(
                     cast(BackendName, backend)
                 )
@@ -4323,7 +4352,12 @@ class ModelHubService:
                 config = self._clone_config(previous)
                 changed = self._apply_builtin_reconcile(config, changed_snapshots)
                 if changed:
-                    await self._commit_synced(previous, config)
+                    try:
+                        await self._commit_synced(previous, config)
+                    except ModelHubError as exc:
+                        if exc.code != "config_recovery":
+                            raise
+                        return []
                 self._builtin_snapshot_generations.update(
                     {
                         cast(BackendName, backend): self._builtin_snapshot_generation(
@@ -4339,6 +4373,7 @@ class ModelHubService:
                     backend
                     for backend in selected_backends
                     if backend in self._pending_builtin_catalog_refresh
+                    and preconditions[backend].satisfied
                 )
                 for backend in pending:
                     await self._refresh_backend_catalog(backend)

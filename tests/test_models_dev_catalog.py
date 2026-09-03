@@ -208,6 +208,40 @@ def test_models_dev_deduplicates_by_model_id_and_ranks_first_party_then_match(
     assert matches[1]["first_party"] is False
 
 
+def test_models_dev_validates_each_copy_before_ranking_and_deduplication(
+    monkeypatch,
+):
+    catalog = {
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "gpt-target": {"name": "   "},
+                "gpt-unusable-target": {
+                    "name": "Unusable target",
+                    "reasoning_options": [
+                        {"type": "effort", "values": ["   "]}
+                    ],
+                },
+            },
+        },
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {"gpt-target": {"name": "Valid aggregator copy"}},
+        },
+    }
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: catalog,
+    )
+
+    matches = models_dev_catalog.search_models_dev("target")
+
+    assert [item["model_id"] for item in matches] == ["gpt-target"]
+    assert matches[0]["provider_id"] == "openrouter"
+    assert matches[0]["first_party"] is False
+
+
 def test_models_dev_caps_matches_at_eight(monkeypatch):
     catalog = {
         "unknown": {

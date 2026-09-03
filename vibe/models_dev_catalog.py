@@ -14,6 +14,10 @@ from typing import Any
 
 from config import paths
 from config.atomic_io import write_atomic
+from config.v2_config import (
+    ModelHubBackendModelConfig,
+    normalize_storable_backend_model_text,
+)
 
 
 MODELS_DEV_URL_ENV = "AVIBE_MODELS_DEV_URL"
@@ -219,7 +223,7 @@ def _match_score(
     return None
 
 
-def _reasoning_efforts(model: dict[str, Any]) -> list[str]:
+def _reasoning_efforts(model: dict[str, Any]) -> list[str] | None:
     options = model.get("reasoning_options")
     if not isinstance(options, list):
         return []
@@ -228,13 +232,19 @@ def _reasoning_efforts(model: dict[str, Any]) -> list[str]:
             continue
         values = option.get("values")
         if isinstance(values, list):
-            return list(
-                dict.fromkeys(
-                    value
-                    for value in values
-                    if isinstance(value, str) and 0 < len(value) <= 64
+            normalized: list[str] = []
+            for value in values:
+                if not isinstance(value, str) or len(value) > 64:
+                    continue
+                effort = normalize_storable_backend_model_text(
+                    value,
+                    field_name="reasoning_efforts",
                 )
-            )
+                if effort is None:
+                    return None
+                if effort not in normalized:
+                    normalized.append(effort)
+            return normalized
     return []
 
 
@@ -292,6 +302,13 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                 if isinstance(model.get("name"), str)
                 else model_id
             )
+            display_name = normalize_storable_backend_model_text(
+                display_name,
+                field_name="display_name",
+            )
+            reasoning_efforts = _reasoning_efforts(model)
+            if display_name is None or reasoning_efforts is None:
+                continue
             score = _match_score(tokens, provider_id, model_id, display_name)
             if score is None:
                 continue
@@ -329,8 +346,26 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                     if isinstance(model.get("reasoning"), bool)
                     else None
                 ),
-                "reasoning_efforts": _reasoning_efforts(model),
+                "reasoning_efforts": reasoning_efforts,
             }
+            try:
+                ModelHubBackendModelConfig.from_payload(
+                    {
+                        "id": row["model_id"],
+                        "origin": "models_dev",
+                        "models_dev_id": row["models_dev_id"],
+                        "display_name": row["display_name"],
+                        "context_window": row["context_window"],
+                        "max_output_tokens": row["max_output_tokens"],
+                        "input_modalities": row["input_modalities"],
+                        "output_modalities": row["output_modalities"],
+                        "supports_tools": row["supports_tools"],
+                        "supports_reasoning": row["supports_reasoning"],
+                        "reasoning_efforts": row["reasoning_efforts"],
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
             candidates.setdefault(model_id, []).append((score, provider_id, row))
 
     matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []

@@ -581,10 +581,17 @@ def backend_builtin_snapshot(
         return _versioned_builtin_snapshot(complete=False, models=[])
 
     cached_remote = _read_cached_remote_payload(get_cached_catalog_path())
-    if schedule_refresh and _remote_cache_stale(cached_remote):
+    remote_source_key = _remote_catalog_source_key(_remote_catalog_url())
+    if schedule_refresh and _remote_cache_stale(
+        cached_remote,
+        source_key=remote_source_key,
+    ):
         schedule_remote_catalog_refresh()
     remote_catalog = cached_remote.get("catalog")
-    remote_complete = isinstance(remote_catalog, dict)
+    remote_complete = (
+        cached_remote.get("source_key") == remote_source_key
+        and isinstance(remote_catalog, dict)
+    )
     if not remote_complete:
         remote_catalog = {}
 
@@ -887,7 +894,14 @@ def _cached_remote_payload() -> dict[str, Any]:
     return payload
 
 
-def _remote_cache_stale(payload: dict[str, Any]) -> bool:
+def _remote_cache_stale(
+    payload: dict[str, Any],
+    *,
+    source_key: str | None = None,
+) -> bool:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
     fetched_at = payload.get("fetched_at")
     checked_at = payload.get("checked_at")
     last_success_at = checked_at if isinstance(checked_at, (int, float)) else fetched_at
@@ -896,6 +910,8 @@ def _remote_cache_stale(payload: dict[str, Any]) -> bool:
         not isinstance(last_success_at, (int, float)) or float(failed_at) >= float(last_success_at)
     ):
         return time.time() - float(failed_at) >= REMOTE_CATALOG_FAILURE_TTL_SECONDS
+    if payload.get("source_key") != current_source_key:
+        return True
     if not isinstance(last_success_at, (int, float)):
         return True
     return time.time() - float(last_success_at) >= REMOTE_CATALOG_REVALIDATE_SECONDS

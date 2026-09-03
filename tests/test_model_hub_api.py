@@ -9,6 +9,7 @@ import re
 import textwrap
 import threading
 from datetime import datetime, timezone
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -2488,6 +2489,166 @@ def test_builtin_reconcile_waits_for_baseline_initialization(monkeypatch, tmp_pa
 
     assert changed == []
     assert store.config.agents["codex"].to_payload() == original
+
+
+def test_builtin_reconcile_precondition_matrix_is_read_safe(monkeypatch, tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    for store_writable, snapshot_complete, baseline_initialized in product(
+        (False, True),
+        repeat=3,
+    ):
+        service, store, _adapter = _service(tmp_path)
+        agent = store.config.agents["codex"]
+        agent.builtin_baseline_initialized = baseline_initialized
+        before = copy.deepcopy(agent.to_payload())
+        store.recovery = not store_writable
+        saves = []
+        original_save = store.save
+
+        def save(config):
+            store.ensure_writable()
+            saves.append(config.to_payload())
+            original_save(config)
+
+        monkeypatch.setattr(store, "save", save)
+        monkeypatch.setattr(
+            service,
+            "_builtin_snapshots",
+            lambda _backends: {
+                "codex": {
+                    "complete": snapshot_complete,
+                    "generation": "precondition-matrix",
+                    "models": [{"id": "gpt-precondition-matrix"}],
+                }
+            },
+        )
+
+        asyncio.run(
+            dispatch_model_hub_rpc(
+                service,
+                "get_agent_sources",
+                {"backend": "codex"},
+            )
+        )
+
+        ready = store_writable and snapshot_complete and baseline_initialized
+        current = store.config.agents["codex"]
+        assert len(saves) == int(ready)
+        assert ("gpt-precondition-matrix" in {model.id for model in current.models}) is ready
+        if not ready:
+            assert current.to_payload() == before
+
+
+@pytest.mark.parametrize(
+    "producer",
+    ("candidates_read", "reconcile_seed", "models_dev_typeahead"),
+)
+def test_model_metadata_producers_emit_storable_backend_payloads(
+    monkeypatch,
+    tmp_path,
+    producer,
+):
+    if producer == "candidates_read":
+        service, store, _adapter = _service(tmp_path)
+        source = ModelHubSourceConfig(
+            id="src_metadata01",
+            kind="api_key",
+            vendor="openai",
+            display_name="Metadata source",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="gpt-metadata-candidate",
+                    provenance="manual",
+                    display_name="   ",
+                    reasoning_efforts=["   ", " high "],
+                )
+            ],
+            credential_ref="cred_metadata01",
+        )
+        store.config.sources = [source]
+        store.config.agents["codex"].sources.order = [source.id]
+        monkeypatch.setattr(
+            "vibe.backend_model_catalog.backend_builtin_models",
+            lambda *_args, **_kwargs: [],
+        )
+        candidate = service.agent_model_candidates("codex")["providers"][0]
+        payload = {
+            "id": candidate["id"],
+            "origin": candidate["origin"],
+            "display_name": candidate["display_name"],
+            "reasoning_efforts": candidate["reasoning_efforts"],
+        }
+    elif producer == "reconcile_seed":
+        service, store, _adapter = _service(tmp_path)
+        monkeypatch.setattr(
+            service,
+            "_builtin_snapshots",
+            lambda _backends: {
+                "codex": {
+                    "complete": True,
+                    "models": [
+                        {
+                            "id": "gpt-metadata-reconcile",
+                            "display_name": "   ",
+                            "reasoning_efforts": ["   ", " high "],
+                        }
+                    ],
+                }
+            },
+        )
+        asyncio.run(service.reconcile_builtin_models(("codex",)))
+        payload = next(
+            model.to_payload()
+            for model in store.config.agents["codex"].models
+            if model.id == "gpt-metadata-reconcile"
+        )
+    else:
+        from vibe import models_dev_catalog
+
+        monkeypatch.setattr(
+            models_dev_catalog,
+            "load_models_dev_catalog",
+            lambda: {
+                "openai": {
+                    "name": "OpenAI",
+                    "models": {
+                        "gpt-metadata-typeahead": {
+                            "name": " Metadata typeahead ",
+                            "reasoning_options": [
+                                {"type": "effort", "values": [" high "]}
+                            ],
+                        }
+                    },
+                }
+            },
+        )
+        match = models_dev_catalog.search_models_dev("gpt-metadata-typeahead")[0]
+        payload = {
+            "id": match["model_id"],
+            "origin": "models_dev",
+            "models_dev_id": match["models_dev_id"],
+            "display_name": match["display_name"],
+            "context_window": match["context_window"],
+            "max_output_tokens": match["max_output_tokens"],
+            "input_modalities": match["input_modalities"],
+            "output_modalities": match["output_modalities"],
+            "supports_tools": match["supports_tools"],
+            "supports_reasoning": match["supports_reasoning"],
+            "reasoning_efforts": match["reasoning_efforts"],
+        }
+
+    parsed = ModelHubBackendModelConfig.from_payload(payload)
+    proposed_values = [
+        value
+        for value in [parsed.display_name, *parsed.reasoning_efforts]
+        if value is not None
+    ]
+    assert all(value == value.strip() and 0 < len(value) <= 64 for value in proposed_values)
 
 
 def test_claude_reconcile_excludes_non_claude_cli_override(monkeypatch, tmp_path):
