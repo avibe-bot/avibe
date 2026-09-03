@@ -646,6 +646,11 @@
   align-items: baseline;
   gap: 8px;
 }
+.model-hub-add-key-protocol-active {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .model-hub-add-key-protocol-manual {
   flex-direction: column;
 }

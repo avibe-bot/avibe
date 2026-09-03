@@ -135,6 +135,7 @@ const renderReplacement = (
 
 const DETECT = /^Detect$|^检测$/;
 const CONFIRM = /Confirm & add|确认添加/;
+const RETRY = /^Retry$|^重试$/i;
 
 const fillCredentials = async () => {
   const user = userEvent.setup();
@@ -497,6 +498,104 @@ describe('AddApiKeyDialog', () => {
     await user.type(name, 'Fixed relay');
     expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
     expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('retires the evidence of every exit that would persist without observing again', async () => {
+    // One rule, stated over how a state exits rather than over which states exist:
+    // ①″'s report and the protocol a server-named refusal still holds were each
+    // proved against this endpoint, this credential and this probe constraint, so
+    // changing any of those three ends both. Every combination is driven through
+    // the UI so neither arm can quietly become its own special case.
+    type Act = (user: ReturnType<typeof userEvent.setup>) => Promise<void>;
+    const exits: Act[] = [
+      async (user) => {
+        await clickDetect(user);
+        await screen.findByRole('button', { name: CONFIRM });
+      },
+      async (user) => {
+        await clickDetect(user);
+        await clickConfirm(user);
+        await screen.findByRole('button', { name: RETRY });
+      },
+    ];
+    const connectionEdits: Act[] = [
+      async (user) => { await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/v2'); },
+      async (user) => { await user.type(screen.getByLabelText(/^API key$/i), 'x'); },
+      async (user) => {
+        await openManualProtocol(user);
+        await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
+      },
+    ];
+
+    for (const reachExit of exits) {
+      for (const edit of connectionEdits) {
+        vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+        const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(
+          new ApiCallError('invalid_source', 'modelHub.errors.discovery_failed', true, [], [], [], 422),
+        );
+        renderDialog();
+        const user = await fillCredentials();
+        await reachExit(user);
+        const persistedBefore = create.mock.calls.length;
+
+        await edit(user);
+
+        expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
+        expect(screen.queryByRole('button', { name: CONFIRM })).toBeNull();
+        expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+        expect(create.mock.calls.length).toBe(persistedBefore);
+
+        cleanup();
+        vi.restoreAllMocks();
+      }
+    }
+  });
+
+  it('keeps a state whose own primary re-observes across the same edit', async () => {
+    // The counterpart of the rule above, and the reason it is written over exits:
+    // ④'s 重试 reads the fields as they now stand, so naming an interface there is
+    // how the user answers it — not evidence to retire.
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed({
+      outcome: 'ambiguous',
+      authenticated: 'unknown',
+      protocol: null,
+      discovery: 'not_attempted',
+      models: [],
+    }));
+    renderDialog();
+    const user = await fillCredentials();
+
+    await clickDetect(user);
+    await user.click(await screen.findByRole('button', { name: 'Anthropic Messages' }));
+
+    expect(screen.getByRole('button', { name: RETRY })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: DETECT })).toBeNull();
+  });
+
+  it('names the interface Detect will send while the disclosure is closed', async () => {
+    // The collapsed row and the expanded selector are one selection rendered two
+    // ways, so the row states the active constraint rather than the default it
+    // replaced, and the promise of automatic identification goes with it.
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    renderDialog();
+    const user = await fillCredentials();
+    const autoRow = document.querySelector('.model-hub-add-key-protocol-active');
+    expect(autoRow?.textContent).toMatch(/Auto detect|自动探测/);
+    expect(autoRow?.querySelector('.model-hub-add-key-protocol-glyph')).toBeNull();
+
+    await openManualProtocol(user);
+    expect(document.querySelector('.model-hub-add-key-protocol-active')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
+    await openManualProtocol(user);
+
+    const chosenRow = document.querySelector('.model-hub-add-key-protocol-active');
+    expect(chosenRow?.textContent).toMatch(/Anthropic Messages/);
+    expect(chosenRow?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.protocol.idleHint'))).toBeNull();
+
+    await clickDetect(user);
+    await screen.findByRole('button', { name: CONFIRM });
+    expect(observe.mock.calls[0][0].protocol).toBe('anthropic');
   });
 
   it('renders the safe observation cause when create rejects after probing', async () => {

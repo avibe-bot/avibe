@@ -73,6 +73,20 @@ type Phase =
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
 type ProtocolSelection = 'auto' | SourceProtocol;
 
+// A phase whose primary commits WITHOUT observing again is carrying evidence
+// that only this endpoint, this credential and this probe constraint produced:
+// ①″'s report, ⑤'s waived inventory, and the protocol a refused or unanswered
+// create already proved. That is the property, not a list of the states that
+// happen to be reachable today — a phase added later inherits the rule from how
+// its own exit behaves. Phases whose primary re-observes (③ / ④ / ⑤'s 重试, ⑥)
+// are deliberately absent: their retry reads the fields as they now stand, and
+// §0.8 keeps the form intact across it.
+const persistsWithoutObserving = (phase: Phase): boolean =>
+  (phase.kind === 'form' && phase.report !== null)
+  || phase.kind === 'inventory'
+  || phase.kind === 'persist_failure'
+  || phase.kind === 'save_unconfirmed';
+
 const ProtocolSegments: React.FC<{
   id?: string;
   disabled: boolean;
@@ -558,22 +572,34 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     await persist(seq, phase.observation.protocol, true);
   };
 
+  // §0.8 ①″: editing Base URL, the API key, or the protocol selection returns
+  // the dialog to ① Ready with the report dropped. The same three inputs are
+  // what every persisting exit's evidence was proved against, so one retirement
+  // covers the whole class instead of each handler picking its own phase.
+  const retireProvedEvidence = () => {
+    setPhase((current) => (persistsWithoutObserving(current) ? INITIAL_PHASE : current));
+  };
+
   const editEndpoint = (value: string) => {
     setBaseUrl(value);
-    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+    retireProvedEvidence();
   };
   const editKey = (value: string) => {
     setApiKey(value);
     if (replaceMode && replacePhase.kind === 'failure') setReplacePhase({ kind: 'edit' });
-    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+    retireProvedEvidence();
   };
+  // The display name is in no observation, so it proves and unproves nothing —
+  // ①″ keeps its report across a rename. It IS in the create request, so a
+  // server-named refusal of that request stops describing the request the user
+  // now holds.
   const editDisplayName = (value: string) => {
     setDisplayName(value);
     if (phase.kind === 'persist_failure') setPhase(INITIAL_PHASE);
   };
   const editProtocol = (value: ProtocolSelection) => {
     setProtocolSelection(value);
-    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+    retireProvedEvidence();
   };
 
   const isWorking = phase.kind === 'working';
@@ -589,6 +615,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const detecting = isWorking && phase.kind === 'working' && phase.stage === 'observe';
   const identified = phase.kind === 'form' && phase.report !== null && Boolean(phase.report.protocol);
   const identifiedProtocol = identified && phase.kind === 'form' ? phase.report?.protocol ?? null : null;
+  // The segments and the summary row are two renderings of one selection, so
+  // only one of them is on screen at a time: expanded, the pressed segment IS
+  // the statement; collapsed, the row carries it.
+  const segmentsOpen = phase.kind === 'undetermined' || (manualOpen && !isWorking);
   const showForm = phase.kind !== 'inventory';
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
@@ -742,13 +772,25 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   </span>
                 </div>
               )}
-              {phase.kind === 'form' && !phase.report && (
+              {phase.kind === 'form' && !phase.report && !segmentsOpen && (
                 <div className="model-hub-add-key-protocol-idle-row">
-                  <span>{t('settings.models.addKey.protocol.auto')}</span>
-                  <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.idleHint')}</span>
+                  {/* Whatever 检测 is about to send, and nothing else: a concrete
+                      choice is the active constraint even while the disclosure
+                      that made it is closed. */}
+                  <span className="model-hub-add-key-protocol-active">
+                    {selectedProtocol && <ProtocolGlyph protocol={selectedProtocol} />}
+                    {t(selectedProtocol
+                      ? PROTOCOL_COPY_KEYS[selectedProtocol]
+                      : 'settings.models.addKey.protocol.auto')}
+                  </span>
+                  {/* The hint promises automatic identification, which is only
+                      what Auto does. A named interface has already answered it. */}
+                  {!selectedProtocol && (
+                    <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.idleHint')}</span>
+                  )}
                 </div>
               )}
-              {(phase.kind === 'undetermined' || (manualOpen && !isWorking)) && (
+              {segmentsOpen && (
                 <div className="model-hub-add-key-protocol-manual">
                   <ProtocolSegments
                     disabled={formLocked}
