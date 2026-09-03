@@ -11,11 +11,12 @@
     "authenticated",
     "protocol",
     "discovery",
-    "models"
+    "models",
+    "model_metadata"
   ],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 6 },
+    "contract_version": { "const": 7 },
     "outcome": {
       "enum": [
         "observed",
@@ -37,6 +38,23 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true
+    },
+    "model_metadata": {
+      "type": "array",
+      "description": "Per-model discovery records in models order. v1 retains only the OpenRouter-shape supported_parameters member; null means absent or malformed upstream metadata, while an empty array is a valid explicit declaration that carries no recognized reasoning signal.",
+      "items": {
+        "type": "object",
+        "required": ["id", "supported_parameters"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "supported_parameters": {
+            "type": ["array", "null"],
+            "items": { "type": "string", "minLength": 1 },
+            "uniqueItems": true
+          }
+        }
+      }
     }
   },
   "allOf": [
@@ -59,7 +77,8 @@
           "authenticated": { "enum": ["authenticated", "unknown"] },
           "protocol": { "const": null },
           "discovery": { "const": "not_attempted" },
-          "models": { "maxItems": 0 }
+          "models": { "maxItems": 0 },
+          "model_metadata": { "maxItems": 0 }
         }
       }
     },
@@ -71,7 +90,8 @@
           "authenticated": { "const": "unknown" },
           "protocol": { "const": null },
           "discovery": { "const": "not_attempted" },
-          "models": { "maxItems": 0 }
+          "models": { "maxItems": 0 },
+          "model_metadata": { "maxItems": 0 }
         }
       }
     },
@@ -83,7 +103,8 @@
           "authenticated": { "const": "rejected" },
           "protocol": { "const": null },
           "discovery": { "const": "not_attempted" },
-          "models": { "maxItems": 0 }
+          "models": { "maxItems": 0 },
+          "model_metadata": { "maxItems": 0 }
         }
       }
     },
@@ -95,7 +116,8 @@
           "authenticated": { "const": "unknown" },
           "protocol": { "const": null },
           "discovery": { "const": "not_attempted" },
-          "models": { "maxItems": 0 }
+          "models": { "maxItems": 0 },
+          "model_metadata": { "maxItems": 0 }
         }
       }
     },
@@ -107,13 +129,19 @@
           "authenticated": { "const": "unknown" },
           "protocol": { "const": null },
           "discovery": { "const": "not_attempted" },
-          "models": { "maxItems": 0 }
+          "models": { "maxItems": 0 },
+          "model_metadata": { "maxItems": 0 }
         }
       }
     },
     {
       "if": { "properties": { "discovery": { "const": "failed" } }, "required": ["discovery"] },
-      "then": { "properties": { "models": { "maxItems": 0 } } }
+      "then": {
+        "properties": {
+          "models": { "maxItems": 0 },
+          "model_metadata": { "maxItems": 0 }
+        }
+      }
     },
     {
       "if": { "properties": { "protocol": { "const": null } }, "required": ["protocol"] },
@@ -122,58 +150,69 @@
   ],
   "examples": [
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "outcome": "observed",
       "reachable": true,
       "authenticated": "authenticated",
       "protocol": "openai_chat",
       "discovery": "succeeded",
-      "models": ["gpt-5.6"]
+      "models": ["gpt-5.6"],
+      "model_metadata": [
+        {
+          "id": "gpt-5.6",
+          "supported_parameters": ["reasoning"]
+        }
+      ]
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "outcome": "authentication_failed",
       "reachable": true,
       "authenticated": "rejected",
       "protocol": null,
       "discovery": "not_attempted",
-      "models": []
+      "models": [],
+      "model_metadata": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "outcome": "ambiguous",
       "reachable": true,
       "authenticated": "unknown",
       "protocol": null,
       "discovery": "not_attempted",
-      "models": []
+      "models": [],
+      "model_metadata": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "outcome": "unreachable",
       "reachable": false,
       "authenticated": "unknown",
       "protocol": null,
       "discovery": "not_attempted",
-      "models": []
+      "models": [],
+      "model_metadata": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "outcome": "adapter_error",
       "reachable": null,
       "authenticated": "unknown",
       "protocol": null,
       "discovery": "not_attempted",
-      "models": []
+      "models": [],
+      "model_metadata": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "outcome": "timeout",
       "reachable": null,
       "authenticated": "unknown",
       "protocol": null,
       "discovery": "not_attempted",
-      "models": []
+      "models": [],
+      "model_metadata": []
     }
   ]
 }

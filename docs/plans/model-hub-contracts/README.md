@@ -1,12 +1,13 @@
 # Model Hub contracts
 
-Status: **FINAL shape, implementation-gated. `contract_version` is 6 (2026-08-19 usage
-metering); 5 published the 2026-08-11 contract completion.**
+Status: **FINAL shape, implementation-gated. `contract_version` is 7 (2026-09-03
+reasoning-tier provenance); 6 published 2026-08-19 usage metering; 5 published the
+2026-08-11 contract completion.**
 
 These files describe the terminal contract for Model Hub before first release. No bump
 carries a data migration, compatibility reader, conversion transaction, or version
 discriminator: Model Hub has not shipped, so republishing the shape converts nothing.
-`contract_version` is 6 wherever a versioned object exists. The owner-approved
+`contract_version` is 7 wherever a versioned object exists. The owner-approved
 pre-release network correction removes the earlier persistent network/timeout cooldown
 spelling without adding a compatibility path.
 
@@ -71,9 +72,12 @@ Contract prose points to those authorities and does not add branches.
    across time, quota, and health changes. Live runnability and current execution
    position may change; Route membership and order may not.
 6. Every Source model id is unique within that Source. The final model item shape is
-   `{id, origin, reasoning_efforts, retired?, display_name?, discovered_at?}`; effort
-   lists are editable capability declarations, may be empty, and have no selected/default
-   item. `retired: true` is a persistent discovered-model tombstone and never supplies.
+   `{id, origin, reasoning_efforts, reasoning_efforts_source, retired?, display_name?,
+   discovered_at?}`. The tier source is `upstream | catalog | user | null`; only `user`
+   and `null` declarations are editable. Older persisted rows without the field load as
+   `user` when their list is non-empty and `null` when it is empty. Effort lists have no
+   selected/default item. `retired: true` is a persistent discovered-model tombstone and
+   never supplies.
 7. A backend has at most one `native_cli` Source. Additional accounts are Hub-held
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
@@ -96,7 +100,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 6 must coexist in all registered version locations on the same tested head:
+`contract_version` 7 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

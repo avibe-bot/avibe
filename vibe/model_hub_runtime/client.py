@@ -20,6 +20,7 @@ import ijson
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     RawCallOutcome,
     RawOutcomeKind,
@@ -717,7 +718,7 @@ async def probe_models(
     base_url: str | None,
     secret: str,
     timeout: float = 15.0,
-) -> tuple[str, ...]:
+) -> tuple[DiscoveredModel, ...]:
     """Probe the one allowlisted models path without redirecting credentials."""
     normalized_vendor = vendor.strip().lower()
     root = base_url or _OFFICIAL_BASE_URLS.get(normalized_vendor)
@@ -776,15 +777,26 @@ async def probe_models(
 
 def _project_model_inventory(
     reader: BinaryIO,
-) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
+) -> tuple[
+    bool,
+    bool,
+    list[DiscoveredModel],
+    bool,
+    bool,
+    list[DiscoveredModel],
+] | None:
     paths = {
         (),
         ("data",),
         ("data", "*"),
         ("data", "*", "id"),
+        ("data", "*", "supported_parameters"),
+        ("data", "*", "supported_parameters", "*"),
         ("models",),
         ("models", "*"),
         ("models", "*", "id"),
+        ("models", "*", "supported_parameters"),
+        ("models", "*", "supported_parameters", "*"),
     }
     root_is_map = False
     data_seen = False
@@ -795,6 +807,14 @@ def _project_model_inventory(
     fallback_models: dict[JSONScope, str] = {}
     invalid_data_models: set[JSONScope] = set()
     invalid_fallback_models: set[JSONScope] = set()
+    data_supported_seen: set[JSONScope] = set()
+    fallback_supported_seen: set[JSONScope] = set()
+    data_supported_arrays: set[JSONScope] = set()
+    fallback_supported_arrays: set[JSONScope] = set()
+    data_supported: dict[JSONScope, dict[int, str]] = {}
+    fallback_supported: dict[JSONScope, dict[int, str]] = {}
+    invalid_data_supported: set[JSONScope] = set()
+    invalid_fallback_supported: set[JSONScope] = set()
 
     def visit(
         path: JSONPath,
@@ -809,6 +829,10 @@ def _project_model_inventory(
             if event == "replace":
                 data_models.clear()
                 invalid_data_models.clear()
+                data_supported_seen.clear()
+                data_supported_arrays.clear()
+                data_supported.clear()
+                invalid_data_supported.clear()
             data_seen = True
             if event != "nonempty":
                 data_is_array = event == "start_array"
@@ -816,6 +840,10 @@ def _project_model_inventory(
             if event == "replace":
                 fallback_models.clear()
                 invalid_fallback_models.clear()
+                fallback_supported_seen.clear()
+                fallback_supported_arrays.clear()
+                fallback_supported.clear()
+                invalid_fallback_supported.clear()
             fallback_seen = True
             if event != "nonempty":
                 fallback_is_array = event == "start_array"
@@ -836,14 +864,66 @@ def _project_model_inventory(
             elif event == "scalar" and isinstance(value, str) and value:
                 fallback_models[scope] = value
 
-    def ordered_unique(values: Mapping[JSONScope, str]) -> list[str]:
-        result: list[str] = []
+        elif path in {
+            ("data", "*", "supported_parameters"),
+            ("models", "*", "supported_parameters"),
+        }:
+            seen = data_supported_seen if path[0] == "data" else fallback_supported_seen
+            arrays = data_supported_arrays if path[0] == "data" else fallback_supported_arrays
+            values = data_supported if path[0] == "data" else fallback_supported
+            invalid = invalid_data_supported if path[0] == "data" else invalid_fallback_supported
+            if event == "replace":
+                values.pop(scope, None)
+                invalid.discard(scope)
+                arrays.discard(scope)
+            seen.add(scope)
+            if event == "start_array":
+                arrays.add(scope)
+            elif event not in {"replace", "nonempty"}:
+                invalid.add(scope)
+        elif path in {
+            ("data", "*", "supported_parameters", "*"),
+            ("models", "*", "supported_parameters", "*"),
+        }:
+            model_scope = scope[:-1]
+            values = data_supported if path[0] == "data" else fallback_supported
+            invalid = invalid_data_supported if path[0] == "data" else invalid_fallback_supported
+            if event == "scalar" and isinstance(value, str) and value:
+                values.setdefault(model_scope, {})[scope[-1]] = value
+            elif event in {"scalar", "elided_string", "start_map", "start_array"}:
+                invalid.add(model_scope)
+
+    def ordered_unique(
+        values: Mapping[JSONScope, str],
+        supported_seen: set[JSONScope],
+        supported_arrays: set[JSONScope],
+        supported: Mapping[JSONScope, Mapping[int, str]],
+        invalid_supported: set[JSONScope],
+    ) -> list[DiscoveredModel]:
+        result: list[DiscoveredModel] = []
         seen: set[str] = set()
         for scope in sorted(values):
             value = values[scope]
-            if value not in seen:
-                seen.add(value)
-                result.append(value)
+            if value in seen:
+                continue
+            seen.add(value)
+            parameters = None
+            if (
+                scope in supported_seen
+                and scope in supported_arrays
+                and scope not in invalid_supported
+            ):
+                parameters = tuple(
+                    parameter
+                    for _index, parameter in sorted(supported.get(scope, {}).items())
+                )
+                parameters = tuple(dict.fromkeys(parameters))
+            result.append(
+                DiscoveredModel(
+                    id=value,
+                    supported_parameters=parameters,
+                )
+            )
         return result
 
     if not project_json_reader(reader, paths, visit) or not root_is_map:
@@ -855,10 +935,22 @@ def _project_model_inventory(
     return (
         data_seen,
         data_is_array,
-        ordered_unique(data_models),
+        ordered_unique(
+            data_models,
+            data_supported_seen,
+            data_supported_arrays,
+            data_supported,
+            invalid_data_supported,
+        ),
         fallback_seen,
         fallback_is_array,
-        ordered_unique(fallback_models),
+        ordered_unique(
+            fallback_models,
+            fallback_supported_seen,
+            fallback_supported_arrays,
+            fallback_supported,
+            invalid_fallback_supported,
+        ),
     )
 
 
@@ -923,7 +1015,14 @@ def _project_model_inventory_before_deadline(
     payload: BinaryIO,
     *,
     deadline: float,
-) -> tuple[bool, bool, list[str], bool, bool, list[str]] | None:
+) -> tuple[
+    bool,
+    bool,
+    list[DiscoveredModel],
+    bool,
+    bool,
+    list[DiscoveredModel],
+] | None:
     payload.seek(0)
     return _project_before_deadline(
         payload,

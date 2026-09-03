@@ -18,10 +18,12 @@ from config.v2_config import (
     ModelHubSourceConfig,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     ObservationDiscovery,
     SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
+from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
 from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 from vibe.claude_config import read_claude_oauth_signed_in, read_claude_settings_env
 from vibe.codex_config import _load_auth, get_codex_config_paths, read_codex_auth_state
@@ -84,10 +86,10 @@ class MigrationHost(Protocol):
         self,
         source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
         *,
         allow_empty: bool = False,
-    ) -> None: ...
+    ) -> list[tuple[str, Literal["upstream", "catalog"]]]: ...
 
     def _apply_source_placement(
         self,
@@ -601,20 +603,23 @@ def _validated_source(
     keep_native = item.proposed_action == "keep_native"
     controlled = item.proposed_action == "controlled_import"
     discovered_at = now.isoformat()
-    models = (
-        [
-            {
-                "id": model_id,
-                "display_name": None,
-                "origin": "discovered",
-                "reasoning_efforts": [],
-                "discovered_at": discovered_at,
-            }
-            for model_id in _native_model_ids(item.backend)
-        ]
-        if keep_native
-        else []
-    )
+    models = []
+    if keep_native:
+        for model_id in _native_model_ids(item.backend):
+            resolution = resolve_reasoning_tiers(
+                protocol=protocol,
+                model_id=model_id,
+            )
+            models.append(
+                {
+                    "id": model_id,
+                    "display_name": None,
+                    "origin": "discovered",
+                    "reasoning_efforts": list(resolution.efforts),
+                    "reasoning_efforts_source": resolution.source,
+                    "discovered_at": discovered_at,
+                }
+            )
     payload: dict[str, object] = {
         "id": item.source_id,
         "created_at": discovered_at,
@@ -762,11 +767,20 @@ async def apply_native_migration(
                             )
                             for model in item.manual_models
                         ]
+                        for model in manual_models:
+                            resolution = resolve_reasoning_tiers(
+                                protocol=protocol,
+                                model_id=model.id,
+                                existing_efforts=model.reasoning_efforts,
+                                existing_source=model.reasoning_efforts_source,
+                            )
+                            model.reasoning_efforts = list(resolution.efforts)
+                            model.reasoning_efforts_source = resolution.source
                         if observation.discovery is ObservationDiscovery.SUCCEEDED:
                             host._apply_discovered_models(
                                 source,
                                 manual_models,
-                                list(observation.model_ids),
+                                list(observation.models),
                                 allow_empty=True,
                             )
                         else:

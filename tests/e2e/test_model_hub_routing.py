@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
+import aiohttp
 import pytest
 
+from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 from tests.e2e.test_model_hub_migration import _write
 from tests.e2e.test_model_hub_runtime import (
@@ -17,6 +22,16 @@ from tests.e2e.test_model_hub_sources import (
     SYNTHETIC_API_KEY,
     _configure_protocol,
     _create_source,
+)
+from tests.scenario_harness.model_hub import (
+    MemoryModelHubStore,
+    ModelHubScenarioAdapter,
+    ScenarioCallResult,
+    config_with_sources,
+    fixed_model,
+    service_for,
+    source,
+    source_model,
 )
 
 
@@ -474,3 +489,93 @@ def test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown(
                 expected_reason="server_error",
                 expected_delay=30,
             )
+
+
+def test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop(
+    tmp_path,
+) -> None:
+    """D10: the per-turn gateway records the exact hop whose effort it strips."""
+
+    async def exercise() -> None:
+        first = source(
+            "src_d10first1",
+            [source_model("relay-model", reasoning_efforts=("high",))],
+            vendor="openai",
+            protocol="openai_responses",
+        )
+        second = source(
+            "src_d10second",
+            [source_model("relay-model")],
+            vendor="openai",
+            protocol="openai_responses",
+        )
+        requested_model = fixed_model("codex")
+        config = config_with_sources(
+            [first, second],
+            backend="codex",
+            menu_model=requested_model,
+            hops=(
+                (first.id, "relay-model"),
+                (second.id, "relay-model"),
+            ),
+        )
+        adapter = ModelHubScenarioAdapter(
+            invoke_results=(
+                ScenarioCallResult(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    error_code="rate_limit_error",
+                ),
+                ScenarioCallResult(RawOutcomeKind.SUCCESS, status=200),
+            )
+        )
+        service = service_for(tmp_path, MemoryModelHubStore(config), adapter)
+        gateway = ModelHubTurnGateway(service)
+        turn_id = "turn_d10_strip"
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id=turn_id,
+            requested_model_id=requested_model,
+            resolved_model_id="relay-model",
+            source_id=first.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={
+                        "model": "relay-model",
+                        "input": "ping",
+                        "reasoning": {"effort": "high", "summary": "auto"},
+                        "stream": False,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 200
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert adapter.requests[0]["reasoning"] == {
+            "effort": "high",
+            "summary": "auto",
+        }
+        assert adapter.requests[1]["reasoning"] == {"summary": "auto"}
+        gateway.correlation.settle(
+            turn_id,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts="2026-09-03T06:00:00+00:00",
+        )
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["failed_attempts"][0]["source_id"] == first.id
+        assert record["served"] == {
+            "source_id": second.id,
+            "configured_model_id": "relay-model",
+            "channel": "hub",
+            "stripped_reasoning_efforts": ["high"],
+            "declared_reasoning_efforts": [],
+        }
+
+    asyncio.run(exercise())

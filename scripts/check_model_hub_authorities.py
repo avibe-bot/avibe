@@ -270,6 +270,37 @@ def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> s
     raise ValueError(f"assignment not found: {spec['name']}")
 
 
+def _versioned_schema_nodes(node: Any):
+    """Yield every contract_version subschema from an arbitrary schema tree."""
+
+    if isinstance(node, dict):
+        properties = node.get("properties")
+        if isinstance(properties, dict) and isinstance(
+            properties.get("contract_version"),
+            dict,
+        ):
+            yield properties["contract_version"]
+        for value in node.values():
+            yield from _versioned_schema_nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _versioned_schema_nodes(value)
+
+
+def _literal_contract_versions(text: str) -> list[int]:
+    patterns = (
+        r"\b[A-Z_]*CONTRACT_VERSION\s*=\s*(\d+)",
+        r"[\"']contract_version[\"']\s*:\s*(\d+)",
+        r"\bcontract_version\s*:\s*(\d+)",
+        r"[\"']contract_version[\"'][^\n\d]{0,40}==\s*(\d+)",
+    )
+    return [
+        int(value)
+        for pattern in patterns
+        for value in re.findall(pattern, text)
+    ]
+
+
 def _json_object_keys(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
     value = _json_pointer(source.json(spec["file"]), spec["path"])
     if not isinstance(value, dict):
@@ -446,6 +477,117 @@ def check(root: Path = ROOT) -> dict[str, Any]:
     source = AuthorityInput(root)
     registry = source.json("docs/plans/model-hub-contracts/mirror-registry.json")
     findings: list[dict[str, Any]] = []
+
+    version_closure = registry.get("contract_version_closure", {})
+    terminal_version = registry.get("contract_version")
+    if not isinstance(terminal_version, int):
+        findings.append({"kind": "invalid_contract_version", "domain": "V1"})
+    else:
+        persisted_schemas = set(version_closure.get("persisted_schemas", ()))
+        checked_schemas: set[str] = set()
+        contracts_dir = root / "docs/plans/model-hub-contracts"
+        for path in sorted(contracts_dir.glob("*.schema.json")):
+            relative = path.relative_to(root).as_posix()
+            for node in _versioned_schema_nodes(source.json(relative)):
+                checked_schemas.add(path.name)
+                accepted = [node["const"]] if "const" in node else list(node.get("enum", ()))
+                if accepted != sorted(set(accepted)) or not accepted:
+                    findings.append(
+                        {
+                            "kind": "invalid_contract_version_set",
+                            "domain": "V1",
+                            "file": relative,
+                            "values": accepted,
+                        }
+                    )
+                    continue
+                expected = (
+                    list(range(accepted[0], terminal_version + 1))
+                    if path.name in persisted_schemas
+                    else [terminal_version]
+                )
+                if accepted != expected:
+                    findings.append(
+                        {
+                            "kind": "contract_version_schema_drift",
+                            "domain": "V1",
+                            "file": relative,
+                            "values": accepted,
+                            "expected": expected,
+                        }
+                    )
+        for missing in sorted(persisted_schemas - checked_schemas):
+            findings.append(
+                {
+                    "kind": "missing_persisted_version_schema",
+                    "domain": "V1",
+                    "file": missing,
+                }
+            )
+
+        for path in sorted(contracts_dir.iterdir()):
+            if not path.is_file() or path.name.endswith(".schema.json"):
+                continue
+            relative = path.relative_to(root).as_posix()
+            for value in re.findall(
+                r"contract_version[^0-9]{0,12}(\d+)",
+                source.text(relative),
+            ):
+                if int(value) != terminal_version:
+                    findings.append(
+                        {
+                            "kind": "contract_version_text_drift",
+                            "domain": "V1",
+                            "file": relative,
+                            "value": int(value),
+                        }
+                    )
+
+        required_literal_files = set(
+            version_closure.get("required_literal_files", ())
+        )
+        matched_literal_files: set[str] = set()
+        for pattern in version_closure.get("literal_globs", ()):
+            for path in sorted(root.glob(pattern)):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(root).as_posix()
+                values = _literal_contract_versions(source.text(relative))
+                if values:
+                    matched_literal_files.add(relative)
+                for value in values:
+                    if value != terminal_version:
+                        findings.append(
+                            {
+                                "kind": "contract_version_literal_drift",
+                                "domain": "V1",
+                                "file": relative,
+                                "value": value,
+                            }
+                        )
+        for missing in sorted(required_literal_files - matched_literal_files):
+            findings.append(
+                {
+                    "kind": "missing_contract_version_literal",
+                    "domain": "V1",
+                    "file": missing,
+                }
+            )
+
+        for relative in version_closure.get("contract_headers", ()):
+            match = re.search(
+                r"FINAL CONTRACT v(\d+)",
+                source.text(relative),
+            )
+            if match is None or int(match.group(1)) != terminal_version:
+                findings.append(
+                    {
+                        "kind": "contract_version_header_drift",
+                        "domain": "V1",
+                        "file": relative,
+                        "value": int(match.group(1)) if match else None,
+                    }
+                )
 
     # Absence assertions are discovered from the live normative text. The checker
     # never embeds a retired member; it derives each term from the assertion and

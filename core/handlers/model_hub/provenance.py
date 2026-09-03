@@ -46,13 +46,23 @@ class AttemptIdentity:
     source_id: str
     resolved_model_id: str
     channel: SupplyChannel
+    stripped_reasoning_efforts: tuple[str, ...] = ()
+    declared_reasoning_efforts: tuple[str, ...] = ()
 
     def payload(self) -> dict:
-        return {
+        payload = {
             "source_id": self.source_id,
             "configured_model_id": self.resolved_model_id,
             "channel": self.channel,
         }
+        if self.stripped_reasoning_efforts:
+            payload["stripped_reasoning_efforts"] = list(
+                self.stripped_reasoning_efforts
+            )
+            payload["declared_reasoning_efforts"] = list(
+                self.declared_reasoning_efforts
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -664,6 +674,8 @@ class GatewayTurnTerminalizer:
         resolved_model_id: str,
         channel: SupplyChannel,
         via_mapping: bool,
+        stripped_reasoning_efforts: tuple[str, ...] = (),
+        declared_reasoning_efforts: tuple[str, ...] = (),
     ) -> None:
         self._attempt_started = True
         self._registry.begin_attempt(
@@ -672,6 +684,8 @@ class GatewayTurnTerminalizer:
             resolved_model_id=resolved_model_id,
             channel=channel,
             via_mapping=via_mapping,
+            stripped_reasoning_efforts=stripped_reasoning_efforts,
+            declared_reasoning_efforts=declared_reasoning_efforts,
             request_id=self._request_id,
         )
 
@@ -1426,6 +1440,8 @@ class TurnCorrelationRegistry:
         resolved_model_id: str,
         channel: SupplyChannel,
         via_mapping: bool,
+        stripped_reasoning_efforts: tuple[str, ...] = (),
+        declared_reasoning_efforts: tuple[str, ...] = (),
         request_id: str = TURN_REQUEST,
     ) -> None:
         if turn_id is None:
@@ -1438,6 +1454,8 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
                 channel=channel,
+                stripped_reasoning_efforts=stripped_reasoning_efforts,
+                declared_reasoning_efforts=declared_reasoning_efforts,
             )
 
     def fail_native_attempt(
@@ -1643,7 +1661,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 6,
+                    "contract_version": 7,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

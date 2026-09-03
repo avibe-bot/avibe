@@ -13,7 +13,7 @@ from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 
 pytestmark = pytest.mark.e2e_model_hub
 
-CONTRACT_VERSION = 6
+CONTRACT_VERSION = 7
 MENU_MODEL = "claude-sonnet-4-6"
 SYNTHETIC_API_KEY = "sk-model-hub-e2e-not-real"
 
@@ -115,6 +115,9 @@ def test_b1_auto_observe_selects_protocol_from_response_shape(
         "protocol": protocol,
         "discovery": "succeeded",
         "models": ["mock-model"],
+        "model_metadata": [
+            {"id": "mock-model", "supported_parameters": None}
+        ],
     }
     captured_paths = [item["path"] for item in mock_llm_upstream.requests()]
     assert "/v1/models" in captured_paths
@@ -147,7 +150,7 @@ def test_b3_discovered_model_persists_only_contract_fields(
     mock_llm_upstream: MockLLMUpstream,
     model_hub_app,
 ) -> None:
-    """B3: relay inventory extensions are deliberately not persisted."""
+    """B3: the one supported extension survives; unrelated metadata does not."""
 
     _configure_protocol(
         mock_llm_upstream,
@@ -158,6 +161,7 @@ def test_b3_discovered_model_persists_only_contract_fields(
                 "display_name": "Upstream display",
                 "context_length": 128_000,
                 "pricing": {"input": "0.01", "output": "0.02"},
+                "supported_parameters": ["reasoning"],
             }
         ],
     )
@@ -168,13 +172,21 @@ def test_b3_discovered_model_persists_only_contract_fields(
         "display_name",
         "origin",
         "reasoning_efforts",
+        "reasoning_efforts_source",
         "discovered_at",
         "retired",
     }
     assert model["id"] == "relay-model"
     assert model["display_name"] is None
     assert model["origin"] == "discovered"
-    assert model["reasoning_efforts"] == []
+    assert model["reasoning_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert model["reasoning_efforts_source"] == "upstream"
     assert model["retired"] is False
     assert model["discovered_at"]
     serialized = str(model)
@@ -567,22 +579,56 @@ def test_b10_custom_models_and_free_text_tiers_obey_ownership_rules(
     mock_llm_upstream: MockLLMUpstream,
     model_hub_app,
 ) -> None:
-    """B10: custom rows are mutable; upstream rows remain managed."""
+    """B10: managed tiers lock; user tiers edit; refresh restores catalog truth."""
 
-    _configure_protocol(mock_llm_upstream)
-    source, _ = _create_source(model_hub_app, mock_llm_upstream)
+    _configure_protocol(
+        mock_llm_upstream,
+        "openai_responses",
+        models=[{"id": "gpt-5.6-sol"}, {"id": "relay-user-model"}],
+    )
+    source, _ = _create_source(
+        model_hub_app,
+        mock_llm_upstream,
+        protocol="openai_responses",
+    )
     endpoint = f"/api/models/sources/{source['id']}/models"
 
-    managed = model_hub_app.client.post(
-        endpoint,
-        {
-            "model_id": "mock-model",
-            "display_name": "Cannot replace",
-            "reasoning_efforts": ["turbo"],
-        },
+    catalog_model = next(
+        model for model in source["models"] if model["id"] == "gpt-5.6-sol"
     )
-    assert managed.status == 409
-    assert managed.json()["error"] == "source_model_managed_upstream"
+    assert catalog_model["reasoning_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert catalog_model["reasoning_efforts_source"] == "catalog"
+    managed = model_hub_app.client.patch(
+        f"{endpoint}/gpt-5.6-sol",
+        {"reasoning_efforts": ["turbo"]},
+    )
+    managed_body = managed.json()
+    assert managed.status == 409, managed_body
+    assert managed_body["error"] == "source_model_tiers_managed"
+    assert managed_body["detail"] == (
+        "settings.models.sourceDetail.tiers.managed.catalog"
+    )
+    assert managed_body["reasoning_efforts_source"] == "catalog"
+
+    user_updated = model_hub_app.client.patch(
+        f"{endpoint}/relay-user-model",
+        {"reasoning_efforts": ["turbo", "careful"]},
+    )
+    assert user_updated.status == 200, user_updated.json()
+    user_model = next(
+        model
+        for model in user_updated.json()["source"]["models"]
+        if model["id"] == "relay-user-model"
+    )
+    assert user_model["reasoning_efforts"] == ["turbo", "careful"]
+    assert user_model["reasoning_efforts_source"] == "user"
 
     added = model_hub_app.client.post(
         endpoint,
@@ -601,6 +647,7 @@ def test_b10_custom_models_and_free_text_tiers_obey_ownership_rules(
     )
     assert manual["origin"] == "manual"
     assert manual["reasoning_efforts"] == ["turbo", "careful"]
+    assert manual["reasoning_efforts_source"] == "user"
 
     updated = model_hub_app.client.patch(
         f"{endpoint}/manual-model",
@@ -621,3 +668,58 @@ def test_b10_custom_models_and_free_text_tiers_obey_ownership_rules(
     assert "manual-model" not in {
         model["id"] for model in deleted.json()["source"]["models"]
     }
+
+    # Emulate the exact released-v6 persisted shape: a non-empty declaration
+    # without provenance loads as user-owned, then the first refresh backfills.
+    config_path = model_hub_app.avibe_home / "config" / "config.json"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    persisted_source = next(
+        item
+        for item in persisted["model_hub"]["sources"]
+        if item["id"] == source["id"]
+    )
+    persisted_model = next(
+        model
+        for model in persisted_source["models"]
+        if model["id"] == "gpt-5.6-sol"
+    )
+    persisted_model["reasoning_efforts"] = ["legacy-user-tier"]
+    persisted_model.pop("reasoning_efforts_source")
+    replacement = config_path.with_suffix(".reasoning-tiers.tmp")
+    replacement.write_text(json.dumps(persisted), encoding="utf-8")
+    replacement.replace(config_path)
+    model_hub_app.restart_controller()
+
+    refreshed = model_hub_app.client.post(
+        f"/api/models/sources/{source['id']}/refresh", {}
+    )
+    refreshed_body = refreshed.json()
+    assert refreshed.status == 200, refreshed_body
+    refreshed_catalog_model = next(
+        model
+        for model in refreshed_body["source"]["models"]
+        if model["id"] == "gpt-5.6-sol"
+    )
+    assert refreshed_catalog_model["reasoning_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert refreshed_catalog_model["reasoning_efforts_source"] == "catalog"
+    events = model_hub_app.client.get("/api/models/events?limit=20").json()[
+        "events"
+    ]
+    overrides = [
+        event
+        for event in events
+        if event["kind"] == "reasoning_efforts_override"
+        and event["from_source"] == source["id"]
+        and event["model_id"] == "gpt-5.6-sol"
+    ]
+    assert len(overrides) == 1
+    assert overrides[0]["reason"] == "catalog_tiers"
+    assert overrides[0]["severity"] == "info"
+    assert SYNTHETIC_API_KEY not in json.dumps(overrides)

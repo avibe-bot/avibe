@@ -33,6 +33,7 @@ from config.v2_config import (
 from core.handlers.model_hub.service import CONTRACT_VERSION
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     OBSERVATION_TERMINAL_RULES,
     ObservationDiscovery,
     ObservationOutcome,
@@ -104,7 +105,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 6
+    assert schema["properties"]["contract_version"]["const"] == 7
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -128,7 +129,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 6,
+            "contract_version": 7,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -141,6 +142,17 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
             "protocol": observation.protocol,
             "discovery": observation.discovery.value,
             "models": list(observation.model_ids),
+            "model_metadata": [
+                {
+                    "id": model.id,
+                    "supported_parameters": (
+                        list(model.supported_parameters)
+                        if model.supported_parameters is not None
+                        else None
+                    ),
+                }
+                for model in observation.models
+            ],
         }
 
     assert set(OBSERVATION_TERMINAL_RULES) == set(ObservationOutcome)
@@ -158,7 +170,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
                 authenticated=authenticated,
                 protocol=protocol,
                 discovery=discovery,
-                model_ids=(),
+                models=(),
             )
             assert validate_source_observation(observation) is observation
             schema.validate(payload(observation))
@@ -169,7 +181,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
             authenticated=next(iter(rule.authenticated)),
             protocol=next(iter(rule.protocols)),
             discovery=next(iter(rule.discoveries)),
-            model_ids=(),
+            models=(),
         )
         invalid_fields = {
             "reachable": reachable_domain - rule.reachable,
@@ -189,7 +201,10 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
         if rule.models_must_be_empty:
             invalid_inventory = SourceObservation(
-                **{**baseline.__dict__, "model_ids": ("model-id",)}
+                **{
+                    **baseline.__dict__,
+                    "models": (DiscoveredModel(id="model-id"),),
+                }
             )
             with pytest.raises(ValueError):
                 validate_source_observation(invalid_inventory)
@@ -200,7 +215,12 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
                 **{
                     **baseline.__dict__,
                     "discovery": ObservationDiscovery.SUCCEEDED,
-                    "model_ids": ("model-id",),
+                    "models": (
+                        DiscoveredModel(
+                            id="model-id",
+                            supported_parameters=("reasoning",),
+                        ),
+                    ),
                 }
             )
             assert validate_source_observation(succeeded) is succeeded
@@ -209,7 +229,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
                 **{
                     **baseline.__dict__,
                     "discovery": ObservationDiscovery.FAILED,
-                    "model_ids": ("model-id",),
+                    "models": (DiscoveredModel(id="model-id"),),
                 }
             )
             with pytest.raises(ValueError):
@@ -226,6 +246,58 @@ def test_final_model_validator_requires_explicit_credential_free_efforts():
     example["reasoning_efforts"] = ["authorization: sk-test-credential-material"]
     with pytest.raises(ValueError):
         ModelHubModelConfig.from_payload(example)
+
+
+def test_source_model_reasoning_effort_provenance_round_trips_current_shape():
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["models"][0]["reasoning_efforts"] = ["low", "high"]
+    source["models"][0]["reasoning_efforts_source"] = "catalog"
+
+    parsed = ModelHubSourceConfig.from_payload(source)
+    serialized = parsed.to_payload()
+
+    assert serialized["models"][0]["reasoning_efforts_source"] == "catalog"
+    _assert_valid("source.schema.json", serialized)
+
+
+def test_released_v6_model_shape_infers_user_or_null_tier_provenance():
+    fixture = json.loads(
+        Path(
+            "tests/fixtures/model_hub/released_v6_reasoning_efforts.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    models = [
+        ModelHubModelConfig.from_payload(model) for model in fixture["models"]
+    ]
+
+    assert models[0].reasoning_efforts_source == "user"
+    assert models[1].reasoning_efforts_source is None
+    assert models[0].to_payload()["reasoning_efforts_source"] == "user"
+    assert models[1].to_payload()["reasoning_efforts_source"] is None
+
+
+@pytest.mark.parametrize(
+    ("efforts", "source"),
+    [
+        (["high"], None),
+        ([], "user"),
+        ([], "upstream"),
+        (["high"], "unknown"),
+    ],
+)
+def test_source_model_rejects_incoherent_tier_provenance(efforts, source):
+    model = {
+        "id": "model-a",
+        "display_name": None,
+        "origin": "manual",
+        "reasoning_efforts": efforts,
+        "reasoning_efforts_source": source,
+        "discovered_at": None,
+    }
+
+    with pytest.raises(ValueError):
+        ModelHubModelConfig.from_payload(model)
 
 
 def test_discovered_model_retirement_is_persisted_without_rewriting_legacy_rows():
@@ -628,7 +700,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 6,
+        "contract_version": 7,
         "error": "source_in_route_chain",
         "would_remove_hops": [hop],
         "would_interrupt": [],
@@ -687,11 +759,11 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     _assert_valid("agent-supply.schema.json", payload)
 
 
-def test_v5_mirror_registry_is_executable_and_complete():
+def test_v7_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 6
+    assert registry["contract_version"] == 7
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -1201,7 +1273,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 6,
+        "contract_version": 7,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "chain": [{

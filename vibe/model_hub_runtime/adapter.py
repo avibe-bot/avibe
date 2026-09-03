@@ -15,6 +15,7 @@ import aiohttp
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -1385,7 +1386,7 @@ class CLIProxyEngineAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
-    ) -> Sequence[str]:
+    ) -> Sequence[DiscoveredModel]:
         metadata = await asyncio.to_thread(
             self.state_store.credential_metadata,
             credential_ref,
@@ -1401,7 +1402,7 @@ class CLIProxyEngineAdapter:
                 "/auth-files/models",
                 query={"name": str(metadata["auth_name"])},
             )
-            return _model_ids(payload)
+            return _discovered_models(payload)
         normalized_base_url = await asyncio.to_thread(
             self.state_store.validate_api_key_target,
             credential_ref,
@@ -1542,7 +1543,7 @@ class CLIProxyEngineAdapter:
                 authenticated=True,
                 protocol=proved_protocol,
                 discovery=discovery,
-                model_ids=tuple(models),
+                models=tuple(models),
             )
 
         considered_protocols = frozenset(protocol_order)
@@ -1582,7 +1583,7 @@ class CLIProxyEngineAdapter:
                 authenticated=True,
                 protocol=proved_protocol,
                 discovery=discovery,
-                model_ids=tuple(models),
+                models=tuple(models),
             )
 
         if received_accepted_unproven_response:
@@ -1595,7 +1596,7 @@ class CLIProxyEngineAdapter:
                 authenticated=True,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         if received_rejection:
             return make_source_observation(
@@ -1604,7 +1605,7 @@ class CLIProxyEngineAdapter:
                 authenticated=False,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         if received_proven_unknown:
             return make_source_observation(
@@ -1613,7 +1614,7 @@ class CLIProxyEngineAdapter:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         if received_unproven_response:
             return make_source_observation(
@@ -1622,7 +1623,7 @@ class CLIProxyEngineAdapter:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         if any(error.error_type == "timeout" for error in failures):
             return make_source_observation(
@@ -1631,7 +1632,7 @@ class CLIProxyEngineAdapter:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         if any(error.error_type in {"network_error", "ConnectionError", "URLError"} for error in failures):
             return make_source_observation(
@@ -1640,7 +1641,7 @@ class CLIProxyEngineAdapter:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         return make_source_observation(
             outcome=ObservationOutcome.ADAPTER_ERROR,
@@ -1648,7 +1649,7 @@ class CLIProxyEngineAdapter:
             authenticated=None,
             protocol=None,
             discovery=ObservationDiscovery.NOT_ATTEMPTED,
-            model_ids=(),
+            models=(),
         )
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
@@ -2105,15 +2106,28 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
     return inventory
 
 
-def _model_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+def _discovered_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, ...]:
     models = payload.get("models")
     if not isinstance(models, list):
         return ()
-    result: list[str] = []
+    result: list[DiscoveredModel] = []
+    seen: set[str] = set()
     for item in models:
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
-        if isinstance(value, str) and value and value not in result:
-            result.append(value)
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        seen.add(value)
+        supported_parameters = None
+        if isinstance(item, dict) and isinstance(item.get("supported_parameters"), list):
+            parameters = item["supported_parameters"]
+            if all(isinstance(parameter, str) and parameter for parameter in parameters):
+                supported_parameters = tuple(dict.fromkeys(parameters))
+        result.append(
+            DiscoveredModel(
+                id=value,
+                supported_parameters=supported_parameters,
+            )
+        )
     return tuple(result)
 
 

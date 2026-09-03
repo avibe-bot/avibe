@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Final, Iterable, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -35,6 +35,20 @@ _SUPPORTED_VISIBILITIES = {"visible", "list", *_HIDDEN_VISIBILITIES}
 _DEFAULT_REASONING_EFFORTS = {
     "claude": ["low", "medium", "high"],
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
+}
+REASONING_EFFORT_VOCABULARY: Final[tuple[str, ...]] = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+PROTOCOL_REASONING_EFFORT_DEFAULTS: Final[dict[str, tuple[str, ...]]] = {
+    "openai_responses": ("minimal", "low", "medium", "high", "xhigh"),
+    "openai_chat": ("minimal", "low", "medium", "high", "xhigh"),
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
 _CODEX_BUILT_IN_MODELS = [
     "gpt-5.5",
@@ -296,6 +310,30 @@ def prepare_codex_hub_catalog(
 
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
     return _read_catalog(path or get_bundled_catalog_path()) or {}
+
+
+def bundled_catalog_reasoning_efforts_for_model(
+    model_id: str,
+) -> tuple[str, ...] | None:
+    """Return one bundled catalog row's exact declared effort list."""
+
+    backends = load_bundled_catalog().get("backends")
+    if not isinstance(backends, dict):
+        return None
+    for backend in backends.values():
+        models = backend.get("models") if isinstance(backend, dict) else None
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            if (
+                isinstance(model, dict)
+                and model.get("id") == model_id
+                and "reasoning_efforts" in model
+            ):
+                efforts = model["reasoning_efforts"]
+                if isinstance(efforts, list):
+                    return tuple(efforts)
+    return None
 
 
 def load_cached_remote_catalog(*, schedule_refresh: bool = True) -> dict[str, Any]:
@@ -898,10 +936,11 @@ def _normalize_model_entry(item: object) -> dict[str, Any]:
     visibility = item.get("visibility")
     if isinstance(visibility, str) and visibility.strip():
         entry["visibility"] = visibility.strip().lower()
-    efforts = _coerce_reasoning_efforts(
-        item.get("reasoning_efforts") or item.get("supported_reasoning_levels")
-    )
-    if efforts:
+    raw_efforts = item.get("reasoning_efforts")
+    if raw_efforts is None:
+        raw_efforts = item.get("supported_reasoning_levels")
+    efforts = _coerce_reasoning_efforts(raw_efforts)
+    if raw_efforts is not None:
         entry["reasoning_efforts"] = efforts
     return entry
 

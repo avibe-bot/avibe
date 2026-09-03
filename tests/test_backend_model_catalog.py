@@ -34,6 +34,52 @@ def _reset_remote_cache(monkeypatch):
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
 
 
+def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
+    assert backend_model_catalog.REASONING_EFFORT_VOCABULARY == (
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    )
+    assert backend_model_catalog.PROTOCOL_REASONING_EFFORT_DEFAULTS == {
+        "openai_responses": ("minimal", "low", "medium", "high", "xhigh"),
+        "openai_chat": ("minimal", "low", "medium", "high", "xhigh"),
+        "anthropic": ("low", "medium", "high", "xhigh", "max"),
+    }
+    assert all(
+        "ultra" not in efforts
+        for efforts in backend_model_catalog.PROTOCOL_REASONING_EFFORT_DEFAULTS.values()
+    )
+
+
+def test_bundled_catalog_rows_are_exact_and_covered_by_the_vocabulary() -> None:
+    catalog = backend_model_catalog.load_bundled_catalog()
+    rows = [
+        model
+        for backend in catalog["backends"].values()
+        for model in backend["models"]
+        if "reasoning_efforts" in model
+    ]
+    declared = {
+        effort
+        for model in rows
+        for effort in model["reasoning_efforts"]
+    }
+
+    assert rows
+    assert declared <= set(backend_model_catalog.REASONING_EFFORT_VOCABULARY)
+    assert len(backend_model_catalog.REASONING_EFFORT_VOCABULARY) == len(
+        set(backend_model_catalog.REASONING_EFFORT_VOCABULARY)
+    )
+    for model in rows:
+        assert backend_model_catalog.bundled_catalog_reasoning_efforts_for_model(
+            model["id"]
+        ) == tuple(model["reasoning_efforts"])
+
+
 def test_backend_model_entries_normalize_runtime_catalog_shape():
     catalog = {
         "schema_version": 1,

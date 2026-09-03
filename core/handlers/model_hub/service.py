@@ -41,6 +41,7 @@ from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
 
 from .adapter import (
+    DiscoveredModel,
     EngineAdapter,
     EngineHealth,
     EngineStatus,
@@ -73,6 +74,7 @@ from .events import (
     EventReason,
     build_resolution_event,
     contains_credential_material,
+    redact_credential_material,
 )
 from .errors import ModelDiscoveryError
 from .identifiers import STANDARD_OPENCODE_VENDOR_IDS, canonical_model_id
@@ -100,6 +102,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest
+from .reasoning_tiers import resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
     BackendName,
@@ -116,9 +119,9 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
-CONTRACT_VERSION = 6
-AGENT_CHAIN_CONTRACT_VERSION = 6
-PROBE_RESULT_CONTRACT_VERSION = 6
+CONTRACT_VERSION = 7
+AGENT_CHAIN_CONTRACT_VERSION = 7
+PROBE_RESULT_CONTRACT_VERSION = 7
 _REORDER_ORDER_UNSET = object()
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
@@ -347,6 +350,13 @@ class HandleSettlement:
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
 
 
+@dataclass(frozen=True)
+class ExactReasoningEffortRequest:
+    request: Mapping[str, Any]
+    stripped_efforts: tuple[str, ...] = ()
+    declared_efforts: tuple[str, ...] = ()
+
+
 AttemptObserver = Callable[
     [
         str,
@@ -355,6 +365,8 @@ AttemptObserver = Callable[
         bool,
         Optional[RawCallOutcome],
         Optional[ResolutionDecision],
+        tuple[str, ...],
+        tuple[str, ...],
     ],
     None,
 ]
@@ -597,7 +609,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 6,
+        "contract_version": 7,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1159,9 +1171,13 @@ class ModelHubService:
             return False
         return True
 
-    async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
+    async def _discover(self, source: ModelHubSourceConfig) -> list[DiscoveredModel]:
         if not source.credential_ref:
-            return [model.id for model in source.models if not model.retired]
+            return [
+                DiscoveredModel(id=model.id)
+                for model in source.models
+                if not model.retired
+            ]
         return list(
             await self._engine_call(
                 self.adapter.discover_models(
@@ -1198,6 +1214,17 @@ class ModelHubService:
             "protocol": observation.protocol,
             "discovery": observation.discovery.value,
             "models": list(observation.model_ids),
+            "model_metadata": [
+                {
+                    "id": model.id,
+                    "supported_parameters": (
+                        list(model.supported_parameters)
+                        if model.supported_parameters is not None
+                        else None
+                    ),
+                }
+                for model in observation.models
+            ],
         }
 
     @staticmethod
@@ -1206,7 +1233,15 @@ class ModelHubService:
             validated = validate_source_observation(observation)
         except (TypeError, ValueError):
             raise ModelHubError("discovery_failed", status=502)
-        if any(contains_credential_material(model_id) for model_id in validated.model_ids):
+        if contains_credential_material(
+            [
+                {
+                    "id": model.id,
+                    "supported_parameters": model.supported_parameters,
+                }
+                for model in validated.models
+            ]
+        ):
             raise ModelHubError("discovery_failed", status=502)
         return validated
 
@@ -1231,7 +1266,7 @@ class ModelHubService:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         except EngineUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
@@ -1244,7 +1279,7 @@ class ModelHubService:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         validated = self._validate_observation(observation)
         if (
@@ -1499,15 +1534,15 @@ class ModelHubService:
         self,
         source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
         *,
         allow_empty: bool = False,
-    ) -> None:
+    ) -> list[tuple[str, Literal["upstream", "catalog"]]]:
         # Admit the canonical form, not the text upstream happened to send: what
         # is stored here is what resolution compares and what usage meters, and a
         # listing that names one model twice under two spellings is a failed
         # discovery, not two models.
-        canonical = [canonical_model_id(model_id) for model_id in discovered]
+        canonical = [canonical_model_id(model.id) for model in discovered]
         if (
             (not allow_empty and not discovered and not manual_models)
             or any(
@@ -1517,7 +1552,14 @@ class ModelHubService:
             or len(set(canonical)) != len(canonical)
         ):
             raise ModelHubError("discovery_failed", status=502)
-        discovered = [model_id for model_id in canonical if model_id is not None]
+        canonical_models = [
+            DiscoveredModel(
+                id=model_id,
+                supported_parameters=model.supported_parameters,
+            )
+            for model, model_id in zip(discovered, canonical)
+            if model_id is not None
+        ]
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         existing_by_id = {model.id: model for model in source.models}
@@ -1527,29 +1569,78 @@ class ModelHubService:
             if model.provenance == "discovered" and model.retired
         ]
         retired_model_ids = {model.id for model in retired_models}
+        discovered_by_id = {model.id: model for model in canonical_models}
+        overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
+
+        def apply_tiers(
+            model: ModelHubModelConfig,
+            metadata: DiscoveredModel | None,
+        ) -> None:
+            resolution = resolve_reasoning_tiers(
+                protocol=source.protocol,
+                model_id=model.id,
+                supported_parameters=(
+                    metadata.supported_parameters if metadata is not None else None
+                ),
+                existing_efforts=model.reasoning_efforts,
+                existing_source=model.reasoning_efforts_source,
+            )
+            if (
+                model.reasoning_efforts
+                and model.reasoning_efforts_source == "user"
+                and resolution.source in {"upstream", "catalog"}
+            ):
+                overrides.append((model.id, resolution.source))
+            model.reasoning_efforts = list(resolution.efforts)
+            model.reasoning_efforts_source = resolution.source
+
         discovered_models = []
-        for model_id in discovered:
+        for metadata in canonical_models:
+            model_id = metadata.id
             if model_id in manual_model_ids or model_id in retired_model_ids:
                 continue
             existing = existing_by_id.get(model_id)
-            discovered_models.append(
-                ModelHubModelConfig(
-                    id=model_id,
-                    provenance="discovered",
-                    reasoning_efforts=list(existing.reasoning_efforts) if existing else [],
-                    display_name=existing.display_name if existing else None,
-                    discovered_at=discovered_at,
-                )
+            model = ModelHubModelConfig(
+                id=model_id,
+                provenance="discovered",
+                reasoning_efforts=list(existing.reasoning_efforts) if existing else [],
+                reasoning_efforts_source=(
+                    existing.reasoning_efforts_source if existing else None
+                ),
+                display_name=existing.display_name if existing else None,
+                discovered_at=discovered_at,
             )
+            apply_tiers(model, metadata)
+            discovered_models.append(model)
+
+        for model in (*retired_models, *manual_models):
+            apply_tiers(model, discovered_by_id.get(model.id))
         source.models = discovered_models + retired_models + manual_models
         source.last_discovered_at = discovered_at
+        return overrides
+
+    def _record_reasoning_tier_overrides(
+        self,
+        source: ModelHubSourceConfig,
+        overrides: Iterable[tuple[str, Literal["upstream", "catalog"]]],
+    ) -> None:
+        for model_id, managed_source in overrides:
+            self._record_event(
+                agent="system",
+                kind="reasoning_efforts_override",
+                model_id=model_id,
+                reason=f"{managed_source}_tiers",
+                from_source=source.id,
+                from_label=source.display_name,
+                now=self.now(),
+            )
 
     async def _finalize_successful_discovery(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
         source: ModelHubSourceConfig,
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
         *,
         force: bool,
         confirmed_remove_hops: object,
@@ -1558,7 +1649,7 @@ class ModelHubService:
         """Apply one successful inventory observation and commit it atomically."""
 
         manual = [model for model in source.models if model.provenance == "manual"]
-        self._apply_discovered_models(
+        overrides = self._apply_discovered_models(
             source,
             manual,
             discovered,
@@ -1574,6 +1665,7 @@ class ModelHubService:
             confirmed_interruptions=confirmed_interruptions,
         )
         await self._commit_synced(previous, updated)
+        self._record_reasoning_tier_overrides(source, overrides)
         return removed_hops, interrupted
 
     async def _commit_new_source_locked(
@@ -1756,7 +1848,7 @@ class ModelHubService:
                         )
                 account_label: str | None = None
                 state = ModelHubSourceStateConfig(status="standby")
-                discovered: list[str] | None
+                discovered: list[DiscoveredModel] | None
                 if channel == "hub":
                     rollback_credential_ref = cast(str, flow.credential_ref)
                     observation = await self._require_proven_observation(
@@ -1770,7 +1862,7 @@ class ModelHubService:
                         observation.protocol,
                     )
                     if observation.discovery is ObservationDiscovery.SUCCEEDED:
-                        discovered = list(observation.model_ids)
+                        discovered = list(observation.models)
                     elif observation.discovery is ObservationDiscovery.FAILED:
                         discovered = None
                         state = ModelHubSourceStateConfig(
@@ -1805,7 +1897,10 @@ class ModelHubService:
                             detail_key="models.source.needs_action.oauth_expired",
                         )
                     )
-                    discovered = list(_native_model_ids(vendor))
+                    discovered = [
+                        DiscoveredModel(id=model_id)
+                        for model_id in _native_model_ids(vendor)
+                    ]
                 if channel == "native_cli" and not discovered:
                     raise ModelHubError("discovery_failed")
                 source_payload: dict[str, Any] = {
@@ -1837,6 +1932,16 @@ class ModelHubService:
                         discovered,
                         allow_empty=channel == "hub",
                     )
+                else:
+                    for model in source.models:
+                        resolution = resolve_reasoning_tiers(
+                            protocol=source.protocol,
+                            model_id=model.id,
+                            existing_efforts=model.reasoning_efforts,
+                            existing_source=model.reasoning_efforts_source,
+                        )
+                        model.reasoning_efforts = list(resolution.efforts)
+                        model.reasoning_efforts_source = resolution.source
                 try:
                     source = ModelHubSourceConfig.from_payload(source.to_payload())
                 except (TypeError, ValueError):
@@ -2053,7 +2158,10 @@ class ModelHubService:
                 manual = [
                     model for model in source.models if model.provenance == "manual"
                 ]
-                discovered = list(_native_model_ids(binding.vendor))
+                discovered = [
+                    DiscoveredModel(id=model_id)
+                    for model_id in _native_model_ids(binding.vendor)
+                ]
                 if not discovered:
                     source.models = [
                         model
@@ -2071,8 +2179,9 @@ class ModelHubService:
                         status=502,
                         data={"interrupted_pairs": interrupted_pairs},
                     )
-                self._apply_discovered_models(source, manual, discovered)
+                overrides = self._apply_discovered_models(source, manual, discovered)
                 await self._commit_synced(previous, config)
+                self._record_reasoning_tier_overrides(source, overrides)
                 interrupted_pairs = self._would_interrupt(config)
                 self._complete_reauth_flow(
                     flow_id,
@@ -2111,7 +2220,7 @@ class ModelHubService:
                 ]
                 source.credential_ref = replacement_ref
                 discovered = await self._discover(source)
-                self._apply_discovered_models(source, manual, discovered)
+                overrides = self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
                 interrupted_pairs = self._would_interrupt(config)
                 if (
@@ -2122,6 +2231,7 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
+                self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
                     flow_id,
                     binding,
@@ -2447,6 +2557,7 @@ class ModelHubService:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
             if any(
                 model.provenance != "manual"
+                or model.reasoning_efforts_source not in {None, "user"}
                 # The same admission rule the manual-add surface applies. A source
                 # may be created with its models inline, so this is the other way a
                 # client-declared identifier enters config — and a client can still
@@ -2580,10 +2691,19 @@ class ModelHubService:
                 self._apply_discovered_models(
                     source,
                     manual_models,
-                    list(observation.model_ids),
+                    list(observation.models),
                     allow_empty=True,
                 )
             elif observation.discovery is ObservationDiscovery.FAILED:
+                for model in source.models:
+                    resolution = resolve_reasoning_tiers(
+                        protocol=source.protocol,
+                        model_id=model.id,
+                        existing_efforts=model.reasoning_efforts,
+                        existing_source=model.reasoning_efforts_source,
+                    )
+                    model.reasoning_efforts = list(resolution.efforts)
+                    model.reasoning_efforts_source = resolution.source
                 source.state = ModelHubSourceStateConfig(
                     status="error",
                     detail_key="models.source.error.unclassified",
@@ -3917,11 +4037,40 @@ class ModelHubService:
                 {
                     **model.to_payload(),
                     "reasoning_efforts": value,
+                    "reasoning_efforts_source": (
+                        "user" if isinstance(value, list) and value else None
+                    ),
                 }
             )
         except ValueError:
             raise ModelHubError("mapping_target_unavailable") from None
         return validated.reasoning_efforts
+
+    @staticmethod
+    def _raise_if_reasoning_tiers_managed(model: ModelHubModelConfig) -> None:
+        managed_source = model.reasoning_efforts_source
+        if managed_source not in {"upstream", "catalog"}:
+            return
+        raise ModelHubError(
+            "source_model_tiers_managed",
+            status=409,
+            detail=f"settings.models.sourceDetail.tiers.managed.{managed_source}",
+            data={"reasoning_efforts_source": managed_source},
+        )
+
+    @staticmethod
+    def _apply_reasoning_tier_ladder(
+        source: ModelHubSourceConfig,
+        model: ModelHubModelConfig,
+    ) -> None:
+        resolution = resolve_reasoning_tiers(
+            protocol=source.protocol,
+            model_id=model.id,
+            existing_efforts=model.reasoning_efforts,
+            existing_source=model.reasoning_efforts_source,
+        )
+        model.reasoning_efforts = list(resolution.efforts)
+        model.reasoning_efforts_source = resolution.source
 
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:
         if not isinstance(payload, dict):
@@ -3951,15 +4100,24 @@ class ModelHubService:
                     model,
                     reasoning_efforts,
                 )
+                model.reasoning_efforts_source = (
+                    "user" if model.reasoning_efforts else None
+                )
+                self._apply_reasoning_tier_ladder(source, model)
                 source.models.append(model)
             elif existing.provenance == "discovered":
                 raise ModelHubError("source_model_managed_upstream", status=409)
             else:
+                self._raise_if_reasoning_tiers_managed(existing)
                 existing.display_name = display_name
                 existing.reasoning_efforts = self._validated_reasoning_efforts(
                     existing,
                     reasoning_efforts,
                 )
+                existing.reasoning_efforts_source = (
+                    "user" if existing.reasoning_efforts else None
+                )
+                self._apply_reasoning_tier_ladder(source, existing)
             await self._commit_synced(previous, config)
             return self._source_payload(source)
 
@@ -3980,9 +4138,13 @@ class ModelHubService:
             model = next((item for item in source.models if item.id == model_id), None)
             if model is None:
                 raise ModelHubError("mapping_target_unavailable", status=404)
+            self._raise_if_reasoning_tiers_managed(model)
             model.reasoning_efforts = self._validated_reasoning_efforts(
                 model,
                 payload["reasoning_efforts"],
+            )
+            model.reasoning_efforts_source = (
+                "user" if model.reasoning_efforts else None
             )
             await self._commit_synced(previous, config)
             return self._source_payload(source)
@@ -5527,6 +5689,8 @@ class ModelHubService:
                 False,
                 outcome,
                 decision,
+                (),
+                (),
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -5645,18 +5809,28 @@ class ModelHubService:
         request: Mapping[str, Any],
         source: ModelHubSourceConfig,
         model_id: str,
-    ) -> Mapping[str, Any]:
+    ) -> ExactReasoningEffortRequest:
         model = next((item for item in source.models if item.id == model_id), None)
-        supported = set(model.reasoning_efforts) if model is not None else set()
+        declared = tuple(model.reasoning_efforts) if model is not None else ()
+        supported = set(declared)
 
         payload = dict(request)
         changed = False
+        stripped: list[str] = []
+
+        def note_stripped(value: object) -> None:
+            if isinstance(value, str) and value:
+                safe_value = redact_credential_material(value)
+                if safe_value not in stripped:
+                    stripped.append(safe_value)
+
         direct = payload.get("reasoning_effort")
         if "reasoning_effort" in payload and not (
             isinstance(direct, str) and direct in supported
         ):
             payload.pop("reasoning_effort")
             changed = True
+            note_stripped(direct)
         reasoning = payload.get("reasoning")
         nested = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
         if (
@@ -5671,15 +5845,33 @@ class ModelHubService:
             else:
                 payload.pop("reasoning")
             changed = True
+            note_stripped(nested)
         if not changed:
-            return request
+            return ExactReasoningEffortRequest(request=request)
         if isinstance(request, ModelHubRequest):
-            return ModelHubRequest(
+            filtered_request: Mapping[str, Any] = ModelHubRequest(
                 payload,
                 protocol=request.protocol,
                 headers=request.headers,
             )
-        return payload
+        else:
+            filtered_request = payload
+        safe_declared = tuple(
+            redact_credential_material(effort) for effort in declared
+        )
+        logger.info(
+            "Stripped undeclared Model Hub reasoning effort(s) %s for source %s "
+            "model %s; declared tiers: %s",
+            stripped,
+            source.id,
+            model_id,
+            list(safe_declared),
+        )
+        return ExactReasoningEffortRequest(
+            request=filtered_request,
+            stripped_efforts=tuple(stripped),
+            declared_efforts=safe_declared,
+        )
 
     async def resolve(
         self,
@@ -5766,11 +5958,12 @@ class ModelHubService:
                 raise AssertionError("runnable hop must have an exact identity")
             if source.id in globally_blocked_source_ids:
                 continue
-            exact_request = self._request_for_exact_reasoning_effort(
+            exact_reasoning_request = self._request_for_exact_reasoning_effort(
                 request,
                 source,
                 target_model,
             )
+            exact_request = exact_reasoning_request.request
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -5800,6 +5993,8 @@ class ModelHubService:
                     False,
                     None,
                     None,
+                    exact_reasoning_request.stripped_efforts,
+                    exact_reasoning_request.declared_efforts,
                 )
             handle, outcome, cancelled = await self._invoke(
                 source=source,
@@ -5894,6 +6089,8 @@ class ModelHubService:
                     False,
                     outcome,
                     decision,
+                    (),
+                    (),
                 )
             if decision.action == "return":
                 self._emit_switch(

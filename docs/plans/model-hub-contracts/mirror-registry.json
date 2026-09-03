@@ -1,8 +1,30 @@
 {
-  "contract_version": 6,
+  "contract_version": 7,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
+  },
+  "contract_version_closure": {
+    "persisted_schemas": [
+      "turn-provenance.schema.json"
+    ],
+    "literal_globs": [
+      "core/handlers/model_hub/service.py",
+      "core/handlers/model_hub/provenance.py",
+      "tests/test_model_hub*.py",
+      "tests/e2e/test_model_hub*.py",
+      "ui/src/components/settings/models/types.ts",
+      "ui/src/components/settings/models/*.test.*"
+    ],
+    "required_literal_files": [
+      "core/handlers/model_hub/service.py",
+      "core/handlers/model_hub/provenance.py",
+      "ui/src/components/settings/models/types.ts"
+    ],
+    "contract_headers": [
+      "core/handlers/model_hub/adapter.py",
+      "docs/plans/model-hub-contracts/adapter-interface.py"
+    ]
   },
   "authority_table_discovery": {
     "files": ["docs/plans/model-hub.md"]
@@ -139,7 +161,9 @@
       },
       "exclusions": [
         "recovery",
-        "manual"
+        "manual",
+        "upstream_tiers",
+        "catalog_tiers"
       ],
       "exclusion_sets": [
         {
@@ -736,6 +760,24 @@
           "file": "ui/src/i18n/zh.json",
           "path": "/models/source/backoff",
           "prefix": "models.source.backoff."
+        }
+      ]
+    },
+    {
+      "id": "D23",
+      "domain": "reasoning tier provenance",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "source.schema.json",
+        "paths": ["/properties/models/items/properties/reasoning_efforts_source"],
+        "exclude": [null]
+      },
+      "consumers": [
+        {
+          "kind": "python_literal_annotation",
+          "file": "config/v2_config.py",
+          "class": "ModelHubModelConfig",
+          "field": "reasoning_efforts_source"
         }
       ]
     },
