@@ -193,6 +193,7 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "features.multi_agent=false",
                 "features.plugins=false",
                 "features.terminal_visualization_instructions=false",
+                "skills.include_instructions=false",
             }.issubset(disabled)
         )
         # ``agents`` is a role-definition table in older supported Codex

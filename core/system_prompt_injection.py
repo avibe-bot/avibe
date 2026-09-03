@@ -583,6 +583,18 @@ def build_system_prompt_injection(
 ) -> str:
     """Build avibe system prompt additions for an agent backend."""
 
+    skills = None
+    if skills_cwd is not None:
+        from core.managed_skills import resolve_skills
+
+        skills = resolve_skills(
+            skills_cwd,
+            project_base=skills_project_base,
+            claude_cli_path=skills_claude_cli_path,
+        )
+        if not include_show_pages:
+            skills = [skill for skill in skills if skill.name != "use-show-pages"]
+
     prompt = _BASE_CAPABILITIES_INTRO
     if context is not None:
         prompt += _build_session_start_prompt(context)
@@ -594,7 +606,8 @@ def build_system_prompt_injection(
         prompt += _build_show_pages_prompt(context, avibe_cloud_guidance=guidance)
     if include_quick_replies:
         prompt += _QUICK_REPLIES_PROMPT
-    prompt += _build_vault_prompt(context, fallback_platform=fallback_platform)
+    if skills is None or any(skill.name == "use-avibe-vault" for skill in skills):
+        prompt += _build_vault_prompt(context, fallback_platform=fallback_platform)
     if context is not None:
         prompt += _build_harness_prompt(
             context,
@@ -609,19 +622,10 @@ def build_system_prompt_injection(
         )
     if include_memory_cli:
         prompt += _MEMORY_CLI_PROMPT
-    if skills_cwd is not None:
-        from core.managed_skills import render_skill_catalog_prompt, resolve_skills
+    if skills is not None:
+        from core.managed_skills import render_skill_catalog_prompt
 
-        skills = resolve_skills(
-            skills_cwd,
-            project_base=skills_project_base,
-            claude_cli_path=skills_claude_cli_path,
-        )
-        if not include_show_pages:
-            skills = [skill for skill in skills if skill.name != "use-show-pages"]
-        prompt += render_skill_catalog_prompt(
-            skills
-        )
+        prompt += render_skill_catalog_prompt(skills)
     if context is not None:
         prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)
     return prompt

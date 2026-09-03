@@ -184,6 +184,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("$<OPENAI_API_KEY>", prompts[0])
 
+    def test_prompt_does_not_route_vault_work_when_the_skill_is_unavailable(self):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=[]),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                skills_cwd=Path("/tmp/project"),
+            )
+
+        self.assertNotIn("## Vault", prompt)
+        self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
+
     def test_prompt_can_exclude_show_pages(self):
         context = MessageContext(
             user_id="U1",

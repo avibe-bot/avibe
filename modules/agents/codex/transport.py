@@ -51,6 +51,7 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.tool_call_mcp_elicitation=false",
     "features.tool_suggest=false",
     "features.workspace_dependencies=false",
+    "skills.include_instructions=false",
 )
 
 

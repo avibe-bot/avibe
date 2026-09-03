@@ -3520,8 +3520,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
 
         params = transport.send_request.await_args.args[1]
-        self.assertNotIn("model", params)
-        self.assertNotIn("effort", params)
+        self.assertIsNone(params["model"])
+        self.assertIsNone(params["effort"])
         self.assertNotIn("collaborationMode", params)
         self.assertNotIn("session-1", agent._thread_model_settings)
 
@@ -3558,7 +3558,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             context=SimpleNamespace(platform_specific={}),
         )
         transport = SimpleNamespace(
-            supports_turn_collaboration_mode=False,
+            supports_turn_collaboration_mode=True,
             send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
         )
 
@@ -3584,6 +3584,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             agent._thread_developer_instructions["session-1"],
             ("thread-1", "stable prompt"),
         )
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
 
     async def test_start_turn_persists_changed_fallback_prompt(self):
         agent = object.__new__(CodexAgent)
@@ -3592,7 +3596,12 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         agent.codex_config = SimpleNamespace(default_model=None)
         agent.sessions = SimpleNamespace(
-            get_agent_session_runtime_marker=Mock(return_value=None),
+            get_agent_session_runtime_marker=Mock(
+                return_value={
+                    "thread_id": "thread-1",
+                    "sha256": agent._fallback_prompt_fingerprint("old prompt"),
+                }
+            ),
             set_agent_session_runtime_marker=Mock(return_value=True),
         )
         agent._thread_developer_instructions = {}
@@ -3614,7 +3623,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             context=SimpleNamespace(platform_specific={}),
         )
         transport = SimpleNamespace(
-            supports_turn_collaboration_mode=False,
+            supports_turn_collaboration_mode=True,
             send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
         )
 

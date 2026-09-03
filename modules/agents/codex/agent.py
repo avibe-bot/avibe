@@ -163,6 +163,8 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, "collaboration" | "fallback")
+        self._thread_prompt_strategies: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, active model, active reasoning effort)
         self._thread_model_settings: Dict[str, tuple[str, str, Optional[str]]] = {}
         # base_session_id → (thread_id, AVIBE_* caller env)
@@ -2501,6 +2503,16 @@ class CodexAgent(BaseAgent):
             self._thread_developer_instructions = {}
         self._thread_developer_instructions[base_session_id] = (thread_id, developer_instructions)
 
+    def _remember_thread_prompt_strategy(
+        self,
+        base_session_id: str,
+        thread_id: str,
+        strategy: str,
+    ) -> None:
+        if not hasattr(self, "_thread_prompt_strategies"):
+            self._thread_prompt_strategies = {}
+        self._thread_prompt_strategies[base_session_id] = (thread_id, strategy)
+
     def _remember_thread_model_settings_from_response(
         self,
         base_session_id: str,
@@ -2553,6 +2565,8 @@ class CodexAgent(BaseAgent):
     def _clear_thread_developer_instructions(self, base_session_id: str) -> None:
         if hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions.pop(base_session_id, None)
+        if hasattr(self, "_thread_prompt_strategies"):
+            self._thread_prompt_strategies.pop(base_session_id, None)
         if hasattr(self, "_thread_model_settings"):
             self._thread_model_settings.pop(base_session_id, None)
         if hasattr(self, "_thread_caller_env_configs"):
@@ -2624,6 +2638,11 @@ class CodexAgent(BaseAgent):
             thread_id,
             developer_instructions,
         )
+        self._remember_thread_prompt_strategy(
+            request.base_session_id,
+            thread_id,
+            "fallback",
+        )
         self._persist_fallback_prompt_fingerprint(
             request,
             thread_id,
@@ -2635,23 +2654,21 @@ class CodexAgent(BaseAgent):
     def _fallback_prompt_fingerprint(developer_instructions: str) -> str:
         return hashlib.sha256(developer_instructions.encode("utf-8")).hexdigest()
 
-    def _persisted_fallback_prompt_matches(
+    def _read_persisted_fallback_prompt_marker(
         self,
-        request: AgentRequest,
         thread_id: str,
-        developer_instructions: str,
         *,
         agent_session_id: Optional[str],
-    ) -> bool:
+    ) -> Optional[dict[str, str]]:
         if not agent_session_id:
-            return False
+            return None
         getter = getattr(
             getattr(self, "sessions", None),
             "get_agent_session_runtime_marker",
             None,
         )
         if not callable(getter):
-            return False
+            return None
         try:
             marker = getter(
                 agent_session_id,
@@ -2659,21 +2676,20 @@ class CodexAgent(BaseAgent):
                 native_session_id=thread_id,
                 key=CODEX_FALLBACK_PROMPT_METADATA_KEY,
             )
-        except Exception:
-            logger.debug("Failed to read Codex fallback prompt marker", exc_info=True)
-            return False
-        expected = {
-            "thread_id": thread_id,
-            "sha256": self._fallback_prompt_fingerprint(developer_instructions),
-        }
-        if marker != expected:
-            return False
-        self._remember_thread_developer_instructions(
-            request.base_session_id,
-            thread_id,
-            developer_instructions,
-        )
-        return True
+        except Exception as exc:
+            raise RuntimeError("Could not resolve the Codex prompt strategy") from exc
+        if marker is None:
+            return None
+        marker_thread_id = marker.get("thread_id") if isinstance(marker, dict) else None
+        marker_sha256 = marker.get("sha256") if isinstance(marker, dict) else None
+        if (
+            marker_thread_id != thread_id
+            or not isinstance(marker_sha256, str)
+            or len(marker_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in marker_sha256)
+        ):
+            raise RuntimeError("Stored Codex fallback prompt marker is invalid")
+        return {"thread_id": thread_id, "sha256": marker_sha256}
 
     def _persist_fallback_prompt_fingerprint(
         self,
@@ -2742,27 +2758,50 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandboxPolicy": {"type": "dangerFullAccess"},
         }
-        if effective_model:
+        if effective_model is not None or model_explicit:
             turn_params["model"] = effective_model
-        if effective_effort:
+        if effective_effort is not None or effort_explicit:
             turn_params["effort"] = effective_effort
 
         cached_instructions = getattr(self, "_thread_developer_instructions", {}).get(request.base_session_id)
         prompt_changed = cached_instructions != (thread_id, developer_instructions)
-        if (
-            developer_instructions
-            and prompt_changed
-            and not getattr(transport, "supports_turn_collaboration_mode", True)
-            and self._persisted_fallback_prompt_matches(
-                request,
+        cached_strategy = getattr(self, "_thread_prompt_strategies", {}).get(request.base_session_id)
+        prompt_strategy = cached_strategy[1] if cached_strategy and cached_strategy[0] == thread_id else None
+        persisted_fallback_marker = None
+        if developer_instructions and prompt_strategy is None:
+            persisted_fallback_marker = self._read_persisted_fallback_prompt_marker(
                 thread_id,
-                developer_instructions,
                 agent_session_id=agent_session_id,
             )
-        ):
+            if persisted_fallback_marker is not None:
+                prompt_strategy = "fallback"
+            elif effective_model and getattr(transport, "supports_turn_collaboration_mode", True):
+                prompt_strategy = "collaboration"
+            else:
+                prompt_strategy = "fallback"
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                prompt_strategy,
+            )
+        fallback_prompt_is_current = bool(
+            developer_instructions
+            and persisted_fallback_marker
+            and persisted_fallback_marker["sha256"]
+            == self._fallback_prompt_fingerprint(developer_instructions)
+        )
+        if fallback_prompt_is_current:
+            self._remember_thread_developer_instructions(
+                request.base_session_id,
+                thread_id,
+                developer_instructions,
+            )
             prompt_changed = False
         use_collaboration_mode = bool(
-            developer_instructions and effective_model and getattr(transport, "supports_turn_collaboration_mode", True)
+            developer_instructions
+            and effective_model
+            and prompt_strategy == "collaboration"
+            and getattr(transport, "supports_turn_collaboration_mode", True)
         )
         if use_collaboration_mode:
             # Codex keeps the collaboration world state across Turns and emits
@@ -2807,16 +2846,12 @@ class CodexAgent(BaseAgent):
                 exc,
             )
             transport.supports_turn_collaboration_mode = False
-            fallback_prompt_is_current = bool(
-                developer_instructions
-                and self._persisted_fallback_prompt_matches(
-                    request,
-                    thread_id,
-                    developer_instructions,
-                    agent_session_id=agent_session_id,
-                )
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                "fallback",
             )
-            if developer_instructions and prompt_changed and not fallback_prompt_is_current:
+            if developer_instructions and not fallback_prompt_is_current:
                 await self._inject_thread_developer_instructions(
                     transport,
                     request,
