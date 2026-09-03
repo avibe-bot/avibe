@@ -275,6 +275,7 @@ class OpenCodeServerManager:
         self._pid_file = paths.get_logs_dir() / "opencode_server.json"
         self._active_requests = 0
         self._active_run_sessions: set[str] = set()
+        self._active_poll_session_ids_provider: Callable[[], set[str]] | None = None
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port: Optional[int] = None
         self._caller_context_plugin_refresh_pending = False
@@ -299,6 +300,14 @@ class OpenCodeServerManager:
         callback: Callable[[bool, bool], bool],
     ) -> None:
         self._runtime_activation_retire = callback
+
+    def set_active_poll_session_ids_provider(
+        self,
+        provider: Callable[[], set[str]],
+    ) -> None:
+        """Attach the durable recovery records that confirm adopted run markers."""
+
+        self._active_poll_session_ids_provider = provider
 
     @staticmethod
     def _runtime_token_from_pid_info(
@@ -615,6 +624,53 @@ class OpenCodeServerManager:
 
     def _has_active_run_sessions(self) -> bool:
         return bool(self._active_run_sessions)
+
+    def _reconcile_adopted_active_run_sessions(
+        self,
+        info: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Discard adopted pre-write markers that have no durable recovery poll."""
+
+        if self._active_run_sessions or not self._pid_file_references_current_server(info):
+            return info
+        active = info.get("active_run_sessions") if isinstance(info, dict) else None
+        if not isinstance(active, list) or not active:
+            return info
+        if any(not isinstance(item, str) or not item for item in active):
+            return info
+        provider = self._active_poll_session_ids_provider
+        if provider is None:
+            return info
+        try:
+            durable = provider()
+        except Exception:
+            logger.warning(
+                "Could not reconcile adopted OpenCode run markers with durable polls",
+                exc_info=True,
+            )
+            return info
+        if any(not isinstance(item, str) or not item for item in durable):
+            logger.warning("Ignoring invalid OpenCode durable active-poll identifiers")
+            return info
+
+        retained = set(active).intersection(durable)
+        revised = dict(info)
+        revised["active_run_sessions"] = sorted(retained)
+        if retained != set(active):
+            try:
+                self._pid_file.write_text(json.dumps(revised))
+            except Exception:
+                logger.warning(
+                    "Could not persist reconciled OpenCode run markers",
+                    exc_info=True,
+                )
+                return info
+            logger.info(
+                "Removed %s orphaned OpenCode run marker(s) without durable polls",
+                len(set(active) - retained),
+            )
+        self._active_run_sessions = retained
+        return revised
 
     def runtime_has_active_turns(self) -> bool:
         if self._active_requests > 0 or self._has_active_run_sessions():
@@ -1554,6 +1610,7 @@ class OpenCodeServerManager:
                         "Stop that server or configure Avibe to use another OPENCODE_PORT so caller context "
                         "environment variables can be injected safely."
                     )
+                pid_info = self._reconcile_adopted_active_run_sessions(pid_info)
                 if not self._pid_file_has_caller_context_binding(pid_info):
                     self._caller_context_plugin_refresh_pending = True
                 runtime_policy_stale = not self._pid_file_has_current_runtime_policy(pid_info)

@@ -731,6 +731,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if restored_server is not None:
                 return restored_server
         server = await self._client_manager.get_server()
+        server.set_active_poll_session_ids_provider(
+            lambda: set(self.sessions.get_all_active_polls())
+        )
         self._attach_server_activation(server)
         return server
 
