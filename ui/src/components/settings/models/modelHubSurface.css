@@ -646,10 +646,17 @@
   align-items: baseline;
   gap: 8px;
 }
+/* The element that carries the statement is the element that sizes it. The idle
+   row holds two deliberately different scales -- this 12px statement and the
+   10.5px hint beside it -- so the scale sits on each child rather than on the row
+   the way the single-child detecting row does. Color stays inherited so the
+   row's `.is-idle` dimming keeps applying to it. */
 .model-hub-add-key-protocol-active {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  font-size: var(--model-hub-add-key-strip-title-size);
+  font-weight: 600;
 }
 .model-hub-add-key-protocol-manual {
   flex-direction: column;
