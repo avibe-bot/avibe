@@ -9104,22 +9104,22 @@ def dependencies_status(*, offline: bool = False) -> dict:
         }
     )
 
-    try:
-        from core.show_runtime import ShowRuntimeManager, get_show_runtime_manager
+    from core.show_runtime import ShowRuntimeManager, get_show_runtime_manager
 
-        srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
-        srt = srt_manager.status()
-    except Exception as exc:  # noqa: BLE001
-        srt = {
-            "install": {"state": "absent", "runtime_version": None, "matches_manifest": None},
-            "node_available": None,
-            "node_version": None,
-            "reason": str(exc),
-        }
+    srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
+    srt = srt_manager.status()
     manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
     install = srt.get("install") if isinstance(srt.get("install"), dict) else {}
-    srt_installed = install.get("state") == "installed"
+    install_state = install.get("state")
+    srt_installed = True if install_state == "installed" else False if install_state == "absent" else None
     installed_matches_manifest = install.get("matches_manifest")
+    recovery_action = install.get("recovery_action")
+    srt_status = "ready" if srt_installed is True else "missing" if srt_installed is False else "error"
+    action_class = (
+        "repairable"
+        if srt_status in {"ready", "missing"} or recovery_action == "repair"
+        else "operator_only"
+    )
     deps.append(
         {
             "id": "show-runtime",
@@ -9128,10 +9128,12 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "installed": srt_installed,
             "version": install.get("runtime_version"),
             "latest_version": manifest.get("runtime_version"),
-            "has_update": bool(srt_installed and installed_matches_manifest is False),
-            "status": "ready" if srt_installed else "missing",
+            "has_update": bool(srt_installed is True and installed_matches_manifest is False),
+            "status": srt_status,
+            "action_class": action_class,
             "reason": srt.get("reason"),
             "download_error": srt.get("download_error"),
+            "inspection_error": srt.get("inspection_error"),
         }
     )
 
@@ -9159,7 +9161,15 @@ def dependencies_status(*, offline: bool = False) -> dict:
 
     # Node present but below the Show Runtime minimum (node_supported is False)
     # is not actually usable — don't show it green while runtime repair fails.
-    node_ok = bool(srt.get("node_available")) and srt.get("node_supported") is not False
+    node_inspection_failed = (
+        install_state == "failed"
+        and srt.get("reason") == "runtime_install_inspection_failed"
+    )
+    node_ok = (
+        None
+        if node_inspection_failed
+        else bool(srt.get("node_available")) and srt.get("node_supported") is not False
+    )
     deps.append(
         {
             "id": "node",
@@ -9167,7 +9177,7 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "required": True,
             "installed": node_ok,
             "version": srt.get("node_version"),
-            "status": "ready" if node_ok else "missing",
+            "status": "error" if node_ok is None else "ready" if node_ok else "missing",
         }
     )
 
@@ -9202,22 +9212,29 @@ def _prepare_show_runtime_job() -> dict:
         from core.show_runtime import get_show_runtime_manager
         from vibe.i18n import t as i18n_t
 
-        payload = get_show_runtime_manager().prepare(force=True)
-        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
+        payload = get_show_runtime_manager().repair()
         ok = bool(payload.get("ok"))
-        reason = payload.get("reason") or install.get("reason")
+        reason = payload.get("reason")
+        healthy = payload.get("outcome") == "healthy"
         result = {
             "ok": ok,
             "message": (
-                i18n_t("runtime.prepare.prepared")
+                i18n_t("doctor.repair.showRuntimeHealthy")
+                if healthy
+                else i18n_t("runtime.prepare.prepared")
                 if ok
                 else i18n_t("runtime.prepare.failed", reason=reason or "unknown")
             ),
             "output": None,
+            "outcome": payload.get("outcome"),
+            "changed": payload.get("outcome") == "repaired",
         }
         if not ok:
-            status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
-            download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
+            download_error = (
+                payload.get("download_error")
+                if isinstance(payload.get("download_error"), dict)
+                else None
+            )
             result["reason"] = reason
             result["download_error"] = download_error
             if download_error:

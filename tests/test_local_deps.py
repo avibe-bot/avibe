@@ -1396,6 +1396,177 @@ def test_dependencies_status_projects_show_runtime_identity_without_pairing(monk
     assert {key: entry[key] for key in expected} == expected
 
 
+def _stub_dependency_status_neighbors(monkeypatch) -> None:
+    import core.tmux_runtime as tmux_runtime
+
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "installed": True,
+            "version": "0.1.14",
+            "latest_version": None,
+            "has_update": False,
+            "status": "ready",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"installed": True, "version": "0.0.1", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (
+            {"id": "memory-package", "status": "not_required"},
+            {"id": "memory-runtime", "status": "not_required"},
+        ),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "tmux_status",
+        lambda: {"installed": False, "version": None, "status": "missing"},
+    )
+
+
+def test_dependencies_status_preserves_show_runtime_inspection_failure(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    runtime_dir = tmp_path / "runtime"
+    pointer = runtime_dir / "prebuilt" / "current.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        json.dumps(
+            {
+                "provider": "archive",
+                "runtime_id": "show-runtime",
+                "install_dir": str(runtime_dir / "prebuilt" / "versions" / "missing"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="archive",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    pointer_before = pointer.read_bytes()
+
+    entry = next(
+        item
+        for item in api.dependencies_status()["deps"]
+        if item["id"] == "show-runtime"
+    )
+
+    assert entry["installed"] is None
+    assert entry["status"] == "error"
+    assert entry["action_class"] == "operator_only"
+    assert entry["reason"] == "runtime_install_inspection_failed"
+    assert entry["inspection_error"]["kind"] == "OSError"
+    repair = manager.repair()
+    assert repair["reason"] == "runtime_install_inspection_failed"
+    assert repair["repair_attempted"] is False
+    assert pointer.read_bytes() == pointer_before
+
+
+def test_dependencies_status_keeps_true_show_runtime_absence_installable(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_path=tmp_path / "runtime.tgz",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    entry = next(
+        item
+        for item in api.dependencies_status()["deps"]
+        if item["id"] == "show-runtime"
+    )
+
+    assert entry["installed"] is False
+    assert entry["status"] == "missing"
+    assert entry["action_class"] == "repairable"
+    assert entry["reason"] is None
+
+
+def test_dependencies_status_keeps_node_ready_for_explicit_runtime_config_failure(
+    monkeypatch,
+    tmp_path,
+):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda command: ["node"] if command == "node" else None,
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        command=str(tmp_path / "missing-runtime"),
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    by_id = {item["id"]: item for item in api.dependencies_status()["deps"]}
+
+    assert by_id["show-runtime"]["installed"] is None
+    assert by_id["show-runtime"]["status"] == "error"
+    assert by_id["show-runtime"]["reason"] == "runtime_command_missing"
+    assert by_id["show-runtime"]["action_class"] == "operator_only"
+    assert by_id["node"]["installed"] is True
+    assert by_id["node"]["status"] == "ready"
+
+
+def test_show_runtime_status_does_not_hide_programming_defects(monkeypatch, tmp_path):
+    from core.show_runtime import ShowRuntimeManager
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(manager, "_status", lambda **_kwargs: (_ for _ in ()).throw(TypeError("bug")))
+
+    with pytest.raises(TypeError, match="bug"):
+        manager.status()
+
+
+def test_settings_and_doctor_consume_the_same_verified_repair_owner(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+    from vibe import cli
+
+    manager = show_runtime.ShowRuntimeManager(
+        command="/bin/echo",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        auto_install=False,
+    )
+    verification_calls = []
+
+    def verify(command):
+        verification_calls.append(command)
+        return show_runtime.ShowRuntimeStartability.startable()
+
+    monkeypatch.setattr(manager, "_verify_startability", verify)
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    monkeypatch.setattr(show_runtime, "ShowRuntimeManager", lambda: manager)
+
+    settings = api._prepare_show_runtime_job()
+    doctor = cli._repair_show_runtime()
+
+    assert settings["outcome"] == "healthy"
+    assert settings["changed"] is False
+    assert doctor["status"] == "skipped"
+    assert verification_calls == [["/bin/echo"], ["/bin/echo"]]
+
+
 @pytest.mark.parametrize(
     ("runtime", "expected"),
     [
@@ -1990,7 +2161,13 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 
     class _Mgr:
         def status(self):
-            return {"installed": False, "manifest": None, "node_available": True, "node_supported": False, "node_version": "16.0"}
+            return {
+                "install": {"state": "absent"},
+                "manifest": None,
+                "node_available": True,
+                "node_supported": False,
+                "node_version": "16.0",
+            }
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
     by = {d["id"]: d for d in api.dependencies_status()["deps"]}
@@ -2907,22 +3084,16 @@ def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):
     import core.show_runtime as show_runtime
 
     manager = Mock()
-    manager.prepare.return_value = {
+    manager.repair.return_value = {
         "ok": False,
+        "outcome": "failed",
         "reason": "runtime_archive_download_failed",
-        "install": {
-            "state": "failed",
-            "reason": "runtime_archive_download_failed",
-            "failure_class": "transient",
-        },
-        "status": {
-            "download_error": {
-                "kind": "timeout",
-                "message": "Connection timed out",
-                "url": "https://example.test/runtime.tgz",
-                "retryable": True,
-                "attempts": 3,
-            }
+        "download_error": {
+            "kind": "timeout",
+            "message": "Connection timed out",
+            "url": "https://example.test/runtime.tgz",
+            "retryable": True,
+            "attempts": 3,
         },
     }
     monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
@@ -2939,17 +3110,12 @@ def test_prepare_show_runtime_job_reports_failed_replacement_with_old_install(mo
     import core.show_runtime as show_runtime
 
     manager = Mock()
-    manager.prepare.return_value = {
+    manager.repair.return_value = {
         "ok": False,
+        "outcome": "failed",
         "reason": "runtime_archive_download_failed",
-        "install": {
-            "state": "installed",
-            "reason": None,
-        },
-        "status": {
-            "installed": True,
-            "command": ["node", "runtime-cli.js"],
-        },
+        "installed": True,
+        "command": ["node", "runtime-cli.js"],
     }
     monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
 
@@ -2958,6 +3124,24 @@ def test_prepare_show_runtime_job_reports_failed_replacement_with_old_install(mo
     assert result["ok"] is False
     assert result["reason"] == "runtime_archive_download_failed"
     assert "runtime_archive_download_failed" in result["message"]
+
+
+def test_prepare_show_runtime_job_reports_healthy_runtime_without_change(monkeypatch):
+    import core.show_runtime as show_runtime
+
+    manager = Mock()
+    manager.repair.return_value = {"ok": True, "outcome": "healthy"}
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    result = api._prepare_show_runtime_job()
+
+    assert result == {
+        "ok": True,
+        "message": "Show Runtime starts successfully; no repair is needed.",
+        "output": None,
+        "outcome": "healthy",
+        "changed": False,
+    }
 
 
 def test_start_dependency_install_job_runs_askill(monkeypatch):

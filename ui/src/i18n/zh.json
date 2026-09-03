@@ -1920,6 +1920,7 @@
     "retry": "重试"
   },
   "errors": {
+    "runtime_install_inspection_failed": "无法检查 Show Runtime 状态。未执行安装或修复。",
     "task_owner_session_unavailable": "这个 Task 的管理 Session 已不可用。请从可用的 Agent Session 创建替代 Task。",
     "share_id_taken": "这个自定义链接已被占用，换一个。",
     "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",

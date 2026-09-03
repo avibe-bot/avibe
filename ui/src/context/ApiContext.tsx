@@ -1893,6 +1893,7 @@ export type DependencyItem = {
   reason?: string | null;
   release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
+  inspection_error?: { kind: string; message: string } | null;
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };

@@ -1382,6 +1382,7 @@
       "dependencyBinaryVerificationFailed": "{target} 二进制校验和验证失败。",
       "dependencyBinaryNotRunnable": "{target} 二进制无法运行。",
       "dependencyBinaryPrepareFailed": "无法准备 {target} 二进制。",
+      "dependencyCandidateValidationFailed": "无法验证 {target} 安装候选项。",
       "dependencyInstallMissingBinary": "{target} 归档不包含其二进制文件。",
       "dependencyInstallLockFailed": "无法获取 {target} 安装锁：{error}。",
       "dependencyInstallClaimFailed": "无法记录 {target} 安装声明：{error}。",
