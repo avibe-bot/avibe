@@ -2797,6 +2797,23 @@ class CodexAgent(BaseAgent):
                 developer_instructions,
             )
             prompt_changed = False
+        clear_collaboration_mode = bool(
+            model_explicit
+            and effective_model is None
+            and getattr(transport, "supports_turn_collaboration_mode", True)
+        )
+        if clear_collaboration_mode:
+            was_collaboration = prompt_strategy == "collaboration"
+            turn_params["collaborationMode"] = None
+            if developer_instructions:
+                prompt_strategy = "fallback"
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    prompt_strategy,
+                )
+                if was_collaboration and not fallback_prompt_is_current:
+                    prompt_changed = True
         use_collaboration_mode = bool(
             developer_instructions
             and effective_model
