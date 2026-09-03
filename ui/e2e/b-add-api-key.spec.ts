@@ -202,9 +202,15 @@ test.describe('B · add an API-key source', () => {
     );
     for (const model of created?.models ?? []) {
       // assert-current: everything the upstream said about a model except its id
-      // is discarded on the way to storage.
+      // is discarded on the way to storage. The set is pinned rather than
+      // sampled so that a field arriving later cannot slip in unnoticed — which
+      // is what it just caught: `reasoning_efforts_source` is #1836's tier
+      // provenance, product shape to record here, not a leak to strip.
       expect(Object.keys(model).sort()).toEqual(
-        ['discovered_at', 'display_name', 'id', 'origin', 'reasoning_efforts', 'retired'],
+        [
+          'discovered_at', 'display_name', 'id', 'origin',
+          'reasoning_efforts', 'reasoning_efforts_source', 'retired',
+        ],
       );
       expect(model.display_name).toBeNull();
       expect(model.reasoning_efforts).toEqual([]);

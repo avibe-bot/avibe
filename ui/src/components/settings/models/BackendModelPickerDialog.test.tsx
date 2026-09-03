@@ -254,12 +254,18 @@ describe('BackendModelPickerDialog', () => {
     const { onCancel, onAdd } = renderPicker();
 
     await user.click(await screen.findByRole('checkbox', { name: 'gpt-6' }));
-    const exits = screen.getAllByRole('button', { name: 'Cancel' });
+    // Every way out is the same way out, and each one is still addressable on
+    // its own: the corner control is named for what it is rather than borrowing
+    // the footer's word, so neither name reaches both. `getByRole` is singular
+    // and enforces that — sharing 「Cancel」 made each of these throw.
+    const exits = [
+      screen.getByRole('button', { name: 'Close' }),
+      screen.getByRole('button', { name: 'Cancel' }),
+    ];
+    expect(new Set(exits).size).toBe(exits.length);
     for (const exit of exits) await user.click(exit);
 
-    // Every way out is the same way out: the corner control borrows the
-    // footer's label rather than inventing a second word for it, and neither
-    // one takes the picks with it.
+    // And neither one takes the picks with it.
     expect(onCancel).toHaveBeenCalledTimes(exits.length);
     expect(onAdd).not.toHaveBeenCalled();
   });
