@@ -1155,6 +1155,39 @@ describe('SourceDetailPanel', () => {
     expect(chipTiers()).toEqual(['high']);
   });
 
+  // The same conclusion by the other road: the write failed for its own reasons
+  // and the row was managed by the time the rollback's re-read came back. "Try
+  // again" would replay a write `tierMutationPayload` now declines, so the notice
+  // that survives is the one that explains the lock — and it goes back to being a
+  // retry if the server ever hands the list back, which is why the branch reads
+  // provenance instead of freezing a verdict when the write failed.
+  it('turns a pending retry into the locked explanation when provenance arrives after the failure', async () => {
+    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
+    const panel = (models: Source['models']) => (
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <ReportOwnedPanel source={{ ...source, models }} trackMutation={immediateTrack} onReauth={noReauth} />
+        </I18nextProvider>
+      </ToastProvider>
+    );
+    const { rerender } = render(panel(source.models));
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+
+    rerender(panel([{ ...source.models[0], reasoning_efforts_source: 'upstream' }]));
+
+    expect(document.querySelector('[data-tier-provenance="upstream"]')).toBeTruthy();
+    expect(await screen.findByText(/tiers are set automatically|档位是自动确定的/i)).toBeTruthy();
+    expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+
+    rerender(panel([{ ...source.models[0], reasoning_efforts_source: 'user' }]));
+
+    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+  });
+
   // The copy obligation checked where the copy is actually read. A bundle
   // missing an entry reaches the user as the key itself, and these four strings
   // are the only thing on the surface that says why an edit is unavailable.

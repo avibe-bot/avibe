@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createPendingWrites } from './asyncLifetime';
 import { managedTierSource, MANAGED_TIER_SOURCES, tierMutationPayload, type TierMutationIntent } from './tierMutation';
-import type { ReasoningEffortsSource, Source } from './types';
+import type { ReasoningEffortsSource, Source, SuppliedModel } from './types';
 
 const source = (tiers: string[], provenance?: ReasoningEffortsSource | null): Source => ({
   id: 'source-a',
@@ -19,7 +19,13 @@ const source = (tiers: string[], provenance?: ReasoningEffortsSource | null): So
     display_name: null,
     origin: 'manual',
     reasoning_efforts: tiers,
-    ...(provenance === undefined ? {} : { reasoning_efforts_source: provenance }),
+    // `undefined` here means the key is absent, which is the payload a server
+    // that predates the field sends and the parser is expected to tolerate. The
+    // v7 type has no shape for that, so the omission is asserted at the one key
+    // it concerns rather than by loosening the whole fixture.
+    ...(provenance === undefined
+      ? ({} as Pick<SuppliedModel, 'reasoning_efforts_source'>)
+      : { reasoning_efforts_source: provenance }),
   }],
 });
 

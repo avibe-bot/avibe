@@ -267,7 +267,15 @@ const TierEditor: React.FC<{
   // it triggers turns the row into the locked one below, so its notice has to be
   // rendered by that branch too, or the only explanation the user gets would
   // disappear at the moment the row changes under them.
-  const failure = failed && (failed.kind === 'managed' ? (
+  //
+  // Provenance can also reach that branch after an ordinary failure — the re-read
+  // the rollback triggers, or a refresh from anywhere else, comes back with the
+  // server owning the list — and it answers the retry the same way the refusal
+  // did: `tierMutationPayload` declines a managed model, so the button would
+  // replay a write that can no longer land. Which notice to show is therefore read
+  // from the row's current provenance rather than frozen when the write failed;
+  // that also lets the retry come back untouched if the server hands the list back.
+  const failure = failed && (managed || failed.kind === 'managed' ? (
     <span data-tier-failure="managed" className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
       {t('settings.models.sourceDetail.fail.tierManaged')}
     </span>
