@@ -8,6 +8,7 @@ observations:
       - MH-S1-001
       - MH-TAKEOVER-001
       - MH-CREDENTIAL-001
+      - MH-RES-LIVE-004
   - id: MH-OBS-002
     source: engine-survey-s1
     summary: Engine usage events can contain credential material, so Model Hub emits only its own redacted records.

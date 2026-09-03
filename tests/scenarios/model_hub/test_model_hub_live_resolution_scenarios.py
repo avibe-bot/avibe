@@ -551,6 +551,78 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn(
+    tmp_path: Path,
+) -> None:
+    """MH-RES-LIVE-004: a hub subscription quota failure serves the next hop in the same turn and marks the switch as entered_metered."""
+
+    async def exercise() -> None:
+        clock = [datetime(2026, 7, 25, tzinfo=timezone.utc)]
+        subscription = _source("src_primary1", kind="subscription")
+        api_key = _source("src_backup01")
+        assert subscription.kind == "subscription"
+        assert subscription.supply_channel == "hub"
+        assert subscription.billing == "monthly"
+        assert api_key.kind == "api_key"
+        assert api_key.billing == "metered"
+        adapter = AdapterBoundaryFake(
+            [
+                AdapterResult(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    code="quota_exceeded",
+                ),
+                AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
+                AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"recovered":true}'),
+            ]
+        )
+        store = MemoryStore(_config(subscription, api_key))
+        service = _service(tmp_path, store, adapter, now=lambda: clock[0])
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            status, body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude"))
+            )
+            assert status == 200
+            assert body == b'{"ok":true}'
+            assert [call[0] for call in adapter.invocations] == [
+                "src_primary1",
+                "src_backup01",
+            ]
+            cooled = store.load().sources[0]
+            assert cooled.id == "src_primary1"
+            assert cooled.state.status == "cooldown"
+            assert cooled.state.detail_key == "models.source.cooldown.quota_exhausted"
+            assert cooled.state.retry_at == (clock[0] + timedelta(seconds=300)).isoformat()
+            events = service.list_events(limit=5)
+            assert [event["kind"] for event in events[:2]] == ["switch", "cooldown"]
+            assert events[0]["from_source"] == "src_primary1"
+            assert events[0]["to_source"] == "src_backup01"
+            assert events[0]["reason"] == "quota_exhausted"
+            assert events[0]["billing_note"] == "entered_metered"
+            assert events[1]["reason"] == "quota_exhausted"
+
+            clock[0] += timedelta(minutes=6)
+            recovered_status, recovered_body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude"))
+            )
+            assert recovered_status == 200
+            assert recovered_body == b'{"recovered":true}'
+            assert adapter.invocations[-1][0] == "src_primary1"
+            recovered = store.load().sources[0]
+            assert recovered.state.status == "standby"
+            assert recovered.state.retry_at is None
+            recovered_events = service.list_events(limit=5)
+            assert recovered_events[0]["kind"] == "recover"
+            assert recovered_events[0]["reason"] == "recovery"
+            assert recovered_events[0]["to_source"] == "src_primary1"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes(
     tmp_path: Path,
 ) -> None:
