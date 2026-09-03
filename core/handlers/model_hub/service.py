@@ -122,6 +122,36 @@ from .revocations import CredentialRevocationJournal
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
 CONTRACT_VERSION = 7
+
+
+def _storable_backend_model_metadata(
+    display_name: object,
+    reasoning_efforts: object,
+) -> tuple[Optional[str], list[str]]:
+    def normalized(value: object, field: str) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value or len(value) > 64:
+            return None
+        candidate = {
+            "id": "metadata-proposal",
+            field: value if field == "display_name" else [value],
+        }
+        try:
+            ModelHubBackendModelConfig.from_payload(candidate)
+        except (TypeError, ValueError):
+            return None
+        return value
+
+    proposed_display_name = normalized(display_name, "display_name")
+    proposed_efforts: list[str] = []
+    if isinstance(reasoning_efforts, (list, tuple)):
+        for effort in reasoning_efforts:
+            proposed = normalized(effort, "reasoning_efforts")
+            if proposed is not None and proposed not in proposed_efforts:
+                proposed_efforts.append(proposed)
+    return proposed_display_name, proposed_efforts
 AGENT_CHAIN_CONTRACT_VERSION = 7
 PROBE_RESULT_CONTRACT_VERSION = 7
 _REORDER_ORDER_UNSET = object()
@@ -3785,10 +3815,14 @@ class ModelHubService:
                     "model_id": hop.model_id,
                 }
             )
-            if display_name is None and model.display_name:
-                display_name = model.display_name
-            for effort in model.reasoning_efforts:
-                if len(effort) <= 64 and effort not in reasoning_efforts:
+            proposed_name, proposed_efforts = _storable_backend_model_metadata(
+                model.display_name,
+                model.reasoning_efforts,
+            )
+            if display_name is None and proposed_name is not None:
+                display_name = proposed_name
+            for effort in proposed_efforts:
+                if effort not in reasoning_efforts:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
@@ -3814,15 +3848,15 @@ class ModelHubService:
                 agent_backend,
                 model_id,
             )
+            display_name, reasoning_efforts = _storable_backend_model_metadata(
+                item.get("display_name"),
+                item.get("reasoning_efforts"),
+            )
             builtin.append(
                 {
                     "id": model_id,
-                    "display_name": item.get("display_name"),
-                    "reasoning_efforts": [
-                        effort
-                        for effort in item.get("reasoning_efforts") or ()
-                        if isinstance(effort, str) and 0 < len(effort) <= 64
-                    ],
+                    "display_name": display_name,
+                    "reasoning_efforts": reasoning_efforts,
                     "suppliers": suppliers,
                     "origin": "builtin",
                 }
@@ -4186,17 +4220,17 @@ class ModelHubService:
                 model_id = item["id"]
                 if model_id in present or model_id in removed:
                     continue
+                display_name, reasoning_efforts = _storable_backend_model_metadata(
+                    item.get("display_name"),
+                    item.get("reasoning_efforts"),
+                )
                 self._insert_builtin_model(
                     agent,
                     ModelHubBackendModelConfig(
                         id=model_id,
                         origin="builtin",
-                        display_name=item.get("display_name"),
-                        reasoning_efforts=[
-                            effort
-                            for effort in item.get("reasoning_efforts") or ()
-                            if isinstance(effort, str) and 0 < len(effort) <= 64
-                        ],
+                        display_name=display_name,
+                        reasoning_efforts=reasoning_efforts,
                     ),
                     builtin_order,
                 )

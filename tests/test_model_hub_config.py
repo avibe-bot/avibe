@@ -654,7 +654,16 @@ def test_per_model_route_put_does_not_consume_stored_source_order():
 
 
 def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
-    validator = Draft7Validator(_schema("guard-refusal.schema.json"))
+    schema = _schema("guard-refusal.schema.json")
+    assert schema["required"] == [
+        "ok",
+        "contract_version",
+        "error",
+        "detail",
+        "would_remove_hops",
+        "would_interrupt",
+    ]
+    validator = Draft7Validator(schema)
     hop = {
         "backend": "claude",
         "menu_model": "claude-opus-4-6",

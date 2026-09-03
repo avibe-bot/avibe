@@ -2063,8 +2063,8 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
             ModelHubModelConfig(
                 id="new-provider-model",
                 provenance="manual",
-                display_name="Second proposal",
-                reasoning_efforts=["high", overlong_effort],
+                display_name="   ",
+                reasoning_efforts=["   ", " high ", overlong_effort],
             ),
         ],
         credential_ref="cred_second001",
@@ -2097,8 +2097,8 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
                 {"id": existing_builtin_id},
                 {
                     "id": "gpt-restorable",
-                    "display_name": "GPT Restorable",
-                    "reasoning_efforts": ["low", overlong_effort],
+                    "display_name": " GPT Restorable ",
+                    "reasoning_efforts": [" low ", "   ", overlong_effort],
                 },
             ]
             if backend == "codex"
@@ -2139,7 +2139,7 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     assert candidates["providers"] == [
         {
             "id": "new-provider-model",
-            "display_name": "Second proposal",
+            "display_name": "First proposal",
             "reasoning_efforts": ["high", "low"],
             "suppliers": [
                 {
@@ -2431,8 +2431,8 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
         {"id": "gpt-alpha"},
         {
             "id": "gpt-new",
-            "display_name": "GPT New",
-            "reasoning_efforts": ["low", "x" * 65, "high"],
+            "display_name": " GPT New ",
+            "reasoning_efforts": [" low ", "   ", "x" * 65, "high"],
         },
         {"id": "gpt-omega"},
         {"id": "gpt-hidden"},

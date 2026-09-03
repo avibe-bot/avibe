@@ -961,8 +961,9 @@ def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[st
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated = _migrate_fixed_menu_routes_on_load(migrated)
     migrated = _initialize_removed_model_ids_on_load(migrated)
+    model_hub_changed = changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
-    return migrated, changed or migrated != payload, warnings
+    return migrated, model_hub_changed, warnings
 
 
 # The spellings a hand-edited config may use for a boolean, both sides in one

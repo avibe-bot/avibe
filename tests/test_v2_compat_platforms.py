@@ -187,6 +187,35 @@ def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
     assert loaded.agents.opencode.active_turn_timeout_seconds == 0
 
 
+def test_opencode_timeout_only_migration_does_not_rewrite_model_hub_config(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.services.settings import default_config
+    from vibe import api
+
+    payload = api.config_to_payload(
+        default_config(),
+        include_secrets=True,
+        include_internal=True,
+    )
+    payload["agents"]["opencode"]["active_turn_timeout_seconds"] = 90 * 60
+    payload["agents"]["opencode"].pop("legacy_turn_timeout_neutralized", None)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    original = config_path.read_bytes()
+
+    for _ in range(2):
+        loaded = V2Config.load(config_path=config_path)
+
+        assert loaded.agents.opencode.active_turn_timeout_seconds == 0
+        assert loaded.agents.opencode.legacy_turn_timeout_neutralized is True
+        assert config_path.read_bytes() == original
+        assert not list(
+            config_path.parent.glob("config.json.bak-model-hub-migration-*")
+        )
+
+
 def test_to_app_config_exposes_opencode_provider_and_reasoning_fields() -> None:
     config = V2Config(
         mode="self_host",

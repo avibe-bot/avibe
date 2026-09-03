@@ -9,10 +9,11 @@
     "ok",
     "contract_version",
     "error",
-    "detail"
+    "detail",
+    "would_remove_hops",
+    "would_interrupt"
   ],
   "additionalProperties": false,
-  "required": ["would_remove_hops", "would_interrupt"],
   "anyOf": [
     {
       "properties": {
