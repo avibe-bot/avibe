@@ -9,7 +9,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from types import MappingProxyType
+from typing import Any, Final, Iterable, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -35,6 +36,20 @@ _SUPPORTED_VISIBILITIES = {"visible", "list", *_HIDDEN_VISIBILITIES}
 _DEFAULT_REASONING_EFFORTS = {
     "claude": ["low", "medium", "high"],
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
+}
+REASONING_EFFORT_VOCABULARY: Final[tuple[str, ...]] = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+PROTOCOL_REASONING_EFFORT_DEFAULTS: Final[dict[str, tuple[str, ...]]] = {
+    "openai_responses": ("minimal", "low", "medium", "high", "xhigh"),
+    "openai_chat": ("minimal", "low", "medium", "high", "xhigh"),
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
 _CODEX_BUILT_IN_MODELS = [
     "gpt-5.5",
@@ -296,6 +311,39 @@ def prepare_codex_hub_catalog(
 
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
     return _read_catalog(path or get_bundled_catalog_path()) or {}
+
+
+def bundled_catalog_reasoning_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
+    """Index bundled reasoning-effort rows without changing their declarations."""
+
+    efforts_by_model: dict[str, tuple[str, ...]] = {}
+    backends = load_bundled_catalog().get("backends")
+    if not isinstance(backends, dict):
+        return MappingProxyType(efforts_by_model)
+    for backend in backends.values():
+        models = backend.get("models") if isinstance(backend, dict) else None
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("id")
+            efforts = model.get("reasoning_efforts")
+            if (
+                isinstance(model_id, str)
+                and model_id not in efforts_by_model
+                and isinstance(efforts, list)
+            ):
+                efforts_by_model[model_id] = tuple(efforts)
+    return MappingProxyType(efforts_by_model)
+
+
+def bundled_catalog_reasoning_efforts_for_model(
+    model_id: str,
+) -> tuple[str, ...] | None:
+    """Return one bundled catalog row's exact declared effort list."""
+
+    return bundled_catalog_reasoning_efforts_by_model().get(model_id)
 
 
 def load_cached_remote_catalog(*, schedule_refresh: bool = True) -> dict[str, Any]:
@@ -898,10 +946,11 @@ def _normalize_model_entry(item: object) -> dict[str, Any]:
     visibility = item.get("visibility")
     if isinstance(visibility, str) and visibility.strip():
         entry["visibility"] = visibility.strip().lower()
-    efforts = _coerce_reasoning_efforts(
-        item.get("reasoning_efforts") or item.get("supported_reasoning_levels")
-    )
-    if efforts:
+    raw_efforts = item.get("reasoning_efforts")
+    if raw_efforts is None:
+        raw_efforts = item.get("supported_reasoning_levels")
+    efforts = _coerce_reasoning_efforts(raw_efforts)
+    if raw_efforts is not None:
         entry["reasoning_efforts"] = efforts
     return entry
 

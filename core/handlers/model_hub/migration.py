@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
     ModelHubConfig,
@@ -18,11 +18,17 @@ from config.v2_config import (
     ModelHubSourceConfig,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     ObservationDiscovery,
     SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
-from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
+from vibe.backend_model_catalog import (
+    backend_model_entries,
+    bundled_catalog_reasoning_efforts_by_model,
+    load_bundled_catalog,
+)
 from vibe.claude_config import read_claude_oauth_signed_in, read_claude_settings_env
 from vibe.codex_config import _load_auth, get_codex_config_paths, read_codex_auth_state
 from vibe.opencode_config import (
@@ -84,10 +90,11 @@ class MigrationHost(Protocol):
         self,
         source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
         *,
         allow_empty: bool = False,
-    ) -> None: ...
+        catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> list[tuple[str, Literal["upstream", "catalog"]]]: ...
 
     def _apply_source_placement(
         self,
@@ -597,24 +604,29 @@ def _validated_source(
     validate_base_url: Callable[[object], Optional[str]],
     credential_ref: str | None = None,
     masked_credential: str | None = None,
+    catalog_efforts_by_model: Mapping[str, tuple[str, ...]],
 ) -> ModelHubSourceConfig:
     keep_native = item.proposed_action == "keep_native"
     controlled = item.proposed_action == "controlled_import"
     discovered_at = now.isoformat()
-    models = (
-        [
-            {
-                "id": model_id,
-                "display_name": None,
-                "origin": "discovered",
-                "reasoning_efforts": [],
-                "discovered_at": discovered_at,
-            }
-            for model_id in _native_model_ids(item.backend)
-        ]
-        if keep_native
-        else []
-    )
+    models = []
+    if keep_native:
+        for model_id in _native_model_ids(item.backend):
+            resolution = resolve_reasoning_tiers(
+                protocol=protocol,
+                model_id=model_id,
+                catalog_efforts_by_model=catalog_efforts_by_model,
+            )
+            models.append(
+                {
+                    "id": model_id,
+                    "display_name": None,
+                    "origin": "discovered",
+                    "reasoning_efforts": list(resolution.efforts),
+                    "reasoning_efforts_source": resolution.source,
+                    "discovered_at": discovered_at,
+                }
+            )
     payload: dict[str, object] = {
         "id": item.source_id,
         "created_at": discovered_at,
@@ -656,6 +668,7 @@ def build_native_migration_source(
         now=now,
         protocol=item.protocol,
         validate_base_url=validate_base_url,
+        catalog_efforts_by_model=bundled_catalog_reasoning_efforts_by_model(),
     )
 
 
@@ -707,6 +720,7 @@ async def apply_native_migration(
 
         provisioned: list[tuple[str, str]] = []
         persisted = False
+        catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
         try:
             for item in selected:
                 protocol = item.protocol
@@ -749,6 +763,7 @@ async def apply_native_migration(
                             validate_base_url=validate_base_url,
                             credential_ref=credential_ref,
                             masked_credential=mask_credential(item.secret),
+                            catalog_efforts_by_model=catalog_efforts_by_model,
                         )
                         manual_models = [
                             ModelHubModelConfig.from_payload(
@@ -762,12 +777,23 @@ async def apply_native_migration(
                             )
                             for model in item.manual_models
                         ]
+                        for model in manual_models:
+                            resolution = resolve_reasoning_tiers(
+                                protocol=protocol,
+                                model_id=model.id,
+                                existing_efforts=model.reasoning_efforts,
+                                existing_source=model.reasoning_efforts_source,
+                                catalog_efforts_by_model=catalog_efforts_by_model,
+                            )
+                            model.reasoning_efforts = list(resolution.efforts)
+                            model.reasoning_efforts_source = resolution.source
                         if observation.discovery is ObservationDiscovery.SUCCEEDED:
                             host._apply_discovered_models(
                                 source,
                                 manual_models,
-                                list(observation.model_ids),
+                                list(observation.models),
                                 allow_empty=True,
+                                catalog_efforts_by_model=catalog_efforts_by_model,
                             )
                         else:
                             failed_payload = source.to_payload()
@@ -789,10 +815,12 @@ async def apply_native_migration(
                         raise MigrationConflictError from None
                 else:
                     try:
-                        source = build_native_migration_source(
+                        source = _validated_source(
                             item,
                             now=host.now(),
+                            protocol=item.protocol,
                             validate_base_url=validate_base_url,
+                            catalog_efforts_by_model=catalog_efforts_by_model,
                         )
                     except (TypeError, ValueError):
                         raise MigrationConflictError from None

@@ -34,6 +34,7 @@ from config.v2_config import (
     model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     EngineHealth,
     EngineStatus,
     RawCallOutcome,
@@ -5600,7 +5601,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("upstream-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="upstream-model"),)),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -5627,7 +5628,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("upstream-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="upstream-model"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5661,7 +5662,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("deepseek-chat",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="deepseek-chat"),)),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -5693,7 +5694,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5725,7 +5726,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5759,7 +5760,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5795,7 +5796,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5829,7 +5830,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5868,7 +5869,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5902,7 +5903,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("chat-only-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="chat-only-model"),)),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -5947,7 +5948,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -5981,7 +5982,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("relay-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="relay-model"),)),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -6013,7 +6014,9 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("anthropic-relay-model",)),
+            new=AsyncMock(
+                return_value=(DiscoveredModel(id="anthropic-relay-model"),)
+            ),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -6065,7 +6068,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         rejected = asyncio.run(
@@ -6090,7 +6093,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("should-not-discover",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
@@ -6128,7 +6131,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("unverified-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="unverified-model"),)),
         ) as inventory_probe,
     ):
         upstream_error = asyncio.run(
@@ -6149,13 +6152,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 6,
+            "contract_version": 7,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
             "protocol": None,
             "discovery": "not_attempted",
             "models": [],
+            "model_metadata": [],
         },
     )
 
@@ -6173,7 +6177,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("upstream-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="upstream-model"),)),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -6207,7 +6211,9 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("later-protocol-model",)),
+            new=AsyncMock(
+                return_value=(DiscoveredModel(id="later-protocol-model"),)
+            ),
         ) as inventory_probe,
     ):
         observed = asyncio.run(
@@ -6251,7 +6257,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as protocol_probe,
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("unreachable-model",)),
+            new=AsyncMock(return_value=(DiscoveredModel(id="unreachable-model"),)),
         ) as inventory_probe,
     ):
         rejected = asyncio.run(
@@ -6953,7 +6959,7 @@ def test_openai_probe_requests_are_mutually_distinguishable() -> None:
 def test_model_discovery_preserves_query_when_appending_models_path() -> None:
     query = "api-version=2026-07-23"
 
-    async def scenario() -> tuple[str, str, tuple[str, ...]]:
+    async def scenario() -> tuple[str, str, tuple[DiscoveredModel, ...]]:
         request_target: tuple[str, str] | None = None
 
         async def list_models(request: web.Request) -> web.Response:
@@ -6985,7 +6991,7 @@ def test_model_discovery_preserves_query_when_appending_models_path() -> None:
 
     assert path == "/v1/models"
     assert request_query == query
-    assert models == ("upstream-model",)
+    assert models == (DiscoveredModel(id="upstream-model"),)
 
 
 def test_model_discovery_adds_standard_v1_path_to_a_bare_origin() -> None:
@@ -7527,7 +7533,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 6,
+        "contract_version": 7,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,
@@ -7723,6 +7729,12 @@ def test_every_authoritative_reason_has_an_event_emission_path(reason: EventReas
             model_id="model",
             from_source="src_reason01",
             to_source="src_reason02",
+        )
+    elif reason in {"upstream_tiers", "catalog_tiers"}:
+        fields.update(
+            kind="reasoning_efforts_override",
+            model_id="model",
+            from_source="src_reason01",
         )
     elif reason == "recovery":
         fields.update(kind="recover", to_source="src_reason01")

@@ -27,6 +27,7 @@ from config.v2_config import (
 )
 from core.agent_auth_service import BackendLoginInProgressError
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -57,7 +58,7 @@ from core.handlers.model_hub.service import (
     create_default_service,
 )
 from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
-from vibe import ui_server
+from vibe import backend_model_catalog, ui_server
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
 from vibe.ui_server import app
@@ -243,7 +244,10 @@ class FakeAdapter:
 
     async def discover_models(self, vendor, protocol, base_url, credential_ref):
         self.discovery_credential_refs.append(credential_ref)
-        return ("claude-opus-4-6", "claude-sonnet-4-6")
+        return (
+            DiscoveredModel(id="claude-opus-4-6"),
+            DiscoveredModel(id="claude-sonnet-4-6"),
+        )
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
         self.observed_protocol_orders.append(tuple(protocol_order))
@@ -261,7 +265,7 @@ class FakeAdapter:
             authenticated=True,
             protocol=protocol_order[0],
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=tuple(models),
+            models=tuple(models),
         )
 
     async def invoke(self, source_id, model_id, request, stream, origin):
@@ -865,7 +869,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 6
+    assert runtime["contract_version"] == 7
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1083,7 +1087,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 6, "status": {"health": "ok"}}
+        return {"contract_version": 7, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1100,7 +1104,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 6, "status": {"health": "not_started"}}
+        return {"contract_version": 7, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1117,7 +1121,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 6, "status": {"health": "installing"}}
+        return {"contract_version": 7, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1673,7 +1677,7 @@ def test_source_create_nonce_releases_only_after_credential_cleanup(tmp_path):
             authenticated=False,
             protocol=None,
             discovery=ObservationDiscovery.NOT_ATTEMPTED,
-            model_ids=(),
+            models=(),
         )
         service = ModelHubService(
             store=MemoryStore(),
@@ -1719,7 +1723,7 @@ def test_source_create_nonce_retains_unsettled_cleanup_until_restart(tmp_path):
             authenticated=False,
             protocol=None,
             discovery=ObservationDiscovery.NOT_ATTEMPTED,
-            model_ids=(),
+            models=(),
         )
         service = ModelHubService(
             store=store,
@@ -2846,7 +2850,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 6,
+        "contract_version": 7,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -3718,9 +3722,130 @@ def test_unsaved_observation_route_restricts_a_manual_protocol_to_one_probe(
     assert adapter.revoked == ["cred_test001"]
 
 
-def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
+@pytest.mark.parametrize(
+    ("protocol", "model", "expected_efforts", "expected_source"),
+    (
+        (
+            "openai_responses",
+            DiscoveredModel(
+                id="relay-reasoning-model",
+                supported_parameters=("reasoning",),
+            ),
+            ["minimal", "low", "medium", "high", "xhigh"],
+            "upstream",
+        ),
+        (
+            "openai_responses",
+            DiscoveredModel(id="gpt-5.6-sol"),
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "catalog",
+        ),
+    ),
+)
+def test_source_creation_applies_the_first_reasoning_tier_provenance_rung(
+    tmp_path,
+    protocol,
+    model,
+    expected_efforts,
+    expected_source,
+):
+    service, store, adapter = _service(tmp_path)
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.OBSERVED,
+        reachable=True,
+        authenticated=True,
+        protocol=protocol,
+        discovery=ObservationDiscovery.SUCCEEDED,
+        models=(model,),
+    )
+
+    created = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-test-tier-provenance-create",
+                "protocol": protocol,
+            }
+        )
+    )["source"]
+
+    [created_model] = created["models"]
+    assert created_model["reasoning_efforts"] == expected_efforts
+    assert created_model["reasoning_efforts_source"] == expected_source
+    assert store.config.sources[0].models[0].reasoning_efforts == expected_efforts
+
+
+def test_discovery_batch_loads_the_bundled_reasoning_index_once(
+    monkeypatch,
     tmp_path,
 ):
+    service, _store, _adapter = _service(tmp_path)
+    catalog_loads = 0
+
+    def load_catalog():
+        nonlocal catalog_loads
+        catalog_loads += 1
+        return {
+            "backends": {
+                "codex": {
+                    "models": [
+                        {"id": "catalog-a", "reasoning_efforts": ["low"]},
+                        {"id": "catalog-b", "reasoning_efforts": ["high"]},
+                    ]
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "load_bundled_catalog",
+        load_catalog,
+    )
+    source = ModelHubSourceConfig(
+        id="src_catalog_batch",
+        kind="api_key",
+        vendor="custom",
+        display_name="Catalog batch",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+    )
+
+    service._apply_discovered_models(
+        source,
+        [],
+        [DiscoveredModel(id="catalog-a"), DiscoveredModel(id="catalog-b")],
+    )
+
+    assert catalog_loads == 1
+    assert [
+        (model.id, model.reasoning_efforts, model.reasoning_efforts_source)
+        for model in source.models
+    ] == [
+        ("catalog-a", ["low"], "catalog"),
+        ("catalog-b", ["high"], "catalog"),
+    ]
+
+
+def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
+    monkeypatch,
+    tmp_path,
+):
+    catalog_index_loads = 0
+
+    def load_catalog_index():
+        nonlocal catalog_index_loads
+        catalog_index_loads += 1
+        return {"catalog-manual": ("low", "ultra")}
+
+    monkeypatch.setattr(
+        "core.handlers.model_hub.service.bundled_catalog_reasoning_efforts_by_model",
+        load_catalog_index,
+    )
     store = MemoryStore()
     adapter = FakeAdapter()
     adapter.observation = SourceObservation(
@@ -3729,7 +3854,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
         authenticated=True,
         protocol="anthropic",
         discovery=ObservationDiscovery.FAILED,
-        model_ids=(),
+        models=(),
     )
     service = ModelHubService(
         store=store,
@@ -3744,6 +3869,18 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
         "base_url": "https://relay.example/v1",
         "key": "sk-test-inventory-consent",
         "protocol": "anthropic",
+        "models": [
+            {
+                "id": "catalog-manual",
+                "origin": "manual",
+                "reasoning_efforts": [],
+            },
+            {
+                "id": "relay-manual",
+                "origin": "manual",
+                "reasoning_efforts": ["careful"],
+            },
+        ],
     }
 
     with pytest.raises(ModelHubError) as rejected:
@@ -3753,6 +3890,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     assert rejected.value.data["observation"]["discovery"] == "failed"
     assert store.config.sources == []
     assert adapter.revoked == ["cred_test001"]
+    assert catalog_index_loads == 0
 
     created = asyncio.run(
         service.create_source(
@@ -3761,7 +3899,17 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     )["source"]
 
     assert created["protocol"] == "anthropic"
-    assert created["models"] == []
+    assert [
+        (
+            model["id"],
+            model["reasoning_efforts"],
+            model["reasoning_efforts_source"],
+        )
+        for model in created["models"]
+    ] == [
+        ("catalog-manual", ["low", "ultra"], "catalog"),
+        ("relay-manual", ["careful"], "user"),
+    ]
     assert created["state"] == {
         "status": "error",
         "retry_at": None,
@@ -3769,6 +3917,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     }
     assert len(store.config.sources) == 1
     assert adapter.revoked == ["cred_test001", "cred_test002"]
+    assert catalog_index_loads == 1
 
 
 def test_source_order_route_rejects_retired_policy_payload(monkeypatch, tmp_path):
@@ -4318,7 +4467,7 @@ def test_discovered_source_model_delete_persists_retirement_tombstone(
     assert store.config.sources[0].models[0].reasoning_efforts == ["high"]
 
     async def rediscover(*_args):
-        return ("gpt-5", "gpt-5.1")
+        return (DiscoveredModel(id="gpt-5"), DiscoveredModel(id="gpt-5.1"))
 
     adapter.discover_models = rediscover
     refreshed = client.post(
@@ -4335,6 +4484,238 @@ def test_discovered_source_model_delete_persists_retirement_tombstone(
     }
     assert refreshed_models["gpt-5"]["retired"] is True
     assert refreshed_models["gpt-5.1"]["retired"] is False
+
+
+@pytest.mark.parametrize("managed_source", ("upstream", "catalog"))
+def test_managed_reasoning_tiers_refuse_patch_with_provenance_detail(
+    monkeypatch,
+    tmp_path,
+    managed_source,
+):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id=f"src_{managed_source}01",
+        kind="api_key",
+        vendor="custom",
+        display_name="Managed tiers",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="managed-model",
+                provenance="discovered",
+                reasoning_efforts=["low", "high"],
+                reasoning_efforts_source=managed_source,
+            )
+        ],
+        credential_ref="cred_managed01",
+    )
+    store.config.sources.append(source)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.patch(
+        f"/api/models/sources/{source.id}/models/managed-model",
+        json={"reasoning_efforts": ["medium"]},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "contract_version": CONTRACT_VERSION,
+        "error": "source_model_tiers_managed",
+        "detail": (
+            f"settings.models.sourceDetail.tiers.managed.{managed_source}"
+        ),
+        "reasoning_efforts_source": managed_source,
+    }
+    assert source.models[0].reasoning_efforts == ["low", "high"]
+
+
+@pytest.mark.parametrize(
+    ("initial_efforts", "initial_source", "replacement", "expected_source"),
+    (
+        (["careful"], "user", [], None),
+        ([], None, ["careful", "turbo"], "user"),
+    ),
+)
+def test_unmanaged_reasoning_tiers_remain_editable(
+    tmp_path,
+    initial_efforts,
+    initial_source,
+    replacement,
+    expected_source,
+):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_unmanaged01",
+        kind="api_key",
+        vendor="custom",
+        display_name="User tiers",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="relay-user-model",
+                provenance="manual",
+                reasoning_efforts=list(initial_efforts),
+                reasoning_efforts_source=initial_source,
+            )
+        ],
+        credential_ref="cred_unmanaged01",
+    )
+    store.config.sources.append(source)
+
+    updated = asyncio.run(
+        service.update_model_reasoning_efforts(
+            source.id,
+            "relay-user-model",
+            {"reasoning_efforts": replacement},
+        )
+    )
+
+    [updated_model] = updated["models"]
+    assert updated_model["reasoning_efforts"] == replacement
+    assert updated_model["reasoning_efforts_source"] == expected_source
+
+
+def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_catalogadd1",
+        kind="api_key",
+        vendor="custom",
+        display_name="Catalog model source",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+        credential_ref="cred_catalogadd1",
+    )
+    store.config.sources.append(source)
+
+    created = asyncio.run(
+        service.add_custom_model(
+            source.id,
+            {
+                "model_id": "gpt-5.6-sol",
+                "reasoning_efforts": ["made-up"],
+            },
+        )
+    )["models"][0]
+
+    assert created["reasoning_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert created["reasoning_efforts_source"] == "catalog"
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(
+            service.add_custom_model(
+                source.id,
+                {
+                    "model_id": "gpt-5.6-sol",
+                    "reasoning_efforts": ["made-up"],
+                },
+            )
+        )
+    assert error.value.code == "source_model_tiers_managed"
+    assert error.value.status == 409
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_efforts", "expected_source", "expected_reason"),
+    (
+        (
+            DiscoveredModel(id="gpt-5.6-sol"),
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "catalog",
+            "catalog_tiers",
+        ),
+        (
+            DiscoveredModel(
+                id="gpt-5.6-sol",
+                supported_parameters=("reasoning_effort",),
+            ),
+            ["minimal", "low", "medium", "high", "xhigh"],
+            "upstream",
+            "upstream_tiers",
+        ),
+    ),
+)
+def test_refresh_overrides_user_tiers_only_after_commit_and_records_one_event(
+    tmp_path,
+    metadata,
+    expected_efforts,
+    expected_source,
+    expected_reason,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_override001",
+        kind="api_key",
+        vendor="custom",
+        display_name="Authorization: sk-test-override-secret",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="gpt-5.6-sol",
+                provenance="discovered",
+                reasoning_efforts=["user-only"],
+                reasoning_efforts_source="user",
+            )
+        ],
+        credential_ref="cred_override001",
+    )
+    store.config.sources.append(source)
+
+    async def discover(*_args):
+        return (metadata,)
+
+    adapter.discover_models = discover
+    save = store.save
+
+    def fail_save(_config):
+        raise OSError("injected persistence failure")
+
+    store.save = fail_save
+    with pytest.raises(OSError, match="injected persistence failure"):
+        asyncio.run(service.refresh_source(source.id))
+    assert service.events.list() == []
+    assert store.config.sources[0].models[0].reasoning_efforts == ["user-only"]
+
+    store.save = save
+    refreshed = asyncio.run(service.refresh_source(source.id))["source"]
+
+    [refreshed_model] = refreshed["models"]
+    assert refreshed_model["reasoning_efforts"] == expected_efforts
+    assert refreshed_model["reasoning_efforts_source"] == expected_source
+    [event] = service.events.list()
+    assert event["kind"] == "reasoning_efforts_override"
+    assert event["agent"] == "system"
+    assert event["model_id"] == "gpt-5.6-sol"
+    assert event["from_source"] == source.id
+    assert event["to_source"] is None
+    assert event["reason"] == expected_reason
+    assert event["severity"] == "info"
+    serialized = json.dumps(event)
+    assert "sk-test-override-secret" not in serialized
+    assert "[redacted]" in serialized
 
 
 def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
@@ -4899,7 +5280,7 @@ def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
                     raise ModelDiscoveryError("duplicate materialization")
                 self.discovery_started.set()
                 await self.release_discovery.wait()
-                return ("claude-opus-4-6",)
+                return (DiscoveredModel(id="claude-opus-4-6"),)
 
         store = MemoryStore()
         adapter = BlockingDiscoveryAdapter()
@@ -5860,7 +6241,7 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
     service.named_agents_override = lambda backend: ([("claude", "claude-opus-4-6")] if backend == "claude" else [])
 
     async def discover_narrower(vendor, protocol, base_url, credential_ref):
-        return ("replacement-only-model",)
+        return (DiscoveredModel(id="replacement-only-model"),)
 
     adapter.discover_models = discover_narrower
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
@@ -6016,7 +6397,7 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
         authenticated=True,
         protocol="openai_chat",
         discovery=ObservationDiscovery.SUCCEEDED,
-        model_ids=("gpt-5.6",),
+        models=(DiscoveredModel(id="gpt-5.6-sol"),),
     )
 
     result = asyncio.run(service.oauth_status(flow["flow_id"]))
@@ -6024,6 +6405,18 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
     assert result["source"]["protocol"] == "openai_chat"
     assert store.config.sources[0].protocol == "openai_chat"
     assert store.config.sources[0].credential_ref == "cred_oauth_proven"
+    assert store.config.sources[0].models[0].reasoning_efforts == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert (
+        store.config.sources[0].models[0].reasoning_efforts_source
+        == "catalog"
+    )
     assert adapter.observed_protocol_orders == [SOURCE_PROTOCOLS]
     assert adapter.revoked == []
 
@@ -6046,7 +6439,7 @@ def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_pa
         authenticated=True,
         protocol=None,
         discovery=ObservationDiscovery.NOT_ATTEMPTED,
-        model_ids=(),
+        models=(),
     )
 
     with pytest.raises(ModelHubError) as exc_info:
@@ -6647,7 +7040,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 6
+    assert runtime["contract_version"] == 7
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
@@ -6818,7 +7211,7 @@ def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
                 if self.discover_started == 2:
                     self.all_discovering.set()
                 await self.all_discovering.wait()
-                return ("claude-opus-4-6",)
+                return (DiscoveredModel(id="claude-opus-4-6"),)
 
         store = MemoryStore()
         adapter = ConcurrentAdapter()
@@ -7129,7 +7522,7 @@ def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
     )
 
     async def credential_bearing_models(vendor, protocol, base_url, credential_ref):
-        return ("sk-model-never-persist-this",)
+        return (DiscoveredModel(id="sk-model-never-persist-this"),)
 
     adapter.discover_models = credential_bearing_models
     with pytest.raises(ModelHubError) as exc_info:
@@ -7156,7 +7549,7 @@ def test_admitted_model_ids_are_stored_in_their_canonical_form(tmp_path):
     service, store, adapter = _service(tmp_path)
 
     async def padded_models(vendor, protocol, base_url, credential_ref):
-        return ("  discovered-model  ",)
+        return (DiscoveredModel(id="  discovered-model  "),)
 
     adapter.discover_models = padded_models
     source = asyncio.run(
@@ -7273,7 +7666,10 @@ def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path)
     )
 
     async def duplicate_spellings(vendor, protocol, base_url, credential_ref):
-        return ("relay-model", " relay-model")
+        return (
+            DiscoveredModel(id="relay-model"),
+            DiscoveredModel(id=" relay-model"),
+        )
 
     adapter.discover_models = duplicate_spellings
     with pytest.raises(ModelHubError) as exc_info:
@@ -7309,7 +7705,7 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
 
     async def discover_narrower(vendor, protocol, base_url, credential_ref):
         discovery_refs.append(credential_ref)
-        return ("replacement-only-model",)
+        return (DiscoveredModel(id="replacement-only-model"),)
 
     adapter.discover_models = discover_narrower
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)

@@ -52,7 +52,7 @@ const sources: Source[] = [
   },
 ];
 const chain: AgentChain = {
-  contract_version: 6,
+  contract_version: 7,
   backend: "claude",
   model_id: "opus-5",
   current: { source_id: "src_b", model_id: "opus-5" },

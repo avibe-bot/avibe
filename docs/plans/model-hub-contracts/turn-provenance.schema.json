@@ -4,6 +4,21 @@
   "title": "TurnProvenance",
   "description": "Persisted debug record for one exactly attributed Gateway turn. It records exact configured Source/model attempts in stored order and one terminal outcome. No route-policy or runtime-mapping discriminator exists; ambiguous attempts produce no record.",
   "type": "object",
+  "definitions": {
+    "strippedReasoningEfforts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string" },
+      "description": "Effort values removed from this exact attempt because they were absent from the hop's declared tiers. String values are preserved exactly, including an empty string; invalid non-string values use fixed type markers. Present only when a strip occurred."
+    },
+    "declaredReasoningEfforts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "The exact hop tier declaration consulted when stripped_reasoning_efforts was produced."
+    }
+  },
   "required": [
     "contract_version",
     "turn_id",
@@ -21,7 +36,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": {
-      "enum": [5, 6],
+      "enum": [5, 6, 7],
       "$comment": "The only versioned object that is written to disk instead of exchanged inside one request, so its released values are a set rather than a constant. A record a v5 build persisted keeps validating -- tests/fixtures/model_hub/released_v5_permission_denied.json is the evidence -- while new records carry the terminal value, which is the last member. Every other versioned object is an in-process envelope and stays pinned to that value alone.",
       "description": "Generation that wrote this record. Nothing branches on it: readers accept every released value and the shape is identical across them."
     },
@@ -71,6 +86,8 @@
           },
           "configured_model_id": { "type": "string" },
           "channel": { "enum": ["native_cli", "hub"] },
+          "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
+          "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" },
           "reason": {
             "enum": [
               "quota_exhausted",
@@ -85,6 +102,10 @@
             ],
             "description": "The attempt-failure partition of ResolutionEvent.reason. The mirror registry enforces totality."
           }
+        },
+        "dependencies": {
+          "stripped_reasoning_efforts": ["declared_reasoning_efforts"],
+          "declared_reasoning_efforts": ["stripped_reasoning_efforts"]
         }
       }
     },
@@ -99,7 +120,13 @@
           "pattern": "^src_[a-z0-9]{8,}$"
         },
         "configured_model_id": { "type": "string" },
-        "channel": { "enum": ["native_cli", "hub"] }
+        "channel": { "enum": ["native_cli", "hub"] },
+        "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
+        "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" }
+      },
+      "dependencies": {
+        "stripped_reasoning_efforts": ["declared_reasoning_efforts"],
+        "declared_reasoning_efforts": ["stripped_reasoning_efforts"]
       }
     },
     "terminal_error": {
@@ -122,6 +149,8 @@
         },
         "configured_model_id": { "type": ["string", "null"] },
         "channel": { "enum": ["native_cli", "hub", null] },
+        "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
+        "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" },
         "reason": {
           "enum": [
             "invalid_parameter",
@@ -132,6 +161,10 @@
           ]
         },
         "stream_started": { "type": "boolean" }
+      },
+      "dependencies": {
+        "stripped_reasoning_efforts": ["declared_reasoning_efforts"],
+        "declared_reasoning_efforts": ["stripped_reasoning_efforts"]
       },
       "allOf": [
         {
@@ -177,7 +210,13 @@
           "pattern": "^src_[a-z0-9]{8,}$"
         },
         "configured_model_id": { "type": "string" },
-        "channel": { "enum": ["native_cli", "hub"] }
+        "channel": { "enum": ["native_cli", "hub"] },
+        "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
+        "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" }
+      },
+      "dependencies": {
+        "stripped_reasoning_efforts": ["declared_reasoning_efforts"],
+        "declared_reasoning_efforts": ["stripped_reasoning_efforts"]
       }
     },
     "model_supply_state": {
@@ -320,7 +359,7 @@
   ],
   "examples": [
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -345,7 +384,7 @@
       "blockers": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -366,7 +405,7 @@
       "blockers": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -386,7 +425,7 @@
       ]
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -406,7 +445,7 @@
       "blockers": []
     },
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",

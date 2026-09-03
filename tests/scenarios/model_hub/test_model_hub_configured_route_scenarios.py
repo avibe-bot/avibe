@@ -16,6 +16,7 @@ from config.v2_config import (
     ModelHubRouteHopConfig,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     SOURCE_PROTOCOLS,
     ObservationDiscovery,
     ObservationOutcome,
@@ -174,7 +175,7 @@ def test_mh_match_001_add_source_persists_and_reports_each_exact_position(
             authenticated=True,
             protocol="anthropic",
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=(menu_model,),
+            models=(DiscoveredModel(id=menu_model),),
         ),
         refresh_models=(menu_model,),
     )
@@ -394,7 +395,7 @@ def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state
             authenticated=True,
             protocol="openai_chat",
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=("observed-model",),
+            models=(DiscoveredModel(id="observed-model"),),
         )
     )
     service = service_for(tmp_path, store, adapter)
@@ -422,7 +423,7 @@ def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state
             authenticated=True,
             protocol=None,
             discovery=ObservationDiscovery.NOT_ATTEMPTED,
-            model_ids=(),
+            models=(),
         )
     )
     ambiguous_service = service_for(
@@ -471,7 +472,7 @@ def test_mh_protocol_003_manual_selection_requires_matching_response_proof(
             authenticated=True,
             protocol="openai_responses",
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=("selected-model",),
+            models=(DiscoveredModel(id="selected-model"),),
         )
     )
     service = service_for(tmp_path, store, adapter)
@@ -502,7 +503,7 @@ def test_mh_protocol_003_manual_selection_requires_matching_response_proof(
             authenticated=True,
             protocol="openai_chat",
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=("wrong-protocol-model",),
+            models=(DiscoveredModel(id="wrong-protocol-model"),),
         )
     )
     mismatch_service = service_for(
@@ -534,7 +535,7 @@ def test_mh_protocol_003_manual_selection_requires_matching_response_proof(
             authenticated=True,
             protocol=None,
             discovery=ObservationDiscovery.NOT_ATTEMPTED,
-            model_ids=(),
+            models=(),
         )
     )
     ambiguous_service = service_for(
@@ -588,7 +589,7 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
             authenticated=True,
             protocol="anthropic",
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=(menu_model,),
+            models=(DiscoveredModel(id=menu_model),),
         )
     )
     service = service_for(tmp_path, store, adapter)

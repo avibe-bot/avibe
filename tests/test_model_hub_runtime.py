@@ -22,6 +22,7 @@ from jsonschema import Draft7Validator
 
 from core import managed_runtime
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     EngineHealth,
     OriginNotAllowedError,
     RawOutcomeKind,
@@ -1150,7 +1151,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 6, **supervisor.status()}
+    projected = {"contract_version": 7, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1632,10 +1633,10 @@ def test_model_inventory_duplicate_top_level_members_replace_earlier_values() ->
     assert projected == (
         True,
         True,
-        ["live-data"],
+        [DiscoveredModel(id="live-data")],
         True,
         True,
-        ["live-models"],
+        [DiscoveredModel(id="live-models")],
     )
 
 
@@ -1650,11 +1651,121 @@ def test_model_inventory_duplicate_item_id_keeps_the_final_member() -> None:
     assert projected == (
         True,
         True,
-        ["live", "other"],
+        [DiscoveredModel(id="live"), DiscoveredModel(id="other")],
         False,
         False,
         [],
     )
+
+
+@pytest.mark.parametrize(
+    ("member", "result_index"),
+    (("data", 2), ("models", 5)),
+)
+def test_model_inventory_captures_supported_parameters_from_both_shapes(
+    member: str,
+    result_index: int,
+) -> None:
+    payload = json.dumps(
+        {
+            member: [
+                {
+                    "id": "reasoning-model",
+                    "supported_parameters": ["reasoning", "temperature"],
+                }
+            ]
+        }
+    ).encode()
+
+    projected = client_module._project_model_inventory(io.BytesIO(payload))
+
+    assert projected is not None
+    assert projected[result_index] == [
+        DiscoveredModel(
+            id="reasoning-model",
+            supported_parameters=("reasoning", "temperature"),
+        )
+    ]
+
+
+def test_model_inventory_distinguishes_absent_and_empty_supported_parameters() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":['
+            b'{"id":"absent"},'
+            b'{"id":"empty","supported_parameters":[]}'
+            b']}'
+        )
+    )
+
+    assert projected is not None
+    assert projected[2] == [
+        DiscoveredModel(id="absent", supported_parameters=None),
+        DiscoveredModel(id="empty", supported_parameters=()),
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        '"reasoning"',
+        '["reasoning", 7]',
+        '["reasoning", {"name":"temperature"}]',
+        '["reasoning", ""]',
+    ),
+)
+def test_model_inventory_degrades_malformed_supported_parameters_without_losing_id(
+    malformed: str,
+) -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            (
+                '{"data":[{"id":"kept-model","supported_parameters":'
+                f"{malformed}"
+                "}]}"
+            ).encode()
+        )
+    )
+
+    assert projected is not None
+    assert projected[2] == [DiscoveredModel(id="kept-model")]
+
+
+def test_model_inventory_duplicate_metadata_member_replaces_its_own_scope() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":['
+            b'{"id":"first","supported_parameters":["stale"],'
+            b'"supported_parameters":["reasoning","reasoning","temperature"]},'
+            b'{"id":"second","supported_parameters":["tools"]}'
+            b']}'
+        )
+    )
+
+    assert projected is not None
+    assert projected[2] == [
+        DiscoveredModel(
+            id="first",
+            supported_parameters=("reasoning", "temperature"),
+        ),
+        DiscoveredModel(id="second", supported_parameters=("tools",)),
+    ]
+
+
+def test_model_inventory_duplicate_ids_keep_the_first_complete_record() -> None:
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            b'{"data":['
+            b'{"id":"same","supported_parameters":["temperature"]},'
+            b'{"id":"same","supported_parameters":["reasoning"]}'
+            b']}'
+        )
+    )
+
+    assert projected is not None
+    assert projected[2] == [
+        DiscoveredModel(id="same", supported_parameters=("temperature",))
+    ]
 
 
 def test_model_inventory_rejects_an_elided_model_identifier() -> None:
@@ -1695,7 +1806,10 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
             credential_ref,
         )
 
-        assert models == ("model-a", "model-b")
+        assert models == (
+            DiscoveredModel(id="model-a"),
+            DiscoveredModel(id="model-b"),
+        )
         assert handler.authorization == "Bearer probe-secret"
         with pytest.raises(EngineStateError, match="does not match"):
             await adapter.discover_models(
@@ -5534,7 +5648,7 @@ def test_model_discovery_accepts_large_valid_inventory(
             protocol="openai_responses",
             base_url="https://api.example.test/v1",
             secret="secret",
-        ) == ("model-a",)
+        ) == (DiscoveredModel(id="model-a"),)
 
     asyncio.run(run())
 
@@ -5745,9 +5859,25 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
             assert query == {"name": "claude-account.json"}
             return {
                 "models": [
-                    {"id": "model-id", "alias": "ignored-alias"},
-                    {"alias": "model-alias", "name": "ignored-name"},
-                    {"name": "model-name"},
+                    {
+                        "id": "model-id",
+                        "alias": "ignored-alias",
+                        "supported_parameters": [
+                            "reasoning",
+                            "temperature",
+                            "reasoning",
+                        ],
+                    },
+                    {
+                        "alias": "model-alias",
+                        "name": "ignored-name",
+                        "supported_parameters": ["reasoning", 7],
+                    },
+                    {"name": "model-name", "supported_parameters": []},
+                    {
+                        "id": "model-id",
+                        "supported_parameters": ["ignored-duplicate"],
+                    },
                 ]
             }
 
@@ -5779,7 +5909,14 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
             credential_ref,
         )
 
-        assert models == ("model-id", "model-alias", "model-name")
+        assert models == (
+            DiscoveredModel(
+                id="model-id",
+                supported_parameters=("reasoning", "temperature"),
+            ),
+            DiscoveredModel(id="model-alias"),
+            DiscoveredModel(id="model-name", supported_parameters=()),
+        )
 
     asyncio.run(run())
 

@@ -139,7 +139,7 @@
     "SuccessCore": {
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6}
+        "contract_version": {"const": 7}
       }
     },
     "SourceListResponse": {
@@ -148,7 +148,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}}
       }
     },
@@ -158,7 +158,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "observation": {"$ref": "model-hub/observation-result.schema.json"}
       }
     },
@@ -168,7 +168,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "source": {"$ref": "#/definitions/SourceApi"},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
         "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
@@ -180,7 +180,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "source": {"$ref": "#/definitions/SourceApi"}
       }
     },
@@ -190,7 +190,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "source": {"$ref": "#/definitions/SourceApi"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -202,7 +202,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
       }
@@ -213,7 +213,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "agents": {"type": "array", "items": {"$ref": "#/definitions/AgentSupplyApi"}}
       }
     },
@@ -223,7 +223,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "agent": {"$ref": "#/definitions/AgentSupplyApi"}
       }
     },
@@ -233,7 +233,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "agent": {
           "type": "object",
           "required": ["backend", "mode", "catalog_models"],
@@ -255,7 +255,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "matches": {
           "type": "array",
           "items": {
@@ -286,7 +286,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"}
       }
     },
@@ -296,7 +296,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "chains": {"type": "array", "items": {"$ref": "model-hub/agent-chain.schema.json"}}
       }
     },
@@ -306,7 +306,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -318,7 +318,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "probe": {"$ref": "model-hub/probe-result.schema.json"}
       }
     },
@@ -328,7 +328,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "events": {"type": "array", "items": {"$ref": "model-hub/resolution-event.schema.json"}}
       }
     },
@@ -338,7 +338,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "usage": {"$ref": "model-hub/usage-summary.schema.json"}
       }
     },
@@ -348,7 +348,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "flow": {
           "allOf": [
             {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -370,7 +370,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 6},
+            "contract_version": {"const": 7},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -393,7 +393,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 6},
+            "contract_version": {"const": 7},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -418,7 +418,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6}
+        "contract_version": {"const": 7}
       }
     },
     "RuntimeApi": {
@@ -440,7 +440,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "scan": {"$ref": "model-hub/migration-scan.schema.json"}
       }
     },
@@ -450,7 +450,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "applied": {"type": "integer", "minimum": 0},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}}
@@ -462,7 +462,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "provenance": {"$ref": "model-hub/turn-provenance.schema.json"}
       }
     },
@@ -472,7 +472,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 6},
+        "contract_version": {"const": 7},
         "runtime": {"$ref": "#/definitions/RuntimeApi"}
       }
     }

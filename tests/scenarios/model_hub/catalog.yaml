@@ -588,7 +588,7 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_sources.py::test_b9_refetch_preserves_existing_model_discovery_timestamp
   - id: B10
-    name: Custom-model mutation obeys upstream ownership boundaries
+    name: Reasoning-tier provenance owns managed and user model mutations
     status: assert
     kind: mutation
     layer: e2e-auto
@@ -704,13 +704,11 @@ scenarios:
     owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D10
-    name: Undeclared reasoning effort is omitted from the upstream request
-    status: skip
+    name: Stripped reasoning effort is attributed to the exact fallback attempt
+    status: assert
     kind: compatibility
-    layer: turn-gateway
-    reason: exact turn request capture requires the private credential issued to a live backend turn
-    owning_layer: future live-turn suite (turn gateway)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop
   - id: D11
     name: Claude token counting behavior is documented at the gateway
     status: skip

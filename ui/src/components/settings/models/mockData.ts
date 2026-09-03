@@ -1,4 +1,10 @@
 // Typed source fixtures retained only for the source schema contract test.
+//
+// Every model carries `reasoning_efforts_source`, and between them the five
+// sources spell out all four rungs of the provenance ladder: `upstream`,
+// `catalog`, `user`, and an explicit `null`. Each list matches what its rung
+// really produces: exact catalog rows, protocol-family upstream defaults,
+// arbitrary user declarations, or an empty undeclared list.
 import type { Source } from './types';
 
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
@@ -24,9 +30,9 @@ export function buildMockSources(): Source[] {
       account_label: 'me@gmail.com',
       masked_credential: null,
       models: [
-        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
-        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
-        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: ['low', 'medium', 'high', 'max'], reasoning_efforts_source: 'catalog', discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: ['low', 'medium', 'high', 'max'], reasoning_efforts_source: 'catalog', discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: ['low', 'medium', 'high'], reasoning_efforts_source: 'catalog', discovered_at: iso(-3 * HOUR) },
       ],
       credential_ref: null,
     },
@@ -46,8 +52,8 @@ export function buildMockSources(): Source[] {
       account_label: 'me@gmail.com',
       masked_credential: null,
       models: [
-        { id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
-        { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'], reasoning_efforts_source: 'upstream', discovered_at: iso(-3 * HOUR) },
+        { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', origin: 'discovered', reasoning_efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'], reasoning_efforts_source: 'upstream', discovered_at: iso(-3 * HOUR) },
       ],
       credential_ref: null,
     },
@@ -67,9 +73,9 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'sk-ant-…8f2A',
       models: [
-        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
-        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
-        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoning_efforts_source: 'upstream', discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoning_efforts_source: 'upstream', discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoning_efforts_source: 'upstream', discovered_at: iso(-6 * HOUR) },
       ],
       credential_ref: 'cred_anth01',
     },
@@ -89,10 +95,10 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'glm-…c31b',
       models: [
-        { id: 'glm-5.2', display_name: 'GLM 5.2', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5-flash', display_name: 'GLM 5 Flash', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5.2-pro', display_name: 'GLM 5.2 Pro', origin: 'manual', reasoning_efforts: [], discovered_at: null },
+        { id: 'glm-5.2', display_name: 'GLM 5.2', origin: 'discovered', reasoning_efforts: ['low', 'high'], reasoning_efforts_source: 'user', discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null, discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5-flash', display_name: 'GLM 5 Flash', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null, discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5.2-pro', display_name: 'GLM 5.2 Pro', origin: 'manual', reasoning_efforts: ['medium', 'high'], reasoning_efforts_source: 'user', discovered_at: null },
       ],
       credential_ref: 'cred_zhipu01',
     },
@@ -115,7 +121,7 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'key …9c1',
       models: [
-        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'manual', reasoning_efforts: [], discovered_at: null },
+        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'manual', reasoning_efforts: [], reasoning_efforts_source: null, discovered_at: null },
       ],
       credential_ref: 'cred_relay01',
     },

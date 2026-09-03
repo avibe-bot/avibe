@@ -2710,6 +2710,9 @@ class ModelHubModelConfig:
     id: str
     provenance: Literal["discovered", "manual"]
     reasoning_efforts: list[str] = field(default_factory=list)
+    reasoning_efforts_source: Optional[
+        Literal["upstream", "catalog", "user"]
+    ] = None
     display_name: Optional[str] = None
     discovered_at: Optional[str] = None
     retired: Optional[bool] = None
@@ -2723,6 +2726,7 @@ class ModelHubModelConfig:
             "display_name",
             "origin",
             "reasoning_efforts",
+            "reasoning_efforts_source",
             "discovered_at",
             "retired",
         }:
@@ -2732,6 +2736,10 @@ class ModelHubModelConfig:
         if "reasoning_efforts" not in payload:
             raise ValueError("Config 'model_hub.sources.models.reasoning_efforts' is required")
         reasoning_efforts = payload["reasoning_efforts"]
+        if "reasoning_efforts_source" in payload:
+            reasoning_efforts_source = payload["reasoning_efforts_source"]
+        else:
+            reasoning_efforts_source = "user" if reasoning_efforts else None
         display_name = payload.get("display_name")
         discovered_at = payload.get("discovered_at")
         retired = payload.get("retired")
@@ -2747,6 +2755,21 @@ class ModelHubModelConfig:
         ):
             raise ValueError(
                 "Config 'model_hub.sources.models.reasoning_efforts' must be a unique credential-free array of strings"
+            )
+        if reasoning_efforts_source is not None and (
+            not isinstance(reasoning_efforts_source, str)
+            or reasoning_efforts_source not in {"upstream", "catalog", "user"}
+        ):
+            raise ValueError(
+                "Config 'model_hub.sources.models.reasoning_efforts_source' is invalid"
+            )
+        if reasoning_efforts and reasoning_efforts_source is None:
+            raise ValueError(
+                "Config non-empty reasoning efforts require a provenance source"
+            )
+        if not reasoning_efforts and reasoning_efforts_source in {"upstream", "user"}:
+            raise ValueError(
+                "Config empty reasoning efforts cannot use upstream or user provenance"
             )
         if display_name is not None and (
             not isinstance(display_name, str)
@@ -2772,6 +2795,7 @@ class ModelHubModelConfig:
             id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
+            reasoning_efforts_source=reasoning_efforts_source,
             display_name=display_name,
             discovered_at=_validate_optional_datetime(
                 discovered_at,
@@ -2781,11 +2805,15 @@ class ModelHubModelConfig:
         )
 
     def to_payload(self) -> dict:
+        reasoning_efforts_source = self.reasoning_efforts_source
+        if reasoning_efforts_source is None and self.reasoning_efforts:
+            reasoning_efforts_source = "user"
         payload = {
             "id": self.id,
             "display_name": self.display_name,
             "origin": self.provenance,
             "reasoning_efforts": list(self.reasoning_efforts),
+            "reasoning_efforts_source": reasoning_efforts_source,
             "discovered_at": self.discovered_at,
         }
         if self.retired is not None:

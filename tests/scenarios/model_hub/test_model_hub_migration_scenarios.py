@@ -17,6 +17,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     ObservationDiscovery,
     ObservationOutcome,
     SourceObservation,
@@ -103,7 +104,7 @@ class MigrationAdapter:
                 authenticated=True,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         return SourceObservation(
             outcome=ObservationOutcome.OBSERVED,
@@ -111,7 +112,7 @@ class MigrationAdapter:
             authenticated=True,
             protocol=self.observed_protocols[vendor],
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=(f"{vendor}-model",),
+            models=(DiscoveredModel(id=f"{vendor}-model"),),
         )
 
     async def provision_credential(
@@ -131,8 +132,8 @@ class MigrationAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
-    ) -> tuple[str, ...]:
-        return (f"{vendor}-model",)
+    ) -> tuple[DiscoveredModel, ...]:
+        return (DiscoveredModel(id=f"{vendor}-model"),)
 
     async def sync_sources(self, bindings) -> None:
         self.synced.append(tuple(bindings))
@@ -674,6 +675,17 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
         ("openai", "subscription", "native_cli", None),
     }
     assert adapter.provisioned == []
+    from vibe.backend_model_catalog import (
+        bundled_catalog_reasoning_efforts_for_model,
+    )
+
+    for source in store.config.sources:
+        assert source.models
+        for model in source.models:
+            assert model.reasoning_efforts_source == "catalog"
+            assert tuple(model.reasoning_efforts) == (
+                bundled_catalog_reasoning_efforts_for_model(model.id)
+            )
     reloaded = _assert_canonical_round_trip(store.config)
     assert {
         (source.vendor, source.kind, source.supply_channel, source.credential_ref)

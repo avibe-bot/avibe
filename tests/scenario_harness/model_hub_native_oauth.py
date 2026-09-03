@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
-from core.handlers.model_hub.adapter import OAuthFlowState
+from core.handlers.model_hub.adapter import DiscoveredModel, OAuthFlowState
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter, _account_label, _signed_in
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
@@ -201,7 +201,7 @@ class FakeHubOAuthAdapter(UnavailableEngineAdapter):
         self.synced.append(tuple(bindings))
 
     async def discover_models(self, vendor, protocol, base_url, credential_ref):
-        return ("claude-opus-4-6",)
+        return (DiscoveredModel(id="claude-opus-4-6"),)
 
     def complete(self, flow_id: str) -> None:
         flow = self.flows[flow_id]

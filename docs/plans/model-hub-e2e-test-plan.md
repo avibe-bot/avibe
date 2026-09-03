@@ -6,7 +6,7 @@ Companion inventories (kept in session, summarized here): capability list C1–C
 ## 1. Goals and ground rules
 
 1. Exercise the **shipped surface end to end** over real HTTP: browser-visible API (`/api/models/*`) and the per-turn gateway, against a **mock upstream provider**, never real vendor credentials.
-2. Assert **current behavior as baseline** where the owner has ruled (cross-vendor fidelity ruling 2026-08-08; "user owns the order" contract in `docs/plans/model-hub.md` §4.2), and mark scenarios **fix-first** or **expected-fail** where the survey found unintended drift (see §5 open decisions).
+2. Assert **current behavior as baseline** where the owner has ruled (cross-vendor fidelity ruling 2026-08-08; "user owns the order" contract in `docs/plans/model-hub.md` §4.2), and mark scenarios **fix-first** or **expected-fail** where the survey found unintended drift (see §5 decision ledger).
 3. Every scenario names the feature ids (C#) it covers and the evidence layer it lives in: `e2e-auto` (this suite), `unit/contract` (existing), `manual` (Incus regression).
 
 Out of scope (documented, not dropped silently):
@@ -40,16 +40,16 @@ Out of scope (documented, not dropped silently):
 ### B. API-key sources (C16–C29)
 | ID | Steps | Expect | Status |
 |---|---|---|---|
-| B1 | observe against mock for each protocol, `protocol:'auto'` | correct protocol chosen by response shape; observation payload contract v6 | assert |
+| B1 | observe against mock for each protocol, `protocol:'auto'` | correct protocol chosen by response shape; observation payload contract v7 | assert |
 | B2 | manual protocol ≠ actual | create refused with matching proof error | assert |
-| B3 | pull models (mock returns `display_name`, `context_length`, `pricing`) | persisted model has only the 6 schema fields; `display_name:null`, `reasoning_efforts:[]` — documents the drop, not a pass/fail of intent | assert-current |
+| B3 | pull models (mock returns `display_name`, `context_length`, `pricing`, `supported_parameters`) | unrelated metadata is dropped; `supported_parameters` is retained in observation and the provenance ladder applies protocol-default tiers | assert |
 | B4 | discovery fails | 422 `inventory_unavailable` unless `accept_unavailable_inventory:true`; then source commits with `state.status=error` | assert |
 | B5 | replay create with same `client_nonce` | idempotent, no duplicate source | assert |
 | B6 | replace key happy + rollback; rename; patch base URL | C22/C23 contracts | assert |
 | B7 | delete source in a chain → guard 409 → echo plan → force | hop removed, impact report lists interrupted agents; malformed echo rejected | assert |
 | B8 | force transport asymmetry (`?force=` vs body) | document current split (B6 issue); decide normalization | baseline |
 | B9 | refetch after upstream inventory change | added/removed diff; **`discovered_at` preserved for pre-existing models** (currently overwritten — fix-first, see B-list) | fix-first |
-| B10 | add/edit/delete custom model; edit tiers | `source_model_managed_upstream` for discovered rows; free-text tiers accepted | assert |
+| B10 | inspect catalog-managed tiers; edit user/null tiers; reload a v6 row and refresh | catalog edits return 409 `source_model_tiers_managed` with exact provenance; user tiers remain editable; refresh restores catalog truth and emits one redacted override event | assert |
 | B11 | trigger each of: `mapping_target_unavailable`, `runtime_in_use`, `source_nonce_conflict`, `reauth_confirmation_required`, `turn_not_found` | UI renders human copy, never the raw `modelHub.errors.*` string (B1 — fix-first; baseline expected-fail) | fix-first |
 
 ### C. OAuth lifecycle (C30–C40, partial by §1)
@@ -72,7 +72,7 @@ Out of scope (documented, not dropped silently):
 | D7 | stream interrupt after first output | terminal frame injected per protocol; **no replay/failover**; source still settles; next turn resolves hop1 (takeover pill visible) | assert |
 | D8 | cooldown `retry_at` elapses | next resolve recovers source, chain returns to hop0, `recover` event | assert |
 | D9 | all hops failing | 503 `mapping_target_unavailable` + waiting copy with retry_at | assert |
-| D10 | chat selects effort `high`; hop model tiers `[]` | upstream capture shows **no** `reasoning_effort` key (silent strip by design); UI note visible | assert-current |
+| D10 | chat selects effort `high`; fallback hop declares tiers `[]` | upstream capture strips effort only for that hop; the exact served attempt records the stripped value and declared tiers in turn provenance | assert |
 | D11 | `POST /{backend}/v1/messages/count_tokens` | currently 404 `not_found_error` (D-2 decision: fix or document impact on Claude Code auto-compact) | baseline |
 | D12 | env/catalog injection for claude/codex/opencode | `ANTHROPIC_BASE_URL/TOKEN` only for claude; codex catalog neutralized 4 keys; opencode overlay model projection shape | assert |
 | D13 | member role matrix | member can PUT chains/PATCH mode; cannot create/delete source, start runtime, read usage (B15) — assert the dead-ends are at least *visible* errors, not silent UI | assert |
@@ -109,12 +109,15 @@ Out of scope (documented, not dropped silently):
 
 Unit/contract suites already cover: config validation, guard structure, classification tables, oauth registry, usage ledger, runtime injection. E2E must **not** duplicate them; it owns the seams those can't see: double-observe cost, cooldown-vs-next-turn timing, UI copy on live errors, guard echo round-trip, engine config conservation, member-role dead-ends.
 
-## 5. Open decisions (owner)
+## 5. Owner decision ledger
 
 - **D-1 subscription-first placement.** Restore "subscription before API key" at placement time (surgical change in `_apply_source_placement`, reuse dead `recommended_source_order`), incl. one-time re-sort of existing configs? Current shipped contract says append-at-tail. Affects D1.
 - **D-2 `count_tokens` 404.** Serve it (proxy to upstream tokenizers or estimate) or document Claude Code context-estimation degradation in hub mode? Affects D11.
 - **D-3 missing `modelHub.*` browser i18n keys + absent Python-bundle codes.** Fix now (makes B11 pass) or baseline as expected-fail for this round?
 - **D-4 Retry-After honoring.** Keep flat cooldowns (simple, predictable) or honor upstream reset headers? Affects D6.
+- **D-5 tier provenance ladder (approved 2026-09-03).** Apply the first available
+  `upstream > catalog > user > null` rung; managed tiers are read-only, a refresh
+  override is observable, and silent stripping is attributed to the exact attempt.
 
 ## 5a. Cross-lane contracts (frozen 2026-09-01)
 

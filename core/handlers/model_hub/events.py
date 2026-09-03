@@ -24,6 +24,7 @@ EventKind = Literal[
     "channel_switch",
     "needs_action",
     "supply_interrupted",
+    "reasoning_efforts_override",
 ]
 EventReason: TypeAlias = str
 BillingNote = Literal["entered_metered", "left_metered"]
@@ -45,6 +46,8 @@ EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
     "network": "self_healing",
     "recovery": "transition",
     "manual": "transition",
+    "upstream_tiers": "transition",
+    "catalog_tiers": "transition",
     "credential_expired": "non_self_healing",
     "credential_revoked": "non_self_healing",
     "balance_exhausted": "non_self_healing",
@@ -210,6 +213,18 @@ def build_resolution_event(
         model_id is None or from_source is None or to_source is None
     ):
         raise ValueError("Invalid switch event")
+    if kind == "reasoning_efforts_override" and (
+        agent != "system"
+        or model_id is None
+        or from_source is None
+        or to_source is not None
+        or reason not in {"upstream_tiers", "catalog_tiers"}
+    ):
+        raise ValueError("Invalid reasoning_efforts_override event")
+    if reason in {"upstream_tiers", "catalog_tiers"} and (
+        kind != "reasoning_efforts_override"
+    ):
+        raise ValueError("Managed-tier reasons require reasoning_efforts_override")
     if kind in {"cooldown", "skip"} and (
         from_source is None or to_source is not None
     ):
@@ -222,6 +237,7 @@ def build_resolution_event(
         "skip",
         "needs_action",
         "channel_switch",
+        "reasoning_efforts_override",
     }:
         raise ValueError("Invalid system event kind")
     if model_id is None and (

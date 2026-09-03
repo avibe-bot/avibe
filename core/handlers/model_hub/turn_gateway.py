@@ -689,6 +689,8 @@ class ModelHubTurnGateway:
             via_mapping: bool,
             outcome: Optional[RawCallOutcome],
             decision,
+            stripped_reasoning_efforts: tuple[str, ...],
+            declared_reasoning_efforts: tuple[str, ...],
         ) -> None:
             if outcome is None or decision is None:
                 terminalizer.begin_attempt(
@@ -696,6 +698,8 @@ class ModelHubTurnGateway:
                     resolved_model_id=resolved_model_id,
                     channel=channel,
                     via_mapping=via_mapping,
+                    stripped_reasoning_efforts=stripped_reasoning_efforts,
+                    declared_reasoning_efforts=declared_reasoning_efforts,
                 )
                 return
             terminalizer.finish_attempt(
