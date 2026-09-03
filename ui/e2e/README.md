@@ -52,8 +52,11 @@ privileged, though: the suite talks to it over HTTP alone, so any server
 implementing the §5a control plane will do in its place — `POST
 /__control/config` with `auth`, `protocol`, `models_endpoint`, `stream`, and
 `models`; `GET /__control/requests` returning `{"requests": [...]}`; `DELETE
-/__control/requests` to reset; plus the protocol endpoint each `protocol`
-names, `/v1/messages`, `/v1/responses`, or `/v1/chat/completions`.
+/__control/requests` to reset; `GET /v1/models`, which serves the configured
+`models` when `models_endpoint` is `ok` and otherwise produces the failure it
+names — `http_404`, `http_500`, `timeout`, or `malformed_json`; plus the
+protocol endpoint each `protocol` names, `/v1/messages`, `/v1/responses`, or
+`/v1/chat/completions`.
 
 ## Preconditions, and why they skip instead of fail
 

@@ -435,8 +435,11 @@ No string explains mechanism.
   observed concurrently with a mutation leaves the stored configuration byte-identical to what
   that mutation alone would have produced, and the candidates read's reconcile is serialized
   by the mutation lock like every write.
-- A built-in that enters the snapshot through any process's refresh is in the menu within one
-  controller tick, and immediately when the picker's candidates read runs.
+- While the config store is writable, a built-in that enters the snapshot through any
+  process's refresh is in the menu within one controller tick, and immediately when the
+  picker's candidates read runs. Recovery mode is the same guarantee under its own
+  precondition, not an exception to it: reconcile changes nothing, so the menu holds its
+  last reconciled state until the store is writable again, and the bound resumes there.
 - No reconcile task outlives Model Hub shutdown.
 - Every producer shares one admission predicate, and it is stricter than the persisted shape
   alone: a proposal is admissible exactly when the backend's identity policy admits the id —

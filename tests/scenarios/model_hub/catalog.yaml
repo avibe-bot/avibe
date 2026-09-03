@@ -127,7 +127,7 @@ scenarios:
   # evidence named for itself and a citation reaching two cases identifies
   # neither.
   - id: MH-MENU-COMPOSE-001
-    name: A backend's list is composed from its providers, and an add seeds the route from exactly the suppliers the picker displayed
+    name: A backend's list is composed from its providers, and the save request carries exactly the suppliers the picker displayed for what was added
     status: covered
     kind: mutation
     layer: unit
