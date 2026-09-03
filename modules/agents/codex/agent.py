@@ -2609,7 +2609,8 @@ class CodexAgent(BaseAgent):
         if cached_model_settings and cached_model_settings[0] == thread_id:
             if effective_model is None:
                 effective_model = cached_model_settings[1]
-                effective_effort = cached_model_settings[2]
+                if effective_effort is None:
+                    effective_effort = cached_model_settings[2]
 
         turn_params: Dict[str, Any] = {
             "threadId": thread_id,

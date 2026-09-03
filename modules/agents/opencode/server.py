@@ -49,6 +49,9 @@ MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
+# Bump whenever the process-level Avibe policy applied in ``_start_server``
+# changes so an adopted process cannot silently keep the previous behavior.
+_MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v1"
 
 
 def _managed_runtime_config_content(raw: str | bytes | None) -> str:
@@ -819,6 +822,7 @@ class OpenCodeServerManager:
         *,
         caller_context_path: object = _USE_CURRENT_CALLER_CONTEXT_PATH,
         owner_pid: Optional[int] = _CURRENT_OWNER_PID,
+        runtime_policy_revision: Optional[str] = _MANAGED_RUNTIME_POLICY_REVISION,
     ) -> None:
         try:
             self._pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -831,6 +835,8 @@ class OpenCodeServerManager:
             }
             if owner_pid is not None:
                 payload["owner_pid"] = owner_pid
+            if runtime_policy_revision is not None:
+                payload["runtime_policy_revision"] = runtime_policy_revision
             if caller_context_path is _USE_CURRENT_CALLER_CONTEXT_PATH:
                 caller_context_path = self._caller_context_path()
             if isinstance(caller_context_path, str) and caller_context_path:
@@ -888,6 +894,13 @@ class OpenCodeServerManager:
             return False
         recorded = info.get("caller_context_path") if isinstance(info, dict) else None
         return bool(isinstance(recorded, str) and recorded and os.path.isabs(recorded))
+
+    def _pid_file_has_current_runtime_policy(self, info: Optional[Dict[str, Any]]) -> bool:
+        return bool(
+            self._pid_file_references_current_server(info)
+            and isinstance(info, dict)
+            and info.get("runtime_policy_revision") == _MANAGED_RUNTIME_POLICY_REVISION
+        )
 
     def _pid_file_was_started_by_current_process(self, info: Optional[Dict[str, Any]]) -> bool:
         return bool(isinstance(info, dict) and info.get("owner_pid") == _CURRENT_OWNER_PID)
@@ -1448,7 +1461,12 @@ class OpenCodeServerManager:
                 actual_pid = actual_pids[0]
                 if actual_pid != pid:
                     logger.info(f"Adopting healthy OpenCode server (updating stale PID {pid} -> {actual_pid})")
-                    self._write_pid_file(actual_pid, caller_context_path=None, owner_pid=None)
+                    self._write_pid_file(
+                        actual_pid,
+                        caller_context_path=None,
+                        owner_pid=None,
+                        runtime_policy_revision=None,
+                    )
                 else:
                     logger.info(f"Adopting healthy OpenCode server pid={pid} from previous run")
             else:
@@ -1491,8 +1509,9 @@ class OpenCodeServerManager:
                     )
                 if not self._pid_file_has_caller_context_binding(pid_info):
                     self._caller_context_plugin_refresh_pending = True
+                runtime_policy_stale = not self._pid_file_has_current_runtime_policy(pid_info)
                 if (
-                    self._caller_context_plugin_refresh_pending
+                    (self._caller_context_plugin_refresh_pending or runtime_policy_stale)
                     and self._active_requests == 0
                     and not self._has_active_run_sessions()
                     and (
@@ -1500,14 +1519,26 @@ class OpenCodeServerManager:
                         or self._pid_file_has_known_no_active_runs(pid_info)
                     )
                 ):
+                    refresh_reasons = []
+                    if self._caller_context_plugin_refresh_pending:
+                        refresh_reasons.append("caller-context plugin")
+                    if runtime_policy_stale:
+                        refresh_reasons.append("managed runtime policy")
                     logger.info(
-                        "Restarting OpenCode server to load updated Avibe caller-context plugin at %s",
+                        "Restarting OpenCode server to refresh %s at %s",
+                        " and ".join(refresh_reasons),
                         plugin_install.path,
                     )
                     await self._restart_for_auth_refresh_locked()
                     await self._start_server()
                     self._caller_context_plugin_refresh_pending = False
                     return self.base_url
+                if runtime_policy_stale:
+                    raise RuntimeError(
+                        "OpenCode managed runtime policy refresh is pending for an adopted or active server; "
+                        "retry after the existing OpenCode turn finishes so Avibe can restart the server "
+                        "with native Skills disabled."
+                    )
                 if self._caller_context_plugin_refresh_pending:
                     raise RuntimeError(
                         "OpenCode caller-context plugin refresh is pending for an adopted or active server; "
