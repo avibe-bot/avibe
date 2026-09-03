@@ -3383,6 +3383,18 @@ The dialog is now a single add flow:
   written over exits: whether a state happens to expose an editable field today
   decides only whether it fires, never whether it applies.
 
+**2026-09-04 owner ruling — no text in this dialog inherits the document's default
+type scale** `[derived]`. Manual verification found the idle/ready row's
+active-interface statement rendering at 16px, larger than the 15px dialog title,
+because the element carrying that statement declared only layout. Its scale is
+12 / 600 — `--model-hub-add-key-strip-title-size`, already the detecting row's and
+the identified strip's scale — while the 自动探测 hint beside it keeps the 10.5
+field-hint scale. Stated as the property rather than as that one row: **every text
+node in this dialog declares its own size.** The element that owns a statement is
+the element that sizes it, which is why the two-scale idle row sizes each child
+instead of the row, and why a row added later is measured by the rule rather than by
+whether it appears in the Metrics list below.
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
