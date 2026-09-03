@@ -1,6 +1,6 @@
 # Backend Model Catalogs
 
-Status: implementation contract — v1 shipped in #1814; **v2 (compose from providers) below is the current definition of done, pending owner approval 2026-09-03**
+Status: implementation contract — v1 shipped in #1814; **v2 (compose from providers) below is the current definition of done, approved by the owner on 2026-09-03; C1–C8 are normative**
 
 ## Outcome
 
@@ -125,33 +125,36 @@ including `deepseek-v3.2`) and `openrouter` (also `deepseek-v3.2`), `aihub` firs
 Codex's Source order. `Manage models` → `Add models` → type `deepseek` → under `From your providers` the row
 `deepseek-v3.2 · aihub, openrouter` → check → `Add 1 model`. Result: Codex's menu gains
 `deepseek-v3.2` with display name and reasoning efforts taken from the supplying Source
-models and context/output/modalities filled from models.dev when one exact match exists;
-its route is `aihub → deepseek-v3.2`, `openrouter → deepseek-v3.2`; the Codex card row
+models (both editable in the list before Save; other metadata stays empty until the user
+fills it); its route is `aihub → deepseek-v3.2`, `openrouter → deepseek-v3.2`; the Codex card row
 reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 
 ### One product model — the seven questions
 
 1. **Candidate identity when several providers supply the same model.** For Claude Code
-   and Codex a candidate is one distinct upstream model id across all
-   configuration-eligible, non-retired Source models — that id is exactly what the menu
-   id will be. The row lists its supplying providers in Source order. For OpenCode a
+   and Codex a candidate is one distinct upstream model id across the non-retired models —
+   discovered or manually added — of every Source that is configuration-eligible for the
+   backend **and present in that backend's Source order**; a Source held out of the order
+   supplies nothing here. That id is exactly what the menu id will be. The row lists its
+   supplying providers in Source order. For OpenCode a
    candidate is the existing OpenCode identifier `vendor/model` (§4.8), so two Sources
    with the same standard vendor collapse into one candidate and two vendors offering the
    same bare model stay two candidates, as OpenCode itself would show them.
 2. **Membership key and metadata owner.** Unchanged: membership is keyed by backend
    model id per backend, and the `BackendModel` row owns display name, capabilities,
-   context, output, and reasoning efforts. Selection seeds those fields — display name
-   and reasoning efforts from the supplying Source model(s), the rest from models.dev —
-   and every field stays editable afterwards.
+   context, output, and reasoning efforts. Selection seeds display name and reasoning
+   efforts from the supplying Source model(s) into the editable draft before Save; other
+   metadata stays empty until the user fills it (the custom-model editor's models.dev
+   lookup is the assistant for that). Every field stays editable.
 3. **One selection → one menu entry → one route with N hops**, one hop per supplying
    Source in Source order, written by the existing `placement-v1` rule. The picker never
    edits an existing route; the Route dialog remains the only place that adds, removes,
    reorders, or cross-maps hops.
-4. **models.dev** proposes, never rules. At add time the server fills empty metadata only
-   when exactly one exact match exists (`provider/model` or model-id equality) and records
-   `models_dev_id`. In the editor the `Model` typeahead proposes models.dev matches while the
-   user types and fills the form on selection. No refresh ever overwrites a field the user
-   has set; a proposal is reversible by editing the field.
+4. **models.dev** proposes, never rules. The server never fills metadata on a user's save.
+   In the editor the `Model` typeahead proposes models.dev matches while the user types and
+   fills the form on selection, recording `models_dev_id`; the user can change any field
+   before saving. No refresh ever overwrites a field the user has set; a proposal is
+   reversible by editing the field.
 5. **A supplying model disappears, is retired, or its Source is disabled or deleted.**
    Routes are configuration and are not rewritten by health (existing rule). The menu
    entry stays; its row shows the existing states (`Supply paused`, `No model route
@@ -172,9 +175,10 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
       (bundled + remote backend catalog + the local CLI cache the product already merges)
       minus what is already in the menu. This is where a removed built-in is found again.
       OpenCode has no built-in list; the group is absent for it.
-   2. **`From your providers`** — every configuration-eligible, non-retired Source model
-      not already in the menu, deduplicated by the identity rule in question 1, with its
-      supplying providers as read-only chips in Source order.
+   2. **`From your providers`** — every non-retired model, discovered or manual, of the
+      backend's ordered and configuration-eligible Sources, not already in the menu,
+      deduplicated by the identity rule in question 1, with its supplying providers as
+      read-only chips in Source order.
    3. **`Add custom model…`** — the picker's footer-left action (and, when a query matches
       nothing, an inline `Add "{{query}}" as a custom model…` under `No model matches.`). It
       opens the existing model editor for a model neither the backend nor your providers
@@ -190,8 +194,10 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    Rules that hold across all groups: a provider chip on any row — built-in included — means
    exactly "one of your providers supplies this id", in Source order, and nothing else ever
    renders as a chip. With an empty query the list shows only what can be added; with a
-   query, models already in the list also appear in their group as disabled rows tagged
-   `In list`, so a search never dead-ends on something that exists. The editor's typeahead
+   query, every model already in the list that matches — built-in, provider, or custom
+   alike — appears in one search-only group, `Already in the list`, as disabled rows, so a
+   search never dead-ends on something that exists and never offers a duplicate. The
+   editor's typeahead
    shows a loading state while a lookup is in flight and `models.dev unavailable` when the
    catalogue cannot be reached; typing an id by hand always still works.
    Checked rows commit together through the footer primary (`Add {{count}} models`; with
@@ -215,60 +221,85 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    provider may still serve it. The menu is therefore always "the backend's list, minus what
    you removed, plus what you added" — with no mode switch to explain.
 
-### Contract deltas (normative once approved; lanes cite these by number)
+### Contract deltas (normative — owner-approved 2026-09-03; lanes cite these by number)
 
 - **C1 — Menu-model add runs matching once.** `PUT /api/models/agents/<backend>/models`
   treats every row added relative to the latest stored list as a one-time matching point:
-  the server runs `matching-v1` for that menu model against configuration-eligible Sources
-  and writes the accepted hops with `placement-v1`. `model-hub.md` §4.2 and §4.6 are
+  the server runs `matching-v1` for that menu model against the Sources present in that
+  backend's Source order that are configuration-eligible, over each Source's complete
+  non-retired inventory — discovered and manual models alike (§4.2's
+  `observed.discovered_models` restriction belongs to Add-Source observation, not to this
+  point) — and writes the accepted hops with `placement-v1`. `model-hub.md` §4.2 and §4.6 are
   amended so that "catalog change never repeats matching" reads "a menu-model add matches
   once at that write; refresh, restart, health, and turns still never re-match". Manual
   adds of an id no Source lists therefore still start with an empty route.
   The success response is the existing `{agent: AgentSupply}`; the seeded hops are visible
   in `agent.routes[<id>].hops` and `agent.model_supply` in the same response.
-- **C2 — Metadata seeding.** For each added row the server fills `display_name` and
-  `reasoning_efforts` from the matched Source model(s) when the client sent them empty
-  (union of efforts across matched Sources, Source order), then fills remaining empty
-  metadata from models.dev only when exactly one exact match exists, recording
-  `models_dev_id` and `origin: "models_dev"`. A models.dev cache miss is silent; the row is
-  still written. `origin` gains the value `"provider"` for rows picked from
-  `From your providers`; `"builtin"`, `"models_dev"`, and `"manual"` keep their meaning.
+- **C2 — Seeding and provenance.** Seeding for a user-initiated add happens in the client
+  draft before Save, never on the server at `PUT`: the picker seeds `display_name` (from the
+  first ordered supplier that has one) and `reasoning_efforts` (union across suppliers, Source
+  order) from the Source models it already holds; the custom editor seeds from the chosen
+  models.dev suggestion. The server stores the request literally — an empty field in the
+  request is an empty field — so a value the user cleared before the first Save stays
+  cleared. Server-side seeding exists only for built-ins the reconcile (C6) adds without a
+  user draft: label and efforts from the built-in snapshot. `origin` records the creation
+  path only — `builtin` (built-in group or reconcile), `provider` (provider group),
+  `models_dev` (custom editor via a models.dev suggestion), `manual` (custom editor by hand)
+  — and `models_dev_id` records enrichment independently; enrichment never changes `origin`.
 - **C3 — Removal cascades through the guard.** `PUT /api/models/agents/<backend>/models`
   accepts the guarded-mutation fields beside `baseline` and `models`:
   `{baseline, models, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}`.
   Removing a row whose route has hops without `force` returns the existing guard-refusal
-  envelope `409 {ok: false, error: "backend_model_in_route", would_remove_hops: RouteHopRef[],
-  would_interrupt: SupplyGap[]}` (`guard-refusal.schema.json`; `RouteHopRef` is
+  envelope `409 {ok: false, contract_version, error: "backend_model_in_route", detail?,
+  would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}`; `guard-refusal.schema.json`'s
+  `error` enum gains `backend_model_in_route`, registered in `mirror-registry.json`,
+  `api-response.schema.json`, and the locale keys the contract guard requires (`RouteHopRef` is
   `{backend, menu_model, source_id, model_id, position}`). A retry with `force: true` that
   echoes both arrays unchanged removes the rows and their routes in one transaction and
   returns `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`.
   Removing rows whose routes are empty needs no confirmation and returns `{agent}` as
   today. The v1 hard refusal is retired.
 - **C4 — Candidates come from reads that already exist.** The picker derives its groups from
-  reads the page already has or the product already serves: the built-in group from the
-  backend model catalog snapshot (`agent_model_options` / `fetchBackendModels`, the same
-  merged remote + bundled + local-CLI snapshot every model picker uses) minus menu ids and
-  including hidden built-ins; the provider group from `GET /api/models/sources` and
+  reads the page already has or the product already serves: the built-in group from
+  `builtin_models` and `hidden_builtin_ids` on the agent models read (C8) minus menu ids —
+  not from `fetchBackendModels`, which in Gateway mode returns the persisted catalog; the
+  provider group from `GET /api/models/sources` and
   `AgentSupply.sources` eligibility (the Route dialog's candidate derivation, promoted to a
   shared helper); the editor typeahead from `GET /api/models/catalog/models-dev?query=` (C7).
   No new read endpoint.
 - **C6 — Hidden built-ins and built-in reconcile.** The backend catalog persists the set of
   hidden built-in ids (`agents.<backend>.hidden_builtin_ids: string[]`, absent on older
   files = empty). `PUT .../models` marks a removed row hidden when its id is in the current
-  built-in snapshot and clears the mark when such an id is added. On every built-in snapshot
-  change (startup, remote catalog refresh, CLI cache change) the service adds each built-in
-  id that is neither in the menu nor hidden, at the position question 9 defines, running C1
+  built-in snapshot and clears the mark when such an id is added. Legacy initialization: a
+  persisted catalog without the field is initialized once, at load, to `built-in snapshot ids
+  − menu ids` and persisted, so an upgrade from v1 changes nothing the user sees and a
+  built-in removed under v1 does not return; only built-ins that enter the snapshot after that
+  initialization arrive by question 9. Reconcile runs only once the field exists. On every
+  built-in snapshot change (startup, remote catalog refresh, CLI cache change) the service
+  adds each built-in id that is neither in the menu nor hidden, at the position question 9 defines, running C1
   and C2 for it, and invalidates the backend's runtime projection. It never removes a row.
   Claude Code's locked `default` row is not a built-in candidate and cannot be hidden.
 - **C7 — models.dev read serves the editor typeahead.** `GET /api/models/catalog/models-dev?query=`
   returns `{models: [...]}` deduplicated by model id and ranked first-party vendor first, then
   exact-id, then name matches; each item carries `vendor_id`, `vendor_name`, `first_party:
-  boolean`, and the existing metadata fields. First-party means the provider that makes the
-  model; aggregator providers (openrouter, together, fireworks, groq, deepinfra, …) never win
-  the ranking when a first-party entry exists. Results are capped at 8 for the typeahead.
+  boolean`, and the existing metadata fields; results are capped at 8. `first_party` is derived
+  from a repo-owned, versioned vendor map (`vibe/data/model_vendors.json`: model-id family
+  prefix → models.dev provider id, e.g. `claude-` → `anthropic`, `gpt-`/`o` → `openai`,
+  `gemini-` → `google`, `deepseek-` → `deepseek`, `glm-` → `zhipuai`, `kimi-` → `moonshotai`,
+  `grok-` → `xai`, `qwen` → `alibaba`, `mistral-`/`codestral-` → `mistral`): a provider is
+  first-party for a model exactly when the map names it. When no listed provider is
+  first-party, the winner is the first provider in the map's ordered aggregator list
+  (`openrouter`, `together`, `fireworks-ai`, `groq`, `deepinfra`), and providers the map does
+  not know rank after those alphabetically. The map is the closed rule; extending it is a
+  versioned data change covered by a test.
+- **C8 — Built-in snapshot on the agent models read.** `GET /api/models/agents/<backend>/models`
+  returns, beside `catalog_models`, `builtin_models: [{id, display_name, reasoning_efforts}]` —
+  the merged remote + bundled + local-CLI snapshot for that backend, served regardless of
+  Gateway/Direct mode — and `hidden_builtin_ids: string[]`. OpenCode returns an empty
+  `builtin_models`. No new endpoint.
 - **C5 — Unchanged.** Source inventories, Source-side manual add, Route dialog, Source
   order, direct/gateway modes, and every runtime projection are byte-for-byte unchanged
-  except through C1–C3.
+  except through C1–C3, C6, and C8.
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
@@ -278,7 +309,7 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 | Picker title | `Add {{backend}} models` |
 | Picker search placeholder | `Search models or providers` |
 | Group headers | `{{backend}} built-in` · `From your providers` |
-| Already-in-list row (search only) | `In list` |
+| Already-in-list group (search only) | header `Already in the list`; rows disabled |
 | Picker no match | `No model matches.` · inline action `Add "{{query}}" as a custom model…` |
 | Picker footer, left | `Add custom model…` |
 | Picker confirm | `Add {{count}} models`; disabled `Add models` when nothing is selected |
@@ -313,6 +344,9 @@ No string explains mechanism.
   menu was saved is present in the menu on the next read unless it was removed before, and
   a previously removed id never returns on its own.
 - The picker lists each candidate id exactly once across all groups.
+- A field the user cleared before the first Save is empty after Save.
+- Loading a v1 catalog shows exactly the same menu before and after the first load, and a
+  built-in the user removed under v1 does not return on its own.
 - In the editor, a models.dev suggestion fills every metadata field it knows and leaves each
   one editable; an id models.dev does not know can still be entered and saved.
 
