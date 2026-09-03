@@ -89,8 +89,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _PollLoop:
         async def run_restored_poll_loop(self, poll_info):
-            active_polls.pop(poll_info.opencode_session_id, None)
-            return None
+            return True
 
         async def remove_restored_ack(self, poll_info):
             return None
@@ -235,7 +234,7 @@ def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> No
 
     assert asyncio.run(run()) == 1
     assert attempts == 3
-    assert removed == []
+    assert removed == ["oc-1"]
 
 
 def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> None:
@@ -255,8 +254,7 @@ def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> No
         async def run_restored_poll_loop(self, _poll_info):
             for _ in range(100):
                 if attempts >= 4:
-                    agent.sessions.remove_active_poll("oc-1")
-                    return
+                    return True
                 await asyncio.sleep(0)
             raise AssertionError("restored binding was not retried")
 
@@ -299,8 +297,7 @@ def test_restore_delayed_binding_does_not_replace_a_newer_turn(monkeypatch) -> N
         async def run_restored_poll_loop(self, _poll_info):
             for _ in range(100):
                 if len(attempts) >= 4:
-                    agent.sessions.remove_active_poll("oc-1")
-                    return
+                    return True
                 await asyncio.sleep(0)
             raise AssertionError("restored binding was not retried")
 
@@ -728,6 +725,19 @@ def test_restore_preserves_poll_when_inactive_marker_cannot_be_persisted() -> No
     with pytest.raises(OSError, match="read-only pid file"):
         asyncio.run(agent.restore_active_polls())
 
+    assert removed == []
+    assert active_polls == {"oc-1": poll}
+
+
+def test_terminal_poll_is_preserved_when_inactive_marker_cannot_be_persisted() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    active_polls = {"oc-1": poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+    agent._test_server.mark_run_inactive_error = OSError("read-only pid file")
+
+    retired = asyncio.run(agent._retire_active_poll(agent._test_server, "oc-1"))
+
+    assert retired is False
     assert removed == []
     assert active_polls == {"oc-1": poll}
 

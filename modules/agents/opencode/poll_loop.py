@@ -773,7 +773,7 @@ class OpenCodePollLoop:
 
         return final_text, True
 
-    async def run_restored_poll_loop(self, poll_info) -> None:
+    async def run_restored_poll_loop(self, poll_info) -> bool:
         """Continue a poll loop that was interrupted by restart."""
 
         session_id = poll_info.opencode_session_id
@@ -830,9 +830,8 @@ class OpenCodePollLoop:
                         working_path=poll_info.working_path,
                         timeout_seconds=timeout_seconds,
                     )
-                    self._agent.sessions.remove_active_poll(session_id)
                     await self.remove_restored_ack(poll_info)
-                    return
+                    return True
                 try:
                     messages = await asyncio.wait_for(
                         server.list_messages(
@@ -863,9 +862,8 @@ class OpenCodePollLoop:
                             working_path=poll_info.working_path,
                             timeout_seconds=timeout_seconds,
                         )
-                        self._agent.sessions.remove_active_poll(session_id)
                         await self.remove_restored_ack(poll_info)
-                        return
+                        return True
                     poll_failures += 1
                     if poll_failures >= _POLL_FAILURE_SETTLE_LIMIT:
                         await self._settle_poll_transport_failure(
@@ -875,9 +873,8 @@ class OpenCodePollLoop:
                             working_path=poll_info.working_path,
                             failures=poll_failures,
                         )
-                        self._agent.sessions.remove_active_poll(session_id)
                         await self.remove_restored_ack(poll_info)
-                        return
+                        return True
                     logger.warning(
                         "Timed out polling restored OpenCode messages before the active-turn deadline"
                     )
@@ -893,9 +890,8 @@ class OpenCodePollLoop:
                             working_path=poll_info.working_path,
                             failures=poll_failures,
                         )
-                        self._agent.sessions.remove_active_poll(session_id)
                         await self.remove_restored_ack(poll_info)
-                        return
+                        return True
                     logger.warning(f"Failed to poll OpenCode messages (restored): {poll_err}")
                     await self._sleep_with_deadline(deadline)
                     continue
@@ -936,9 +932,8 @@ class OpenCodePollLoop:
                                 await server.abort_session(session_id, poll_info.working_path)
                             except Exception as abort_err:
                                 logger.warning("Failed to abort disabled question session %s: %s", session_id, abort_err)
-                            self._agent.sessions.remove_active_poll(session_id)
                             await self.remove_restored_ack(poll_info)
-                            return
+                            return True
 
                         seen_tool_calls.add(call_key)
 
@@ -1015,9 +1010,8 @@ class OpenCodePollLoop:
                                         request=restored_request,
                                         failure_id=str(last_info.get("id") or ""),
                                     )
-                                    self._agent.sessions.remove_active_poll(session_id)
                                     await self.remove_restored_ack(poll_info)
-                                    return
+                                    return True
                                 await self._sleep_with_deadline(deadline)
                                 continue
 
@@ -1066,7 +1060,7 @@ class OpenCodePollLoop:
 
             # Clean up ack reaction after result is sent
             await self.remove_restored_ack(poll_info)
-            self._agent.sessions.remove_active_poll(session_id)
+            return True
 
         except asyncio.CancelledError:
             logger.info(f"Restored OpenCode poll cancelled for {poll_info.base_session_id}")
@@ -1075,7 +1069,6 @@ class OpenCodePollLoop:
                 restored_request,
                 terminal_emoji=STOPPED_REACTION_EMOJI if stopped_by_user else None,
             )
-            self._agent.sessions.remove_active_poll(session_id)
             raise
         except Exception as e:
             error_name = type(e).__name__
@@ -1089,7 +1082,6 @@ class OpenCodePollLoop:
             except Exception as abort_err:
                 logger.warning(f"Failed to abort OpenCode session after error: {abort_err}")
 
-            self._agent.sessions.remove_active_poll(session_id)
             await self.remove_restored_ack(poll_info)
 
             message = f"Restored OpenCode session failed: {error_text}"
@@ -1102,3 +1094,4 @@ class OpenCodePollLoop:
                 request=restored_request,
                 failure_id=session_id,
             )
+            return True

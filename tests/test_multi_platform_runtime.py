@@ -1334,6 +1334,7 @@ def test_opencode_normal_text_matching_legacy_question_prefix_is_processed():
 def test_opencode_process_message_removes_active_poll_when_question_tool_aborts():
     removed = []
     ack_removed = []
+    retirement_order = []
 
     request_context = MessageContext(
         user_id="u",
@@ -1358,6 +1359,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
             return None
 
         async def mark_run_inactive(self, session_id):
+            retirement_order.append(("marker", session_id))
             return None
 
         def get_default_agent_from_config(self):
@@ -1390,6 +1392,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
             return None
 
         def remove_active_poll(self, session_id):
+            retirement_order.append(("poll", session_id))
             removed.append(session_id)
 
     class _PollLoop:
@@ -1452,6 +1455,10 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
 
     asyncio.run(agent._process_message(request))
 
+    assert retirement_order == [
+        ("marker", "oc-session"),
+        ("poll", "oc-session"),
+    ]
     assert removed == ["oc-session"]
     assert ack_removed == ["base"]
 
@@ -2702,9 +2709,10 @@ def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
         prompt_started_at=time.time(),
     )
 
-    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
 
-    assert removed == ["oc-session"]
+    assert terminal is True
+    assert removed == []
     assert any(item[0] == "result" and item[2] is True for item in emitted)
     assert all("No response from OpenCode" not in str(item) for item in results)
     assert any("certificate failed" in (item[1] or "") for item in emitted)
@@ -2832,10 +2840,11 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
     )
 
     loop = OpenCodePollLoop(_Agent())
-    asyncio.run(loop.run_restored_poll_loop(poll))
+    terminal = asyncio.run(loop.run_restored_poll_loop(poll))
 
     assert diagnostics == []
-    assert removed == ["oc-session"]
+    assert terminal is True
+    assert removed == []
     assert emitted == [
         (
             "notify",
@@ -2942,10 +2951,11 @@ def test_opencode_restored_poll_settles_after_consecutive_transport_failures(
         prompt_started_at=time.time(),
     )
 
-    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
 
     assert aborted == [("oc-restored-transport-dead", "/tmp/work")]
-    assert removed == ["oc-restored-transport-dead"]
+    assert terminal is True
+    assert removed == []
     assert any(
         item[0] == "notify" and item[1] == "error.opencodePollTransportFailure:3"
         for item in emitted
@@ -3037,11 +3047,12 @@ def test_opencode_restored_poll_consumes_original_timeout_budget():
         prompt_started_at=time.time() - 1,
     )
 
-    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
 
     assert list_calls == []
     assert aborted == [("oc-restored-timeout", "/tmp/work")]
-    assert removed == ["oc-restored-timeout"]
+    assert terminal is True
+    assert removed == []
     assert [item[0] for item in emitted] == ["notify", "notify", "result"]
     assert emitted[1][1] == "error.opencodeActiveTurnTimeout:0.05"
     assert emitted[2][1:] == (
@@ -3552,7 +3563,7 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
         },
     )
 
-    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
 
     assert model_hub_failures == [
         (
@@ -3561,7 +3572,8 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
             "NativeSessionEndedBeforeResult - OpenCode 已结束，但没有产出模型回复。",
         )
     ]
-    assert removed == ["oc-restored-error"]
+    assert terminal is True
+    assert removed == []
     assert [item[0] for item in emitted] == ["notify", "notify", "result"]
     assert emitted[1][1] == (
         "OpenCode 错误：NativeSessionEndedBeforeResult - "
