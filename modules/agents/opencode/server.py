@@ -768,18 +768,19 @@ class OpenCodeServerManager:
                 )
                 if reserved_overlay is None:
                     raise RuntimeError("OpenCode overlay reservation is no longer active")
-            run_was_active = session_id in self._active_run_sessions
-            self._active_run_sessions.add(session_id)
+            previous_active_runs = set(self._active_run_sessions)
             if overlay_reservation is not None:
                 self._model_hub_overlay_reservations.pop(
                     overlay_reservation,
                     None,
                 )
             try:
-                self._write_active_run_sessions_to_pid_file()
+                self._active_run_sessions = self._persist_active_run_session_change(
+                    session_id,
+                    active=True,
+                )
             except Exception:
-                if not run_was_active:
-                    self._active_run_sessions.discard(session_id)
+                self._active_run_sessions = previous_active_runs
                 if overlay_reservation is not None and reserved_overlay is not None:
                     self._model_hub_overlay_reservations[
                         overlay_reservation
@@ -788,13 +789,14 @@ class OpenCodeServerManager:
 
     async def mark_run_inactive(self, session_id: str) -> None:
         async with self._get_lock():
-            run_was_active = session_id in self._active_run_sessions
-            self._active_run_sessions.discard(session_id)
+            previous_active_runs = set(self._active_run_sessions)
             try:
-                self._write_active_run_sessions_to_pid_file()
+                self._active_run_sessions = self._persist_active_run_session_change(
+                    session_id,
+                    active=False,
+                )
             except Exception:
-                if run_was_active:
-                    self._active_run_sessions.add(session_id)
+                self._active_run_sessions = previous_active_runs
                 raise
 
     @asynccontextmanager
@@ -866,13 +868,47 @@ class OpenCodeServerManager:
         if callable(apply_to_pid):
             apply_to_pid(pid, label="opencode serve")
 
-    def _write_active_run_sessions_to_pid_file(self) -> None:
-        info = self._read_pid_file()
-        if not self._pid_file_references_current_server(info):
-            return
-        assert isinstance(info, dict)
-        info["active_run_sessions"] = sorted(self._active_run_sessions)
-        self._pid_file.write_text(json.dumps(info))
+    def _persist_active_run_session_change(
+        self,
+        session_id: str,
+        *,
+        active: bool,
+    ) -> set[str]:
+        try:
+            raw_info = self._pid_file.read_text()
+        except FileNotFoundError:
+            info = None
+        except Exception as exc:
+            raise RuntimeError("Could not read OpenCode active-run metadata") from exc
+        else:
+            try:
+                info = json.loads(raw_info)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("OpenCode active-run metadata is invalid") from exc
+            if not isinstance(info, dict):
+                raise RuntimeError("OpenCode active-run metadata is invalid")
+
+        updated = set(self._active_run_sessions)
+        references_current_server = self._pid_file_references_current_server(info)
+        if references_current_server:
+            assert isinstance(info, dict)
+            persisted = info.get("active_run_sessions")
+            if not isinstance(persisted, list) or any(
+                not isinstance(item, str) or not item for item in persisted
+            ):
+                raise RuntimeError("OpenCode active-run metadata is invalid")
+            updated.update(persisted)
+
+        if active:
+            updated.add(session_id)
+        else:
+            updated.discard(session_id)
+
+        if references_current_server:
+            assert isinstance(info, dict)
+            info["active_run_sessions"] = sorted(updated)
+            self._pid_file.write_text(json.dumps(info))
+        return updated
 
     def _clear_pid_file(self) -> None:
         try:
