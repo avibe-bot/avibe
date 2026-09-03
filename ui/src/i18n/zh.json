@@ -955,7 +955,6 @@
           "edit": "编辑 {{model}}",
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
-          "removeConsequence": "同时会移除它的路由：{{hops}}",
           "removeConfirm": "移除",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",

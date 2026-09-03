@@ -8,7 +8,7 @@ import i18n from '@/i18n';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { blankBackendModel, candidateBackendModel } from './backendCatalog';
 import { ApiCallError, modelsApi } from './modelsApi';
-import type { AgentSupply, BackendModel, ModelCandidate, RouteHop, Source } from './types';
+import type { AgentSupply, BackendModel, ModelCandidate, RouteHop } from './types';
 
 const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel => ({
   ...blankBackendModel(),
@@ -17,19 +17,6 @@ const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel 
 });
 
 const locked = model('claude-default', { locked: true, routeable: false });
-
-const source = (id: string, displayName: string): Source => ({
-  id,
-  last_discovered_at: null,
-  kind: 'api_key',
-  vendor: 'anthropic',
-  display_name: displayName,
-  protocol: 'anthropic',
-  supply_channel: 'hub',
-  billing: 'metered',
-  state: { status: 'active', retry_at: null, detail_key: null },
-  models: [],
-});
 
 const candidate = (id: string, overrides: Partial<ModelCandidate> = {}): ModelCandidate => ({
   id,
@@ -89,7 +76,6 @@ const renderDialog = (overrides: Partial<React.ComponentProps<typeof BackendMode
       <BackendModelCatalogDialog
         open
         backend="claude"
-        sources={[source('src_a', 'Primary relay')]}
         canReadSources
         onClose={onClose}
         onSaved={onSaved}
@@ -233,17 +219,19 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
-  it('names what a removal takes with it, and removes both together once agreed', async () => {
+  it('shows what a removal takes with it, and echoes exactly that plan', async () => {
     const user = userEvent.setup();
     const catalog = [model('alpha'), model('beta')];
+    /** The plan, written once. It is the fixture for both halves of the property
+     *  below — what the confirmation shows and what the forced save claims are
+     *  the same arrays, so the test may not state them twice. */
+    const hops = [
+      { backend: 'claude' as const, menu_model: 'alpha', source_id: 'src_a', model_id: 'glm-5.2-air', position: 1 },
+      { backend: 'claude' as const, menu_model: 'alpha', source_id: 'src_gone', model_id: 'backup', position: 2 },
+    ];
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
       routes: {
-        alpha: {
-          hops: [
-            { source_id: 'src_a', model_id: 'glm-5.2-air' },
-            { source_id: 'src_gone', model_id: 'backup' },
-          ],
-        },
+        alpha: { hops: hops.map(({ source_id, model_id }) => ({ source_id, model_id })) },
       },
     }));
     const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([]));
@@ -256,11 +244,17 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('1 model')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Remove alpha' }));
-    // Named by the Sources and upstream models the user can recognise, in route
-    // order — and by the id for a Source this client never read, because the
-    // consequence is worth stating either way.
-    expect(screen.getByRole('alert').textContent)
-      .toBe('Also removes its route: Primary relay → glm-5.2-air, src_gone → backup');
+    const asked = screen.getByRole('alert');
+    // The shared guard body, as the Route dialog shows it: every hop the plan
+    // names, at the order it sits at, and however many there are.
+    expect(asked.textContent).toContain('2 hops');
+    for (const hop of hops) {
+      expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
+    }
+    // Nothing is stranded, so it says so — rather than showing an interruption
+    // the guard never reported.
+    expect(within(asked).queryByText('Models that will be left with no source')).toBeNull();
+    expect(asked.textContent).toContain('These models still have another source available.');
     expect(screen.getByText('1 model')).toBeTruthy();
 
     // Asking is not doing.
@@ -275,17 +269,14 @@ describe('BackendModelCatalogDialog', () => {
 
     // The save echoes the plan the user was shown, one-based like the server's
     // own positions, so the guard is answered for exactly that plan and not for
-    // whatever the routes hold by the time it lands.
+    // whatever the routes hold by the time it lands. Both arrays: a confirmation
+    // confirms the whole plan, and the empty one here is empty because this plan
+    // strands nothing, not because the surface cannot carry it.
     await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
       baseline: catalog,
       models: [],
       force: true,
-      would_remove_hops: [
-        { backend: 'claude', menu_model: 'alpha', source_id: 'src_a', model_id: 'glm-5.2-air', position: 1 },
-        { backend: 'claude', menu_model: 'alpha', source_id: 'src_gone', model_id: 'backup', position: 2 },
-      ],
-      // This dialog never showed an interruption plan, so it cannot claim one
-      // was confirmed.
+      would_remove_hops: hops,
       would_interrupt: [],
     }));
   });
@@ -535,6 +526,20 @@ describe('BackendModelCatalogDialog', () => {
       agreement: Record<string, unknown>;
     };
 
+    /**
+     * The plan the server holds and the client could not see.
+     *
+     * Written once, because it is the fixture for both halves of the property:
+     * what the confirmation shows and what the answered save echoes are the same
+     * two arrays. It strands a model on purpose — a refusal that interrupts
+     * something is still a question the user may answer, so the ask must carry
+     * the interruption rather than be withheld because of it.
+     */
+    const GUARDED = {
+      hops: [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }],
+      gaps: [{ backend: 'claude' as const, model_id: 'beta', agents: ['main'] }],
+    };
+
     const MEMBERS: readonly Member[] = [
       {
         what: 'the suppliers the picker displayed went stale',
@@ -584,26 +589,35 @@ describe('BackendModelCatalogDialog', () => {
           'backend_model_in_route',
           'modelHub.errors.backend_model_in_route',
           true,
+          GUARDED.gaps,
           [],
-          [],
-          [{ backend: 'claude', menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }],
+          GUARDED.hops,
           409,
         ),
         // Asked through the same confirmation that records what a save may
-        // force, and naming the plan the server has rather than the empty one
-        // the client had.
-        reasked: () => screen.findByText('Also removes its route: Primary relay → beta-air'),
+        // force, and showing the whole plan the server named rather than the
+        // empty one the client had — the same evidence body the Route dialog
+        // shows, so a removal here and a route change there answer the same
+        // question with the same words.
+        reasked: async () => {
+          const asked = await screen.findByRole('alert');
+          for (const hop of GUARDED.hops) {
+            expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
+          }
+          expect(within(asked).getByText('Models that will be left with no source')).toBeTruthy();
+          for (const gap of GUARDED.gaps) {
+            expect(within(asked).getByText(`Agents pinned to it: ${gap.agents.join(', ')}`)).toBeTruthy();
+          }
+          expect(asked.textContent).toContain('Some models will be left with no usable source.');
+          return asked;
+        },
         answer: async (user) => {
           await user.click(confirmation().getByRole('button', { name: 'Remove' }));
         },
         models: [EDITED],
-        agreement: {
-          force: true,
-          would_remove_hops: [
-            { backend: 'claude', menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
-          ],
-          would_interrupt: [],
-        },
+        // Both arrays, because both were shown: an echo of one would claim a
+        // confirmation for half of what the user answered.
+        agreement: { force: true, would_remove_hops: GUARDED.hops, would_interrupt: GUARDED.gaps },
       },
     ];
 
@@ -643,6 +657,45 @@ describe('BackendModelCatalogDialog', () => {
       });
     }
 
+    it('drops a withdrawn candidate instead of re-asking, and promises nothing for it again', async () => {
+      const user = userEvent.setup();
+      // The other half of the same refusal: `changed` names the picked id with no
+      // suppliers at all. There is nothing left to offer, so there is nothing to
+      // ask — and a row left in the draft with no agreement behind it would go
+      // out on the next save as though it had been typed by hand, which is the
+      // silent re-send the re-ask exists to prevent.
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
+      vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ providers: [shown] }));
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [] }))
+        .mockResolvedValue(agent([EDITED, model('beta')]));
+      const { onSaved, onClose } = renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
+      await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+      await widen(user, 'alpha');
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The row leaves, and it leaves without a question: nothing re-opens for a
+      // candidate that has nothing left to pick.
+      await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
+      expect(screen.queryByRole('heading', { name: 'Add Claude Code models' })).toBeNull();
+      expect(onSaved).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The rest of the draft is still the user's, and the write claims nothing
+      // beyond the list itself — an `expected_suppliers` entry would be an
+      // agreement about a candidate that no longer exists, and there is no other
+      // field this save was granted.
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+      const body = write.mock.lastCall?.[1] as Record<string, unknown>;
+      expect(body.models).toEqual([EDITED, model('beta')]);
+      expect(Object.keys(body)).toEqual(['baseline', 'models']);
+    });
+
     it('asks about every removal the guard held back, not just the first', async () => {
       const user = userEvent.setup();
       const catalog = [model('alpha'), model('beta'), model('gamma')];
@@ -655,6 +708,13 @@ describe('BackendModelCatalogDialog', () => {
       vi.spyOn(modelsApi, 'getAgentSources')
         .mockResolvedValueOnce(agent(catalog))
         .mockResolvedValue(routed);
+      /** One hop per held-back removal. The fixture for the whole property:
+       *  each question shows its own hop, and the answered save echoes all of
+       *  them — so neither half may state the plan a second time. */
+      const hops = [
+        { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
+        { backend: 'claude' as const, menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
+      ];
       const write = vi.spyOn(modelsApi, 'putAgentModels')
         .mockRejectedValueOnce(new ApiCallError(
           'backend_model_in_route',
@@ -662,10 +722,7 @@ describe('BackendModelCatalogDialog', () => {
           true,
           [],
           [],
-          [
-            { backend: 'claude', menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
-            { backend: 'claude', menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
-          ],
+          hops,
           409,
         ))
         .mockResolvedValue(agent([model('alpha')]));
@@ -676,12 +733,16 @@ describe('BackendModelCatalogDialog', () => {
       await user.click(screen.getByRole('button', { name: 'Save' }));
 
       // One question at a time, because the confirmation lives in the row it is
-      // about — but every held-back removal gets one. A row handed back with no
-      // question is a removal the user asked for that nobody answered.
-      expect(await screen.findByText('Also removes its route: Primary relay → beta-air')).toBeTruthy();
-      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
-      expect(await screen.findByText('Also removes its route: Primary relay → gamma-air')).toBeTruthy();
-      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+      // about — but every held-back removal gets one, carrying its own hop and
+      // no one else's. A row handed back with no question is a removal the user
+      // asked for that nobody answered; a question carrying the whole refusal
+      // would ask each row to confirm the others.
+      for (const hop of hops) {
+        const asked = await screen.findByRole('alert');
+        expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
+        expect(asked.textContent).toContain('1 hop');
+        await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+      }
       expect(screen.queryByRole('alert')).toBeNull();
 
       await user.click(screen.getByRole('button', { name: 'Save' }));
@@ -689,10 +750,7 @@ describe('BackendModelCatalogDialog', () => {
       await waitFor(() => expect(write).toHaveBeenLastCalledWith('claude', expect.objectContaining({
         models: [model('alpha')],
         force: true,
-        would_remove_hops: [
-          { backend: 'claude', menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
-          { backend: 'claude', menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
-        ],
+        would_remove_hops: hops,
         would_interrupt: [],
       })));
     });

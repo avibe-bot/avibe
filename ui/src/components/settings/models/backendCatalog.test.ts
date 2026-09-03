@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -10,6 +13,7 @@ import {
   catalogModelIds,
   catalogModels,
   backendModelId,
+  draftWithId,
   MODELS_DEV_FIELDS,
   pickerGroups,
   readBackendCatalogBaseline,
@@ -18,7 +22,6 @@ import {
 } from './backendCatalog';
 import { inferProvider, type StandardVendors } from './menus/identifiers';
 import type {
-  AgentBackend,
   AgentSupply,
   BackendModel,
   BackendModelCandidates,
@@ -224,58 +227,88 @@ describe('retireModelsDevMatch', () => {
 });
 
 /**
- * The id rule, asserted over every path that produces one.
+ * The id rule, asserted where ids are written instead of at each writer.
  *
- * Stated this way on purpose. The rule was first written for the 「use what I
- * typed」 escape, and a second producer — choosing a models.dev suggestion —
- * then shipped with a bare id OpenCode rejects, because nothing said the rule
- * belonged to all of them. So the producers are the fixture: a third one is
- * added to this list and inherits the whole property, or it is not added and
- * this file is where that shows.
+ * This started as a table of producers, and the table is what kept failing. The
+ * rule was written for the 「use what I typed」 escape; choosing a models.dev
+ * suggestion then shipped with a bare id OpenCode rejects; the picker's seed did
+ * it again. A list of producers cannot state this property, because the producer
+ * that is missing from the list is exactly the one nobody checked — and the list
+ * reads complete either way.
+ *
+ * So the property belongs to `draftWithId`, the one write that gives a draft row
+ * its id, and it is stated over arbitrary input rather than over known callers:
+ * whatever this function is handed, what it writes is admissible. A producer
+ * added later inherits it by calling the only function that can write the field,
+ * and the boundary test below is what keeps 「the only」 true.
  */
-describe('the id every producer mints', () => {
-  const PRODUCERS: readonly { what: string; mint: (typed: string, backend: AgentBackend, vendors: StandardVendors) => string }[] = [
-    {
-      what: 'the 「use what I typed」 escape',
-      mint: (typed, backend, vendors) => backendModelId(typed, backend, vendors),
-    },
-    {
-      what: 'a chosen models.dev suggestion',
-      mint: (typed, backend, vendors) => applyModelsDevMatch(
-        blankBackendModel(),
-        { ...match, model_id: typed, provider_id: 'zhipuai' },
-        'models_dev',
-        backend,
-        vendors,
-      ).id,
-    },
-  ];
-
+describe('the id chokepoint', () => {
   const VENDORS: StandardVendors = new Set(['anthropic', 'zhipuai']);
-  const TYPED = ['glm-5.2', 'zhipuai/glm-5.2', 'anthropic/claude', 'nosuchvendor/glm-5.2', 'custom/glm-5.2', 'a/b/c'];
+  /** Not a list of cases that must pass — a spread of shapes the field can hold:
+   *  no vendor, a standard one, an unknown one, the escape hatch, extra
+   *  separators, and separators in the positions that parse to nothing. */
+  const HANDED = [
+    'glm-5.2',
+    'zhipuai/glm-5.2',
+    'anthropic/claude',
+    'nosuchvendor/glm-5.2',
+    'custom/glm-5.2',
+    'a/b/c',
+    '/leading',
+    'trailing/',
+  ];
+  /** Who offered the model, when anyone did: the picker and the escape name no
+   *  vendor, a models.dev match names its provider, standard or not. */
+  const OFFERED_BY = ['', 'zhipuai', 'nosuchvendor'];
 
-  for (const { what, mint } of PRODUCERS) {
-    it(`gives OpenCode an admissible provider segment from ${what}`, () => {
-      for (const typed of TYPED) {
-        const id = mint(typed, 'opencode', VENDORS);
-        // Parsed as the backend parses it: an id with no slash has no provider
-        // segment at all, which fails the check below for the same reason a
-        // wrong one does.
-        const slash = id.indexOf('/');
-        const provider = slash > 0 ? id.slice(0, slash) : '';
-        // The property, not a table of expected strings: whatever the segment
-        // is, the backend's own normalization has to agree it is already that
-        // segment — which is exactly the check `set_opencode_menu` applies.
-        expect(inferProvider(provider, VENDORS), `${what} produced ${id} from ${typed}`).toBe(provider);
-      }
-    });
+  /** Admissible as the backend decides it, not as this test decides it: whatever
+   *  provider segment the id carries, OpenCode's own normalization must already
+   *  agree it is that segment — the check `set_opencode_menu` applies. An id
+   *  with no slash carries no segment, which fails for the same reason a wrong
+   *  one does. */
+  const admissible = (id: string): boolean => {
+    const slash = id.indexOf('/');
+    const provider = slash > 0 ? id.slice(0, slash) : '';
+    return inferProvider(provider, VENDORS) === provider;
+  };
 
-    it(`leaves a backend without provider segments alone, from ${what}`, () => {
-      for (const typed of TYPED) {
-        expect(mint(typed, 'codex', VENDORS)).toBe(typed);
+  it('writes only ids OpenCode admits, whatever it is handed', () => {
+    for (const handed of HANDED) {
+      for (const vendor of OFFERED_BY) {
+        const written = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id;
+        expect(admissible(written), `${handed} from ${vendor || 'nobody'} was written as ${written}`).toBe(true);
       }
-    });
-  }
+    }
+  });
+
+  it('is settled by one pass, so resolving an already-resolved id changes nothing', () => {
+    for (const handed of HANDED) {
+      for (const vendor of OFFERED_BY) {
+        const once = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor);
+        // Why a producer may route a value through here twice — an editor that
+        // resolves at commit what the escape already resolved — without the
+        // prefix accumulating.
+        expect(draftWithId(once, once.id, 'opencode', VENDORS, vendor).id).toBe(once.id);
+      }
+    }
+  });
+
+  it('has nothing to prefix the blank floor with', () => {
+    // The one id that is not admissible and must still pass: a draft opens with
+    // no id at all, and 「required」 is the editor's answer to that, not a vendor.
+    expect(draftWithId(blankBackendModel(), '', 'opencode', VENDORS).id).toBe('');
+  });
+
+  it('leaves a backend without provider segments alone', () => {
+    for (const handed of HANDED) {
+      expect(draftWithId(blankBackendModel(), handed, 'codex', VENDORS).id).toBe(handed);
+    }
+  });
+
+  it('writes the id and nothing else', () => {
+    const row = model('kept', { display_name: 'Kept', context_window: 200_000, origin: 'models_dev' });
+    expect(draftWithId(row, 'glm-5.2', 'opencode', VENDORS)).toEqual({ ...row, id: 'custom/glm-5.2' });
+  });
 
   it('takes the offering provider when it is standard and falls back to custom when it is not', () => {
     const from = (providerId: string, vendors: StandardVendors) => applyModelsDevMatch(
@@ -292,12 +325,37 @@ describe('the id every producer mints', () => {
     expect(from('zhipuai', new Set())).toBe('custom/glm-5.2');
   });
 
-  it('has nothing to prefix an empty id with', () => {
-    expect(backendModelId('', 'opencode', VENDORS)).toBe('');
-  });
-
-  it('gives the escape a custom provider, because a query names no vendor', () => {
+  it('gives an id that names no vendor a custom provider', () => {
     expect(backendModelId('glm-5.2', 'opencode', VENDORS)).toBe('custom/glm-5.2');
+  });
+});
+
+/**
+ * What makes 「the only write」 true.
+ *
+ * The property above is about `draftWithId`; it says nothing about a producer
+ * that sets `id` itself. That is the defect that shipped twice, so it is checked
+ * mechanically rather than by review: outside the module that owns the rule,
+ * `backendModelId` may be read for display but never assigned to an `id`. A
+ * producer that reaches for the resolver directly is one that is about to write
+ * a draft field without the write that carries the rule.
+ */
+describe('the id chokepoint boundary', () => {
+  const OWNER = 'backendCatalog.ts';
+  /** `id:` or `id =` fed from the resolver, however the call is spelled or
+   *  wrapped — the assignment is the part that matters, not the formatting. */
+  const ASSIGNS_FROM_RESOLVER = /\bid\s*[:=]\s*[^;,\n]*\bbackendModelId\s*\(/;
+
+  it('lets no module outside the resolver’s own write the id from it', () => {
+    const offenders = readdirSync(join(process.cwd(), 'src/components/settings/models'), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name))
+      .filter((entry) => entry.name !== OWNER)
+      .filter((entry) => ASSIGNS_FROM_RESOLVER.test(
+        readFileSync(join(process.cwd(), 'src/components/settings/models', entry.name), 'utf8'),
+      ))
+      .map((entry) => entry.name);
+
+    expect(offenders).toEqual([]);
   });
 });
 

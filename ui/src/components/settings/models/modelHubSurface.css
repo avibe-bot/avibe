@@ -2030,7 +2030,14 @@
   border-top: 1px solid var(--border);
   background: var(--model-hub-wash-05);
 }
+/* The guard's evidence, at row scale. The body is the same one the Route dialog
+ * shows and brings its own parts, so this only has to stack them and set the
+ * scale — the dialog's own wrapper is sized for a dialog and would push the row
+ * open. Same gap as the question it sits in. */
 .model-hub-catalog-consequence {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   font-size: var(--model-hub-catalog-consequence-size);
   color: var(--foreground);
 }
@@ -2290,8 +2297,12 @@
   color: var(--muted);
 }
 
+/* Chips wrap rather than overflow: what the row displays is exactly what
+ * `expected_suppliers` sends, so a clipped strip would hide part of the
+ * agreement the user is confirming. The row grows only when they wrap. */
 .model-hub-picker-chips {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }

@@ -21,6 +21,7 @@ import type {
   BackendModelOrigin,
   ModelCandidate,
   ModelsDevMatch,
+  RouteHop,
 } from './types';
 
 /**
@@ -111,8 +112,8 @@ export const blankBackendModel = (): BackendModel => ({
  * `origin` comes from the candidate rather than from the group the row was
  * rendered in: the server names the creation path, and reading it back off the
  * group would be this client re-deriving something it was told. The cast is
- * transitional — `provider` joins `BackendModelOrigin` on the head that carries
- * the version bump, and it goes away when this branch rebases onto it.
+ * transitional — `provider` joins `BackendModelOrigin` on the backend head that
+ * ships this contract, and it goes away when this branch rebases onto it.
  */
 export const candidateBackendModel = (candidate: ModelCandidate): BackendModel => ({
   ...blankBackendModel(),
@@ -120,6 +121,33 @@ export const candidateBackendModel = (candidate: ModelCandidate): BackendModel =
   display_name: candidate.display_name,
   origin: candidate.origin as BackendModelOrigin,
   reasoning_efforts: [...candidate.reasoning_efforts],
+});
+
+/**
+ * One picked candidate, and the projection it was picked against.
+ *
+ * This is the agreement `expected_suppliers` states (C1): the id the user chose
+ * and the suppliers the picker displayed for it. One object, because two records
+ * of one agreement can disagree — a set of picked ids beside a map of
+ * expectations lets an id leave the set while its promise stays behind, and the
+ * next save then sends a projection nobody agreed to. Here, dropping a pick
+ * drops its promise with it, and there is no second place for a stale
+ * expectation to survive in.
+ */
+export type ChosenCandidate = {
+  candidate: ModelCandidate;
+  /** The suppliers on screen, in the shape the write sends them. */
+  expected_suppliers: RouteHop[];
+};
+
+/** A candidate paired with the suppliers displayed for it — the agreement, taken
+ *  from exactly what the row shows. */
+export const chosenCandidate = (candidate: ModelCandidate): ChosenCandidate => ({
+  candidate,
+  expected_suppliers: candidate.suppliers.map((supplier) => ({
+    source_id: supplier.source_id,
+    model_id: supplier.model_id,
+  })),
 });
 
 export type PickerGroups = {
@@ -209,6 +237,30 @@ export const backendModelId = (
 };
 
 /**
+ * The one write that gives a draft row its id.
+ *
+ * Every id this UI produces lands through here — a models.dev fill, the picker's
+ * 「add as a custom model」 seed, the 「use what I typed」 escape, and the row the
+ * editor finally commits. One chokepoint rather than a rule each producer
+ * remembers: a producer that skipped the resolver used to be a defect nobody
+ * could see until the backend refused the saved id, and the answer to 「which
+ * producers apply it?」 has to be 「there is no other way in」, not a list that a
+ * later producer falls off.
+ *
+ * The id field's own keystrokes are the one thing that does not come through
+ * here, and deliberately: while the user is typing, the value is theirs to
+ * finish. What they typed is resolved once, when `commit` turns it into a row —
+ * so the exemption cannot outlive the dialog.
+ */
+export const draftWithId = (
+  draft: BackendModel,
+  id: string,
+  backend: AgentBackend,
+  standardVendors: StandardVendors,
+  vendor = '',
+): BackendModel => ({ ...draft, id: backendModelId(id, backend, standardVendors, vendor) });
+
+/**
  * A models.dev match, poured into a draft — the id included.
  *
  * Choosing a suggestion is choosing a model, not decorating one: the row it
@@ -229,20 +281,25 @@ export const applyModelsDevMatch = (
   origin: BackendModelOrigin,
   backend: AgentBackend,
   standardVendors: StandardVendors,
-): BackendModel => ({
-  ...draft,
-  id: backendModelId(match.model_id, backend, standardVendors, match.provider_id),
-  display_name: match.display_name,
-  origin,
-  models_dev_id: match.models_dev_id,
-  context_window: match.context_window,
-  max_output_tokens: match.max_output_tokens,
-  input_modalities: [...match.input_modalities],
-  output_modalities: [...match.output_modalities],
-  supports_tools: match.supports_tools,
-  supports_reasoning: match.supports_reasoning,
-  reasoning_efforts: [...match.reasoning_efforts],
-});
+): BackendModel => draftWithId(
+  {
+    ...draft,
+    display_name: match.display_name,
+    origin,
+    models_dev_id: match.models_dev_id,
+    context_window: match.context_window,
+    max_output_tokens: match.max_output_tokens,
+    input_modalities: [...match.input_modalities],
+    output_modalities: [...match.output_modalities],
+    supports_tools: match.supports_tools,
+    supports_reasoning: match.supports_reasoning,
+    reasoning_efforts: [...match.reasoning_efforts],
+  },
+  match.model_id,
+  backend,
+  standardVendors,
+  match.provider_id,
+);
 
 const sameList = (left: readonly unknown[], right: readonly unknown[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);

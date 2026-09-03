@@ -18,14 +18,37 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
-import { EMPTY_PICKER_GROUPS, pickerGroups } from './backendCatalog';
-import type { PickerGroups } from './backendCatalog';
+import { chosenCandidate, EMPTY_PICKER_GROUPS, pickerGroups } from './backendCatalog';
+import type { ChosenCandidate, PickerGroups } from './backendCatalog';
 import { modelsApi } from './modelsApi';
 import type { AgentBackend, BackendModelCandidates, ModelCandidate } from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
 
-const NO_PICKS: ReadonlySet<string> = new Set();
+const NO_SEED: ReadonlySet<string> = new Set();
+const NO_PICKS: ReadonlyMap<string, ChosenCandidate> = new Map();
+
+/**
+ * The seed, re-agreed against the read that just arrived.
+ *
+ * A re-ask is a question about suppliers, so only today's answer can settle it:
+ * a seeded id the server still offers comes back picked with its current chips,
+ * and one it no longer offers is simply not picked. That withdrawal needs no
+ * sentence of its own — the row is absent and the confirmation counts one fewer,
+ * which is the same signal the user gets from unpicking it themselves, and
+ * nothing carries the old projection forward.
+ */
+const seededPicks = (
+  read: BackendModelCandidates,
+  seed: ReadonlySet<string>,
+): ReadonlyMap<string, ChosenCandidate> => {
+  const picks = new Map<string, ChosenCandidate>();
+  if (seed.size === 0) return picks;
+  for (const candidate of [...read.builtin, ...read.providers]) {
+    if (seed.has(candidate.id) && !picks.has(candidate.id)) picks.set(candidate.id, chosenCandidate(candidate));
+  }
+  return picks;
+};
 
 /** Id, display name, and supplier name — the three things a row shows are the
  *  three things a query searches, so nothing on screen is unsearchable and
@@ -43,11 +66,13 @@ export const BackendModelPickerDialog: React.FC<{
   listedIds: ReadonlySet<string>;
   /** Ids to open with already picked, for a re-ask: the server refused an
    *  addition because its suppliers had moved (C1), so the same models come back
-   *  selected with their current chips and one confirmation answers again. Keep
-   *  the value stable while the dialog is open — it is applied on open. */
+   *  selected with the chips they have now and one confirmation answers again.
+   *  Applied against the read, not before it — see `seededPicks`. Keep the value
+   *  stable while the dialog is open. */
   seedPicked?: ReadonlySet<string>;
   onCancel: () => void;
-  onAdd: (chosen: ModelCandidate[]) => void;
+  /** The picks, each carrying the projection its row displayed. */
+  onAdd: (chosen: ChosenCandidate[]) => void;
   /** Hand off to the custom-model editor, seeding the id with the query when the
    *  action the user pressed named it. */
   onCustom: (seedId: string) => void;
@@ -56,17 +81,21 @@ export const BackendModelPickerDialog: React.FC<{
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [candidates, setCandidates] = React.useState<BackendModelCandidates | null>(null);
   const [query, setQuery] = React.useState('');
-  const [picked, setPicked] = React.useState<ReadonlySet<string>>(new Set());
+  /** What the confirmation will send, held as the agreement itself rather than as
+   *  ids beside a projection kept somewhere else. */
+  const [chosen, setChosen] = React.useState<ReadonlyMap<string, ChosenCandidate>>(NO_PICKS);
   const readAttempt = React.useRef(0);
 
-  const load = React.useCallback(() => {
+  const load = React.useCallback((seed: ReadonlySet<string>) => {
     const attempt = ++readAttempt.current;
     setReadState('loading');
+    setChosen(NO_PICKS);
     void (async () => {
       try {
         const read = await modelsApi.getAgentModelCandidates(backend);
         if (attempt !== readAttempt.current) return;
         setCandidates(read);
+        setChosen(seededPicks(read, seed));
         setReadState('ready');
       } catch {
         if (attempt === readAttempt.current) setReadState('error');
@@ -74,13 +103,13 @@ export const BackendModelPickerDialog: React.FC<{
     })();
   }, [backend]);
 
+  const seed = seedPicked ?? NO_SEED;
   React.useEffect(() => {
     if (!open) return;
     setQuery('');
-    setPicked(seedPicked ?? NO_PICKS);
-    load();
+    load(seed);
     return () => { readAttempt.current += 1; };
-  }, [load, open, seedPicked]);
+  }, [load, open, seed]);
 
   const groups = candidates ? pickerGroups(candidates, listedIds) : EMPTY_PICKER_GROUPS;
   const needle = query.trim().toLowerCase();
@@ -94,10 +123,13 @@ export const BackendModelPickerDialog: React.FC<{
   };
   const nothingShown = shown.builtin.length === 0 && shown.providers.length === 0 && shown.listed.length === 0;
 
-  const toggle = (modelId: string) => {
-    setPicked((current) => {
-      const next = new Set(current);
-      if (!next.delete(modelId)) next.add(modelId);
+  /** Picking a row records the row: the id and the suppliers it is showing.
+   *  Unpicking deletes that one object, so there is no expectation left over to
+   *  promise something about a model the user just took off the list. */
+  const toggle = (candidate: ModelCandidate) => {
+    setChosen((current) => {
+      const next = new Map(current);
+      if (!next.delete(candidate.id)) next.set(candidate.id, chosenCandidate(candidate));
       return next;
     });
   };
@@ -107,7 +139,10 @@ export const BackendModelPickerDialog: React.FC<{
    *  offered rather than the order they were clicked. The count comes from the
    *  same list the confirmation sends, so a seeded id the current read no longer
    *  offers cannot be counted in a label that would then add fewer. */
-  const chosen = [...groups.builtin, ...groups.providers].filter((candidate) => picked.has(candidate.id));
+  const picks = [...groups.builtin, ...groups.providers].flatMap((candidate) => {
+    const pick = chosen.get(candidate.id);
+    return pick ? [pick] : [];
+  });
 
   const group = (key: 'builtin' | 'providers' | 'listed', label: string, rows: ModelCandidate[]) => (
     rows.length === 0 ? null : (
@@ -120,9 +155,9 @@ export const BackendModelPickerDialog: React.FC<{
           <PickerRow
             key={candidate.id}
             candidate={candidate}
-            picked={picked.has(candidate.id)}
+            picked={chosen.has(candidate.id)}
             listed={key === 'listed'}
-            onToggle={() => toggle(candidate.id)}
+            onToggle={() => toggle(candidate)}
           />
         ))}
       </div>
@@ -165,7 +200,7 @@ export const BackendModelPickerDialog: React.FC<{
             ) : readState === 'error' ? (
               <div className="model-hub-picker-empty">
                 <p>{t('settings.models.gateway.picker.unavailable')}</p>
-                <Button type="button" variant="outline" size="sm" onClick={load}>
+                <Button type="button" variant="outline" size="sm" onClick={() => load(seed)}>
                   {t('settings.models.gateway.retry')}
                 </Button>
               </div>
@@ -220,15 +255,15 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="brand"
               className="model-hub-catalog-control flex-1 rounded-md px-5 text-[12.5px] font-semibold sm:flex-none"
-              disabled={chosen.length === 0}
-              onClick={() => onAdd(chosen)}
+              disabled={picks.length === 0}
+              onClick={() => onAdd(picks)}
             >
               {/* The empty state borrows the catalog's own action label rather
                   than a count of zero, so the footer keeps its width and the
                   button keeps naming what it does. */}
-              {chosen.length === 0
+              {picks.length === 0
                 ? t('settings.models.gateway.catalog.add')
-                : t('settings.models.gateway.picker.confirm', { count: chosen.length })}
+                : t('settings.models.gateway.picker.confirm', { count: picks.length })}
             </Button>
           </div>
         </DialogFooter>
@@ -283,7 +318,7 @@ const PickerRow: React.FC<{
         <span className="model-hub-picker-chips shrink-0">
           {candidate.suppliers.map((supplier) => (
             <span
-              key={`${supplier.source_id} ${supplier.model_id}`}
+              key={`${supplier.source_id}\0${supplier.model_id}`}
               className="model-hub-pill model-hub-fill-0a border border-border text-muted"
             >
               {supplier.source_name}

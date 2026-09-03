@@ -6,12 +6,19 @@ import { cn } from '@/lib/utils';
 import { GuardGapList } from './GuardGapList';
 import type { RouteHopRef, SupplyGap } from './types';
 
+/**
+ * What a guarded mutation would take with it.
+ *
+ * The two arrays travel together because the guard reports them together, the
+ * confirmation shows both, and the forced retry echoes both: a caller holding
+ * them apart can echo one without the other, which claims a confirmation the
+ * user was never shown. Named here, beside the body that renders them, so a
+ * surface that has to CARRY a plan before showing it uses the same shape.
+ */
+export type GuardPlan = { hops: RouteHopRef[]; gaps: SupplyGap[] };
+
 /** The shared evidence body for every guarded Model Hub mutation and its result. */
-export const GuardImpact: React.FC<{
-  hops: RouteHopRef[];
-  gaps: SupplyGap[];
-  committed?: boolean;
-}> = ({ hops, gaps, committed = false }) => {
+export const GuardImpact: React.FC<GuardPlan & { committed?: boolean }> = ({ hops, gaps, committed = false }) => {
   const { t } = useTranslation();
   return (
     <>

@@ -955,7 +955,6 @@
           "edit": "Edit {{model}}",
           "remove": "Remove {{model}}",
           "reorder": "Reorder {{model}}",
-          "removeConsequence": "Also removes its route: {{hops}}",
           "removeConfirm": "Remove",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",

@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
-import { applyModelsDevMatch, backendModelId, blankBackendModel, retireModelsDevMatch } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
 import type { StandardVendors } from './menus/identifiers';
@@ -184,11 +184,16 @@ export const BackendModelEditorDialog: React.FC<{
       return;
     }
     // A seeded add opens with the query already running: the user typed it in
-    // the picker, and asking for it again would be the surface forgetting.
-    const next = model ?? { ...blankBackendModel(), id: seedId ?? '' };
+    // the picker, and asking for it again would be the surface forgetting. The
+    // id it lands as goes through the one chokepoint like every other produced
+    // id — a seed that skipped it would be an id the backend refuses, arriving
+    // by the one route nobody watches. The query stays what was typed: it is a
+    // models.dev search, and searching for the resolved id would search for the
+    // vendor prefix the resolver just added.
+    const next = model ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend, standardVendors);
     seed(next);
-    setLookup(model === null ? next.id.trim() : '');
-  }, [model, open, seed, seedId]);
+    setLookup(model === null ? seedId?.trim() ?? '' : '');
+  }, [backend, model, open, seed, seedId, standardVendors]);
 
   /**
    * The typeahead: what has been typed so far, answered by models.dev.
@@ -236,6 +241,20 @@ export const BackendModelEditorDialog: React.FC<{
   const context = parseTokens(contextText);
   const output = parseTokens(outputText);
   const trimmedId = draft.id.trim();
+  /**
+   * The row as it would be stored.
+   *
+   * Add mode resolves the id through the one chokepoint here, so the rules below
+   * and the row `commit` sends judge and write the same value — the one the
+   * backend receives. Checking the raw box instead would measure a length and a
+   * collision against an id that does not exist yet: `custom/` is part of what
+   * gets stored, and a row already holding `custom/foo` collides with a freshly
+   * typed `foo`.
+   *
+   * An edit mints nothing. The id came from the server and is held read-only, so
+   * resolving it again would rename a saved row whose id predates the rule.
+   */
+  const resolved = creating ? draftWithId(draft, trimmedId, backend, standardVendors) : draft;
   // Every id rule is a rule about what the user may type, and only add mode lets
   // them type it — an edit shows the id read-only. Judging a value the dialog
   // itself locks is what made a persisted row whose id predates the length
@@ -245,9 +264,9 @@ export const BackendModelEditorDialog: React.FC<{
     ? null
     : trimmedId === ''
       ? 'required'
-      : trimmedId.length > BACKEND_MODEL_ID_MAX_LENGTH
+      : resolved.id.length > BACKEND_MODEL_ID_MAX_LENGTH
         ? 'tooLong'
-        : takenIds.has(trimmedId)
+        : takenIds.has(resolved.id)
           ? 'duplicate'
           : null;
   const valid = idError === null && context.ok && output.ok;
@@ -292,7 +311,7 @@ export const BackendModelEditorDialog: React.FC<{
    *  earlier fill still owned was retired by `changeId` the moment they typed
    *  again, and what survived that is what they typed themselves. */
   const takeLookupAsId = () => {
-    patch({ id: backendModelId(lookup.trim(), backend, standardVendors) });
+    setDraft((current) => draftWithId(current, lookup.trim(), backend, standardVendors));
     setLookup('');
   };
 
@@ -366,8 +385,7 @@ export const BackendModelEditorDialog: React.FC<{
     setSubmitted(true);
     if (!valid) return;
     onCommit({
-      ...draft,
-      id: trimmedId,
+      ...resolved,
       // An empty box is 「no name」, not an empty name: the schema takes null and
       // the list falls back to the id.
       display_name: nameText.trim() || null,

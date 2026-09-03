@@ -5,6 +5,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import type { ChosenCandidate } from './backendCatalog';
 import { BackendModelPickerDialog } from './BackendModelPickerDialog';
 import { modelsApi } from './modelsApi';
 import type { BackendModelCandidates, ModelCandidate } from './types';
@@ -113,7 +114,17 @@ describe('BackendModelPickerDialog', () => {
     // Group order, not click order: additions land where the picker offered
     // them, so the list the user gets back reads the way the one they picked from
     // did.
-    expect(onAdd.mock.calls[0][0].map((entry: ModelCandidate) => entry.id)).toEqual(['gpt-6', 'glm-5.2']);
+    const chosen: ChosenCandidate[] = onAdd.mock.calls[0][0];
+    expect(chosen.map((entry) => entry.candidate.id)).toEqual(['gpt-6', 'glm-5.2']);
+    // The property behind every one of them, whatever was picked and in whatever
+    // order: what a pick promises is the projection of the suppliers its own row
+    // displayed. Not a fixture of expected pairs — derived from the candidate the
+    // object carries, so the two can never describe different models.
+    for (const entry of chosen) {
+      expect(entry.expected_suppliers).toEqual(
+        entry.candidate.suppliers.map(({ source_id, model_id }) => ({ source_id, model_id })),
+      );
+    }
   });
 
   it('refuses to confirm nothing, and names what it would do instead', async () => {
@@ -226,7 +237,15 @@ describe('BackendModelPickerDialog', () => {
     expect(screen.getByRole('button', { name: 'Add 1 model' })).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
-    expect(onAdd.mock.calls[0][0].map((entry: ModelCandidate) => entry.id)).toEqual(['glm-5.2']);
+    // One object per pick, carrying exactly the suppliers its row displayed —
+    // the agreement and the id it is about cannot come apart. And the seeded id
+    // this read no longer offers is not in it at all: a withdrawn candidate is
+    // dropped from the selection, never re-sent under an expectation nobody
+    // could see (C1).
+    expect(onAdd.mock.calls[0][0]).toEqual([{
+      candidate: expect.objectContaining({ id: 'glm-5.2' }),
+      expected_suppliers: [{ source_id: 'src_b', model_id: 'glm-5.2' }],
+    }]);
   });
 
   it('cancels without choosing anything', async () => {
