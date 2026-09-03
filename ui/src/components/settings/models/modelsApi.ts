@@ -17,15 +17,19 @@ import type {
   AgentSupply,
   ApiKeySourceCreate,
   ApiKeySourceObservation,
+  BackendModelCandidates,
   BackendModelsPut,
   CredentialReplace,
   CustomModelCreate,
   MigrationApplyResult,
   MigrationScan,
+  ModelCandidate,
+  ModelCandidateSupplier,
   ModelsDevMatch,
   OAuthFlow,
   ProbeResult,
   ResolutionEvent,
+  RouteHop,
   RouteHopRef,
   RuntimeDependency,
   Source,
@@ -133,6 +137,9 @@ export type ModelsApi = {
    *  the order, the server-derived `locked`/`routeable`, and any concurrent
    *  edit this caller never saw. */
   putAgentModels(backend: AgentBackend, body: BackendModelsPut): Promise<AgentSupply>;
+  /** Everything the picker can offer for this backend, already grouped, deduped
+   *  and ordered by the server (C4). A pure read. */
+  getAgentModelCandidates(backend: AgentBackend): Promise<BackendModelCandidates>;
   /** Normalized models.dev candidates for a free-text query. A pure read: it
    *  persists nothing, so a fill the user abandons leaves no trace. */
   searchModelsDev(query: string, signal?: AbortSignal): Promise<ModelsDevMatch[]>;
@@ -199,6 +206,22 @@ export class ApiCallError extends Error {
    * each client-invented transport summary as false at its construction site.
    */
   serverNamed: boolean;
+  /**
+   * A stale-candidate refusal's `changed` map, keyed by added model id.
+   *
+   * Its own field, and deliberately not one of the two above: a guard refusal
+   * reports what a write WOULD have destroyed and is answered by echoing that
+   * plan back with `force`. This one destroys nothing and interrupts nothing —
+   * the save simply did not happen, because the suppliers the picker displayed
+   * are no longer the ones the server would seed. Forcing it would commit the
+   * projection the user never saw, so the answer is the opposite: show these
+   * suppliers and ask again. Collapsed into `wouldRemoveHops`, a caller could
+   * not tell 「confirm this loss」 from 「re-read and re-ask」.
+   *
+   * `{}` on every other code, so a call site can read it without first proving
+   * which error it has.
+   */
+  changedSuppliers: Record<string, RouteHop[]>;
   /** HTTP status observed by this client. Absent when no response arrived. */
   responseStatus?: number;
   /** Safe, structured add-time observation returned with a rejected create. */
@@ -212,6 +235,7 @@ export class ApiCallError extends Error {
     wouldRemoveHops: RouteHopRef[] = [],
     responseStatus?: number,
     observation?: SourceObservation,
+    changed: Record<string, RouteHop[]> = {},
   ) {
     super(detail || code);
     this.name = 'ApiCallError';
@@ -221,6 +245,7 @@ export class ApiCallError extends Error {
     this.wouldInterrupt = wouldInterrupt;
     this.interrupted = interrupted;
     this.wouldRemoveHops = wouldRemoveHops;
+    this.changedSuppliers = changed;
     this.responseStatus = responseStatus;
     this.observation = observation;
   }
@@ -240,10 +265,103 @@ const supplyGaps = (raw: unknown): SupplyGap[] =>
         }))
     : [];
 
+const candidateSuppliers = (raw: unknown): ModelCandidateSupplier[] =>
+  Array.isArray(raw)
+    ? raw.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object') return [];
+        const row = entry as Record<string, unknown>;
+        return typeof row.source_id === 'string' && typeof row.model_id === 'string'
+          ? [{
+              source_id: row.source_id,
+              model_id: row.model_id,
+              // The display name a chip renders. Falls back to the id rather than
+              // to an empty chip: an unnamed supplier is still one the user must
+              // be able to recognize.
+              source_name: typeof row.source_name === 'string' && row.source_name
+                ? row.source_name
+                : row.source_id,
+            }]
+          : [];
+      })
+    : [];
+
+type CandidateOrigin = ModelCandidate['origin'];
+/** The creation paths a candidate may state. A runtime set, because the type it
+ *  mirrors erases — and asserted equal to the schema's own enum in
+ *  `backendModelContract.test.ts`, so a path the contract gains fails a test
+ *  rather than being quietly read as the group's fallback. */
+export const CANDIDATE_ORIGINS: readonly CandidateOrigin[] = ['builtin', 'provider', 'models_dev', 'manual'];
+
+/** The groups the server names as a removed row's way back (C4). A value it
+ *  does not state is not a group, and `null` is a value it states. */
+const REENTRY_GROUPS: readonly ('builtin' | 'providers')[] = ['builtin', 'providers'];
+
+/** What the server says would offer this id again if it left the menu, read
+ *  only when the server says it. Absent stays absent rather than becoming
+ *  `null`: the two mean the same thing to the picker, and inventing a stated
+ *  answer out of an unstated one is how a client starts deriving the field. */
+const reentryGroup = (raw: Record<string, unknown>): Pick<ModelCandidate, 'group_if_removed'> => {
+  if (!('group_if_removed' in raw)) return {};
+  const stated = raw.group_if_removed;
+  if (stated === null) return { group_if_removed: null };
+  return REENTRY_GROUPS.includes(stated as 'builtin' | 'providers')
+    ? { group_if_removed: stated as 'builtin' | 'providers' }
+    : {};
+};
+
+/**
+ * One candidate group, read defensively.
+ *
+ * `fallbackOrigin` is the group's own creation path (C2), used only when the
+ * server omits `origin`. It is not a guess about the model: the group a
+ * candidate arrives in IS its creation path, so the two can never disagree.
+ */
+const modelCandidates = (raw: unknown, fallbackOrigin: CandidateOrigin): ModelCandidate[] =>
+  Array.isArray(raw)
+    ? raw.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object') return [];
+        const row = entry as Record<string, unknown>;
+        if (typeof row.id !== 'string' || !row.id) return [];
+        return [{
+          id: row.id,
+          display_name: typeof row.display_name === 'string' && row.display_name ? row.display_name : null,
+          reasoning_efforts: Array.isArray(row.reasoning_efforts)
+            ? row.reasoning_efforts.filter((effort): effort is string => typeof effort === 'string')
+            : [],
+          suppliers: candidateSuppliers(row.suppliers),
+          origin: CANDIDATE_ORIGINS.includes(row.origin as CandidateOrigin)
+            ? row.origin as CandidateOrigin
+            : fallbackOrigin,
+          ...reentryGroup(row),
+        }];
+      })
+    : [];
+
 const routeHopRefs = (raw: unknown): RouteHopRef[] =>
   Array.isArray(raw)
     ? raw.filter((hop): hop is RouteHopRef => Boolean(hop) && typeof hop === 'object')
     : [];
+
+/** The `changed` map of a stale-candidate refusal: the suppliers the server
+ *  matched at commit time, keyed by the added model id whose displayed
+ *  projection they disagree with. Ids the caller never listed are absent, and an
+ *  entry may be empty — 「nothing supplies this any more」 is itself the change
+ *  the user has to see. */
+const changedSuppliers = (raw: unknown): Record<string, RouteHop[]> => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const changed: Record<string, RouteHop[]> = {};
+  for (const [modelId, hops] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(hops)) continue;
+    changed[modelId] = hops.flatMap((hop) => {
+      if (!hop || typeof hop !== 'object') return [];
+      const row = hop as Record<string, unknown>;
+      return typeof row.source_id === 'string' && typeof row.model_id === 'string'
+        ? [{ source_id: row.source_id, model_id: row.model_id }]
+        : [];
+    });
+  }
+  return changed;
+};
 
 /**
  * The one reader every call site uses instead of casting a caught `unknown`.
@@ -263,6 +381,7 @@ export const apiFailure = (
   wouldInterrupt: SupplyGap[];
   interrupted: SupplyGap[];
   wouldRemoveHops: RouteHopRef[];
+  changedSuppliers: Record<string, RouteHop[]>;
   responseStatus?: number;
   observation?: SourceObservation;
 } | null =>
@@ -274,6 +393,7 @@ export const apiFailure = (
         wouldInterrupt: err.wouldInterrupt,
         interrupted: err.interrupted,
         wouldRemoveHops: err.wouldRemoveHops,
+        changedSuppliers: err.changedSuppliers,
         responseStatus: err.responseStatus,
         observation: err.observation,
       }
@@ -324,6 +444,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
             typeof envelope.observation === 'object' && envelope.observation !== null
               ? envelope.observation as SourceObservation
               : undefined,
+            changedSuppliers(envelope.changed),
           );
         }
         return payload as T;
@@ -475,6 +596,18 @@ export const modelsApi: ModelsApi = {
   probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
   putAgentModels: (backend, body) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/models`, jsonInit('PUT', body)).then((r) => (r.agent ?? r) as AgentSupply),
+  getAgentModelCandidates: (backend) => call<{ candidates?: Record<string, unknown> }>(
+    `/api/models/agents/${backend}/models/candidates`,
+  ).then((r) => ({
+    builtin: modelCandidates(r.candidates?.builtin, 'builtin'),
+    providers: modelCandidates(r.candidates?.providers, 'provider'),
+    // An in-list row's origin is whatever it was created as, so this group has
+    // no creation path of its own to fall back to. `manual` is the floor a row
+    // with no stated origin already carries (`blankBackendModel`), and nothing
+    // reads it here: these rows are disabled, and only a pickable candidate is
+    // ever poured into a draft.
+    in_list: modelCandidates(r.candidates?.in_list, 'manual'),
+  })),
   searchModelsDev: (query, signal) => call<{ matches: ModelsDevMatch[] }>(
     `/api/models/catalog/models-dev?query=${encodeURIComponent(query)}`,
     { signal },

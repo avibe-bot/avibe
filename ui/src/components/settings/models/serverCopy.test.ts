@@ -265,12 +265,20 @@ describe('tierEditRefusedAsManaged', () => {
 
 describe('modelsDevFillFailureKey', () => {
   it('separates an upstream catalog outage from a lookup that simply failed', () => {
-    // The one cause that is not about this machine, and the one where retrying is
-    // the wrong advice: every field the fill would have set is typeable by hand.
+    // Two different states of the same typeahead row, so the two keys must be
+    // two sentences in every bundle: 「the catalog is down」 is not 「this lookup
+    // failed」, and only the first one means retrying is the wrong advice. The
+    // property is that they stay distinguishable and neither renders as a key —
+    // the wording itself belongs to the copy table, not to this test.
     const down = modelsDevFillFailureKey('modelHub.errors.models_dev_unavailable');
+    const failed = modelsDevFillFailureKey(undefined);
     expect(down).toBe('settings.models.gateway.modelEditor.fillUnavailable');
-    expect(t('en')(down)).toMatch(/by hand/i);
-    expect(t('zh')(down)).toContain('手动填写');
+    for (const lng of ['en', 'zh'] as const) {
+      const outage = t(lng)(down) as string;
+      expect(outage).not.toBe('');
+      expect(outage).not.toBe(down);
+      expect(outage).not.toBe(t(lng)(failed) as string);
+    }
   });
 
   it('keeps every other cause on the plain unreachable line', () => {

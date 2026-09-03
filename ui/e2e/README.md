@@ -16,6 +16,12 @@ counterpart; if the pytest lane lands an orchestration that runs this suite and
 records its result, that runner — not the spec files — is what belongs in the
 catalog.
 
+A spec whose surface has no §3 family carries no id at all and states the
+property in its title instead — `model-list.spec.ts` is one: §3 covers routing,
+sources, guards and usage, but not the model list a backend routes. Inventing a
+letter here would put a label in the spec titles that the plan cannot resolve,
+so the id waits for the plan.
+
 ## What it talks to
 
 | Variable | Default | What it is |
@@ -297,3 +303,17 @@ Recorded here so the gaps are visible rather than merely absent:
   run: the copy is reached by intercepting that one PATCH, and Chinese is a
   config-GET rewrite for that page only — the instance's language is never
   saved.
+- **A saved model list, and the routes an addition seeds.** `model-list.spec.ts`
+  adds and then cancels, because the list it opens is the instance's own and a
+  committed row changes what that backend offers its users — the suite owns its
+  sources outright, but not a backend's model menu. So "the addition persists"
+  and "the supplier chips a candidate was shown with are the hops its route is
+  seeded with" are asserted where a disposable list can be saved and its chains
+  read back, not here.
+- **The models a backend can be given.** The picker's built-in and provider
+  groups are one server read
+  (`GET /api/models/agents/<backend>/models/candidates`). An instance that does
+  not serve it skips that spec — an environmental fact, like a stopped runtime.
+  Note that the status cannot establish it: the UI server's static catch-all
+  answers an unmatched extension-less GET with `index.html` at 200, so
+  `HubApi.servesModelCandidates` judges the payload instead.

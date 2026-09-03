@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { blankBackendModel } from '../components/settings/models/backendCatalog';
+import { blankBackendModel, candidateBackendModel } from '../components/settings/models/backendCatalog';
 import type { AgentSupply, BackendModel } from '../components/settings/models/types';
 import { ApiError, type ApiContextType } from '../context/ApiContext';
 import { fetchBackendModels, loadBackendModelsWithRefresh, modelOptionLabel } from './backendModels';
@@ -162,6 +162,38 @@ describe('fetchBackendModels in gateway mode', () => {
     for (const id of result.models) {
       expect(resolveEffortOptions('codex', id, result.reasoningOptions)).toEqual([]);
     }
+  });
+
+  it('keeps the efforts a picked candidate arrived with, all the way to the Route editor', async () => {
+    // Built the way the picker builds it — a checkbox, no editor — so this is
+    // the whole path from 「the server proposed these tiers」 to 「the Route
+    // editor offers them」. A floor that answered `supports_reasoning: false`
+    // on the row's behalf broke it here: the projection reads that as 「this
+    // model does not reason」 and suppresses the very efforts the row was
+    // created with, leaving a reasoning model with nothing to select.
+    const picked = candidateBackendModel({
+      id: 'glm-5.2',
+      display_name: 'GLM 5.2',
+      reasoning_efforts: ['low', 'high'],
+      suppliers: [{ source_id: 'src_relay0001', source_name: 'relay.example', model_id: 'glm-5.2-air' }],
+      origin: 'provider',
+    });
+    const api = {
+      readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue(
+        hubAgent('codex', { catalog_models: [picked] }),
+      ),
+      codexModels: vi.fn(),
+    } as unknown as ApiContextType;
+
+    // The row states no capability at all: `null` leaves the backend's own
+    // default in force, which is the only honest reading of a row nobody
+    // opened.
+    expect(picked.supports_reasoning).toBeNull();
+    expect(picked.supports_tools).toBeNull();
+
+    const result = await fetchBackendModels(api, 'codex');
+
+    expect(resolveEffortOptions('codex', 'glm-5.2', result.reasoningOptions)).toEqual(['low', 'high']);
   });
 
   it('treats model ids as data rather than Object properties', async () => {

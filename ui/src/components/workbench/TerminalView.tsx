@@ -17,6 +17,7 @@ import {
 } from '../../lib/terminalFontSize';
 import { IS_APPLE } from '../../lib/platform';
 import { openLinkInNewContext } from '../../lib/pwaNavigation';
+import { isComposingKey } from '@/lib/imeComposition';
 import { useLatestRef } from '@/lib/useLatestRef';
 import {
   REMOTE_AUTH_STATE_EVENT,
@@ -503,7 +504,7 @@ export const TerminalView: React.FC<{
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     // Mid-IME-composition (e.g. a CJK candidate), Enter/Escape belong to the IME — accepting or
     // cancelling the candidate — not to search navigation. Let them through untouched.
-    if (e.nativeEvent.isComposing) return;
+    if (isComposingKey(e)) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       runFind(e.shiftKey ? 'prev' : 'next');

@@ -205,10 +205,81 @@ export type BackendModel = {
 
 /** `baseline` is the last full list this caller observed; `models` is its
  *  desired replacement. The server applies the difference to the latest saved
- *  list, so a concurrent editor's unrelated row survives. */
+ *  list, so a concurrent editor's unrelated row survives.
+ *
+ *  The guarded tail (v2 C3) is the same echo-the-plan protocol every other
+ *  destructive supply mutation uses: a removal that would take route hops with
+ *  it is refused once with the plan, and only a retry carrying that exact plan
+ *  back executes. Absent on a save that removes nothing. */
 export type BackendModelsPut = {
   baseline: BackendModel[];
   models: BackendModel[];
+  force?: true;
+  would_remove_hops?: RouteHopRef[];
+  would_interrupt?: SupplyGap[];
+  /** What the picker SHOWED as each added id's suppliers, keyed by that id (v2
+   *  C1). The server matches an addition once, at commit time, against inventory
+   *  that may have moved since the candidates read; this states which projection
+   *  the user actually agreed to, so a changed one is refused (`409
+   *  candidate_suppliers_changed`, nothing committed) instead of seeding a route
+   *  the picker never displayed. Only ids added along a path that displayed
+   *  chips carry an entry — a hand-written custom row promised nothing. */
+  expected_suppliers?: Record<string, RouteHop[]>;
+};
+
+/** One provider that supplies a candidate's id, as the server's own
+ *  `matching-v1` projection names it — so a Claude alias hop reads here exactly
+ *  as it will be seeded. `model_id` is the upstream id, which may differ from
+ *  the candidate id it answers for. */
+export type ModelCandidateSupplier = {
+  source_id: string;
+  source_name: string;
+  model_id: string;
+};
+
+/** One model the picker can add, projected by the server (v2 C4).
+ *
+ *  Every rule that used to be re-derived in the browser — identity dedupe,
+ *  eligibility, Source order, alias matching, built-in snapshot merging — is
+ *  already applied here. The client renders the groups it is given, filters them
+ *  by the query, and copies `display_name` / `reasoning_efforts` / `origin` into
+ *  the catalog draft on selection (C2). */
+export type ModelCandidate = {
+  id: string;
+  display_name: string | null;
+  reasoning_efforts: string[];
+  /** In the backend's Source order. Empty is meaningful: nothing supplies this
+   *  id yet, so adding it starts with an empty route. */
+  suppliers: ModelCandidateSupplier[];
+  /** The creation path a pick records (C2). */
+  origin: BackendModelOrigin;
+  /** Where the server would offer this id if it left the menu (C4). Set on
+   *  `in_list` candidates only, because they are the only ones already in it —
+   *  `null` means nowhere, which is a real answer. It exists because `origin`
+   *  cannot answer this: `origin` is the path a row was created by, not what
+   *  supplies it now.
+   *
+   *  Optional because the schema leaves it optional: an `in_list` candidate may
+   *  omit it, and the reading of an absent answer is the same as a `null` one —
+   *  nowhere, reachable through `Add custom model…`. Never inferred from
+   *  anything else on the row. */
+  group_if_removed?: 'builtin' | 'providers' | null;
+};
+
+/** The picker's one read. Groups are rendered in this order and a candidate id
+ *  appears in exactly one of them. `builtin` is empty for a backend with no
+ *  built-in list of its own (OpenCode).
+ *
+ *  `in_list` is the same projection over the rows the menu ALREADY holds, and it
+ *  is what makes the search-only 「Already in the list」 group answerable: the
+ *  catalog row on its own knows neither which Sources supply it nor under what
+ *  upstream id, so a search for a provider's name could not find a model that
+ *  provider serves once it had been added, and its disabled row could only show
+ *  chips this client had guessed. */
+export type BackendModelCandidates = {
+  builtin: ModelCandidate[];
+  providers: ModelCandidate[];
+  in_list: ModelCandidate[];
 };
 
 /** One normalized models.dev candidate. Metadata only: choosing it fills the
@@ -228,6 +299,10 @@ export type ModelsDevMatch = {
   supports_tools: boolean | null;
   supports_reasoning: boolean | null;
   reasoning_efforts: string[];
+  /** Whether this provider is the model's own vendor rather than an aggregator
+   *  reselling it (v2 C7). Optional because it postdates the shipped shape: a
+   *  server that does not state it leaves the ranking to the order it served. */
+  first_party?: boolean;
 };
 
 /** Why a source cannot serve this backend at all. A closed vocabulary — a new

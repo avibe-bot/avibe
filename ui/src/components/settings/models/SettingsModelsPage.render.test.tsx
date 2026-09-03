@@ -6,8 +6,10 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
+import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
@@ -178,18 +180,27 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(initial);
     vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(saved);
+    // Nobody offers this id, so it arrives through the picker's own way out to
+    // the editor — the only path left for a model the server cannot propose.
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({ builtin: [], providers: [], in_list: [] });
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
 
     render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <SettingsModelsPage />
-        </I18nextProvider>
-      </ToastProvider>,
+      <InstanceAuthorizationContext.Provider
+        value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}
+      >
+        <ToastProvider>
+          <I18nextProvider i18n={i18n}>
+            <SettingsModelsPage />
+          </I18nextProvider>
+        </ToastProvider>
+      </InstanceAuthorizationContext.Provider>,
     );
 
     await userEvent.click(await screen.findByRole('button', { name: /^Manage models$|^管理模型$/i }));
-    await userEvent.click(await screen.findByRole('button', { name: /^Add model$|^添加模型$/i }));
-    await userEvent.type(screen.getByLabelText(/^Backend model ID$|^后端模型 ID$/i), addedId);
+    await userEvent.click(await screen.findByRole('button', { name: /^Add models$|^添加模型$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Add custom model…$|^添加自定义模型…$/i }));
+    await userEvent.type(await screen.findByLabelText(/^Model$|^模型$/i), addedId);
     await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 

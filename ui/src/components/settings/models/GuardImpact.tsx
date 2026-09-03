@@ -6,12 +6,45 @@ import { cn } from '@/lib/utils';
 import { GuardGapList } from './GuardGapList';
 import type { RouteHopRef, SupplyGap } from './types';
 
+/**
+ * What a guarded mutation would take with it.
+ *
+ * The two arrays travel together because the guard reports them together, the
+ * confirmation shows both, and the forced retry echoes both: a caller holding
+ * them apart can echo one without the other, which claims a confirmation the
+ * user was never shown. Named here, beside the body that renders them, so a
+ * surface that has to CARRY a plan before showing it uses the same shape.
+ */
+export type GuardPlan = { hops: RouteHopRef[]; gaps: SupplyGap[] };
+
+/**
+ * What a caller can show BEFORE the guard has spoken.
+ *
+ * `gaps: null` is 「nobody has said」, and it is not `[]`. Whether a removal
+ * strands an Agent is the guard's answer — it depends on supply this client
+ * cannot see — so a client that answers `[]` on its own has told the user
+ * 「another source is available」 during the one confirmation that matters, on no
+ * authority at all. A picture says which hops it can see and stays silent about
+ * the rest; only a `GuardPlan`, whose halves both come from the server, may
+ * carry a statement about interruption.
+ */
+export type GuardPicture = Omit<GuardPlan, 'gaps'> & { gaps: SupplyGap[] | null };
+
 /** The shared evidence body for every guarded Model Hub mutation and its result. */
-export const GuardImpact: React.FC<{
-  hops: RouteHopRef[];
-  gaps: SupplyGap[];
+export const GuardImpact: React.FC<GuardPicture & {
   committed?: boolean;
-}> = ({ hops, gaps, committed = false }) => {
+  /**
+   * Source id → that Source's own name, for the callers that can resolve one.
+   *
+   * A hop goes THROUGH a supplier, and 「no hidden mappings」 means the
+   * confirmation says which — otherwise a user forcing a removal reads which
+   * position disappears without reading whose it was. Only a caller holding the
+   * page's Sources can answer that, so it is asked for rather than looked up
+   * here, and an id it cannot name leaves the row exactly as it was: a raw
+   * `src_…` in front of the model would name nothing while looking like it did.
+   */
+  sourceNames?: Readonly<Record<string, string>>;
+}> = ({ hops, gaps, committed = false, sourceNames }) => {
   const { t } = useTranslation();
   return (
     <>
@@ -22,30 +55,47 @@ export const GuardImpact: React.FC<{
             <span>{t('settings.models.guard.count', { count: hops.length })}</span>
           </div>
           <div className="model-hub-guard-list">
-            {hops.map((hop) => (
-              <div
-                key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`}
-                className="model-hub-guard-hop"
-              >
-                <span className="min-w-0 flex-1">
-                  <strong>
-                    {t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}
-                  </strong>
-                  <span>{hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span>
-                </span>
-              </div>
-            ))}
+            {hops.map((hop) => {
+              const source = sourceNames?.[hop.source_id];
+              return (
+                <div
+                  key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`}
+                  className="model-hub-guard-hop"
+                >
+                  <span className="min-w-0 flex-1">
+                    <strong>
+                      {t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}
+                    </strong>
+                    {/* The supplier and the model it serves, in the Agent card's
+                        own mapping copy rather than a second string that would
+                        say the same thing: one mapping reads one way wherever
+                        the Model Hub shows it. */}
+                    <span>{source ? t('settings.models.gateway.row.current', { source, model: hop.model_id }) : hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span>
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
-      <GuardGapList
-        gaps={gaps}
-        labelKey={committed ? 'settings.models.guard.result.gapLabel' : undefined}
-      />
-      <p className={cn('model-hub-guard-hint', gaps.length > 0 && 'text-destructive-ink')}>
-        <Info aria-hidden />
-        {t(`settings.models.guard.${committed ? 'result.' : ''}hint.${gaps.length > 0 ? 'interrupt' : 'safe'}`)}
-      </p>
+      {/* Both of these are statements ABOUT the gaps — the list names them, and
+          the hint below says whether there are any — so an unstated gap list
+          renders neither. Silence is the only honest reading: 「safe」 would be
+          this client vouching for supply it cannot see, and 「interrupt」 would
+          invent a consequence. The hops above are unaffected; they are what the
+          caller does know. */}
+      {gaps !== null && (
+        <>
+          <GuardGapList
+            gaps={gaps}
+            labelKey={committed ? 'settings.models.guard.result.gapLabel' : undefined}
+          />
+          <p className={cn('model-hub-guard-hint', gaps.length > 0 && 'text-destructive-ink')}>
+            <Info aria-hidden />
+            {t(`settings.models.guard.${committed ? 'result.' : ''}hint.${gaps.length > 0 ? 'interrupt' : 'safe'}`)}
+          </p>
+        </>
+      )}
     </>
   );
 };

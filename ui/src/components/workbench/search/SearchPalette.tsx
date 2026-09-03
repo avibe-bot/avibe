@@ -5,6 +5,7 @@ import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { AlertCircle, Loader2, Search } from 'lucide-react';
 
 import { appTabHref, tabModifierLabel, type LaunchModifiers } from '../../../apps/appLaunch';
+import { isComposingKey } from '@/lib/imeComposition';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
@@ -105,9 +106,9 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
     // While an IME composition is active (Chinese/Japanese/Korean candidate
     // selection), ArrowUp/Down/Enter belong to the IME — navigating candidates
     // and committing the chosen one. Intercepting them would steal those keys
-    // from the input. ``keyCode === 229`` is the legacy IME-in-progress signal
-    // for browsers that don't set ``isComposing`` on the synthetic event.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    // from the input. The two signals a browser may announce this through are
+    // read by the shared guard.
+    if (isComposingKey(e)) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       moveSelection(1);

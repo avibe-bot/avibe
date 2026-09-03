@@ -28,6 +28,23 @@ export function formatCount(value: number, locale: string): string {
   return new Intl.NumberFormat(locale).format(Math.max(0, Math.floor(value)));
 }
 
+/**
+ * A context window as the figure a model is published under — 「128K」.
+ *
+ * Compact, and compacted the same way in every locale, because this is not a
+ * quantity being reconciled: it is the number that appears on the vendor's own
+ * model card, in its docs and in every comparison the reader has already seen,
+ * and 「12.8万」 is that number in a unit no provider uses. The exact value is one
+ * field below in the reader's own grouping, so nothing is hidden by rounding
+ * here. `null` renders as nothing rather than as a zero the catalog never
+ * claimed.
+ */
+export function formatTokensCompact(value: number | null): string {
+  if (value === null || value < 1) return '';
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 0 })
+    .format(Math.floor(value));
+}
+
 /** A ratio in [0, 1] as a whole-percent string — 「65%」. */
 export function formatPercent(ratio: number, locale: string): string {
   return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 0 }).format(ratio);

@@ -5,20 +5,24 @@
 // baseline — an editor that saved on its own would make every row its own
 // mutation and leave no way to cancel a list still being arranged.
 //
-// models.dev is a metadata source here, not an authority: it fills fields the
-// user can then change, and it never touches the backend model id, which is the
-// routing identity the user typed.
+// models.dev is a metadata source here, not an authority: the first field is a
+// search, and choosing a suggestion fills the model id along with every fact the
+// catalog knows about it — all of them still editable, because what the user
+// wanted may be the model next to the one they found.
 import * as React from 'react';
-import { Check, Database, DownloadCloud, LoaderCircle, Plus } from 'lucide-react';
+import { Check, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
+import { isComposingKey } from '@/lib/imeComposition';
 import { cn } from '@/lib/utils';
-import { applyModelsDevMatch, blankBackendModel } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, opencodeMenuIdentity, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
+import { formatTokensCompact } from './format';
+import type { StandardVendors } from './menus/identifiers';
 import { apiFailure, modelsApi } from './modelsApi';
 import { modelsDevFillFailureKey } from './serverCopy';
 import {
@@ -33,7 +37,11 @@ import {
   type ModelsDevMatch,
 } from './types';
 
-type FillState = 'idle' | 'loading' | 'empty' | 'error';
+type FillState = 'idle' | 'loading' | 'error';
+
+/** Long enough that a typed word is one read rather than one per keystroke,
+ *  short enough that the list is there when the typing stops. */
+const LOOKUP_DEBOUNCE_MS = 250;
 
 /** Digits only. A pasted 「163,840」 is the same number as 「163840」, and the
  *  field renders the grouped form itself, so refusing the separator would refuse
@@ -111,14 +119,22 @@ export const BackendModelEditorDialog: React.FC<{
   backend: AgentBackend;
   /** null opens the editor in add mode. */
   model: BackendModel | null;
+  /** What the picker's 「add as a custom model」 action carried over, so the
+   *  editor opens on that query instead of asking for it a second time. */
+  seedId?: string;
   /** Ids the draft catalog already holds; a second row may not claim one. */
   takenIds: ReadonlySet<string>;
   /** Effort values this backend's other rows already use. Suggestions, never a
    *  vocabulary — every effort is sent verbatim and any string is equally valid. */
   effortSuggestions: readonly string[];
+  /** OpenCode's standard vendor ids, as the server projects them — the input to
+   *  the shared id rule both typeahead rows resolve through (`backendModelId`).
+   *  Empty for every other backend, and for a server too old to project them:
+   *  `custom/` is then the answer for every query, which OpenCode still accepts. */
+  standardVendors: StandardVendors;
   onCancel: () => void;
   onCommit: (model: BackendModel) => void;
-}> = ({ open, backend, model, takenIds, effortSuggestions, onCancel, onCommit }) => {
+}> = ({ open, backend, model, seedId, takenIds, effortSuggestions, standardVendors, onCancel, onCommit }) => {
   const { t } = useTranslation();
   const creating = model === null;
   const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
@@ -132,11 +148,22 @@ export const BackendModelEditorDialog: React.FC<{
    *  own answer is still in hand. */
   const [fillFailedKey, setFillFailedKey] = React.useState('settings.models.gateway.modelEditor.fillFailed');
   const [matches, setMatches] = React.useState<ModelsDevMatch[]>([]);
-  const [matchesOpen, setMatchesOpen] = React.useState(false);
+  /** The query the typeahead is answering; empty closes it. Held apart from
+   *  `draft.id` because choosing a suggestion writes the id, and a list keyed on
+   *  the id would reopen on the answer it just gave. */
+  const [lookup, setLookup] = React.useState('');
+  const [active, setActive] = React.useState(0);
   const [customOpen, setCustomOpen] = React.useState(false);
   const [customEffort, setCustomEffort] = React.useState('');
   const [submitted, setSubmitted] = React.useState(false);
   const fillAttempt = React.useRef(0);
+  /** The whole editable surface exactly as the last models.dev fill left it —
+   *  the draft and the three fields held as text. A value that still matches it
+   *  is models.dev's answer; a value that differs is the user's own typing. Null
+   *  once no answer is outstanding, which is the only state `changeId` needs to
+   *  tell apart. A ref, not state: nothing renders from it. */
+  const filled = React.useRef<{ draft: BackendModel; name: string; context: string; output: string } | null>(null);
+  const listId = React.useId();
 
   const seed = React.useCallback((next: BackendModel) => {
     setDraft(next);
@@ -145,20 +172,90 @@ export const BackendModelEditorDialog: React.FC<{
     setOutputText(groupTokens(next.max_output_tokens));
     setFillState('idle');
     setMatches([]);
-    setMatchesOpen(false);
+    setActive(0);
     setCustomOpen(false);
     setCustomEffort('');
     setSubmitted(false);
+    filled.current = null;
   }, []);
 
   React.useEffect(() => {
-    if (open) seed(model ?? blankBackendModel());
-    else fillAttempt.current += 1;
-  }, [model, open, seed]);
+    if (!open) {
+      fillAttempt.current += 1;
+      return;
+    }
+    // A seeded add opens with the query already running: the user typed it in
+    // the picker, and asking for it again would be the surface forgetting. The
+    // id it lands as goes through the one chokepoint like every other produced
+    // id — a seed that skipped it would be an id the backend refuses, arriving
+    // by the one route nobody watches. The query stays what was typed: it is a
+    // models.dev search, and searching for the resolved id would search for the
+    // vendor prefix the resolver just added.
+    const next = model ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend, standardVendors);
+    seed(next);
+    setLookup(model === null ? seedId?.trim() ?? '' : '');
+  }, [backend, model, open, seed, seedId, standardVendors]);
+
+  /**
+   * The typeahead: what has been typed so far, answered by models.dev.
+   *
+   * Debounced, because the query is a keystroke and the answer is a network
+   * hop. Aborted on the way out, so a reply to a query the user has already
+   * replaced never lands — and the attempt counter is bumped on every exit,
+   * because aborting raises inside the request, and a stale attempt that still
+   * matched would report 「models.dev could not be reached」 about a search
+   * nobody is waiting for.
+   */
+  React.useEffect(() => {
+    if (!creating || lookup === '') {
+      fillAttempt.current += 1;
+      setFillState('idle');
+      setMatches([]);
+      return;
+    }
+    const attempt = ++fillAttempt.current;
+    setFillState('loading');
+    setMatches([]);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const found = await modelsApi.searchModelsDev(lookup, controller.signal);
+          if (attempt !== fillAttempt.current) return;
+          setMatches(found);
+          setActive(0);
+          setFillState('idle');
+        } catch (error) {
+          if (attempt !== fillAttempt.current) return;
+          setFillFailedKey(modelsDevFillFailureKey(apiFailure(error)?.detail));
+          setFillState('error');
+        }
+      })();
+    }, LOOKUP_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      fillAttempt.current += 1;
+    };
+  }, [creating, lookup]);
 
   const context = parseTokens(contextText);
   const output = parseTokens(outputText);
   const trimmedId = draft.id.trim();
+  /**
+   * The row as it would be stored.
+   *
+   * Add mode resolves the id through the one chokepoint here, so the rules below
+   * and the row `commit` sends judge and write the same value — the one the
+   * backend receives. Checking the raw box instead would measure a length and a
+   * collision against an id that does not exist yet: `custom/` is part of what
+   * gets stored, and a row already holding `custom/foo` collides with a freshly
+   * typed `foo`.
+   *
+   * An edit mints nothing. The id came from the server and is held read-only, so
+   * resolving it again would rename a saved row whose id predates the rule.
+   */
+  const resolved = creating ? draftWithId(draft, trimmedId, backend, standardVendors) : draft;
   // Every id rule is a rule about what the user may type, and only add mode lets
   // them type it — an edit shows the id read-only. Judging a value the dialog
   // itself locks is what made a persisted row whose id predates the length
@@ -168,11 +265,18 @@ export const BackendModelEditorDialog: React.FC<{
     ? null
     : trimmedId === ''
       ? 'required'
-      : trimmedId.length > BACKEND_MODEL_ID_MAX_LENGTH
+      : resolved.id.length > BACKEND_MODEL_ID_MAX_LENGTH
         ? 'tooLong'
-        : takenIds.has(trimmedId)
-          ? 'duplicate'
-          : null;
+        // Asked of the resolved id for the same reason the length and the
+        // collision are: `custom/` is part of what gets stored, so the shape
+        // rule has to judge the value the backend will actually parse. It is
+        // the last rule that can be answered without the list, and the
+        // collision check below is the one that needs it.
+        : !opencodeMenuIdentity(resolved.id, backend)
+          ? 'invalid'
+          : takenIds.has(resolved.id)
+            ? 'duplicate'
+            : null;
   const valid = idError === null && context.ok && output.ok;
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
@@ -194,14 +298,29 @@ export const BackendModelEditorDialog: React.FC<{
   });
 
   const applyMatch = (match: ModelsDevMatch) => {
-    // `applyModelsDevMatch` leaves `id` alone: a fill never renames the row, even
-    // when the chosen match is published under a different id.
-    setDraft((current) => applyModelsDevMatch(current, match, creating ? 'models_dev' : current.origin));
-    setNameText(match.display_name ?? '');
-    setContextText(groupTokens(match.context_window));
-    setOutputText(groupTokens(match.max_output_tokens));
-    setMatchesOpen(false);
-    setFillState('idle');
+    // The id comes with it — the row is the model that was chosen, under the id
+    // its provider publishes it as. `origin` is `models_dev` unconditionally
+    // because the typeahead is add mode's field: a saved row's own creation path
+    // is never re-decided here.
+    const next = applyModelsDevMatch(draft, match, 'models_dev', backend, standardVendors);
+    const name = match.display_name ?? '';
+    const context = groupTokens(match.context_window);
+    const output = groupTokens(match.max_output_tokens);
+    setDraft(next);
+    setNameText(name);
+    setContextText(context);
+    setOutputText(output);
+    filled.current = { draft: next, name, context, output };
+    setLookup('');
+  };
+
+  /** Take the query as the id itself, resolved to one this backend accepts. The
+   *  draft's other fields are the user's own by construction: whatever an
+   *  earlier fill still owned was retired by `changeId` the moment they typed
+   *  again, and what survived that is what they typed themselves. */
+  const takeLookupAsId = () => {
+    setDraft((current) => draftWithId(current, lookup.trim(), backend, standardVendors));
+    setLookup('');
   };
 
   /**
@@ -209,52 +328,61 @@ export const BackendModelEditorDialog: React.FC<{
    * request still in flight, the match list it would open, and the metadata an
    * earlier fill already poured in.
    *
-   * `models_dev_id` decides how far that goes, because it is the schema's own
-   * record of where a row's metadata came from. A filled draft describes the id
-   * that fetched it — keeping its context window, modalities or efforts would
-   * save one model's facts under another model's name — so it goes back to
-   * blank. A hand-typed draft owes models.dev nothing and keeps every field,
-   * since correcting a typo in the id is not a decision to retype the rest.
+   * How far that reaches is decided field by field against the fill itself, not
+   * by one flag over the whole row — see `retireModelsDevMatch`. A draft that
+   * owes models.dev nothing keeps every field, since correcting a typo in the id
+   * is not a decision to retype the rest, and after one retirement there is
+   * nothing left to retire.
    */
   const changeId = (nextId: string) => {
-    fillAttempt.current += 1;
-    setFillState('idle');
-    setMatches([]);
-    setMatchesOpen(false);
-    if (draft.models_dev_id === null) {
+    setActive(0);
+    setLookup(nextId.trim());
+    const fill = filled.current;
+    if (fill === null) {
       patch({ id: nextId });
       return;
     }
-    setDraft({ ...blankBackendModel(), id: nextId });
-    setNameText('');
-    setContextText('');
-    setOutputText('');
+    setDraft((current) => retireModelsDevMatch(current, fill.draft, nextId));
+    if (nameText === fill.name) setNameText('');
+    if (contextText === fill.context) setContextText('');
+    if (outputText === fill.output) setOutputText('');
+    filled.current = null;
   };
 
-  const fill = () => {
-    const query = trimmedId;
-    if (query === '') return;
-    const attempt = ++fillAttempt.current;
-    setFillState('loading');
-    setMatchesOpen(false);
-    void (async () => {
-      try {
-        const found = await modelsApi.searchModelsDev(query);
-        if (attempt !== fillAttempt.current) return;
-        setMatches(found);
-        if (found.length === 0) {
-          setFillState('empty');
-          return;
-        }
-        setFillState('idle');
-        if (found.length === 1) applyMatch(found[0]);
-        else setMatchesOpen(true);
-      } catch (error) {
-        if (attempt !== fillAttempt.current) return;
-        setFillFailedKey(modelsDevFillFailureKey(apiFailure(error)?.detail));
-        setFillState('error');
-      }
-    })();
+  // The escape is the last row in every open state, including 「searching」 and
+  // 「unavailable」: models.dev being slow or down is not a reason the user may
+  // not name their own model.
+  const lookupOpen = creating && lookup !== '';
+  const rowCount = matches.length + 1;
+  const activeRow = Math.min(active, rowCount - 1);
+  const chooseRow = (index: number) => {
+    if (index < matches.length) applyMatch(matches[index]);
+    else takeLookupAsId();
+  };
+
+  const onIdKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    // Every key below is one an IME candidate window uses too — Enter accepts
+    // the characters being composed, the arrows move through the candidates —
+    // so while one is open none of them are aimed at this list.
+    if (isComposingKey(event)) return;
+    if (!lookupOpen) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const step = event.key === 'ArrowDown' ? 1 : rowCount - 1;
+      setActive((current) => (Math.min(current, rowCount - 1) + step) % rowCount);
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      setActive(event.key === 'Home' ? 0 : rowCount - 1);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      chooseRow(activeRow);
+    } else if (event.key === 'Escape') {
+      // Only the list closes. Without this the dialog would take the same key
+      // and discard a row the user is still filling in.
+      event.preventDefault();
+      event.stopPropagation();
+      setLookup('');
+    }
   };
 
   const addCustomEffort = () => {
@@ -269,8 +397,7 @@ export const BackendModelEditorDialog: React.FC<{
     setSubmitted(true);
     if (!valid) return;
     onCommit({
-      ...draft,
-      id: trimmedId,
+      ...resolved,
       // An empty box is 「no name」, not an empty name: the schema takes null and
       // the list falls back to the id.
       display_name: nameText.trim() || null,
@@ -306,17 +433,31 @@ export const BackendModelEditorDialog: React.FC<{
         <div className="model-hub-model-editor-body min-h-0 flex-1 overflow-y-auto">
           <section className="model-hub-model-section">
             <SectionLabel>{t('settings.models.gateway.modelEditor.section.basic')}</SectionLabel>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-              <Field
-                label={t('settings.models.gateway.modelEditor.id.label')}
-                className="min-w-0 flex-1 gap-1.5"
-                labelClassName="model-hub-model-field-label"
-              >
-                {(id) => (
+            <Field
+              label={t('settings.models.gateway.modelEditor.id.label')}
+              className="min-w-0 gap-1.5"
+              labelClassName="model-hub-model-field-label"
+            >
+              {(id) => (
+                <div
+                  className="relative min-w-0"
+                  // The list is an overlay over the fields below it, so it lives
+                  // exactly as long as the user is in it: focus moving anywhere
+                  // outside closes it, the same containment check
+                  // `SourceDetailPanel` uses. Its own rows never trigger this —
+                  // they refuse focus on mousedown to keep the caret in the
+                  // field — so choosing one still runs.
+                  onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLookup(''); }}
+                >
                   <Input
                     id={id}
                     value={draft.id}
                     readOnly={!creating}
+                    role="combobox"
+                    aria-expanded={lookupOpen}
+                    aria-controls={listId}
+                    aria-autocomplete="list"
+                    aria-activedescendant={lookupOpen ? `${listId}-${activeRow}` : undefined}
                     aria-invalid={Boolean(idHint)}
                     // The ceiling belongs to the field that can still be typed
                     // into; a read-only legacy id is shown in full, not clipped.
@@ -324,69 +465,87 @@ export const BackendModelEditorDialog: React.FC<{
                     spellCheck={false}
                     autoComplete="off"
                     onChange={(event) => changeId(event.target.value)}
+                    onKeyDown={onIdKeyDown}
                     placeholder={t('settings.models.gateway.modelEditor.id.placeholder') as string}
                     className="model-hub-model-control w-full font-mono text-[12.5px] read-only:text-muted"
                   />
-                )}
-              </Field>
-              <Button
-                type="button"
-                variant="outline"
-                className="model-hub-model-control shrink-0 rounded-md px-3.5 text-[12.5px] font-semibold"
-                disabled={trimmedId === '' || fillState === 'loading'}
-                onClick={fill}
-              >
-                {fillState === 'loading'
-                  ? <LoaderCircle className="animate-spin" aria-hidden="true" />
-                  : <DownloadCloud aria-hidden="true" />}
-                {t('settings.models.gateway.modelEditor.fill')}
-              </Button>
-            </div>
+                  {lookupOpen && (
+                    // Over the form, not in it: the fields below keep their
+                    // places while the list opens and closes on every keystroke.
+                    <div className="model-hub-model-match-list absolute inset-x-0 top-full z-30 mt-1.5 flex flex-col">
+                      {fillState !== 'idle' && (
+                        <p className="model-hub-model-match-state" role="status">
+                          {t(fillState === 'loading' ? 'settings.models.gateway.modelEditor.lookupLoading' : fillFailedKey)}
+                        </p>
+                      )}
+                      <div
+                        id={listId}
+                        role="listbox"
+                        aria-label={t('settings.models.gateway.modelEditor.matches') as string}
+                        className="flex min-w-0 flex-col"
+                      >
+                        {matches.map((match, index) => {
+                          const context = formatTokensCompact(match.context_window);
+                          return (
+                            <button
+                              key={match.models_dev_id}
+                              type="button"
+                              role="option"
+                              id={`${listId}-${index}`}
+                              aria-selected={activeRow === index}
+                              // The field keeps the caret: a click that moved
+                              // focus would close the list before it fired.
+                              onMouseDown={(event) => event.preventDefault()}
+                              onMouseEnter={() => setActive(index)}
+                              onClick={() => applyMatch(match)}
+                              className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', activeRow === index && 'is-selected')}
+                            >
+                              <span className="flex min-w-0 flex-1 items-center gap-2">
+                                {/* No `shrink-0`: pinning the name at its full
+                                  * width is what its own `truncate` is there
+                                  * to prevent, and a name long enough to need
+                                  * cutting would instead squeeze the id and
+                                  * the provider out of the row before running
+                                  * past its edge. Left to shrink, the three
+                                  * yield in proportion to what they show, so
+                                  * the longest gives up the most. */}
+                                <span className="model-hub-model-match-name truncate">{match.display_name ?? match.model_id}</span>
+                                <span className="model-hub-model-match-id truncate font-mono">{match.model_id}</span>
+                                <span className="model-hub-model-match-meta truncate">{match.provider_name}</span>
+                              </span>
+                              {context && <span className="model-hub-model-match-meta shrink-0">{context}</span>}
+                            </button>
+                          );
+                        })}
+                        <button
+                          type="button"
+                          role="option"
+                          id={`${listId}-${matches.length}`}
+                          aria-selected={activeRow === matches.length}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onMouseEnter={() => setActive(matches.length)}
+                          onClick={takeLookupAsId}
+                          className={cn(
+                            'model-hub-model-match model-hub-model-match--literal flex min-w-0 items-center text-left',
+                            activeRow === matches.length && 'is-selected',
+                          )}
+                        >
+                          {/* The id it will create, not the raw query: on
+                              OpenCode those differ, and the row that names the
+                              other one would be describing a different model. */}
+                          <span className="model-hub-model-match-literal min-w-0 truncate">
+                            {t('settings.models.gateway.modelEditor.useAsId', {
+                              query: backendModelId(lookup.trim(), backend, standardVendors),
+                            })}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </Field>
             {idHint && <p className="model-hub-model-error" role="alert">{idHint}</p>}
-            {fillState === 'empty' && <p className="model-hub-model-error" role="status">{t('settings.models.gateway.modelEditor.fillEmpty')}</p>}
-            {fillState === 'error' && <p className="model-hub-model-error" role="status">{t(fillFailedKey)}</p>}
-
-            {draft.models_dev_id && (
-              <div className="model-hub-model-source-strip flex min-w-0 items-center gap-2.5">
-                <Database className="size-[14px] shrink-0 text-muted" aria-hidden="true" />
-                <span className="model-hub-model-source-id shrink-0 font-mono">{`models.dev · ${draft.models_dev_id}`}</span>
-                <span className="model-hub-model-source-note min-w-0 flex-1 truncate">{t('settings.models.gateway.modelEditor.filled')}</span>
-                <button
-                  type="button"
-                  className="model-hub-model-source-view shrink-0"
-                  aria-expanded={matchesOpen}
-                  disabled={matches.length === 0}
-                  onClick={() => setMatchesOpen((value) => !value)}
-                >
-                  {t('settings.models.gateway.modelEditor.viewMatches')}
-                </button>
-              </div>
-            )}
-
-            {matchesOpen && matches.length > 0 && (
-              <div className="model-hub-model-match-list flex flex-col" role="listbox" aria-label={t('settings.models.gateway.modelEditor.matches') as string}>
-                {matches.map((match) => {
-                  const selected = draft.models_dev_id === match.models_dev_id;
-                  return (
-                    <button
-                      key={match.models_dev_id}
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      onClick={() => applyMatch(match)}
-                      className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', selected && 'is-selected')}
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="model-hub-model-match-name block truncate">{match.display_name ?? match.model_id}</span>
-                        <span className="model-hub-model-match-id block truncate font-mono">{match.models_dev_id}</span>
-                      </span>
-                      <span className="model-hub-pill model-hub-fill-0a shrink-0 border border-border text-muted">{match.provider_name}</span>
-                      {selected && <Check className="model-hub-ink-mint size-4 shrink-0" aria-hidden="true" />}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
 
             <Field
               label={t('settings.models.gateway.modelEditor.displayName.label')}
@@ -501,6 +660,9 @@ export const BackendModelEditorDialog: React.FC<{
                         placeholder={t('settings.models.gateway.modelEditor.customEffortPlaceholder') as string}
                         onChange={(event) => setCustomEffort(event.target.value)}
                         onKeyDown={(event) => {
+                          // The Enter that accepts an IME candidate is not the
+                          // Enter that names an effort.
+                          if (isComposingKey(event)) return;
                           if (event.key === 'Enter') {
                             event.preventDefault();
                             addCustomEffort();

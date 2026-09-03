@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, formatCount, formatDayTime, formatNameList, formatPercent } from './format';
+import { cooldownEtaMinutes, formatCount, formatDayTime, formatNameList, formatPercent, formatTokensCompact } from './format';
 
 describe('formatCount', () => {
   it('groups so a figure can be read against a vendor console', () => {
@@ -18,6 +18,24 @@ describe('formatCount', () => {
   it('never renders a fractional or negative count', () => {
     expect(formatCount(12.9, 'en-US')).toBe('12');
     expect(formatCount(-5, 'en-US')).toBe('0');
+  });
+});
+
+describe('formatTokensCompact', () => {
+  // The property: every window renders as the K/M figure the model is published
+  // under — never grouped, never fractional, and never in a unit (万) no
+  // provider's model card uses.
+  it('renders the published K/M figure', () => {
+    for (const value of [128_000, 163_840, 200_000, 1_047_576]) {
+      expect(formatTokensCompact(value)).toMatch(/^\d+[KM]$/);
+    }
+    expect(formatTokensCompact(128_000)).toBe('128K');
+    expect(formatTokensCompact(1_000_000)).toBe('1M');
+  });
+
+  it('renders nothing for a window nobody stated', () => {
+    expect(formatTokensCompact(null)).toBe('');
+    expect(formatTokensCompact(0)).toBe('');
   });
 });
 

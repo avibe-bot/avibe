@@ -54,6 +54,7 @@ import {
   voiceInsertionSnapshot,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
+import { isComposingKey } from '@/lib/imeComposition';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 export type AgentSearchResult = {
@@ -385,7 +386,7 @@ function EnterSubmitPlugin({
         KEY_ENTER_COMMAND,
         (event: KeyboardEvent | null) => {
           if (!event || event.shiftKey) return false;
-          if (event.isComposing || event.keyCode === 229) return false;
+          if (isComposingKey(event)) return false;
           if (menuOpenRef.current || isSoftKeyboardOpen()) return false;
           event.preventDefault();
           onSubmit();

@@ -14,6 +14,7 @@ import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
+import { isComposingKey } from '../../lib/imeComposition';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
@@ -1624,8 +1625,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // Enter sends, Shift+Enter newline — EXCEPT while the on-screen
               // keyboard is open (mobile), where Enter inserts a newline and Send is
               // the button. Hardware keyboards (no soft keyboard) keep Enter-to-send.
-              // ``isComposing`` guards against submitting mid-IME composition (CJK).
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isSoftKeyboardOpen()) {
+              // ``isComposingKey`` guards against submitting mid-IME composition (CJK).
+              if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e) && !isSoftKeyboardOpen()) {
                 e.preventDefault();
                 submit();
               }
