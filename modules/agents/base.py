@@ -45,6 +45,10 @@ class AgentRequest:
     vibe_agent_backend: Optional[str] = None
     vibe_agent_model: Optional[str] = None
     vibe_agent_reasoning_effort: Optional[str] = None
+    # ``None`` normally means "inherit", but a persisted Session can pin an
+    # explicit null. Keep that distinction across the shared dispatch boundary.
+    vibe_agent_model_explicit: bool = False
+    vibe_agent_reasoning_effort_explicit: bool = False
     vibe_agent_system_prompt: Optional[str] = None
     last_agent_message: Optional[str] = None
     last_agent_message_parse_mode: Optional[str] = None

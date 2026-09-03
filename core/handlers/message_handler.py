@@ -897,6 +897,8 @@ class MessageHandler(BaseHandler):
                 vibe_agent_backend=vibe_agent.backend if vibe_agent else None,
                 vibe_agent_model=effective_model,
                 vibe_agent_reasoning_effort=effective_reasoning_effort,
+                vibe_agent_model_explicit="model" in explicit_overrides,
+                vibe_agent_reasoning_effort_explicit="reasoning_effort" in explicit_overrides,
                 vibe_agent_system_prompt=vibe_agent.system_prompt if vibe_agent else None,
                 processing_indicator=processing_indicator,
                 files=processed_files,

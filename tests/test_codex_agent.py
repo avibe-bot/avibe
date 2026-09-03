@@ -3476,6 +3476,170 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ("thread-1", "stable prompt"),
         )
 
+    async def test_start_turn_honors_explicit_null_model_instead_of_cached_route(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "routing-model", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace()
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+            vibe_agent_model_explicit=True,
+            vibe_agent_reasoning_effort_explicit=True,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions=None,
+        )
+
+        params = transport.send_request.await_args.args[1]
+        self.assertNotIn("model", params)
+        self.assertNotIn("effort", params)
+        self.assertNotIn("collaborationMode", params)
+        self.assertNotIn("session-1", agent._thread_model_settings)
+
+    async def test_start_turn_reuses_persisted_fallback_prompt_after_process_restart(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "sha256": agent._fallback_prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+            set_agent_session_runtime_marker=Mock(),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["turn/start"],
+        )
+        agent.sessions.get_agent_session_runtime_marker.assert_called_once_with(
+            "ses-runtime",
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_fallback_prompt",
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_not_called()
+        self.assertEqual(
+            agent._thread_developer_instructions["session-1"],
+            ("thread-1", "stable prompt"),
+        )
+
+    async def test_start_turn_persists_changed_fallback_prompt(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="changed prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["thread/inject_items", "turn/start"],
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+            "ses-runtime",
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_fallback_prompt",
+            value={
+                "thread_id": "thread-1",
+                "sha256": agent._fallback_prompt_fingerprint("changed prompt"),
+            },
+        )
+
     async def test_start_turn_does_not_reuse_cached_effort_for_an_explicit_model_change(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(

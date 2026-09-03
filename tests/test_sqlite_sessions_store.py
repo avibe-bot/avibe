@@ -301,6 +301,66 @@ def test_save_state_does_not_relabel_existing_anchor_row_to_different_backend(tm
         service.close()
 
 
+def test_runtime_marker_is_bound_to_exact_active_native_session(tmp_path: Path) -> None:
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn,
+                "avibe::project::proj_1",
+                now="2026-09-04T00:00:00Z",
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="ses-runtime",
+                native_session_id="thread-1",
+                workdir="/tmp",
+                metadata={"keep": "unchanged"},
+                require_workdir=False,
+            )
+
+        marker = {"thread_id": "thread-1", "sha256": "abc123"}
+        assert service.set_agent_session_runtime_marker(
+            session_id,
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_fallback_prompt",
+            value=marker,
+        )
+        assert (
+            service.get_agent_session_runtime_marker(
+                session_id,
+                backend="codex",
+                native_session_id="thread-1",
+                key="codex_fallback_prompt",
+            )
+            == marker
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert json.loads(row["metadata_json"])["keep"] == "unchanged"
+
+        assert not service.set_agent_session_runtime_marker(
+            session_id,
+            backend="codex",
+            native_session_id="thread-replaced",
+            key="codex_fallback_prompt",
+            value={"thread_id": "thread-replaced", "sha256": "new"},
+        )
+        assert service.get_agent_session_runtime_marker(
+            session_id,
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_fallback_prompt",
+        ) == marker
+    finally:
+        service.close()
+
+
 def test_save_state_skips_import_when_archived_row_owns_anchor(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)

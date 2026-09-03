@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import shlex
@@ -71,6 +72,7 @@ _CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
 )
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
+CODEX_FALLBACK_PROMPT_METADATA_KEY = "codex_fallback_prompt"
 
 
 class _CodexConnectionProbeState:
@@ -2101,11 +2103,31 @@ class CodexAgent(BaseAgent):
         request_effort = getattr(request, "subagent_reasoning_effort", None)
         vibe_model = getattr(request, "vibe_agent_model", None)
         vibe_effort = getattr(request, "vibe_agent_reasoning_effort", None)
+        vibe_model_explicit = bool(getattr(request, "vibe_agent_model_explicit", False))
+        vibe_effort_explicit = bool(
+            getattr(request, "vibe_agent_reasoning_effort_explicit", False)
+        )
         vibe_instructions = getattr(request, "vibe_agent_system_prompt", None)
 
         effective_agent = request_subagent or routing_agent
-        explicit_model = request_model or vibe_model or routing_model
-        explicit_effort = request_effort or vibe_effort or routing_effort
+        if request_model is not None:
+            selected_model = request_model
+            selected_model_is_explicit = True
+        elif vibe_model_explicit:
+            selected_model = vibe_model
+            selected_model_is_explicit = True
+        else:
+            selected_model = vibe_model or routing_model
+            selected_model_is_explicit = False
+        if request_effort is not None:
+            selected_effort = request_effort
+            selected_effort_is_explicit = True
+        elif vibe_effort_explicit:
+            selected_effort = vibe_effort
+            selected_effort_is_explicit = True
+        else:
+            selected_effort = vibe_effort or routing_effort
+            selected_effort_is_explicit = False
 
         agent_definition: Optional[SubagentDefinition] = None
         if effective_agent:
@@ -2116,8 +2138,16 @@ class CodexAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
-        effective_model = explicit_model or (agent_definition.model if agent_definition else None)
-        effective_effort = explicit_effort or (agent_definition.reasoning_effort if agent_definition else None)
+        effective_model = (
+            selected_model
+            if selected_model_is_explicit
+            else selected_model or (agent_definition.model if agent_definition else None)
+        )
+        effective_effort = (
+            selected_effort
+            if selected_effort_is_explicit
+            else selected_effort or (agent_definition.reasoning_effort if agent_definition else None)
+        )
         if getattr(self.controller, "model_hub_runtime", None) is not None:
             from modules.agents.model_hub import launch_for_context
 
@@ -2566,6 +2596,8 @@ class CodexAgent(BaseAgent):
         request: AgentRequest,
         thread_id: str,
         developer_instructions: str,
+        *,
+        agent_session_id: Optional[str] = None,
     ) -> None:
         """Fallback for Codex builds without Turn collaboration settings."""
 
@@ -2592,6 +2624,94 @@ class CodexAgent(BaseAgent):
             thread_id,
             developer_instructions,
         )
+        self._persist_fallback_prompt_fingerprint(
+            request,
+            thread_id,
+            developer_instructions,
+            agent_session_id=agent_session_id,
+        )
+
+    @staticmethod
+    def _fallback_prompt_fingerprint(developer_instructions: str) -> str:
+        return hashlib.sha256(developer_instructions.encode("utf-8")).hexdigest()
+
+    def _persisted_fallback_prompt_matches(
+        self,
+        request: AgentRequest,
+        thread_id: str,
+        developer_instructions: str,
+        *,
+        agent_session_id: Optional[str],
+    ) -> bool:
+        if not agent_session_id:
+            return False
+        getter = getattr(
+            getattr(self, "sessions", None),
+            "get_agent_session_runtime_marker",
+            None,
+        )
+        if not callable(getter):
+            return False
+        try:
+            marker = getter(
+                agent_session_id,
+                backend=self.name,
+                native_session_id=thread_id,
+                key=CODEX_FALLBACK_PROMPT_METADATA_KEY,
+            )
+        except Exception:
+            logger.debug("Failed to read Codex fallback prompt marker", exc_info=True)
+            return False
+        expected = {
+            "thread_id": thread_id,
+            "sha256": self._fallback_prompt_fingerprint(developer_instructions),
+        }
+        if marker != expected:
+            return False
+        self._remember_thread_developer_instructions(
+            request.base_session_id,
+            thread_id,
+            developer_instructions,
+        )
+        return True
+
+    def _persist_fallback_prompt_fingerprint(
+        self,
+        request: AgentRequest,
+        thread_id: str,
+        developer_instructions: str,
+        *,
+        agent_session_id: Optional[str],
+    ) -> None:
+        if not agent_session_id:
+            return
+        setter = getattr(
+            getattr(self, "sessions", None),
+            "set_agent_session_runtime_marker",
+            None,
+        )
+        if not callable(setter):
+            return
+        marker = {
+            "thread_id": thread_id,
+            "sha256": self._fallback_prompt_fingerprint(developer_instructions),
+        }
+        try:
+            persisted = setter(
+                agent_session_id,
+                backend=self.name,
+                native_session_id=thread_id,
+                key=CODEX_FALLBACK_PROMPT_METADATA_KEY,
+                value=marker,
+            )
+        except Exception:
+            logger.debug("Failed to persist Codex fallback prompt marker", exc_info=True)
+            return
+        if not persisted:
+            logger.debug(
+                "Skipped Codex fallback prompt marker for stale Session binding %s",
+                agent_session_id,
+            )
 
     async def _start_turn(
         self,
@@ -2602,14 +2722,18 @@ class CodexAgent(BaseAgent):
         developer_instructions: Optional[str] = None,
     ) -> str:
         """Build input, configure overrides, and send turn/start to Codex."""
-        self.ensure_agent_session_id(request)
+        agent_session_id = self.ensure_agent_session_id(request)
         input_items = self._build_input(request)
         _, effective_model, effective_effort, _ = self._resolve_codex_agent_settings(request)
+        model_explicit = bool(getattr(request, "vibe_agent_model_explicit", False))
+        effort_explicit = bool(
+            getattr(request, "vibe_agent_reasoning_effort_explicit", False)
+        )
         cached_model_settings = getattr(self, "_thread_model_settings", {}).get(request.base_session_id)
         if cached_model_settings and cached_model_settings[0] == thread_id:
-            if effective_model is None:
+            if effective_model is None and not model_explicit:
                 effective_model = cached_model_settings[1]
-                if effective_effort is None:
+                if effective_effort is None and not effort_explicit:
                     effective_effort = cached_model_settings[2]
 
         turn_params: Dict[str, Any] = {
@@ -2625,6 +2749,18 @@ class CodexAgent(BaseAgent):
 
         cached_instructions = getattr(self, "_thread_developer_instructions", {}).get(request.base_session_id)
         prompt_changed = cached_instructions != (thread_id, developer_instructions)
+        if (
+            developer_instructions
+            and prompt_changed
+            and not getattr(transport, "supports_turn_collaboration_mode", True)
+            and self._persisted_fallback_prompt_matches(
+                request,
+                thread_id,
+                developer_instructions,
+                agent_session_id=agent_session_id,
+            )
+        ):
+            prompt_changed = False
         use_collaboration_mode = bool(
             developer_instructions and effective_model and getattr(transport, "supports_turn_collaboration_mode", True)
         )
@@ -2647,6 +2783,7 @@ class CodexAgent(BaseAgent):
                 request,
                 thread_id,
                 developer_instructions,
+                agent_session_id=agent_session_id,
             )
 
         self._write_caller_env_script(request)
@@ -2670,12 +2807,22 @@ class CodexAgent(BaseAgent):
                 exc,
             )
             transport.supports_turn_collaboration_mode = False
-            if developer_instructions and prompt_changed:
+            fallback_prompt_is_current = bool(
+                developer_instructions
+                and self._persisted_fallback_prompt_matches(
+                    request,
+                    thread_id,
+                    developer_instructions,
+                    agent_session_id=agent_session_id,
+                )
+            )
+            if developer_instructions and prompt_changed and not fallback_prompt_is_current:
                 await self._inject_thread_developer_instructions(
                     transport,
                     request,
                     thread_id,
                     developer_instructions,
+                    agent_session_id=agent_session_id,
                 )
             fallback_turn_params = dict(turn_params)
             fallback_turn_params.pop("collaborationMode", None)
@@ -2694,6 +2841,8 @@ class CodexAgent(BaseAgent):
                 effective_model,
                 effective_effort,
             )
+        elif model_explicit:
+            getattr(self, "_thread_model_settings", {}).pop(request.base_session_id, None)
 
         turn_id = resp.get("id", "")
         if not turn_id:

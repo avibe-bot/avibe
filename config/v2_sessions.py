@@ -470,6 +470,40 @@ class SessionsStore:
             expected_route=expected_route,
         )
 
+    def get_agent_session_runtime_marker(
+        self,
+        session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+    ) -> Any:
+        self._ensure_service()
+        return self._service.get_agent_session_runtime_marker(
+            session_id,
+            backend=backend,
+            native_session_id=native_session_id,
+            key=key,
+        )
+
+    def set_agent_session_runtime_marker(
+        self,
+        session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+        value: Any,
+    ) -> bool:
+        self._ensure_service()
+        return self._service.set_agent_session_runtime_marker(
+            session_id,
+            backend=backend,
+            native_session_id=native_session_id,
+            key=key,
+            value=value,
+        )
+
     def bind_agent_session_by_id(
         self,
         agent_session_id: str,
