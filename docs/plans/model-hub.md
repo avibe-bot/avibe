@@ -259,10 +259,11 @@ request: `vendor` and transient `key`, plus optional `display_name`, `base_url`,
 `accept_unavailable_inventory`; omission is `false`, and the boolean consents only when
 the server's repeated observation has established a protocol (catalog pin, user
 declaration, or matching response shape) but returns
-`discovery: failed`. Omitted `protocol` auto-detects across the supported interfaces and
-still requires matching response proof. A supplied value is persisted when observation
-is authenticated and either the vendor catalog pins that protocol, the client declared
-it on `custom`, or a matching protocol-shaped response proves it. Source identity, protocol
+`discovery: failed`. Omitted `protocol` selects the shipped vendor pin when one exists;
+otherwise only `custom` omission auto-detects across the supported interfaces and still
+requires matching response proof. A supplied value is persisted when observation is
+authenticated and either the vendor catalog pins that protocol, the client declared it
+on `custom`, or a matching protocol-shaped response proves it. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is unique among live Sources and live-process
 create reservations. The server reserves it atomically in process before observation or

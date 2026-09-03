@@ -82,11 +82,12 @@ create request:
 ```
 
 `base_url` may be null for an official vendor endpoint. `protocol`, when present,
-restricts observation to exactly that interface; omitting it probes the authoritative
-three-value order. Auto-detect on `custom` still requires a matching protocol-shaped
-upstream response. A supplied protocol is established when authentication succeeds and
-either `vendor` has a shipped catalog pin, the client declared that protocol on
-`custom`, or a matching protocol-shaped response proves it. The protocol probe is deliberately
+restricts observation to exactly that interface; omitting it selects the shipped vendor
+pin when one exists, otherwise on `custom` it probes the authoritative three-value
+order. Auto-detect on `custom` still requires a matching protocol-shaped upstream
+response. A supplied protocol is established when authentication succeeds and either
+`vendor` has a shipped catalog pin, the client declared that protocol on `custom`, or
+a matching protocol-shaped response proves it. The protocol probe is deliberately
 schema-invalid and names no synthetic model, so a relay can authenticate and classify it
 without selecting or invoking an upstream model. A bare-origin Base URL uses the
 standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
@@ -111,7 +112,7 @@ authoritative; no Source response field may be inferred backwards into the reque
 | Field | Required | Producer → consumer | Rule |
 | --- | --- | --- | --- |
 | `vendor` | yes | Add Source client → observation adapter | Same normalized vendor id as the unsaved observation request. |
-| `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical vendor label; it never carries credential material. |
+| `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical locale-neutral vendor label; it never carries credential material. |
 | `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
 | `protocol` | no | Add Source client → observation adapter | One supported interface. It restricts the probe to that type. Omission auto-detects only on `custom`; a shipped vendor catalog pin collapses omission to the pinned protocol. Persistence requires authentication plus a shipped catalog pin, a `custom` declaration, or matching response proof. |

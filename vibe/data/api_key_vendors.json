@@ -19,19 +19,19 @@
   },
   {
     "id": "zhipuai",
-    "label": "智谱",
+    "label": "Zhipu AI",
     "official_base_url": "https://open.bigmodel.cn/api/paas/v4",
     "protocol": "openai_chat"
   },
   {
     "id": "openai",
-    "label": "OpenAI 官方",
+    "label": "OpenAI",
     "official_base_url": "https://api.openai.com/v1",
     "protocol": "openai_responses"
   },
   {
     "id": "anthropic",
-    "label": "Anthropic 官方",
+    "label": "Anthropic",
     "official_base_url": "https://api.anthropic.com",
     "protocol": "anthropic"
   },

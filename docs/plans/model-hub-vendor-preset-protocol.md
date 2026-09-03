@@ -62,9 +62,9 @@ prefix map in `vibe/data/model_vendors.json` is a different document
 | `deepseek` | DeepSeek | `https://api.deepseek.com` | `openai_chat` |
 | `qwen` | Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `openai_chat` |
 | `kimi` | Kimi | `https://api.moonshot.cn/v1` | `openai_chat` |
-| `zhipuai` | 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `openai_chat` |
-| `openai` | OpenAI 官方 | `https://api.openai.com/v1` | `openai_responses` |
-| `anthropic` | Anthropic 官方 | `https://api.anthropic.com` | `anthropic` |
+| `zhipuai` | Zhipu AI | `https://open.bigmodel.cn/api/paas/v4` | `openai_chat` |
+| `openai` | OpenAI | `https://api.openai.com/v1` | `openai_responses` |
+| `anthropic` | Anthropic | `https://api.anthropic.com` | `anthropic` |
 | `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openai_chat` |
 | `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
 | `mistral` | Mistral | `https://api.mistral.ai/v1` | `openai_chat` |
