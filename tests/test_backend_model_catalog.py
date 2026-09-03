@@ -57,6 +57,9 @@ def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
 
 def test_bundled_catalog_rows_are_exact_and_covered_by_the_vocabulary() -> None:
     catalog = backend_model_catalog.load_bundled_catalog()
+    efforts_by_model = (
+        backend_model_catalog.bundled_catalog_reasoning_efforts_by_model()
+    )
     rows = [
         model
         for backend in catalog["backends"].values()
@@ -75,9 +78,38 @@ def test_bundled_catalog_rows_are_exact_and_covered_by_the_vocabulary() -> None:
         set(backend_model_catalog.REASONING_EFFORT_VOCABULARY)
     )
     for model in rows:
-        assert backend_model_catalog.bundled_catalog_reasoning_efforts_for_model(
-            model["id"]
-        ) == tuple(model["reasoning_efforts"])
+        assert efforts_by_model[model["id"]] == tuple(model["reasoning_efforts"])
+
+
+def test_bundled_reasoning_effort_index_is_immutable_and_keeps_first_row(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "load_bundled_catalog",
+        lambda: {
+            "backends": {
+                "first": {
+                    "models": [
+                        {"id": "shared-model", "reasoning_efforts": ["low"]}
+                    ]
+                },
+                "second": {
+                    "models": [
+                        {"id": "shared-model", "reasoning_efforts": ["ultra"]}
+                    ]
+                },
+            }
+        },
+    )
+
+    efforts_by_model = (
+        backend_model_catalog.bundled_catalog_reasoning_efforts_by_model()
+    )
+
+    assert efforts_by_model["shared-model"] == ("low",)
+    with pytest.raises(TypeError):
+        efforts_by_model["shared-model"] = ("changed",)
 
 
 def test_backend_model_entries_normalize_runtime_catalog_shape():

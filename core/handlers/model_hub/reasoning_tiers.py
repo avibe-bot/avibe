@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
 from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
@@ -28,6 +28,7 @@ def resolve_reasoning_tiers(
     supported_parameters: tuple[str, ...] | None = None,
     existing_efforts: Sequence[str] = (),
     existing_source: ReasoningEffortsSource = None,
+    catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ReasoningTierResolution:
     """Apply upstream, bundled-catalog, then user provenance in that order."""
 
@@ -39,7 +40,11 @@ def resolve_reasoning_tiers(
         if defaults is not None:
             return ReasoningTierResolution(defaults, "upstream")
 
-    catalog_efforts = bundled_catalog_reasoning_efforts_for_model(model_id)
+    catalog_efforts = (
+        bundled_catalog_reasoning_efforts_for_model(model_id)
+        if catalog_efforts_by_model is None
+        else catalog_efforts_by_model.get(model_id)
+    )
     if catalog_efforts is not None:
         return ReasoningTierResolution(catalog_efforts, "catalog")
 

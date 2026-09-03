@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -39,6 +40,7 @@ from core.agent_auth_service import BackendLoginInProgressError
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
+from vibe.backend_model_catalog import bundled_catalog_reasoning_efforts_by_model
 
 from .adapter import (
     DiscoveredModel,
@@ -123,6 +125,7 @@ CONTRACT_VERSION = 7
 AGENT_CHAIN_CONTRACT_VERSION = 7
 PROBE_RESULT_CONTRACT_VERSION = 7
 _REORDER_ORDER_UNSET = object()
+_REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -355,6 +358,22 @@ class ExactReasoningEffortRequest:
     request: Mapping[str, Any]
     stripped_efforts: tuple[str, ...] = ()
     declared_efforts: tuple[str, ...] = ()
+
+
+def _bounded_reasoning_effort_telemetry(value: str) -> str:
+    """Redact and fold an untrusted effort value into bounded telemetry."""
+
+    redacted = redact_credential_material(value)
+    encoded = redacted.encode("utf-8")
+    if len(encoded) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
+        return redacted
+    digest = hashlib.sha256(encoded).hexdigest()
+    suffix = f"... [sha256:{digest}]"
+    preview_bytes = _REASONING_EFFORT_TELEMETRY_MAX_BYTES - len(
+        suffix.encode("utf-8")
+    )
+    preview = encoded[:preview_bytes].decode("utf-8", errors="ignore")
+    return f"{preview}{suffix}"
 
 
 AttemptObserver = Callable[
@@ -1571,6 +1590,7 @@ class ModelHubService:
         retired_model_ids = {model.id for model in retired_models}
         discovered_by_id = {model.id: model for model in canonical_models}
         overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
+        catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
 
         def apply_tiers(
             model: ModelHubModelConfig,
@@ -1584,6 +1604,7 @@ class ModelHubService:
                 ),
                 existing_efforts=model.reasoning_efforts,
                 existing_source=model.reasoning_efforts_source,
+                catalog_efforts_by_model=catalog_efforts_by_model,
             )
             if (
                 model.reasoning_efforts
@@ -5820,7 +5841,7 @@ class ModelHubService:
 
         def note_stripped(value: object) -> None:
             if isinstance(value, str) and value:
-                safe_value = redact_credential_material(value)
+                safe_value = _bounded_reasoning_effort_telemetry(value)
                 if safe_value not in stripped:
                     stripped.append(safe_value)
 
@@ -5857,7 +5878,7 @@ class ModelHubService:
         else:
             filtered_request = payload
         safe_declared = tuple(
-            redact_credential_material(effort) for effort in declared
+            _bounded_reasoning_effort_telemetry(effort) for effort in declared
         )
         logger.info(
             "Stripped undeclared Model Hub reasoning effort(s) %s for source %s "

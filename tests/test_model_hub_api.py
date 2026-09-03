@@ -58,7 +58,7 @@ from core.handlers.model_hub.service import (
     create_default_service,
 )
 from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
-from vibe import ui_server
+from vibe import backend_model_catalog, ui_server
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
 from vibe.ui_server import app
@@ -3775,6 +3775,60 @@ def test_source_creation_applies_the_first_reasoning_tier_provenance_rung(
     assert created_model["reasoning_efforts"] == expected_efforts
     assert created_model["reasoning_efforts_source"] == expected_source
     assert store.config.sources[0].models[0].reasoning_efforts == expected_efforts
+
+
+def test_discovery_batch_loads_the_bundled_reasoning_index_once(
+    monkeypatch,
+    tmp_path,
+):
+    service, _store, _adapter = _service(tmp_path)
+    catalog_loads = 0
+
+    def load_catalog():
+        nonlocal catalog_loads
+        catalog_loads += 1
+        return {
+            "backends": {
+                "codex": {
+                    "models": [
+                        {"id": "catalog-a", "reasoning_efforts": ["low"]},
+                        {"id": "catalog-b", "reasoning_efforts": ["high"]},
+                    ]
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "load_bundled_catalog",
+        load_catalog,
+    )
+    source = ModelHubSourceConfig(
+        id="src_catalog_batch",
+        kind="api_key",
+        vendor="custom",
+        display_name="Catalog batch",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+    )
+
+    service._apply_discovered_models(
+        source,
+        [],
+        [DiscoveredModel(id="catalog-a"), DiscoveredModel(id="catalog-b")],
+    )
+
+    assert catalog_loads == 1
+    assert [
+        (model.id, model.reasoning_efforts, model.reasoning_efforts_source)
+        for model in source.models
+    ] == [
+        ("catalog-a", ["low"], "catalog"),
+        ("catalog-b", ["high"], "catalog"),
+    ]
 
 
 def test_source_create_requires_explicit_consent_for_proven_inventory_failure(

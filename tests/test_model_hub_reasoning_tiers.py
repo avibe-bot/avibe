@@ -52,12 +52,13 @@ def test_catalog_row_is_not_filtered_through_the_vocabulary(
     monkeypatch.setattr(
         reasoning_tiers,
         "bundled_catalog_reasoning_efforts_for_model",
-        lambda _model_id: ("future-effort",),
+        lambda _model_id: pytest.fail("injected catalog index was ignored"),
     )
 
     resolution = resolve_reasoning_tiers(
         protocol="openai_chat",
         model_id="future-model",
+        catalog_efforts_by_model={"future-model": ("future-effort",)},
     )
 
     assert resolution.efforts == ("future-effort",)
