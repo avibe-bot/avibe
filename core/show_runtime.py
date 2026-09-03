@@ -2053,6 +2053,47 @@ class ShowRuntimeManager:
         identity = hashlib.sha256(str(install_dir).encode("utf-8")).hexdigest()
         return self.runtime_dir / "references" / identity
 
+    def _install_reference_key(self, install_dir: Path) -> tuple[str, str] | None:
+        try:
+            resolved = install_dir.resolve(strict=True)
+            runtime_root = self.runtime_dir.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if runtime_root not in resolved.parents:
+            return None
+        return str(runtime_root), str(resolved)
+
+    def _owns_install_reference(self, key: tuple[str, str]) -> bool:
+        with _INSTALL_REFERENCE_LOCKS_GUARD:
+            reference = _INSTALL_REFERENCE_LOCKS.get(key)
+            return bool(
+                reference is not None
+                and self._install_reference_owner in reference.owners
+            )
+
+    def _release_install_reference(self, key: tuple[str, str]) -> None:
+        released: _ShowRuntimeInstallReference | None = None
+        with _INSTALL_REFERENCE_LOCKS_GUARD:
+            reference = _INSTALL_REFERENCE_LOCKS.get(key)
+            if (
+                reference is None
+                or self._install_reference_owner not in reference.owners
+            ):
+                return
+            reference.owners.remove(self._install_reference_owner)
+            if not reference.owners:
+                released = _INSTALL_REFERENCE_LOCKS.pop(key)
+        if released is None:
+            return
+        try:
+            _unlock_install_reference(released.handle)
+        except OSError:
+            logger.warning("Failed to release Show Runtime install reference", exc_info=True)
+        try:
+            released.marker.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove Show Runtime install reference", exc_info=True)
+
     @staticmethod
     def _reference_path_matches_handle(path: Path, handle: IO[str]) -> bool:
         try:
@@ -2077,14 +2118,11 @@ class ShowRuntimeManager:
             return self._retain_install_dir_locked(install_dir)
 
     def _retain_install_dir_locked(self, install_dir: Path) -> bool:
-        try:
-            resolved = install_dir.resolve(strict=True)
-            runtime_root = self.runtime_dir.resolve(strict=True)
-        except (OSError, RuntimeError):
+        key = self._install_reference_key(install_dir)
+        if key is None:
             return False
-        if runtime_root not in resolved.parents:
-            return False
-        key = (str(runtime_root), str(resolved))
+        runtime_root = Path(key[0])
+        resolved = Path(key[1])
         with _INSTALL_REFERENCE_LOCKS_GUARD:
             existing = _INSTALL_REFERENCE_LOCKS.get(key)
             if existing is not None:
@@ -3736,21 +3774,34 @@ class ShowRuntimeManager:
         if force:
             self._invalidate_managed_runtime_projection()
         manager = self._shared_manifest_manager(offline=offline)
+        retained_publication_key: tuple[str, str] | None = None
 
         def validate_entrypoint(entrypoint: Path) -> str | None:
-            if candidate_validator is None:
-                return None
-            outcome = candidate_validator([*node, str(entrypoint)])
-            if outcome.state is ShowRuntimeStartabilityState.STARTABLE:
-                return None
-            if outcome.state is ShowRuntimeStartabilityState.NOT_STARTABLE:
-                return outcome.reason or "runtime_start_failed"
-            return "runtime_start_verification_failed"
+            nonlocal retained_publication_key
+            command = [*node, str(entrypoint)]
+            if candidate_validator is not None:
+                outcome = candidate_validator(command)
+                if outcome.state is ShowRuntimeStartabilityState.NOT_STARTABLE:
+                    return outcome.reason or "runtime_start_failed"
+                if outcome.state is ShowRuntimeStartabilityState.UNDETERMINED:
+                    return "runtime_start_verification_failed"
+            install_dir = self._managed_install_dir_for_command(command)
+            key = self._install_reference_key(install_dir) if install_dir else None
+            if key is None:
+                return "runtime_install_guard_unavailable"
+            already_owned = self._owns_install_reference(key)
+            if not self._retain_install_dir_locked(install_dir):
+                return self._install_reason or "runtime_install_guard_unavailable"
+            if not already_owned:
+                retained_publication_key = key
+            return None
 
         result = manager.ensure(
             force=force,
-            validate_candidate=(validate_entrypoint if candidate_validator is not None else None),
+            validate_candidate=validate_entrypoint,
         )
+        if not result.get("ok") and retained_publication_key is not None:
+            self._release_install_reference(retained_publication_key)
         self._adopt_shared_manifest_evidence(manager, result)
         entrypoint = manager.installed_result_entrypoint(result)
         if (
@@ -3759,8 +3810,6 @@ class ShowRuntimeManager:
         ):
             entrypoint = manager.resolve_selected_entrypoint()
         command = [*node, str(entrypoint)] if entrypoint is not None else None
-        if command and not self._retain_managed_command(command):
-            command = None
         return self._managed_install_operation_command(
             command,
             replacement_required=force,
@@ -3809,6 +3858,7 @@ class ShowRuntimeManager:
             )
         tmp_dir = Path(tempfile.mkdtemp(prefix="prebuilt-", dir=self.runtime_dir))
         candidate_dir: Path | None = None
+        retained_publication_key: tuple[str, str] | None = None
         try:
             with tarfile.open(archive, "r:gz") as tar:
                 safe_extract_tar(tar, tmp_dir)
@@ -3845,18 +3895,25 @@ class ShowRuntimeManager:
                         existing_command,
                         replacement_required=force,
                     )
+            reference_key = self._install_reference_key(candidate_dir)
+            already_owned = bool(
+                reference_key is not None
+                and self._owns_install_reference(reference_key)
+            )
+            if not self._retain_managed_command(installed_command):
+                self._install_reason = self._install_reason or "runtime_install_guard_unavailable"
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=force,
+                )
+            if reference_key is not None and not already_owned:
+                retained_publication_key = reference_key
             self._write_provider_pointer(
                 self.runtime_dir / "prebuilt",
                 candidate_dir,
                 provider=_RUNTIME_SOURCE_ARCHIVE,
             )
             candidate_dir = None
-            if not self._retain_managed_command(installed_command):
-                self._install_reason = "runtime_install_guard_unavailable"
-                return self._managed_install_operation_command(
-                    existing_command,
-                    replacement_required=force,
-                )
             return self._managed_install_operation_command(
                 installed_command,
                 replacement_required=force,
@@ -3871,6 +3928,8 @@ class ShowRuntimeManager:
             )
         finally:
             if candidate_dir is not None:
+                if retained_publication_key is not None:
+                    self._release_install_reference(retained_publication_key)
                 shutil.rmtree(candidate_dir, ignore_errors=True)
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -4001,6 +4060,7 @@ class ShowRuntimeManager:
         package_json = staging_root / "package.json"
         package_json.write_text('{"private":true,"type":"module"}\n', encoding="utf-8")
         candidate_dir: Path | None = None
+        retained_publication_key: tuple[str, str] | None = None
         try:
             with self.install_log_path.open("w", encoding="utf-8") as log:
                 result = subprocess.run(
@@ -4076,18 +4136,25 @@ class ShowRuntimeManager:
                         existing_command,
                         replacement_required=replacement_required,
                     )
+            reference_key = self._install_reference_key(candidate_dir)
+            already_owned = bool(
+                reference_key is not None
+                and self._owns_install_reference(reference_key)
+            )
+            if not self._retain_managed_command(installed_command):
+                self._install_reason = self._install_reason or "runtime_install_guard_unavailable"
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=replacement_required,
+                )
+            if reference_key is not None and not already_owned:
+                retained_publication_key = reference_key
             self._write_provider_pointer(
                 self.runtime_dir / "package",
                 candidate_dir,
                 provider=_RUNTIME_SOURCE_NPM,
             )
             candidate_dir = None
-            if not self._retain_managed_command(installed_command):
-                self._install_reason = "runtime_install_guard_unavailable"
-                return self._managed_install_operation_command(
-                    existing_command,
-                    replacement_required=replacement_required,
-                )
             return self._managed_install_operation_command(
                 installed_command,
                 replacement_required=replacement_required,
@@ -4095,6 +4162,8 @@ class ShowRuntimeManager:
             )
         finally:
             if candidate_dir is not None:
+                if retained_publication_key is not None:
+                    self._release_install_reference(retained_publication_key)
                 shutil.rmtree(candidate_dir, ignore_errors=True)
             if staging_root.exists():
                 shutil.rmtree(staging_root, ignore_errors=True)

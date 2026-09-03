@@ -1496,6 +1496,35 @@ def test_dependencies_status_keeps_true_show_runtime_absence_installable(monkeyp
     assert entry["reason"] is None
 
 
+def test_dependencies_status_keeps_node_ready_for_explicit_runtime_config_failure(
+    monkeypatch,
+    tmp_path,
+):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda command: ["node"] if command == "node" else None,
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        command=str(tmp_path / "missing-runtime"),
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    by_id = {item["id"]: item for item in api.dependencies_status()["deps"]}
+
+    assert by_id["show-runtime"]["installed"] is None
+    assert by_id["show-runtime"]["status"] == "error"
+    assert by_id["show-runtime"]["reason"] == "runtime_command_missing"
+    assert by_id["show-runtime"]["action_class"] == "operator_only"
+    assert by_id["node"]["installed"] is True
+    assert by_id["node"]["status"] == "ready"
+
+
 def test_show_runtime_status_does_not_hide_programming_defects(monkeypatch, tmp_path):
     from core.show_runtime import ShowRuntimeManager
 

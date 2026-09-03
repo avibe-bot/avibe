@@ -210,6 +210,7 @@ DOCTOR_DISPLAY_PROJECTIONS = {
         "binary_checksum_mismatch": "doctor.repair.dependencyBinaryVerificationFailed",
         "binary_not_runnable": "doctor.repair.dependencyBinaryNotRunnable",
         "binary_prepare_failed": "doctor.repair.dependencyBinaryPrepareFailed",
+        "candidate_validation_failed": "doctor.repair.dependencyCandidateValidationFailed",
         "install_missing_binary": "doctor.repair.dependencyInstallMissingBinary",
         "install_failed": "doctor.repair.installError",
         "install_lock_failed": "doctor.repair.dependencyInstallLockFailed",
@@ -13047,24 +13048,27 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         )
 
     reason = str(result.get("reason") or "runtime_prepare_failed")
+    message_kwargs: dict[str, object]
     if result.get("explicit_command"):
-        message = i18n_t("doctor.repair.showRuntimeExplicitFailed", language, reason=reason)
+        message_key = "doctor.repair.showRuntimeExplicitFailed"
+        message_kwargs = {"reason": reason}
     elif reason == "runtime_legacy_archive_unavailable":
-        message = i18n_t("doctor.repair.showRuntimeLegacyUnavailable", language)
+        message_key = "doctor.repair.showRuntimeLegacyUnavailable"
+        message_kwargs = {}
     elif verification.get("state") == "undetermined":
-        key = (
+        message_key = (
             "doctor.repair.showRuntimePostVerificationFailed"
             if result.get("verification_phase") == "after"
             else "doctor.repair.showRuntimeVerificationFailed"
         )
-        message = i18n_t(key, language, detail=verification.get("detail") or reason)
+        message_kwargs = {"detail": verification.get("detail") or reason}
     elif result.get("verification_phase") == "after" and verification.get("state") == "not_startable":
-        key = (
+        message_key = (
             "doctor.repair.showRuntimeReinstallStartFailed"
             if result.get("was_installed")
             else "doctor.repair.showRuntimeInstallStartFailed"
         )
-        message = i18n_t(key, language, reason=verification.get("reason") or reason)
+        message_kwargs = {"reason": verification.get("reason") or reason}
     else:
         download_error = (
             result.get("download_error")
@@ -13074,7 +13078,8 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         detail = str(download_error.get("message") or reason) if download_error else reason
         if download_error and download_error.get("url"):
             detail = f"{detail}: {download_error['url']}"
-        message = i18n_t("doctor.repair.showRuntimePrepareFailed", language, detail=detail)
+        message_key = "doctor.repair.showRuntimePrepareFailed"
+        message_kwargs = {"detail": detail}
     download_error = (
         result.get("download_error")
         if isinstance(result.get("download_error"), dict)
@@ -13083,7 +13088,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     return _doctor_repair_result(
         target,
         "failed",
-        message,
+        i18n_t(message_key, language, **message_kwargs),
         provider=result.get("provider"),
         platform=result.get("platform"),
         install_dir=result.get("install_dir"),

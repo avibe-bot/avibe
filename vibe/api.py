@@ -9161,7 +9161,10 @@ def dependencies_status(*, offline: bool = False) -> dict:
 
     # Node present but below the Show Runtime minimum (node_supported is False)
     # is not actually usable — don't show it green while runtime repair fails.
-    node_inspection_failed = srt_status == "error"
+    node_inspection_failed = (
+        install_state == "failed"
+        and srt.get("reason") == "runtime_install_inspection_failed"
+    )
     node_ok = (
         None
         if node_inspection_failed

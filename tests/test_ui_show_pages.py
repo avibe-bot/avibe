@@ -10231,6 +10231,54 @@ def test_show_runtime_repair_rejects_unverified_candidate_and_preserves_old_inst
     assert len(list((runtime_dir / "versions").glob("**/.vibe-show-runtime.json"))) == 1
 
 
+@pytest.mark.parametrize("provider", ("manifest-cache", "archive", "npm"))
+def test_show_runtime_candidate_reference_failure_never_publishes_pointer(
+    monkeypatch,
+    tmp_path,
+    provider,
+):
+    runtime_dir = tmp_path / "runtime"
+    archive_path = _write_runtime_archive(tmp_path)
+    manager_kwargs = {
+        "workspace_root": tmp_path / "show",
+        "runtime_dir": runtime_dir,
+        "runtime_source": provider,
+    }
+    if provider == "manifest-cache":
+        manager_kwargs["manifest_path"] = _write_runtime_manifest(tmp_path, archive_path)
+        pointer = runtime_dir / "current.json"
+    elif provider == "archive":
+        manager_kwargs["archive_path"] = archive_path
+        pointer = runtime_dir / "prebuilt" / "current.json"
+    else:
+        pointer = runtime_dir / "package" / "current.json"
+
+        def install_npm(argv, **_kwargs):
+            prefix = Path(argv[argv.index("--prefix") + 1])
+            binary = ShowRuntimeManager._npm_bin_path(prefix)
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(0o755)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr("core.show_runtime.subprocess.run", install_npm)
+
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: [command] if command in {"node", "npm"} else None,
+    )
+    manager = ShowRuntimeManager(**manager_kwargs)
+    monkeypatch.setattr(manager, "_retain_install_dir_locked", lambda _install_dir: False)
+    monkeypatch.setattr(manager, "_retain_managed_command", lambda _command: False)
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_install_guard_unavailable"
+    assert pointer.exists() is False
+    assert list(runtime_dir.rglob(".vibe-show-runtime.json")) == []
+
+
 def test_show_runtime_live_cached_install_survives_distinct_identity_cleanup(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     monkeypatch.setattr(
@@ -10296,9 +10344,10 @@ def test_show_runtime_manager_force_publication_failure_preserves_cached_command
 ):
     archive_path = _write_runtime_archive(tmp_path, text="healthy runtime\n")
     manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    runtime_dir = tmp_path / "runtime"
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
+        runtime_dir=runtime_dir,
         manifest_path=manifest_path,
     )
     monkeypatch.setattr(
@@ -10330,6 +10379,7 @@ def test_show_runtime_manager_force_publication_failure_preserves_cached_command
     assert failed["command"] == installed["command"]
     assert manager._managed_command == installed["command"]
     assert installed_cli.exists()
+    assert len(list((runtime_dir / "references").glob("*/*.lock"))) == 1
 
     repaired = manager.prepare()
 
