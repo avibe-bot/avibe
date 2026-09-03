@@ -1185,6 +1185,24 @@
 }
 
 .model-hub-guard-overlay { background: var(--model-hub-scrim); }
+/* Only the chrome's metrics. The head, title, subtitle, close, foot and action
+   are this dialog's own furniture and render nowhere else, so they resolve here.
+   The evidence BODY below is a different kind of thing: `GuardImpact` and
+   `GuardGapList` are shared, and they mount inside four separate dialogs — this
+   one, the catalog dialog's in-row removal confirmation, the Add-key replace
+   phase, and the route chain's guard phase. A body token declared here reached
+   exactly one of them; in the other three `var()` named a property no ancestor
+   declares, which is invalid at computed-value time, so the declaration drew
+   nothing: the label lost its gap AND its size, and the count lost its padding
+   AND its size, which is not a pill missing a margin but 「Hops that will be
+   removed2 hops」 in one unbroken run at the inherited font.
+
+   It is the argument `.model-hub-route-selector` makes further up, arrived at
+   from the other side. There a popover is portalled out of its dialog and
+   inherits nothing; here nothing is portalled — the body is simply mounted
+   somewhere else, which the stylesheet cannot see and the token scope must not
+   assume. So each body class carries what it and its descendants consume, and a
+   caller may mount it under any root at all. */
 .model-hub-guard-dialog {
   --model-hub-guard-width: 520px;
   --model-hub-guard-radius: 14px;
@@ -1195,28 +1213,6 @@
   --model-hub-guard-subtitle-size: 10.5px;
   --model-hub-guard-close-size: 27px;
   --model-hub-guard-close-icon-size: 15px;
-  --model-hub-guard-body-padding: 20px;
-  --model-hub-guard-body-gap: 14px;
-  --model-hub-guard-label-gap: 6px;
-  --model-hub-guard-label-size: 10.5px;
-  --model-hub-guard-count-padding-y: 3px;
-  --model-hub-guard-count-padding-x: 8px;
-  --model-hub-guard-count-size: 10px;
-  --model-hub-guard-list-padding: 8px;
-  --model-hub-guard-list-gap: 6px;
-  --model-hub-guard-list-radius: 10px;
-  --model-hub-guard-hop-height: 52px;
-  --model-hub-guard-hop-padding-x: 10px;
-  --model-hub-guard-hop-gap: 10px;
-  --model-hub-guard-hop-radius: 8px;
-  --model-hub-guard-hop-name-size: 12px;
-  --model-hub-guard-hop-detail-gap: 3px;
-  --model-hub-guard-hop-detail-size: 10.5px;
-  --model-hub-guard-hint-gap: 7px;
-  --model-hub-guard-hint-size: 11.5px;
-  --model-hub-guard-hint-line: 17px;
-  --model-hub-guard-hint-icon-size: 13px;
-  --model-hub-guard-hint-icon-offset: 2px;
   --model-hub-guard-foot-padding-y: 14px;
   --model-hub-guard-foot-padding-x: 20px;
   --model-hub-guard-foot-gap: 8px;
@@ -1240,14 +1236,77 @@
 .model-hub-guard-subtitle { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: var(--model-hub-guard-subtitle-size); }
 .model-hub-guard-close { width: var(--model-hub-guard-close-size); height: var(--model-hub-guard-close-size); color: var(--model-hub-ink-59); }
 .model-hub-guard-close svg { width: var(--model-hub-guard-close-icon-size); height: var(--model-hub-guard-close-icon-size); }
-.model-hub-guard-body { padding: var(--model-hub-guard-body-padding); display: flex; flex-direction: column; gap: var(--model-hub-guard-body-gap); }
-.model-hub-guard-label { display: flex; align-items: center; justify-content: flex-start; gap: var(--model-hub-guard-label-gap); color: var(--model-hub-ink-73); font-size: var(--model-hub-guard-label-size); font-weight: 700; }
+/* The travelling body. Each class declares the metrics it and its own
+   selector-descendants consume, so none of them depends on where a caller
+   mounted it — not on the guard dialog, and not on each other either: a hop
+   outside a list still measures like a hop. */
+.model-hub-guard-body {
+  --model-hub-guard-body-padding: 20px;
+  --model-hub-guard-body-gap: 14px;
+  padding: var(--model-hub-guard-body-padding);
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-guard-body-gap);
+}
+.model-hub-guard-label {
+  --model-hub-guard-label-gap: 6px;
+  --model-hub-guard-label-size: 10.5px;
+  --model-hub-guard-count-padding-y: 3px;
+  --model-hub-guard-count-padding-x: 8px;
+  --model-hub-guard-count-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--model-hub-guard-label-gap);
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-guard-label-size);
+  font-weight: 700;
+}
 .model-hub-guard-label > span { padding: var(--model-hub-guard-count-padding-y) var(--model-hub-guard-count-padding-x); border: 1px solid var(--border); border-radius: 999px; background: var(--model-hub-wash-0a); color: var(--muted); font-size: var(--model-hub-guard-count-size); font-weight: 600; }
-.model-hub-guard-list { padding: var(--model-hub-guard-list-padding); display: flex; flex-direction: column; gap: var(--model-hub-guard-list-gap); border: 1px solid var(--border); border-radius: var(--model-hub-guard-list-radius); background: var(--background); }
-.model-hub-guard-hop { min-height: var(--model-hub-guard-hop-height); padding: 0 var(--model-hub-guard-hop-padding-x); display: flex; align-items: center; gap: var(--model-hub-guard-hop-gap); border: 1px solid var(--border); border-radius: var(--model-hub-guard-hop-radius); background: var(--model-hub-wash-08); }
+.model-hub-guard-list {
+  --model-hub-guard-list-padding: 8px;
+  --model-hub-guard-list-gap: 6px;
+  --model-hub-guard-list-radius: 10px;
+  padding: var(--model-hub-guard-list-padding);
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-guard-list-gap);
+  border: 1px solid var(--border);
+  border-radius: var(--model-hub-guard-list-radius);
+  background: var(--background);
+}
+.model-hub-guard-hop {
+  --model-hub-guard-hop-height: 52px;
+  --model-hub-guard-hop-padding-x: 10px;
+  --model-hub-guard-hop-gap: 10px;
+  --model-hub-guard-hop-radius: 8px;
+  --model-hub-guard-hop-name-size: 12px;
+  --model-hub-guard-hop-detail-gap: 3px;
+  --model-hub-guard-hop-detail-size: 10.5px;
+  min-height: var(--model-hub-guard-hop-height);
+  padding: 0 var(--model-hub-guard-hop-padding-x);
+  display: flex;
+  align-items: center;
+  gap: var(--model-hub-guard-hop-gap);
+  border: 1px solid var(--border);
+  border-radius: var(--model-hub-guard-hop-radius);
+  background: var(--model-hub-wash-08);
+}
 .model-hub-guard-hop strong { display: block; color: color-mix(in srgb, var(--foreground) 70.2%, transparent); font-size: var(--model-hub-guard-hop-name-size); font-weight: 600; }
 .model-hub-guard-hop span span { margin-top: var(--model-hub-guard-hop-detail-gap); display: block; color: var(--model-hub-muted-b3); font-family: 'JetBrains Mono', monospace; font-size: var(--model-hub-guard-hop-detail-size); }
-.model-hub-guard-hint { display: flex; align-items: flex-start; gap: var(--model-hub-guard-hint-gap); color: var(--model-hub-ink-73); font-size: var(--model-hub-guard-hint-size); line-height: var(--model-hub-guard-hint-line); }
+.model-hub-guard-hint {
+  --model-hub-guard-hint-gap: 7px;
+  --model-hub-guard-hint-size: 11.5px;
+  --model-hub-guard-hint-line: 17px;
+  --model-hub-guard-hint-icon-size: 13px;
+  --model-hub-guard-hint-icon-offset: 2px;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--model-hub-guard-hint-gap);
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-guard-hint-size);
+  line-height: var(--model-hub-guard-hint-line);
+}
 .model-hub-guard-hint svg { width: var(--model-hub-guard-hint-icon-size); height: var(--model-hub-guard-hint-icon-size); margin-top: var(--model-hub-guard-hint-icon-offset); flex: none; color: var(--model-hub-ink-59); }
 .model-hub-guard-foot { padding: var(--model-hub-guard-foot-padding-y) var(--model-hub-guard-foot-padding-x); display: flex; align-items: center; justify-content: flex-end; gap: var(--model-hub-guard-foot-gap); border-top: 1px solid var(--border); background: var(--model-hub-wash-05); }
 .model-hub-guard-action { height: auto; padding: var(--model-hub-guard-action-padding-y) var(--model-hub-guard-action-padding-x); border-radius: var(--model-hub-guard-action-radius); font-size: var(--model-hub-guard-action-size); font-weight: 600; }
