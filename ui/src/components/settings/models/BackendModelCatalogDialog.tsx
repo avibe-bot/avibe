@@ -26,6 +26,7 @@ import {
   backendModelId,
   catalogModelIds,
   draftRowFor,
+  echoableRefusal,
   heldRowFor,
   readBackendCatalogBaseline,
   sameCatalog,
@@ -69,11 +70,19 @@ const matchesQuery = (model: BackendModel, query: string, renderedLabel: string)
     || renderedLabel.toLowerCase().includes(needle);
 };
 
-/** One removal, waiting on an answer, carrying the plan it is about. Together,
- *  because a re-ask after the guard refused is about the server's plan and a
- *  first ask is about the baseline's — the question is not answerable without
- *  the plan it was raised from. */
-type RemovalQuestion = { modelId: string; plan: GuardPlan };
+/**
+ * One removal, waiting on an answer, carrying the account of its consequence
+ * the user is being shown.
+ *
+ * The plan travels with the question because a re-ask after the guard refused
+ * is about the server's plan and a first ask is about the baseline's — the
+ * question is not answerable without the plan it was raised from. `account`
+ * names whose plan it is, and that is the whole reason the field exists:
+ * agreeing to what the dialog projected from the routes it holds is not
+ * agreeing to what the server refused. Only a `guard` answer can settle a
+ * refusal, so only a `guard` answer is allowed to discharge what one owes.
+ */
+type RemovalQuestion = { modelId: string; plan: GuardPlan; account: 'draft' | 'guard' };
 
 /** A guard refusal, as received, together with the write it refused. Both
  *  halves are needed to use it: the arrays are what a retry echoes, and the
@@ -84,6 +93,26 @@ type StoredRefusal = {
   gaps: readonly SupplyGap[];
   baseline: readonly BackendModel[];
   models: readonly BackendModel[];
+  /**
+   * The held-back removals still owed an answer against the server's own plan.
+   *
+   * This is the acceptance bit: empty means accepted, and only an accepted
+   * refusal may be echoed with `force`. It is separate from the write above
+   * because the two answer different questions — the write says 「is this the
+   * same save the server refused?」 and this says 「did the user accept that
+   * refusal?」 — and the reachable path that made one stand in for the other is
+   * why it exists. A queued question can be taken off the screen by removing
+   * its row through the ordinary trash action, which recomputes from the
+   * baseline and shows the dialog's own projection instead; answer the rest and
+   * the draft is byte-for-byte the refused list again, so equality alone would
+   * have forced a plan whose interruptions were never displayed.
+   *
+   * Discharged one id at a time, and only by a `guard` answer. A swallowed
+   * question therefore leaves the save unforced, the server refuses it again
+   * with the same arrays, and the question comes back — one extra round-trip,
+   * and no loop, because acceptance is the only route to `force`.
+   */
+  owed: ReadonlySet<string>;
 };
 
 /**
@@ -121,7 +150,7 @@ const refusalPlans = (
   for (const gap of gaps) {
     if (gap.backend === backend) planFor(gap.model_id)?.gaps.push(gap);
   }
-  return [...plans].map(([modelId, plan]) => ({ modelId, plan }));
+  return [...plans].map(([modelId, plan]) => ({ modelId, plan, account: 'guard' as const }));
 };
 
 /** The stale-candidate refusal (C1), named by the route's own `error` rather
@@ -449,12 +478,31 @@ export const BackendModelCatalogDialog: React.FC<{
     mutate(draftRef.current.filter((entry) => entry.id !== modelId));
   };
 
+  /**
+   * The user answers one removal question: the row leaves, and if the question
+   * was the guard's own, the refusal is one answer closer to being echoable.
+   *
+   * Only a `guard` answer discharges anything. The same confirmation renders for
+   * a removal the dialog itself asked about, and what that one shows is the
+   * dialog's projection from the routes it holds — accepting it says nothing
+   * about the plan the server refused, which may name interruptions the
+   * projection had no way to know about.
+   */
+  const acceptRemoval = (question: RemovalQuestion) => {
+    dropModel(question.modelId, question.plan);
+    const refusal = refusalRef.current;
+    if (question.account !== 'guard' || !refusal || !refusal.owed.has(question.modelId)) return;
+    const owed = new Set(refusal.owed);
+    owed.delete(question.modelId);
+    refusalRef.current = { ...refusal, owed };
+  };
+
   const removeModel = (model: BackendModel) => {
     const plan = removalPreview(model.id);
     // A route is the only thing a removal takes with it that the user did not
     // name, so it is the only removal that asks first.
     if (plan.hops.length > 0) {
-      setRemoving({ modelId: model.id, plan });
+      setRemoving({ modelId: model.id, plan, account: 'draft' });
       return;
     }
     dropModel(model.id, plan);
@@ -544,17 +592,14 @@ export const BackendModelCatalogDialog: React.FC<{
    * fields — there is no path to them that does not pass through a refusal the
    * server wrote.
    *
-   * The refusal is used only while it is still about this write. It answers one
-   * `baseline` + `models` pair, and a draft that has moved since is a different
-   * question — so the check is the write itself, not a flag someone has to
-   * remember to clear.
+   * Whether a stored refusal has earned that echo is `echoableRefusal`'s
+   * question, asked against this write rather than against a flag someone has
+   * to remember to clear.
    */
   const putBody = (baselineModels: BackendModel[], requested: BackendModel[]): BackendModelsPut => {
     const body: BackendModelsPut = { baseline: baselineModels, models: requested };
     const refusal = refusalRef.current;
-    if (refusal
-      && sameCatalog(refusal.baseline, baselineModels)
-      && sameCatalog(refusal.models, requested)) {
+    if (refusal && echoableRefusal(refusal, baselineModels, requested)) {
       body.force = true;
       body.would_remove_hops = [...refusal.hops];
       body.would_interrupt = [...refusal.gaps];
@@ -661,12 +706,6 @@ export const BackendModelCatalogDialog: React.FC<{
           ? refusalPlans(refusal.wouldRemoveHops, refusal.wouldInterrupt, intent.removed, backend)
           : [];
         if (refusal && guardedPlans.length > 0) {
-          refusalRef.current = {
-            hops: refusal.wouldRemoveHops,
-            gaps: refusal.wouldInterrupt,
-            baseline: baselineModels,
-            models: requested,
-          };
           // Does the server's plan say what the user already accepted? Compared
           // as contents, not as sequence: the previews were recorded row by row
           // as the trash was clicked, the server walks its own baseline, and two
@@ -676,6 +715,23 @@ export const BackendModelCatalogDialog: React.FC<{
             .map(([, plan]) => plan);
           const agreed = samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops))
             && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps));
+          refusalRef.current = {
+            hops: refusal.wouldRemoveHops,
+            gaps: refusal.wouldInterrupt,
+            baseline: baselineModels,
+            models: requested,
+            // An agreement that already covers this plan owes nothing: the user
+            // has seen these consequences, and `agreed` is that statement.
+            // Otherwise every removal being handed back owes an answer, and the
+            // echo waits for the last of them.
+            //
+            // What the split could not attribute to any removed row is owed by
+            // nobody, because there is no row for it to be asked in. It still
+            // travels in the echo once every question that COULD be asked has
+            // been answered — the alternative is a save the user can never make
+            // — and that residue is a recorded decision, not an oversight.
+            owed: agreed ? new Set() : new Set(guardedPlans.map((question) => question.modelId)),
+          };
           // Already agreed, and this attempt did not carry the agreement: the
           // user answered this question before they pressed Save, and asking it
           // again would only be the dialog telling them what they just told it.
@@ -802,6 +858,7 @@ export const BackendModelCatalogDialog: React.FC<{
   const removeConfirmation = (model: BackendModel) => {
     if (removing?.modelId !== model.id) return null;
     const { plan } = removing;
+    const asked = removing;
     return (
       <div className="model-hub-catalog-confirm">
         <div className="model-hub-catalog-consequence" role="alert">
@@ -822,7 +879,7 @@ export const BackendModelCatalogDialog: React.FC<{
             variant="destructive"
             className="model-hub-catalog-confirm-action rounded-md text-[12.5px] font-bold"
             disabled={busy}
-            onClick={() => { dropModel(model.id, plan); askNextGuarded(); }}
+            onClick={() => { acceptRemoval(asked); askNextGuarded(); }}
           >
             {t('settings.models.gateway.catalog.removeConfirm')}
           </Button>

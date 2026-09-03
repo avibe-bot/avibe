@@ -1037,7 +1037,7 @@ describe('BackendModelCatalogDialog', () => {
       })));
     });
 
-    it('discards a queued question whose row has already left the draft, and asks no more', async () => {
+    it('discards a queued question whose row has already left the draft, and forces nothing on its behalf', async () => {
       const user = userEvent.setup();
       // The queue outlives the question on screen, and the rows behind the head
       // keep their own controls — so the user can remove one before its turn
@@ -1047,6 +1047,11 @@ describe('BackendModelCatalogDialog', () => {
       // the row that could advance the queue is the one that is gone, so every
       // question behind it goes unasked and the removals the user did ask for
       // can never be confirmed — the guard would refuse the list forever.
+      //
+      // Discarding it keeps the queue live but settles nothing: the consequence
+      // the server named for that row was never displayed. So the save that
+      // follows goes out unforced, and the two properties hold together — the
+      // dialog never stalls, and it never vouches for what it did not show.
       const catalog = [model('alpha'), model('beta'), model('gamma'), model('delta')];
       vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
         // The one route this dialog can see. The others were created after the
@@ -1057,16 +1062,21 @@ describe('BackendModelCatalogDialog', () => {
         { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
         { backend: 'claude' as const, menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
       ];
+      const refusal = () => new ApiCallError(
+        'backend_model_in_route',
+        'modelHub.errors.backend_model_in_route',
+        true,
+        [],
+        [],
+        hops,
+        409,
+      );
       const write = vi.spyOn(modelsApi, 'putAgentModels')
-        .mockRejectedValueOnce(new ApiCallError(
-          'backend_model_in_route',
-          'modelHub.errors.backend_model_in_route',
-          true,
-          [],
-          [],
-          hops,
-          409,
-        ))
+        .mockRejectedValueOnce(refusal())
+        // The same refusal, because nothing was accepted and so nothing about
+        // the routes changed: an unforced save asks the guard the same question
+        // and gets the same answer.
+        .mockRejectedValueOnce(refusal())
         .mockResolvedValue(agent([model('alpha'), model('delta')]));
       renderDialog();
 
@@ -1100,16 +1110,33 @@ describe('BackendModelCatalogDialog', () => {
       await user.click(screen.getByRole('button', { name: 'Remove beta' }));
       await user.click(screen.getByRole('button', { name: 'Save' }));
 
-      // The same list the guard refused, so its refusal still answers it — and
-      // what goes back is that refusal whole, the server's account of this
-      // write rather than a transcript of which questions happened to be asked.
+      // The list is byte-for-byte the one the guard refused — and that is not
+      // enough. Both questions left without ever being answered, so the two
+      // hops the server named were never put to the user, and a `force` here
+      // would be the client vouching for a consequence nobody was shown.
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+      expect(write.mock.calls[1]?.[1]).toEqual({ baseline: catalog, models: [model('alpha'), model('delta')] });
+
+      // So the guard refuses it again, with the same two hops, and the
+      // questions come back — the round-trip the swallow cost, in exchange for
+      // the user seeing what they are agreeing to.
+      const reasked = await screen.findByRole('alert');
+      expect(within(reasked).getByText('beta-air · Order #1')).toBeTruthy();
+      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+      expect(within(screen.getByRole('alert')).getByText('gamma-air · Order #1')).toBeTruthy();
+      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+
+      // Answered now, both of them, against the server's own account. This is
+      // the only way the echo is reached, so it carries the refusal whole and
+      // in the server's order rather than a transcript of the asking.
+      await user.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(write).toHaveBeenLastCalledWith('claude', expect.objectContaining({
         models: [model('alpha'), model('delta')],
         force: true,
         would_remove_hops: hops,
         would_interrupt: [],
       })));
-      expect(write).toHaveBeenCalledTimes(2);
+      expect(write).toHaveBeenCalledTimes(3);
     });
   });
 

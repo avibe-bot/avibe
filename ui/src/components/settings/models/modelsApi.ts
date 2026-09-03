@@ -286,12 +286,28 @@ const candidateSuppliers = (raw: unknown): ModelCandidateSupplier[] =>
     : [];
 
 type CandidateOrigin = ModelCandidate['origin'];
-/** The creation paths a candidate may state. Local rather than read off the
- *  registered mirror while this branch sits at the version before `provider`
- *  joins it: reading against the shipped set would silently demote every
- *  provider-group row to its group fallback. Delete at the rebase and read
- *  `BACKEND_MODEL_ORIGINS`. */
-const CANDIDATE_ORIGINS: readonly CandidateOrigin[] = ['builtin', 'provider', 'models_dev', 'manual'];
+/** The creation paths a candidate may state. A runtime set, because the type it
+ *  mirrors erases — and asserted equal to the schema's own enum in
+ *  `backendModelContract.test.ts`, so a path the contract gains fails a test
+ *  rather than being quietly read as the group's fallback. */
+export const CANDIDATE_ORIGINS: readonly CandidateOrigin[] = ['builtin', 'provider', 'models_dev', 'manual'];
+
+/** The groups the server names as a removed row's way back (C4). A value it
+ *  does not state is not a group, and `null` is a value it states. */
+const REENTRY_GROUPS: readonly ('builtin' | 'providers')[] = ['builtin', 'providers'];
+
+/** What the server says would offer this id again if it left the menu, read
+ *  only when the server says it. Absent stays absent rather than becoming
+ *  `null`: the two mean the same thing to the picker, and inventing a stated
+ *  answer out of an unstated one is how a client starts deriving the field. */
+const reentryGroup = (raw: Record<string, unknown>): Pick<ModelCandidate, 'group_if_removed'> => {
+  if (!('group_if_removed' in raw)) return {};
+  const stated = raw.group_if_removed;
+  if (stated === null) return { group_if_removed: null };
+  return REENTRY_GROUPS.includes(stated as 'builtin' | 'providers')
+    ? { group_if_removed: stated as 'builtin' | 'providers' }
+    : {};
+};
 
 /**
  * One candidate group, read defensively.
@@ -316,6 +332,7 @@ const modelCandidates = (raw: unknown, fallbackOrigin: CandidateOrigin): ModelCa
           origin: CANDIDATE_ORIGINS.includes(row.origin as CandidateOrigin)
             ? row.origin as CandidateOrigin
             : fallbackOrigin,
+          ...reentryGroup(row),
         }];
       })
     : [];

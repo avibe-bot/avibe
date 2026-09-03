@@ -251,20 +251,18 @@ export type ModelCandidate = {
   /** In the backend's Source order. Empty is meaningful: nothing supplies this
    *  id yet, so adding it starts with an empty route. */
   suppliers: ModelCandidateSupplier[];
-  /** The creation path a pick records (C2). Widened here rather than in
-   *  `BackendModelOrigin` on purpose: the picker's provider group is a new
-   *  creation path, and the registered mirror gains `provider` on the head that
-   *  carries the version bump — one head, one closure. Until this branch rebases
-   *  onto that head, stating it locally keeps a provider-origin candidate honest
-   *  without pinning a version this branch does not implement. Drop the `|
-   *  'provider'` at the rebase; the field is `BackendModelOrigin` afterwards. */
-  origin: BackendModelOrigin | 'provider';
+  /** The creation path a pick records (C2). */
+  origin: BackendModelOrigin;
   /** Where the server would offer this id if it left the menu (C4). Set on
    *  `in_list` candidates only, because they are the only ones already in it —
    *  `null` means nowhere, which is a real answer. It exists because `origin`
    *  cannot answer this: `origin` is the path a row was created by, not what
-   *  supplies it now. Optional while the backend lane is landing it; the
-   *  fallback that covers its absence is `pickerGroups`'. */
+   *  supplies it now.
+   *
+   *  Optional because the schema leaves it optional: an `in_list` candidate may
+   *  omit it, and the reading of an absent answer is the same as a `null` one —
+   *  nowhere, reachable through `Add custom model…`. Never inferred from
+   *  anything else on the row. */
   group_if_removed?: 'builtin' | 'providers' | null;
 };
 

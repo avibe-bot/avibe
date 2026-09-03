@@ -15,6 +15,7 @@ import {
   backendModelId,
   draftRowFor,
   draftWithId,
+  echoableRefusal,
   heldRowFor,
   MODELS_DEV_FIELDS,
   pickerGroups,
@@ -686,18 +687,21 @@ describe('pickerGroups', () => {
     // path and nothing else (C2), so a row added through a provider whose Source
     // was deleted months ago still reads `provider`. Filing by that would offer
     // it under 「From your providers」 and name a supplier that no longer exists.
-    // So the group is a function of the supply facts alone — and a row those
-    // facts place nowhere is absent from the picker, with `Add custom model…` as
-    // its way back, which costs the user far less than a row nothing can serve.
+    // So the group is a function of the server's own answer alone — and a row
+    // that answer places nowhere is absent from the picker, with `Add custom
+    // model…` as its way back, which costs the user far less than a row filed
+    // under a supplier nothing can serve.
     const ORIGINS: ModelCandidate['origin'][] = ['builtin', 'models_dev', 'manual', 'provider'];
     const SUPPLIED: ModelCandidateSupplier[] = [{ source_id: 'src', source_name: 'Src', model_id: 'upstream' }];
 
-    /** One row per shape the read can state current supply in, absence included,
-     *  each paired with the group it must reach. Seeded over the field's closed
-     *  domain rather than listed as cases: a value the server gains is one row
-     *  here, and every origin below then covers it. The first three pair the
-     *  server's answer with a `suppliers` that would disagree, so a result can
-     *  only have come from the answer itself. */
+    /** One row per shape the read can answer `group_if_removed` in, absence
+     *  included, each paired with the group it must reach. Seeded over the
+     *  field's closed domain rather than listed as cases: a value the server
+     *  gains is one row here, and every origin below then covers it. Every row
+     *  pairs the answer with a `suppliers` that would disagree with it, so a
+     *  result can only have come from the answer itself — and the last two say
+     *  an absent answer reads exactly as `null`, whatever else the row carries,
+     *  because there is nothing else the client is entitled to read it from. */
     const FACTS: {
       what: string;
       supply: Partial<ModelCandidate>;
@@ -706,8 +710,8 @@ describe('pickerGroups', () => {
       { what: 'the server names the built-in snapshot', supply: { group_if_removed: 'builtin', suppliers: SUPPLIED }, group: 'builtin' },
       { what: 'the server names the providers', supply: { group_if_removed: 'providers', suppliers: [] }, group: 'providers' },
       { what: 'the server names nowhere', supply: { group_if_removed: null, suppliers: SUPPLIED }, group: null },
-      { what: 'no answer yet, and a provider supplies it', supply: { suppliers: SUPPLIED }, group: 'providers' },
-      { what: 'no answer yet, and nothing supplies it', supply: { suppliers: [] }, group: null },
+      { what: 'no answer, and a provider supplies it', supply: { suppliers: SUPPLIED }, group: null },
+      { what: 'no answer, and nothing supplies it', supply: { suppliers: [] }, group: null },
     ];
 
     /** The one group a candidate reaches, and proof there is only one. */
@@ -720,9 +724,9 @@ describe('pickerGroups', () => {
 
     for (const fact of FACTS) {
       const reached = ORIGINS.map((origin) => groupOf(offered('kimi-k3', { ...fact.supply, origin })));
-      // One group for one set of supply facts, whatever origin arrived with them…
+      // One group for one answer, whatever origin arrived with it…
       expect(new Set(reached).size, fact.what).toBe(1);
-      // …and it is the group those facts name.
+      // …and it is the group that answer names.
       expect(reached[0], fact.what).toBe(fact.group);
     }
   });
@@ -778,5 +782,55 @@ describe('samePlanContents', () => {
       [{ source_id: 'src', model_id: 'kimi-k3', position: 1 }],
       [{ position: 1, model_id: 'kimi-k3', source_id: 'src', menu_model: undefined }],
     )).toBe(true);
+  });
+});
+
+describe('echoableRefusal', () => {
+  const BASELINE = [model('alpha'), model('beta'), model('gamma')];
+  const REQUESTED = [model('alpha')];
+  const stored = (owed: readonly string[]) => ({
+    baseline: BASELINE,
+    models: REQUESTED,
+    owed: new Set(owed),
+  });
+
+  it('permits an echo only where the refusal was accepted AND still describes this write', () => {
+    // Two independent facts decide it, so what is stated here is their product
+    // rather than a list of cases: whether every held-back removal has been
+    // answered against the server's own plan, and whether the write is still
+    // the one the server refused. `force` asserts both at once — 「the user saw
+    // this consequence, and it is the consequence of what I am sending」 — so
+    // the answer is their conjunction, and each dimension is free to grow
+    // without the expectations being rewritten.
+    const ACCEPTANCE = [
+      { what: 'every question answered', owed: [], accepted: true },
+      { what: 'one still owed', owed: ['beta'], accepted: false },
+      { what: 'every one still owed', owed: ['beta', 'gamma'], accepted: false },
+    ];
+    const SUBJECT = [
+      { what: 'the write it refused', baseline: BASELINE, requested: REQUESTED, same: true },
+      { what: 'a draft that removed more since', baseline: BASELINE, requested: [], same: false },
+      { what: 'a draft that put a row back', baseline: BASELINE, requested: BASELINE, same: false },
+      { what: 'a draft that added a row', baseline: BASELINE, requested: [...REQUESTED, model('delta')], same: false },
+      { what: 'the same ids, one row edited', baseline: BASELINE, requested: [model('alpha', { display_name: 'Alpha' })], same: false },
+      { what: 'a newer server catalog', baseline: [...BASELINE, model('delta')], requested: REQUESTED, same: false },
+    ];
+    const cells = ACCEPTANCE.flatMap((acceptance) => SUBJECT.map((subject) => ({
+      what: `${acceptance.what} · ${subject.what}`,
+      echoable: echoableRefusal(stored(acceptance.owed), subject.baseline, subject.requested),
+      accepted: acceptance.accepted,
+      same: subject.same,
+    })));
+    expect(cells.filter((cell) => cell.echoable !== (cell.accepted && cell.same))).toEqual([]);
+    // And the product is the whole point: neither fact on its own permits an
+    // echo, so exactly one cell of the matrix does.
+    expect(cells.filter((cell) => cell.echoable).map((cell) => cell.what))
+      .toEqual(['every question answered · the write it refused']);
+  });
+
+  it('permits nothing when there is no refusal to echo', () => {
+    // The state a fresh dialog saves from, and the one it returns to after a
+    // reopen: there is no server plan, so there is nothing to force.
+    expect(echoableRefusal(null, BASELINE, REQUESTED)).toBe(false);
   });
 });

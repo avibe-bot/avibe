@@ -1,22 +1,23 @@
 // The catalog half of the registered mirror: what this client promises to send,
 // and what it promises not to drop on the way in.
 //
-// Two anchors, on purpose. Where `docs/plans/model-hub-contracts/` already
-// states a shape, the schema is the authority and these tests read it — a field
-// added there fails here rather than reaching a projection nobody renders. The
-// v2 additions (the candidates read, `expected_suppliers`, and the
-// stale-candidate refusal) have no schema at this head yet, so they are anchored
-// on the property instead: the real client is driven over a stubbed wire, and a
-// typed fixture with no optional fields left out is asserted to survive the
-// round trip intact. Re-anchor those cases to the schema when the head carrying
-// the version bump lands its authority files.
+// Two anchors, on purpose. Where `docs/plans/model-hub-contracts/` states a
+// shape, the schema is the authority and these tests read it — a field added
+// there fails here rather than reaching a projection nobody renders. Where it
+// does not, the property is the anchor instead: the real client is driven over
+// a stubbed wire, and a typed fixture with no optional field left out is
+// asserted to survive the round trip intact.
+//
+// The candidates read moved from the second anchor to the first when #1837
+// merged its authority files, so `ModelCandidate` is now read out of
+// `api-response.schema.json` rather than described here twice.
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { apiFailure, modelsApi } from './modelsApi';
+import { apiFailure, CANDIDATE_ORIGINS, modelsApi } from './modelsApi';
 import {
   BACKEND_MODEL_INPUT_MODALITIES,
   BACKEND_MODEL_OUTPUT_MODALITIES,
@@ -77,12 +78,15 @@ const HOP_REF: RouteHopRef = {
   position: 2,
 };
 
-const CANDIDATE: ModelCandidate = {
+/** Every field the projection states, optional one included — so the schema's
+ *  closed-object set equality below is a relation in both directions. */
+const CANDIDATE: Required<ModelCandidate> = {
   id: 'glm-5.2',
   display_name: 'GLM 5.2',
   reasoning_efforts: ['low', 'high'],
   suppliers: [{ source_id: 'src_relay0001', source_name: 'relay.example', model_id: 'glm-5.2-air' }],
   origin: 'provider',
+  group_if_removed: 'providers',
 };
 
 const MATCH: ModelsDevMatch = {
@@ -134,11 +138,47 @@ describe('backend model catalog contract', () => {
     // vocabulary fails to typecheck against the mirror's own constant.
     expect(new Set(MODEL.input_modalities)).toEqual(new Set(schema.properties.input_modalities.items?.enum));
     expect(new Set(MODEL.output_modalities)).toEqual(new Set(schema.properties.output_modalities.items?.enum));
-    // The origin vocabulary is checked one value deep on purpose: `provider`
-    // joins both the schema and `BackendModelOrigin` on the head that carries
-    // the version bump, and asserting set equality from here would pin this
-    // branch to a version it does not implement.
-    expect(schema.properties.origin.enum).toContain(MODEL.origin);
+    // The origin vocabulary, both directions now that `provider` has landed in
+    // the schema: the runtime set the candidates read validates against is the
+    // one the contract states, so a creation path either side gains fails here
+    // instead of being read as the group's fallback.
+    expect(new Set(CANDIDATE_ORIGINS)).toEqual(new Set(schema.properties.origin.enum));
+    expect(new Set(CANDIDATE_ORIGINS)).toContain(MODEL.origin);
+  });
+
+  it('mirrors the candidate projection api-response.schema.json now states', () => {
+    const schema = contract('api-response.schema.json') as unknown as {
+      definitions: {
+        ModelCandidate: {
+          required: string[];
+          additionalProperties: boolean;
+          properties: Record<string, { anyOf?: { enum?: string[] }[] }>;
+        };
+        AddableModelCandidate: { allOf: [unknown, { not: { required: string[] } }] };
+        AgentModelCandidatesResponse: { properties: { contract_version: { const: number } } };
+      };
+    };
+    const candidate = schema.definitions.ModelCandidate;
+
+    // The object is closed, so set equality over the fixture's keys is the
+    // whole relation: a property the schema gains is missing from the mirror,
+    // and one the mirror invents is not in the schema. `Required<…>` is what
+    // makes the optional field participate.
+    expect(candidate.additionalProperties).toBe(false);
+    expect(new Set(Object.keys(CANDIDATE)))
+      .toEqual(new Set([...candidate.required, ...Object.keys(candidate.properties)]));
+    // And what the mirror calls optional is what the schema leaves out of
+    // `required`, rather than a second opinion about the same field.
+    expect(new Set(candidate.required))
+      .toEqual(new Set(Object.keys(CANDIDATE).filter((field) => field !== 'group_if_removed')));
+
+    // The re-entry vocabulary, and the reason it is a separate field: the schema
+    // forbids it on the two addable groups, because a candidate not in the list
+    // has no way back to state.
+    expect(new Set(candidate.properties.group_if_removed?.anyOf?.[0]?.enum))
+      .toEqual(new Set(['builtin', 'providers']));
+    expect(schema.definitions.AddableModelCandidate.allOf[1].not.required).toEqual(['group_if_removed']);
+    expect(CONTRACT_VERSION).toBe(schema.definitions.AgentModelCandidatesResponse.properties.contract_version.const);
   });
 
   it('mirrors the plan hop reference and the version the refusal schema registers', () => {
@@ -164,9 +204,10 @@ describe('backend model catalog contract', () => {
     const read = await modelsApi.getAgentModelCandidates('opencode');
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/models/agents/opencode/models/candidates');
-    // Deep equality against typed fixtures is the property: `ModelCandidate` has
-    // no optional field, so a field the projection gains has to be stated here
-    // to compile, and is then asserted to survive the read.
+    // Deep equality against typed fixtures is the property, and the schema case
+    // above is what keeps the fixtures honest: every field the contract states
+    // is on `CANDIDATE`, so a field the projection gains is asserted to survive
+    // the read rather than being dropped on the way in.
     expect(read).toEqual(groups);
   });
 

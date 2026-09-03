@@ -111,15 +111,13 @@ export const blankBackendModel = (): BackendModel => ({
  *
  * `origin` comes from the candidate rather than from the group the row was
  * rendered in: the server names the creation path, and reading it back off the
- * group would be this client re-deriving something it was told. The cast is
- * transitional — `provider` joins `BackendModelOrigin` on the backend head that
- * ships this contract, and it goes away when this branch rebases onto it.
+ * group would be this client re-deriving something it was told.
  */
 export const candidateBackendModel = (candidate: ModelCandidate): BackendModel => ({
   ...blankBackendModel(),
   id: candidate.id,
   display_name: candidate.display_name,
-  origin: candidate.origin as BackendModelOrigin,
+  origin: candidate.origin,
   reasoning_efforts: [...candidate.reasoning_efforts],
 });
 
@@ -205,31 +203,6 @@ export type PickerGroups = {
 export const EMPTY_PICKER_GROUPS: PickerGroups = { builtin: [], providers: [], listed: [] };
 
 /**
- * Which group would offer a menu row again, if the draft's removal of it saved.
- *
- * The server answers it — `group_if_removed` is its own reading of what supplies
- * the id right now (C4) — and this returns that answer whenever it is present,
- * `null` included: 「nowhere」 is an answer, not a missing one.
- *
- * Until every server sends the field, the fallback asks the only current-supply
- * question this read can still answer: `suppliers` is the server's own
- * `matching-v1` projection for the id, and its emptiness is meaningful (C4), so
- * a row something supplies re-enters `providers` and a row nothing supplies
- * re-enters nothing. It cannot see the built-in snapshot — `builtin` is served
- * 「minus menu ids」, so a row still in the menu is by construction absent from
- * it — and it does not guess: a built-in falls back to no group and comes back
- * through `Add custom model…` rather than under a heading that may be stale.
- *
- * `origin` answers none of this. It records the path a row was created by (C2),
- * so reading current availability out of it offers a model whose provider was
- * deleted months ago under 「From your providers」.
- */
-const reentryGroup = (candidate: ModelCandidate): 'builtin' | 'providers' | null => {
-  if (candidate.group_if_removed !== undefined) return candidate.group_if_removed;
-  return candidate.suppliers.length > 0 ? 'providers' : null;
-};
-
-/**
  * The three groups the picker renders, reconciled against the draft the catalog
  * dialog holds.
  *
@@ -239,8 +212,16 @@ const reentryGroup = (candidate: ModelCandidate): 'builtin' | 'providers' | null
  * decides membership; the server still decides what a candidate is, which group
  * serves it, and which suppliers it has.
  *
- * A draft-removed row re-enters the group `reentryGroup` names, or no group at
- * all. `Add custom model…` is the way back for anything that ends up nowhere, so
+ * A draft-removed row re-enters wherever `group_if_removed` says, which is the
+ * server's own reading of what supplies the id right now (C4) — `null` and
+ * absent alike meaning nowhere. Nothing else on the row is consulted for it, and
+ * `origin` least of all: `origin` records the path a row was created by (C2), so
+ * reading current availability out of it offers a model whose provider was
+ * deleted months ago under 「From your providers」. Nor could the client derive
+ * the answer if it wanted to — `builtin` is served 「minus menu ids」, so a row
+ * still in the menu is by construction absent from it.
+ *
+ * `Add custom model…` is the way back for anything that ends up nowhere, so
  * being absent costs the user nothing — while being present under a heading that
  * claims a supplier costs them a row nothing can serve.
  *
@@ -260,7 +241,7 @@ export const pickerGroups = (
       groups.listed.push(candidate);
       return;
     }
-    const target = group ?? reentryGroup(candidate);
+    const target = group ?? candidate.group_if_removed ?? null;
     if (target) groups[target].push(candidate);
   };
   for (const candidate of candidates.in_list) file(candidate, null);
@@ -473,6 +454,35 @@ const canonicalJson = (value: unknown): string => {
 export const samePlanContents = (left: readonly unknown[], right: readonly unknown[]): boolean =>
   left.length === right.length
   && sameList(left.map(canonicalJson).sort(), right.map(canonicalJson).sort());
+
+/**
+ * Whether a stored guard refusal may still be echoed back with `force`.
+ *
+ * `force` is the client saying 「the user has been shown this consequence and
+ * still wants it」, and two independent things have to be true before it can
+ * say that honestly. `owed` empty is the acceptance: every removal the server
+ * refused has been put to the user and confirmed. The two catalogs are the
+ * subject: the refusal answers *this* save — same starting point, same request
+ * — and not a later, different one.
+ *
+ * Neither implies the other, so neither alone is enough. A refusal the user
+ * never answered must not be forced however exactly its catalogs match, and an
+ * accepted one must not be carried onto a save it was never about. Either way
+ * the fallback is the same and is not a failure: the save goes out unforced and
+ * the server asks again.
+ */
+export const echoableRefusal = (
+  refusal: {
+    baseline: readonly BackendModel[];
+    models: readonly BackendModel[];
+    owed: ReadonlySet<string>;
+  } | null,
+  baseline: readonly BackendModel[],
+  requested: readonly BackendModel[],
+): boolean => refusal !== null
+  && refusal.owed.size === 0
+  && sameCatalog(refusal.baseline, baseline)
+  && sameCatalog(refusal.models, requested);
 
 export type BackendCatalogIntent = {
   removed: ReadonlySet<string>;
