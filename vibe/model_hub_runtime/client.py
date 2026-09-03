@@ -49,10 +49,7 @@ _STREAM_CHUNK_BYTES = 64 * 1024
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
 _ERROR_OBSERVATION_BYTES = 256 * 1024
-_OFFICIAL_BASE_URLS = {
-    **official_api_key_base_urls(),
-    "codex": "https://api.openai.com/v1",
-}
+_OFFICIAL_BASE_URLS = official_api_key_base_urls()
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")

@@ -72,11 +72,14 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
     api_key = store.read_api_key(source.credential_ref)
     models = [{"name": model, "alias": model} for model in source.model_ids]
     if source.protocol == "anthropic":
-        entry: dict[str, Any] = {"api-key": api_key, "prefix": source.prefix}
+        base_url = source.base_url
+        if not base_url:
+            base_url = official_api_key_base_url(source.vendor)
+        if not base_url:
+            raise EngineStateError("Anthropic-compatible source requires a base URL")
+        entry: dict[str, Any] = {"api-key": api_key, "prefix": source.prefix, "base-url": base_url}
         if models:
             entry["models"] = models
-        if source.base_url:
-            entry["base-url"] = source.base_url
         payload.setdefault("claude-api-key", []).append(entry)
         return
     if source.protocol == "openai_responses":

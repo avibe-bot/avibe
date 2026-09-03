@@ -61,6 +61,7 @@ from core.handlers.model_hub.service import (
 from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
 from vibe import backend_model_catalog, ui_server
 from vibe.model_hub_client import ModelHubRemoteService, _decode
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
 from vibe.ui_server import app
 
@@ -84,6 +85,9 @@ API_RESPONSE_ROUTES = API_RESPONSE_CONTRACT["x-model-hub-routes"]
 API_RESPONSE_EXERCISES = [
     (route, exercise) for route in API_RESPONSE_ROUTES for exercise in route.get("exercises", [route.get("exercise")])
 ]
+CATALOG_API_KEY_SOURCE_CASES = tuple(
+    pytest.param(entry.id, entry.label, entry.protocol, id=entry.id) for entry in api_key_vendor_catalog()
+)
 
 
 def _assert_valid(name: str, payload: dict) -> None:
@@ -4595,6 +4599,39 @@ def test_create_source_defaults_a_catalog_vendor_to_its_pinned_protocol(tmp_path
     assert adapter.observed_protocol_orders == [("openai_chat",)]
     assert store.config.sources[0].protocol == "openai_chat"
     assert store.config.sources[0].base_url is None
+    assert adapter.revoked == ["cred_test001"]
+
+
+@pytest.mark.parametrize(
+    ("vendor", "expected_display_name", "expected_protocol"),
+    CATALOG_API_KEY_SOURCE_CASES,
+)
+def test_create_source_defaults_catalog_display_names_for_all_shipped_api_key_vendors(
+    tmp_path,
+    vendor: str,
+    expected_display_name: str,
+    expected_protocol: str,
+):
+    service, store, adapter = _service(tmp_path)
+
+    created = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": vendor,
+                "key": f"sk-test-create-{vendor}",
+            },
+        )
+    )
+
+    assert created["display_name"] == expected_display_name
+    assert created["protocol"] == expected_protocol
+    assert created["base_url"] is None
+    assert store.config.sources[0].display_name == expected_display_name
+    assert store.config.sources[0].protocol == expected_protocol
+    assert store.config.sources[0].base_url is None
+    assert adapter.observed_protocol_orders == [(expected_protocol,)]
     assert adapter.revoked == ["cred_test001"]
 
 

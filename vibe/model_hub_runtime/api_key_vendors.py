@@ -82,6 +82,11 @@ def pinned_api_key_protocol(vendor: str) -> str | None:
     return entry.protocol if entry is not None else None
 
 
+def catalog_api_key_vendor_label(vendor: str) -> str | None:
+    entry = api_key_vendor_entry(vendor)
+    return entry.label if entry is not None else None
+
+
 def official_api_key_base_url(vendor: str) -> str | None:
     normalized_vendor = vendor.strip().lower()
     entry = _catalog_by_id().get(normalized_vendor)

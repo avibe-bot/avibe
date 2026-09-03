@@ -40,6 +40,7 @@ from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
@@ -76,6 +77,15 @@ RELEASED_INSTALL_CLAIMS = json.loads(
 )["claims"]
 RUNTIME_INSTALL_GENERATION_A = "a" * 32
 RUNTIME_INSTALL_GENERATION_B = "b" * 32
+API_KEY_VENDOR_RUNTIME_CASES = tuple(
+    [
+        *[
+            pytest.param(entry.id, entry.protocol, entry.official_base_url, id=entry.id)
+            for entry in api_key_vendor_catalog()
+        ],
+        pytest.param("codex", "openai_responses", "https://api.openai.com/v1", id="codex"),
+    ]
+)
 
 
 def _create_runtime_install_claim(
@@ -1553,11 +1563,74 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
-def test_api_key_vendor_catalog_populates_runtime_official_base_urls() -> None:
-    assert client_module._OFFICIAL_BASE_URLS["deepseek"] == "https://api.deepseek.com"
-    assert client_module._OFFICIAL_BASE_URLS["openrouter"] == "https://openrouter.ai/api/v1"
-    assert client_module._OFFICIAL_BASE_URLS["openai"] == "https://api.openai.com/v1"
-    assert client_module._OFFICIAL_BASE_URLS["codex"] == "https://api.openai.com/v1"
+@pytest.mark.parametrize(
+    ("vendor", "expected_base_url"),
+    [
+        *[
+            pytest.param(entry.id, entry.official_base_url, id=entry.id)
+            for entry in api_key_vendor_catalog()
+        ],
+        pytest.param("codex", "https://api.openai.com/v1", id="codex"),
+    ],
+)
+def test_api_key_vendor_catalog_populates_runtime_official_base_urls(
+    vendor: str,
+    expected_base_url: str,
+) -> None:
+    assert client_module._OFFICIAL_BASE_URLS[vendor] == expected_base_url
+
+
+@pytest.mark.parametrize(
+    ("vendor", "protocol", "expected_base_url"),
+    API_KEY_VENDOR_RUNTIME_CASES,
+)
+def test_catalog_owned_api_key_sources_without_explicit_base_url_sync_and_write_engine_config(
+    tmp_path: Path,
+    vendor: str,
+    protocol: str,
+    expected_base_url: str,
+) -> None:
+    source_suffix = "".join(character for character in vendor.lower() if character.isalnum())
+    source_id = f"src_{(source_suffix + '12345678')[:8]}"
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    credential_ref = store.store_api_key(
+        "secret",
+        vendor=vendor,
+        protocol=protocol,
+        base_url=None,
+    )
+    store.sync_sources(
+        [
+            _binding(
+                credential_ref,
+                source_id=source_id,
+                vendor=vendor,
+                protocol=protocol,
+                base_url=None,
+            )
+        ]
+    )
+    config_path = instance_dir / "config.yaml"
+
+    write_engine_config(
+        config_path,
+        host="127.0.0.1",
+        port=18231,
+        auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets,
+        sources=store.list_sources(),
+        state_store=store,
+    )
+
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if protocol == "anthropic":
+        assert payload["claude-api-key"][0]["base-url"] == expected_base_url
+        return
+    if protocol == "openai_responses":
+        assert payload["codex-api-key"][0]["base-url"] == expected_base_url
+        return
+    assert payload["openai-compatibility"][0]["base-url"] == expected_base_url
 
 
 def test_state_removes_secret_bearing_configs_on_upgrade_and_revocation(tmp_path: Path) -> None:
