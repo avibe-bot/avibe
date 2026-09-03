@@ -3769,7 +3769,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("collaborationMode", params)
         self.assertNotIn("session-1", agent._thread_model_settings)
 
-    async def test_start_turn_uses_fallback_when_collaboration_strategy_cannot_persist(self):
+    async def test_start_turn_fails_when_fallback_strategy_cannot_persist(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
@@ -3803,23 +3803,24 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        await agent._start_turn(
-            transport,
-            request,
-            "thread-1",
-            developer_instructions="stable prompt",
-        )
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not persist the fallback prompt strategy",
+        ):
+            await agent._start_turn(
+                transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
 
         calls = transport.send_request.await_args_list
         self.assertEqual(
             [call.args[0] for call in calls],
-            ["thread/inject_items", "turn/start"],
+            ["thread/inject_items"],
         )
-        self.assertNotIn("collaborationMode", calls[1].args[1])
-        self.assertEqual(
-            agent._thread_prompt_strategies["session-1"],
-            ("thread-1", "fallback"),
-        )
+        self.assertNotIn("session-1", agent._thread_prompt_strategies)
+        self.assertNotIn("session-1", getattr(agent, "_thread_developer_instructions", {}))
 
     async def test_start_turn_reuses_persisted_fallback_prompt_after_process_restart(self):
         agent = object.__new__(CodexAgent)
@@ -4927,6 +4928,33 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, {"answers": {}})
+
+    async def test_current_time_request_returns_protocol_shape(self):
+        agent = self._agent()
+
+        with patch.object(_MODULE.time, "time", return_value=1234.9):
+            result = await agent._on_server_request(
+                "/tmp/work",
+                9,
+                "currentTime/read",
+                {"threadId": "thread-1"},
+            )
+
+        self.assertEqual(result, {"currentTimeAt": 1234})
+
+    async def test_unhandled_experimental_server_request_is_rejected(self):
+        agent = self._agent()
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "Unsupported Codex server request: item/permissions/requestApproval",
+        ):
+            await agent._on_server_request(
+                "/tmp/work",
+                10,
+                "item/permissions/requestApproval",
+                {"itemId": "item-1"},
+            )
 
     def test_turn_start_refreshes_the_cwd_transport_clock(self):
         agent = self._agent()

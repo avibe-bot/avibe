@@ -26,6 +26,7 @@ from modules.agents.base import AgentRequest
 from modules.agents.model_hub import launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.server import OpenCodeManagedPolicyRefreshPendingError
 from modules.agents.opencode.poll_loop import (
     OpenCodePollLoop,
     _settlement_assistant_message,
@@ -40,6 +41,22 @@ ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
 class _StubConfig(BaseIMConfig):
     def validate(self) -> None:
         return None
+
+
+def test_opencode_policy_refresh_failure_is_localized() -> None:
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = type(
+        "Controller",
+        (),
+        {"config": type("Config", (), {"language": "zh"})()},
+    )()
+
+    display = agent._server_start_error_display_text(
+        OpenCodeManagedPolicyRefreshPendingError("internal diagnostic")
+    )
+
+    assert "仍在完成已有回合" in display
+    assert "internal diagnostic" not in display
 
 
 class _StubClient(BaseIMClient):

@@ -2682,6 +2682,24 @@ class CodexAgent(BaseAgent):
                 ],
             },
         )
+        if not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            developer_instructions,
+            strategy="fallback",
+            agent_session_id=agent_session_id,
+        ):
+            getattr(self, "_thread_developer_instructions", {}).pop(
+                request.base_session_id,
+                None,
+            )
+            getattr(self, "_thread_prompt_strategies", {}).pop(
+                request.base_session_id,
+                None,
+            )
+            raise CodexPromptRefreshUnavailableError(
+                "Could not persist the fallback prompt strategy after injection"
+            )
         self._remember_thread_developer_instructions(
             request.base_session_id,
             thread_id,
@@ -2691,13 +2709,6 @@ class CodexAgent(BaseAgent):
             request.base_session_id,
             thread_id,
             "fallback",
-        )
-        self._persist_prompt_strategy(
-            request,
-            thread_id,
-            developer_instructions,
-            strategy="fallback",
-            agent_session_id=agent_session_id,
         )
 
     @staticmethod
@@ -3224,8 +3235,11 @@ class CodexAgent(BaseAgent):
             )
             return {"answers": {}}
 
-        logger.warning("Unknown Codex server request: %s", method)
-        return {"approved": True}
+        if method == "currentTime/read":
+            return {"currentTimeAt": int(time.time())}
+
+        logger.warning("Unsupported Codex server request: %s", method)
+        raise NotImplementedError(f"Unsupported Codex server request: {method}")
 
     # ------------------------------------------------------------------
     # Helpers

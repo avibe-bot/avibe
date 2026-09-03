@@ -234,6 +234,10 @@ class OpenCodePromptRejectedError(RuntimeError):
         return self.status == 400
 
 
+class OpenCodeManagedPolicyRefreshPendingError(RuntimeError):
+    """The adopted OpenCode process cannot apply Avibe's current policy yet."""
+
+
 class OpenCodeServerManager:
     """Manages a singleton OpenCode server process shared across all working directories."""
 
@@ -1577,7 +1581,7 @@ class OpenCodeServerManager:
                     self._caller_context_plugin_refresh_pending = False
                     return self.base_url
                 if runtime_policy_stale:
-                    raise RuntimeError(
+                    raise OpenCodeManagedPolicyRefreshPendingError(
                         "OpenCode managed runtime policy refresh is pending for an adopted or active server; "
                         "retry after the existing OpenCode turn finishes so Avibe can restart the server "
                         "with native Skills disabled."

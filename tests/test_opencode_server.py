@@ -42,6 +42,9 @@ def _load_server_module():
 
 
 SERVER_MODULE = _load_server_module()
+OpenCodeManagedPolicyRefreshPendingError = (
+    SERVER_MODULE.OpenCodeManagedPolicyRefreshPendingError
+)
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
 
 
@@ -545,7 +548,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "ensure_plugin_installed",
             return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
         ):
-            with self.assertRaisesRegex(RuntimeError, "adopted or active server"):
+            with self.assertRaisesRegex(
+                OpenCodeManagedPolicyRefreshPendingError,
+                "adopted or active server",
+            ):
                 await manager.ensure_running()
 
         manager._restart_for_auth_refresh_locked.assert_not_awaited()

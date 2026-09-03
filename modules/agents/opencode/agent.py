@@ -89,6 +89,7 @@ from .poll_loop import (
     restored_session_key_from_poll_info,
 )
 from .server import (
+    OpenCodeManagedPolicyRefreshPendingError,
     OpenCodePromptRejectedError,
     OpenCodeServerManager,
     native_part_id_for_attempt,
@@ -933,6 +934,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             variant=reasoning_effort or default_label,
         )
 
+    def _server_start_error_display_text(self, error: BaseException) -> str:
+        if isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t('error.opencodePolicyRefreshPending', language)}"
+        return f"Failed to start OpenCode server: {error}"
+
     async def prepare_runtime_restart(self) -> None:
         """Adopt persisted server state before the shared drain snapshot."""
         await self._get_server()
@@ -1198,7 +1208,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 str(e),
-                display_text=f"Failed to start OpenCode server: {e}",
+                display_text=self._server_start_error_display_text(e),
                 request=request,
             )
             await self._remove_ack_reaction(request)
