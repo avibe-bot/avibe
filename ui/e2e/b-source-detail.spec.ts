@@ -26,10 +26,10 @@ type ManagedRung = 'upstream' | 'catalog';
 
 /**
  * The lock this UI can show only exists once the server has stamped the rung.
- * A server that predates the field leaves the row editable, which is the
- * pre-ladder behavior — not a product failure on this instance. `test.fixme`
- * rather than `test.skip`: the report names the missing backend, and the
- * same spec starts asserting the moment the field lands, with no edit here.
+ * The ladder ships, so a running instance that leaves the row editable is one
+ * whose build predates it — the pre-ladder behavior, not a product failure
+ * here. `test.fixme` rather than `test.skip`: the report names the instance's
+ * missing rung, and the same spec asserts on an up-to-date one with no edit.
  */
 const requireManagedRung = (
   model: Supplied | undefined,
@@ -42,7 +42,7 @@ const requireManagedRung = (
   // keeps this body from then asserting a lock the instance cannot draw.
   test.fixme(
     true,
-    `backend lane has not stamped reasoning_efforts_source=${rung} on ${modelId}`
+    `this instance did not stamp reasoning_efforts_source=${rung} on ${modelId}`
       + ` (got ${stamped === undefined ? 'absent' : JSON.stringify(stamped)}); `
       + 'locked editor and provenance badge cannot be reached on this instance.',
   );
@@ -324,10 +324,10 @@ test.describe('B · the source detail panel', () => {
       // The UI does not offer the write on a locked row, so the authentic
       // browser path is a state race: the editor is open because this client
       // still believes the row is editable, and the PATCH comes back as the
-      // server owning the list. Intercepting that one call is how the copy
-      // is reached on an instance whose backend has not landed the guard —
-      // and remains the path after it has, because a locked row never sends
-      // the write. The instance's language is not saved; Chinese is a
+      // server owning the list. Intercepting that one call is how the copy is
+      // reached on an instance whose build predates the guard — and remains
+      // the path on one that has it, because a locked row never sends the
+      // write. The instance's language is not saved; Chinese is a
       // config-GET rewrite for this page only.
       if (locale === 'zh') {
         await page.route('**/api/config', async (route) => {
