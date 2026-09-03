@@ -11,6 +11,12 @@ from config.v2_config import normalize_model_hub_base_url, normalize_model_hub_v
 
 
 _SUPPORTED_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat"}
+_LEGACY_OFFICIAL_BASE_URLS = {
+    # ``codex`` remains a supported legacy vendor alias outside the shipped
+    # api-key vendor preset catalog. Runtime official-URL fallback must keep
+    # treating it like OpenAI for persisted Sources that omit ``base_url``.
+    "codex": "https://api.openai.com/v1",
+}
 
 
 @dataclass(frozen=True)
@@ -77,9 +83,15 @@ def pinned_api_key_protocol(vendor: str) -> str | None:
 
 
 def official_api_key_base_url(vendor: str) -> str | None:
-    entry = api_key_vendor_entry(vendor)
-    return entry.official_base_url if entry is not None else None
+    normalized_vendor = vendor.strip().lower()
+    entry = _catalog_by_id().get(normalized_vendor)
+    if entry is not None:
+        return entry.official_base_url
+    return _LEGACY_OFFICIAL_BASE_URLS.get(normalized_vendor)
 
 
 def official_api_key_base_urls() -> dict[str, str]:
-    return {entry.id: entry.official_base_url for entry in api_key_vendor_catalog()}
+    return {
+        **{entry.id: entry.official_base_url for entry in api_key_vendor_catalog()},
+        **_LEGACY_OFFICIAL_BASE_URLS,
+    }
