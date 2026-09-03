@@ -895,8 +895,11 @@ def test_managed_watch_service_forever_timeout_disables_and_enqueues_failure(tmp
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.2)
-        await service.stop()
+        watch_task = service._active_tasks[watch.id]
+        try:
+            await asyncio.wait_for(asyncio.shield(watch_task), timeout=10)
+        finally:
+            await service.stop()
 
     asyncio.run(_run())
 
