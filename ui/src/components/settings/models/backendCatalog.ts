@@ -227,6 +227,33 @@ export const chosenCandidate = (candidate: ModelCandidate): ChosenCandidate => (
   })),
 });
 
+/**
+ * Every id this read OFFERS, and the candidate it offers for it.
+ *
+ * Withdrawal has one definition (C1) and this is its only evidence: an id is
+ * withdrawn when the server stops offering it. A supplier list that came back
+ * empty does not say so — `ModelCandidate.suppliers` is explicit that empty is
+ * meaningful, an offered id nothing supplies yet, whose route starts empty — and
+ * `origin` cannot say it either, because `origin` records the path a row was
+ * created by (C2), not what supplies it now.
+ *
+ * Only the pickable groups count, in the order and with the first-wins dedupe
+ * `pickerGroups` files them by, so 「offered」 means 「a row the picker would put
+ * in front of the user」 rather than 「named somewhere in the response」. That
+ * makes the answer here and the answer the picker reaches one answer. `in_list`
+ * is not an offer: it names what the saved menu already holds.
+ */
+export const offeredCandidates = (
+  candidates: BackendModelCandidates,
+): Map<string, ModelCandidate> => {
+  const offered = new Map<string, ModelCandidate>();
+  for (const candidate of [...candidates.builtin, ...candidates.providers]) {
+    if (!candidate.id || offered.has(candidate.id)) continue;
+    offered.set(candidate.id, candidate);
+  }
+  return offered;
+};
+
 export type PickerGroups = {
   builtin: ModelCandidate[];
   providers: ModelCandidate[];
@@ -579,6 +606,41 @@ export const backendCatalogIntent = (
     }),
     order: draft.map((model) => model.id),
   };
+};
+
+/**
+ * An order with cancelled removals put back where they were.
+ *
+ * A removal the server refuses was never a decision, so undoing it may not cost
+ * the row its place: the requested order is the list with the row already gone,
+ * and appending it back would answer 「are you sure?」 with a reordered catalog
+ * the user never asked for. The baseline is what says where it belongs — each
+ * restored id goes back after its nearest baseline predecessor that is still on
+ * screen, or at the front when it had none — so a removal that is cancelled
+ * leaves the draft byte-identical to the baseline, and the position is recovered
+ * from the two lists rather than from a snapshot somebody has to remember to
+ * take.
+ *
+ * Only the restored ids move. Anything else the user did to the order is a
+ * separate edit the refusal said nothing about, and an independent reorder is
+ * still theirs afterwards — which is why the baseline is read for positions
+ * rather than replayed as the order. Walking the baseline in its own order is
+ * what keeps two restored neighbours in their original sequence, since the
+ * earlier one is on screen by the time the later one looks for its anchor.
+ */
+export const orderWithRestored = (
+  requested: readonly string[],
+  baseline: readonly string[],
+  restored: ReadonlySet<string>,
+): string[] => {
+  const order = requested.filter((id) => !restored.has(id));
+  const before = new Map(baseline.map((id, index) => [id, baseline.slice(0, index)]));
+  for (const id of baseline) {
+    if (!restored.has(id)) continue;
+    const anchor = [...(before.get(id) ?? [])].reverse().find((previous) => order.includes(previous));
+    order.splice(anchor === undefined ? 0 : order.indexOf(anchor) + 1, 0, id);
+  }
+  return order;
 };
 
 /**

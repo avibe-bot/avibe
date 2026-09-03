@@ -394,11 +394,18 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
     await user.click(await screen.findByRole('button', { name: 'Save' }));
 
-    // Nothing was committed, so there is nothing to report and nothing to
+    // Nothing was committed, so there is nothing to report and no list to
     // re-read: the answer to this refusal is the same question again, asked
     // against the suppliers the server matched this time.
+    //
+    // The candidates are read twice for that, and both reads have a job. The
+    // refusal is reconciled against one — whether the id is still offered is
+    // the only thing that withdraws it, and an answer that withdrew every pick
+    // would open no picker to read it. The question then takes its own, because
+    // the chips it shows are the promise its confirmation sends, and a picker
+    // rendering a read it did not take would display one and send the other.
     expect(await screen.findByRole('checkbox', { name: /Backup relay/ })).toBeTruthy();
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledTimes(3);
     expect(onObserved).not.toHaveBeenCalled();
     expect(screen.queryByRole('status')).toBeNull();
 
@@ -747,17 +754,20 @@ describe('BackendModelCatalogDialog', () => {
       });
     }
 
-    it('drops a withdrawn candidate instead of re-asking, and re-sends the save it was already owed', async () => {
+    it('withdraws a candidate the refreshed offer no longer holds, and re-sends the save it was already owed', async () => {
       const user = userEvent.setup();
-      // The other half of the same refusal: `changed` names the picked id with no
-      // suppliers at all. There is nothing left to offer, so there is nothing to
-      // ask — and a row left in the draft with no agreement behind it would go
-      // out on the next save as though it had been typed by hand, which is the
-      // silent re-send the re-ask exists to prevent.
+      // Withdrawal has one source of evidence, and this is it: the refusal still
+      // names suppliers for the picked id, and the refreshed offer does not hold
+      // the id at all. So the answer is not another question — a row left in the
+      // draft with no agreement behind it would go out on the next save as
+      // though it had been typed by hand, which is the silent re-send the re-ask
+      // exists to prevent.
       vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
-      const read = vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ providers: [shown] }));
+      const read = vi.spyOn(modelsApi, 'getAgentModelCandidates')
+        .mockResolvedValueOnce(offered({ providers: [shown] }))
+        .mockResolvedValue(offered());
       const write = vi.spyOn(modelsApi, 'putAgentModels')
-        .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [] }))
+        .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [{ source_id: 'src_b', model_id: 'glm-5.2' }] }))
         .mockResolvedValue(agent([EDITED, model('beta')]));
       const { onSaved, onClose } = renderDialog();
 
@@ -767,12 +777,13 @@ describe('BackendModelCatalogDialog', () => {
       await widen(user, 'alpha');
       await user.click(screen.getByRole('button', { name: 'Save' }));
 
-      // The row leaves, and it leaves without a question: nothing re-opens for a
-      // candidate that has nothing left to pick, and nothing is re-read for a
-      // refusal that committed nothing.
+      // The row leaves, and it leaves without a question: nothing reopens for a
+      // candidate the server has stopped offering. One read settled it — the
+      // reconciliation takes its own, because a withdrawal that opens no picker
+      // would otherwise never be read at all.
       await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
       expect(screen.queryByRole('heading', { name: 'Add Claude Code models' })).toBeNull();
-      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledTimes(2);
       // Nor a sentence about it: the row that disappeared and the count that fell
       // are the report, and a failure line here would be the dialog telling the
       // user about its own edit.
@@ -793,13 +804,99 @@ describe('BackendModelCatalogDialog', () => {
       expect(onClose).toHaveBeenCalled();
     });
 
-    it('promises only what the refusal itself still offers, whichever picks it disputes', async () => {
+    it('keeps a candidate the offer holds with no suppliers, and promises exactly that', async () => {
       const user = userEvent.setup();
-      // One refusal carrying both answers at once: a pick whose suppliers are
-      // gone and a pick whose suppliers moved. The property is that the next
-      // write promises exactly what the server just said is there — so the
-      // withdrawn id may appear in neither the list nor the agreement, and the
-      // re-asked one may appear in both only with today's suppliers.
+      // The other side of the same definition: empty is not withdrawn. A
+      // built-in the server still offers with nothing behind it is a candidate
+      // whose route starts empty, and a refusal naming it with no suppliers is a
+      // statement about supply, not about the offer. So the row stays, the
+      // re-ask shows it claiming no supplier, and the save promises the empty
+      // list the user agreed to — which is what lets the server seed an empty
+      // route instead of matching a supplier nobody offered.
+      const bare = candidate('glm-5.2', { display_name: 'GLM 5.2', origin: 'builtin' });
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
+      vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ builtin: [bare] }));
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [] }))
+        .mockResolvedValue(agent([...CATALOG, model('glm-5.2')]));
+      const { onSaved } = renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await screen.findByRole('checkbox', { name: /GLM 5\.2/ }));
+      await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      // Asked again rather than withdrawn, still picked, and showing the model
+      // and nothing else: there is no supplier to name, and a chip here would be
+      // the dialog claiming one on the server's behalf.
+      const reasked = await screen.findByRole('checkbox', { name: /GLM 5\.2/ });
+      expect(reasked.getAttribute('aria-checked')).toBe('true');
+      expect((reasked as HTMLButtonElement).disabled).toBe(false);
+      expect(reasked.textContent).toBe('GLM 5.2glm-5.2');
+      expect(onSaved).not.toHaveBeenCalled();
+
+      await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+      const body = write.mock.lastCall?.[1] as Record<string, unknown>;
+      expect(body.models).toEqual([...CATALOG, candidateBackendModel(bare)]);
+      // Promised, not omitted: an addition with no entry is one the server
+      // matches by its own reading, and 「nothing supplies this yet」 is a claim
+      // only the user's agreement can carry.
+      expect(body.expected_suppliers).toEqual({ 'glm-5.2': [] });
+    });
+
+    it('restores a refused removal to its own place, so cancelling it leaves nothing edited', async () => {
+      const user = userEvent.setup();
+      // A removal the server refuses was never a decision, so undoing it may not
+      // cost the row its place: the requested list is the one it is already gone
+      // from, and appending it back would answer 「are you sure?」 with a
+      // reordered catalog the user never asked for. Cancelling then has to leave
+      // the draft equal to the baseline, rows and order — the only state that
+      // can honestly report itself as unedited.
+      const rowOrder = () => screen.getAllByRole('button', { name: /^Reorder / })
+        .map((row) => row.getAttribute('aria-label')?.replace('Reorder ', ''));
+      vi.spyOn(modelsApi, 'getAgentSources')
+        .mockResolvedValue(agent([model('alpha'), model('beta'), model('gamma')]));
+      const write = vi.spyOn(modelsApi, 'putAgentModels').mockRejectedValue(new ApiCallError(
+        'backend_model_in_route',
+        'modelHub.errors.backend_model_in_route',
+        true,
+        [],
+        [],
+        GUARDED.hops,
+        409,
+      ));
+      const { onSaved, onClose } = renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+      expect(rowOrder()).toEqual(['alpha', 'gamma']);
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      // Handed back into its own row, between the two it sat between — not after
+      // the rows that outlived it.
+      expect(await screen.findByRole('alert')).toBeTruthy();
+      expect(rowOrder()).toEqual(['alpha', 'beta', 'gamma']);
+
+      await user.click(confirmation().getByRole('button', { name: 'Cancel' }));
+      expect(rowOrder()).toEqual(['alpha', 'beta', 'gamma']);
+      // And nothing left to send, because nothing is different: a draft still
+      // reporting itself as edited would offer a write that repeats the
+      // baseline back to the server.
+      expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(onSaved).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('promises what the refreshed offer holds, whichever picks the refusal disputes', async () => {
+      const user = userEvent.setup();
+      // One refusal carrying both answers at once: a pick the offer has dropped
+      // and a pick whose suppliers moved. The property is that the next write
+      // promises exactly what the server just said is there — so the withdrawn
+      // id may appear in neither the list nor the agreement, and the re-asked
+      // one may appear in both only with today's suppliers.
       const kimi = candidate('kimi-3', {
         display_name: 'Kimi 3',
         suppliers: [{ source_id: 'src_a', source_name: 'Primary relay', model_id: 'kimi-3-turbo' }],
@@ -811,8 +908,8 @@ describe('BackendModelCatalogDialog', () => {
       vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
       vi.spyOn(modelsApi, 'getAgentModelCandidates')
         .mockResolvedValueOnce(offered({ providers: [shown, kimi] }))
-        // The refreshed offer no longer holds `glm-5.2` at all, which is what the
-        // refusal reported by naming it with no suppliers.
+        // The refreshed offer no longer holds `glm-5.2` at all. That, and not the
+        // empty supplier list the refusal names it with, is what withdraws it.
         .mockResolvedValue(offered({ providers: [kimiNow] }));
       const write = vi.spyOn(modelsApi, 'putAgentModels')
         .mockRejectedValueOnce(staleCandidates({

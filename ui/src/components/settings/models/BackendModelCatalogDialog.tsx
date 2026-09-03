@@ -25,9 +25,12 @@ import {
   backendCatalogIntentApplied,
   backendModelId,
   catalogModelIds,
+  chosenCandidate,
   draftRowFor,
   echoableRefusal,
   heldRowFor,
+  offeredCandidates,
+  orderWithRestored,
   readBackendCatalogBaseline,
   sameCatalog,
   samePlanContents,
@@ -46,6 +49,7 @@ import type {
   AgentSupply,
   BackendModel,
   BackendModelsPut,
+  ModelCandidate,
   RouteHopRef,
   SupplyGap,
 } from './types';
@@ -576,6 +580,23 @@ export const BackendModelCatalogDialog: React.FC<{
   };
 
   /**
+   * What the server offers right now, or `null` when that could not be read.
+   *
+   * A 409 answers a pick, a pick came from the picker, and the picker is only
+   * offered where Sources are readable (C4) — so a read that does not arrive
+   * here is a failed read, not a role forbidden to take one, and `null` is the
+   * whole of what this dialog learned about the offer. The caller decides what
+   * to do with not knowing; it may not guess.
+   */
+  const offeredNow = async (): Promise<Map<string, ModelCandidate> | null> => {
+    try {
+      return offeredCandidates(await modelsApi.getAgentModelCandidates(backend));
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * The one write this dialog makes.
    *
    * `baseline` + `models` is the whole list settling through a single optimistic
@@ -635,7 +656,7 @@ export const BackendModelCatalogDialog: React.FC<{
       } catch (error) {
         const failure = apiFailure(error);
         if (failure?.code === CANDIDATES_CHANGED) {
-          // Nothing was committed, so there is nothing to re-read and nothing to
+          // Nothing was committed, so there is no list to re-read and nothing to
           // report: the answer is the same question again, and the draft is
           // still the user's. The rows stay exactly as they built them — a
           // context window they widened or a name they wrote is theirs, and
@@ -650,35 +671,54 @@ export const BackendModelCatalogDialog: React.FC<{
           // before anything reopens — so no later path has to remember to undo a
           // projection the server has already refused.
           //
-          // An id the refusal reports with no suppliers left is not a question:
-          // there is nothing to offer and so nothing to agree to, and asking
-          // about it would only invite a confirmation this dialog could not
-          // send. Losing its row is what withdraws it — the row that disappears
-          // and the count that falls are the answer — and losing the row is
-          // enough, because a promise is read per row this write sends, so one
-          // left in the map for a row that is gone describes nothing and can
-          // reach no body. Whatever puts such an id back is what states its
-          // agreement again: every path that re-adds a row writes or clears its
-          // entry first. An id that still has suppliers keeps its row and takes
-          // today's suppliers as its agreement, so the map this dialog writes
-          // from says what the server just said whatever happens next, and is
-          // then re-asked with them. Only picks: a supplier disagreement may not
-          // delete a row the server already holds, and one it never named is no
-          // part of this write's agreement either.
+          // What `changed` reports is suppliers, and suppliers are not the
+          // question of whether an id is still on offer: a built-in the server
+          // still serves with none of them is a legitimate candidate whose route
+          // starts empty (C1), so reading an empty list as a withdrawal deletes
+          // a row the user may still add. Only one thing withdraws an id — the
+          // server no longer offering it — and only a candidates read says that
+          // (C4), so the refusal is reconciled against one, taken HERE, because
+          // an answer where every pick is withdrawn opens no picker and a read
+          // that only the picker performs would never happen.
+          //
+          // Withdrawn takes the row and the agreement together: the row that
+          // disappears and the count that falls are the whole report, and the
+          // entry goes with it so nothing is left describing a row this dialog
+          // no longer has. An offered id keeps its row and takes the read's own
+          // candidate as its agreement — both halves from one read, including an
+          // empty supplier list, which re-asks as a row with no chips and saves
+          // as an empty promise the server seeds an empty route for. Only picks:
+          // a supplier disagreement may not delete a row the server already
+          // holds, and one this write promised nothing for is no part of it.
           const saved = new Set(baselineModels.map((model) => model.id));
           const disputed = Object.entries(failure.changedSuppliers)
             .filter(([modelId]) => chosenRef.current.has(modelId) && !saved.has(modelId));
+          // A read that failed knows nothing about what is offered, so it
+          // withdraws nothing and every disputed pick is asked again, promising
+          // the suppliers the refusal itself named — the freshest word there is
+          // when the read that would supersede it never arrived. The picker
+          // reads on its way in, so a withdrawal invisible here is still caught
+          // there; a row deleted on a failed read would be this dialog spending
+          // the user's list on its own missing evidence.
+          const offered = disputed.length > 0 ? await offeredNow() : null;
           const withdrawn = new Set(
-            disputed.filter(([, suppliers]) => suppliers.length === 0).map(([modelId]) => modelId),
+            offered ? disputed.filter(([modelId]) => !offered.has(modelId)).map(([modelId]) => modelId) : [],
           );
-          const reask = new Map(disputed.filter(([, suppliers]) => suppliers.length > 0));
-          for (const [modelId, suppliers] of reask) {
+          const reask: string[] = [];
+          for (const [modelId, suppliers] of disputed) {
+            if (withdrawn.has(modelId)) {
+              chosenRef.current.delete(modelId);
+              continue;
+            }
+            const fresh = offered?.get(modelId);
             const pick = chosenRef.current.get(modelId);
-            if (pick) chosenRef.current.set(modelId, { ...pick, expected_suppliers: [...suppliers] });
+            if (fresh) chosenRef.current.set(modelId, chosenCandidate(fresh));
+            else if (pick) chosenRef.current.set(modelId, { ...pick, expected_suppliers: [...suppliers] });
+            reask.push(modelId);
           }
           if (withdrawn.size > 0) mutate(draftRef.current.filter((model) => !withdrawn.has(model.id)));
-          if (reask.size > 0) {
-            setPicking({ seed: new Set(reask.keys()) });
+          if (reask.length > 0) {
+            setPicking({ seed: new Set(reask) });
             return;
           }
           // Nothing left to ask, and the list already shows what changed: a drop
@@ -756,10 +796,17 @@ export const BackendModelCatalogDialog: React.FC<{
           // is deliberately NOT re-read: the refusal above answers this
           // `baseline` + `models` pair, and reading a newer list would leave the
           // dialog holding a plan about a write it can no longer make.
+          //
+          // It comes back to its own place, not to the end. The requested order
+          // is the list with the row already gone, so the baseline is what says
+          // where it belongs — and a removal the user then cancels leaves the
+          // draft equal to the baseline, rows and order, which is the only state
+          // that can honestly report itself as unedited.
           const heldBack = new Set(guardedPlans.map((question) => question.modelId));
           const held: BackendCatalogIntent = {
             ...intent,
             removed: new Set([...intent.removed].filter((id) => !heldBack.has(id))),
+            order: orderWithRestored(intent.order, baselineModels.map((model) => model.id), heldBack),
           };
           mutate(applyBackendCatalogIntent(baselineModels, held));
           // What the user accepted for these rows was the preview, and it is not

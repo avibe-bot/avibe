@@ -17,7 +17,9 @@ import {
   draftWithId,
   echoableRefusal,
   heldRowFor,
+  offeredCandidates,
   opencodeMenuIdentity,
+  orderWithRestored,
   MODELS_DEV_FIELDS,
   pickerGroups,
   readBackendCatalogBaseline,
@@ -614,6 +616,45 @@ describe('backendCatalogIntent', () => {
   });
 });
 
+describe('orderWithRestored', () => {
+  const BASELINE = ['a', 'b', 'c', 'd'];
+
+  const without = (...ids: string[]) => BASELINE.filter((id) => !ids.includes(id));
+
+  it('puts a cancelled removal back where the baseline had it, wherever that was', () => {
+    // The property, stated for every position rather than for the one that
+    // happens to be interesting: undoing a removal restores the baseline
+    // exactly. A row that came back at the end would answer 「are you sure?」
+    // with a reordered catalog the user never asked for — and one that reports
+    // itself as edited afterwards can never be saved back to what it was.
+    for (const id of BASELINE) {
+      expect(orderWithRestored(without(id), BASELINE, new Set([id])), id).toEqual(BASELINE);
+    }
+    // Including all of them at once, in any combination: the restored rows keep
+    // their baseline sequence among themselves, so neighbours cannot swap.
+    expect(orderWithRestored(without('b', 'c'), BASELINE, new Set(['b', 'c']))).toEqual(BASELINE);
+    expect(orderWithRestored([], BASELINE, new Set(BASELINE))).toEqual(BASELINE);
+  });
+
+  it('leaves every other edit alone', () => {
+    // A refusal answers one removal; it says nothing about a reorder or an
+    // addition the user also made, and those are still theirs afterwards. So
+    // the baseline decides positions and is never replayed as the order.
+    expect(orderWithRestored(['d', 'a', 'c'], BASELINE, new Set(['b'])))
+      .toEqual(['d', 'a', 'b', 'c']);
+    expect(orderWithRestored(['a', 'c', 'd', 'new'], BASELINE, new Set(['b'])))
+      .toEqual(['a', 'b', 'c', 'd', 'new']);
+    expect(orderWithRestored(['a', 'b', 'c', 'd'], BASELINE, new Set())).toEqual(BASELINE);
+  });
+
+  it('restores an id whose baseline neighbours are all gone', () => {
+    // Nothing to anchor to is still an answer: the front, because a row with no
+    // surviving predecessor had none in the baseline either.
+    expect(orderWithRestored(['d'], BASELINE, new Set(['b']))).toEqual(['b', 'd']);
+    expect(orderWithRestored(['new'], BASELINE, new Set(['c']))).toEqual(['c', 'new']);
+  });
+});
+
 describe('applyBackendCatalogIntent', () => {
   it('replays edits onto a newer catalog and keeps a concurrent addition visible', () => {
     const intent = backendCatalogIntent([model('a'), model('b')], [model('b'), model('a', { display_name: 'A' })]);
@@ -801,6 +842,76 @@ describe('pickerGroups', () => {
       // …and it is the group that answer names.
       expect(reached[0], fact.what).toBe(fact.group);
     }
+  });
+});
+
+describe('offeredCandidates', () => {
+  const candidate = (id: string, overrides: Partial<ModelCandidate> = {}): ModelCandidate => ({
+    id,
+    display_name: null,
+    reasoning_efforts: [],
+    suppliers: [],
+    origin: 'provider',
+    ...overrides,
+  });
+
+  const read = (groups: Partial<BackendModelCandidates> = {}): BackendModelCandidates => ({
+    builtin: groups.builtin ?? [],
+    providers: groups.providers ?? [],
+    in_list: groups.in_list ?? [],
+  });
+
+  const supplier: ModelCandidateSupplier = { source_id: 'src_a', source_name: 'Primary relay', model_id: 'up' };
+
+  it('offers every pickable id, whatever its suppliers say', () => {
+    // The property: being offered and having suppliers are two different facts,
+    // and only the first one this answers. A candidate the server serves with
+    // nothing behind it yet is a row the user may add — its route starts empty —
+    // so a supplier list can never be the reason an id is missing from here.
+    const rows = [
+      candidate('supplied', { suppliers: [supplier] }),
+      candidate('unsupplied'),
+      candidate('many', { suppliers: [supplier, { ...supplier, source_id: 'src_b' }] }),
+    ];
+
+    for (const group of ['builtin', 'providers'] as const) {
+      const offered = offeredCandidates(read({ [group]: rows }));
+      expect([...offered.keys()], group).toEqual(rows.map((row) => row.id));
+      expect([...offered.values()], group).toEqual(rows);
+    }
+  });
+
+  it('answers for the ids the picker would offer, and files each of them once', () => {
+    // One answer, not two: the withdrawal decision here and the rows the picker
+    // puts in front of the user are the same question, so 「offered」 is the
+    // pickable groups in group order with the same first-wins dedupe — a
+    // response that repeats an id across them cannot make it two offers.
+    const arrival = read({
+      builtin: [candidate('shared'), candidate('shared', { display_name: 'again' }), candidate('gpt-6')],
+      providers: [candidate('shared'), candidate('glm-5.2')],
+    });
+    const groups = pickerGroups(arrival, new Set());
+
+    expect([...offeredCandidates(arrival).keys()])
+      .toEqual([...groups.builtin, ...groups.providers].map((entry) => entry.id));
+  });
+
+  it('never offers an id the saved menu already holds', () => {
+    // `in_list` is not an offer, whatever it carries: it reports what the saved
+    // menu holds, and a row already in the list is not one this dialog can offer
+    // to add. `group_if_removed` says where such a row would RE-enter if it were
+    // removed, which is a question about a removal nobody has made.
+    const arrival = read({
+      in_list: [candidate('kimi-k3', { group_if_removed: 'providers' }), candidate('gpt-6')],
+      providers: [candidate('glm-5.2')],
+    });
+
+    expect([...offeredCandidates(arrival).keys()]).toEqual(['glm-5.2']);
+  });
+
+  it('drops an id the response left blank', () => {
+    expect([...offeredCandidates(read({ providers: [candidate(''), candidate('glm-5.2')] })).keys()])
+      .toEqual(['glm-5.2']);
   });
 });
 
