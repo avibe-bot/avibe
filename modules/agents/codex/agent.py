@@ -167,7 +167,7 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
-        # base_session_id → (thread_id, "collaboration" | "fallback")
+        # base_session_id → (thread_id, collaboration | fallback | fallback_pending_clear)
         self._thread_prompt_strategies: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, active model, active reasoning effort)
         self._thread_model_settings: Dict[str, tuple[str, str, Optional[str]]] = {}
@@ -2039,14 +2039,19 @@ class CodexAgent(BaseAgent):
         target_agent_session_id = (
             self.bind_agent_session_id(request, thread_id) or target_agent_session_id
         )
-        if source_prompt_strategy == "collaboration" and not self._persist_prompt_strategy(
+        if source_prompt_strategy in {
+            "collaboration",
+            "fallback_pending_clear",
+        } and not self._persist_prompt_strategy(
             request,
             thread_id,
             None,
-            strategy="collaboration",
+            strategy=source_prompt_strategy,
             agent_session_id=target_agent_session_id,
         ):
-            raise RuntimeError("Could not persist the forked Codex prompt strategy")
+            raise CodexPromptRefreshUnavailableError(
+                "Could not persist the forked Codex prompt strategy"
+            )
         if source_prompt_strategy:
             self._remember_thread_prompt_strategy(
                 request.base_session_id,
@@ -2661,6 +2666,7 @@ class CodexAgent(BaseAgent):
         developer_instructions: str,
         *,
         agent_session_id: Optional[str] = None,
+        strategy: str = "fallback",
     ) -> None:
         """Fallback for Codex builds without Turn collaboration settings."""
 
@@ -2686,7 +2692,7 @@ class CodexAgent(BaseAgent):
             request,
             thread_id,
             developer_instructions,
-            strategy="fallback",
+            strategy=strategy,
             agent_session_id=agent_session_id,
         ):
             getattr(self, "_thread_developer_instructions", {}).pop(
@@ -2708,7 +2714,7 @@ class CodexAgent(BaseAgent):
         self._remember_thread_prompt_strategy(
             request.base_session_id,
             thread_id,
-            "fallback",
+            strategy,
         )
 
     @staticmethod
@@ -2751,10 +2757,12 @@ class CodexAgent(BaseAgent):
         )
         if (
             marker_thread_id != thread_id
-            or marker_strategy not in {"collaboration", "fallback"}
+            or marker_strategy
+            not in {"collaboration", "fallback", "fallback_pending_clear"}
             or (marker_strategy == "fallback" and not marker_sha256_valid)
             or (
-                marker_strategy == "collaboration"
+                marker_strategy
+                in {"collaboration", "fallback_pending_clear"}
                 and marker_sha256 is not None
                 and not marker_sha256_valid
             )
@@ -2809,7 +2817,11 @@ class CodexAgent(BaseAgent):
         strategy: str,
         agent_session_id: Optional[str],
     ) -> bool:
-        if strategy not in {"collaboration", "fallback"}:
+        if strategy not in {
+            "collaboration",
+            "fallback",
+            "fallback_pending_clear",
+        }:
             raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
         if strategy == "fallback" and not developer_instructions:
             raise ValueError("Fallback prompt strategy requires developer instructions")
@@ -2928,7 +2940,8 @@ class CodexAgent(BaseAgent):
         fallback_prompt_is_current = bool(
             developer_instructions
             and persisted_prompt_marker
-            and persisted_prompt_marker["strategy"] == "fallback"
+            and persisted_prompt_marker["strategy"]
+            in {"fallback", "fallback_pending_clear"}
             and persisted_prompt_marker.get("sha256")
             == self._prompt_fingerprint(developer_instructions)
         )
@@ -2939,7 +2952,7 @@ class CodexAgent(BaseAgent):
                 developer_instructions,
             )
             prompt_changed = False
-        if prompt_strategy == "collaboration":
+        if prompt_strategy in {"collaboration", "fallback_pending_clear"}:
             await self._confirm_collaboration_mode_capability(transport)
         collaboration_mode_is_known = bool(
             getattr(transport, "supports_turn_collaboration_mode", True)
@@ -2950,14 +2963,20 @@ class CodexAgent(BaseAgent):
             and not effective_model
         )
         clear_collaboration_mode = collaboration_mode_is_known and bool(
-            (model_explicit and effective_model is None)
+            prompt_strategy == "fallback_pending_clear"
+            or (model_explicit and effective_model is None)
             or collaboration_strategy_has_no_model
         )
         if clear_collaboration_mode:
             was_collaboration = prompt_strategy == "collaboration"
             turn_params["collaborationMode"] = None
             if developer_instructions:
-                prompt_strategy = "fallback"
+                prompt_strategy = (
+                    "fallback_pending_clear"
+                    if was_collaboration
+                    or prompt_strategy == "fallback_pending_clear"
+                    else "fallback"
+                )
                 self._remember_thread_prompt_strategy(
                     request.base_session_id,
                     thread_id,
@@ -2991,6 +3010,11 @@ class CodexAgent(BaseAgent):
                 thread_id,
                 developer_instructions,
                 agent_session_id=agent_session_id,
+                strategy=(
+                    "fallback_pending_clear"
+                    if prompt_strategy == "fallback_pending_clear"
+                    else "fallback"
+                ),
             )
 
         self._write_caller_env_script(request)
@@ -3007,6 +3031,10 @@ class CodexAgent(BaseAgent):
         try:
             resp = await transport.send_request("turn/start", turn_params)
         except Exception as exc:
+            if prompt_strategy == "fallback_pending_clear":
+                raise CodexPromptRefreshUnavailableError(
+                    "Could not confirm that Codex cleared the previous collaboration prompt"
+                ) from exc
             if (
                 "collaborationMode" not in turn_params
                 or not self._collaboration_mode_is_unsupported(exc)
@@ -3033,6 +3061,25 @@ class CodexAgent(BaseAgent):
             fallback_turn_params = dict(turn_params)
             fallback_turn_params.pop("collaborationMode", None)
             resp = await transport.send_request("turn/start", fallback_turn_params)
+
+        if prompt_strategy == "fallback_pending_clear" and developer_instructions:
+            if self._persist_prompt_strategy(
+                request,
+                thread_id,
+                developer_instructions,
+                strategy="fallback",
+                agent_session_id=agent_session_id,
+            ):
+                prompt_strategy = "fallback"
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    prompt_strategy,
+                )
+            else:
+                logger.warning(
+                    "Codex collaboration clear succeeded but its completed prompt strategy marker remains pending"
+                )
 
         if use_collaboration_mode and developer_instructions:
             self._remember_thread_developer_instructions(
