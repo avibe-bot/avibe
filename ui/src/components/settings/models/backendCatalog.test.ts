@@ -10,8 +10,10 @@ import {
   catalogModelIds,
   catalogModels,
   backendModelId,
+  MODELS_DEV_FIELDS,
   pickerGroups,
   readBackendCatalogBaseline,
+  retireModelsDevMatch,
   sameBackendModel,
 } from './backendCatalog';
 import { inferProvider, type StandardVendors } from './menus/identifiers';
@@ -136,6 +138,89 @@ describe('applyModelsDevMatch', () => {
 
     expect(match.reasoning_efforts).toEqual(['low', 'high']);
   });
+});
+
+/**
+ * Retiring a fill, asserted over every field the fill owns.
+ *
+ * The rule has two halves and they are decided per field, so a test that named
+ * fields would be a list of the ones somebody thought of. `MODELS_DEV_FIELDS` is
+ * the fixture instead: every field is walked, and the values the two halves are
+ * told apart by are derived from each field's shape rather than written down —
+ * so a field the mirror gains is covered here without this file being edited,
+ * and a field added to `applyModelsDevMatch` alone fails the first case.
+ */
+describe('retireModelsDevMatch', () => {
+  const NO_VENDORS: ReadonlySet<string> = new Set();
+  /** A match differing from the blank row in every field it fills, so 「the fill
+   *  set this」 is never indistinguishable from 「it was already blank」. */
+  const sentinel: ModelsDevMatch = {
+    ...match,
+    model_id: 'sentinel',
+    display_name: 'Sentinel',
+    context_window: 1,
+    max_output_tokens: 2,
+    input_modalities: ['image'],
+    output_modalities: ['audio'],
+    supports_tools: null,
+    supports_reasoning: true,
+    reasoning_efforts: ['sentinel'],
+  };
+  const fill = () => applyModelsDevMatch(blankBackendModel(), sentinel, 'models_dev', 'codex', NO_VENDORS);
+
+  const same = (left: unknown, right: unknown): boolean =>
+    Array.isArray(left) && Array.isArray(right)
+      ? left.length === right.length && left.every((value, index) => value === right[index])
+      : left === right;
+
+  const changedFrom = (before: BackendModel, after: BackendModel): Set<string> =>
+    new Set(Object.keys(after).filter((key) => !same(
+      before[key as keyof BackendModel],
+      after[key as keyof BackendModel],
+    )));
+
+  /** A value distinct from both the fill's and the blank row's, whatever shape
+   *  the field has — otherwise 「the user typed this」 could read as 「this was
+   *  retired」. Chosen by shape, never by field name. */
+  const typedByUser = (filled: unknown, blank: unknown): unknown => {
+    if (Array.isArray(filled)) return [...filled, 'text'];
+    const choices: unknown[] = typeof filled === 'number' || typeof blank === 'number'
+      ? [7, 8]
+      : typeof filled === 'string' || typeof blank === 'string'
+        ? ['mine', 'yours']
+        : [true, false, null];
+    return choices.find((choice) => choice !== filled && choice !== blank);
+  };
+
+  it('owns exactly the fields the fill writes', () => {
+    // Both directions at once: the constant matches the applier, and the
+    // sentinel really does move every one of them off the blank floor.
+    expect(changedFrom(blankBackendModel(), fill())).toEqual(new Set([...MODELS_DEV_FIELDS, 'id']));
+  });
+
+  it('takes back every field the fill still owns, and only those', () => {
+    const filled = fill();
+
+    const retired = retireModelsDevMatch(filled, filled, 'typed-instead');
+
+    expect(retired).toEqual({ ...blankBackendModel(), id: 'typed-instead' });
+  });
+
+  for (const field of MODELS_DEV_FIELDS) {
+    it(`keeps ${field} when the user typed it themselves`, () => {
+      const blank = blankBackendModel();
+      const filled = fill();
+      const mine = typedByUser(filled[field], blank[field]);
+      const edited: BackendModel = { ...filled, ...{ [field]: mine } };
+
+      const retired = retireModelsDevMatch(edited, filled, 'typed-instead');
+
+      // Theirs survives; the rest of the fill goes, so the row is never left
+      // describing a model whose id it no longer carries.
+      expect(retired[field]).toEqual(mine);
+      expect(retired).toEqual({ ...blank, id: 'typed-instead', ...{ [field]: mine } });
+    });
+  }
 });
 
 /**

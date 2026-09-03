@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
-import { applyModelsDevMatch, backendModelId, blankBackendModel } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
 import type { StandardVendors } from './menus/identifiers';
@@ -156,6 +156,12 @@ export const BackendModelEditorDialog: React.FC<{
   const [customEffort, setCustomEffort] = React.useState('');
   const [submitted, setSubmitted] = React.useState(false);
   const fillAttempt = React.useRef(0);
+  /** The whole editable surface exactly as the last models.dev fill left it —
+   *  the draft and the three fields held as text. A value that still matches it
+   *  is models.dev's answer; a value that differs is the user's own typing. Null
+   *  once no answer is outstanding, which is the only state `changeId` needs to
+   *  tell apart. A ref, not state: nothing renders from it. */
+  const filled = React.useRef<{ draft: BackendModel; name: string; context: string; output: string } | null>(null);
   const listId = React.useId();
 
   const seed = React.useCallback((next: BackendModel) => {
@@ -169,6 +175,7 @@ export const BackendModelEditorDialog: React.FC<{
     setCustomOpen(false);
     setCustomEffort('');
     setSubmitted(false);
+    filled.current = null;
   }, []);
 
   React.useEffect(() => {
@@ -268,16 +275,22 @@ export const BackendModelEditorDialog: React.FC<{
     // its provider publishes it as. `origin` is `models_dev` unconditionally
     // because the typeahead is add mode's field: a saved row's own creation path
     // is never re-decided here.
-    setDraft((current) => applyModelsDevMatch(current, match, 'models_dev', backend, standardVendors));
-    setNameText(match.display_name ?? '');
-    setContextText(groupTokens(match.context_window));
-    setOutputText(groupTokens(match.max_output_tokens));
+    const next = applyModelsDevMatch(draft, match, 'models_dev', backend, standardVendors);
+    const name = match.display_name ?? '';
+    const context = groupTokens(match.context_window);
+    const output = groupTokens(match.max_output_tokens);
+    setDraft(next);
+    setNameText(name);
+    setContextText(context);
+    setOutputText(output);
+    filled.current = { draft: next, name, context, output };
     setLookup('');
   };
 
   /** Take the query as the id itself, resolved to one this backend accepts. The
-   *  draft's other fields are the user's own by construction: any earlier fill
-   *  was cleared by `changeId` the moment they typed again. */
+   *  draft's other fields are the user's own by construction: whatever an
+   *  earlier fill still owned was retired by `changeId` the moment they typed
+   *  again, and what survived that is what they typed themselves. */
   const takeLookupAsId = () => {
     patch({ id: backendModelId(lookup.trim(), backend, standardVendors) });
     setLookup('');
@@ -288,24 +301,25 @@ export const BackendModelEditorDialog: React.FC<{
    * request still in flight, the match list it would open, and the metadata an
    * earlier fill already poured in.
    *
-   * `models_dev_id` decides how far that goes, because it is the schema's own
-   * record of where a row's metadata came from. A filled draft describes the id
-   * that fetched it — keeping its context window, modalities or efforts would
-   * save one model's facts under another model's name — so it goes back to
-   * blank. A hand-typed draft owes models.dev nothing and keeps every field,
-   * since correcting a typo in the id is not a decision to retype the rest.
+   * How far that reaches is decided field by field against the fill itself, not
+   * by one flag over the whole row — see `retireModelsDevMatch`. A draft that
+   * owes models.dev nothing keeps every field, since correcting a typo in the id
+   * is not a decision to retype the rest, and after one retirement there is
+   * nothing left to retire.
    */
   const changeId = (nextId: string) => {
     setActive(0);
     setLookup(nextId.trim());
-    if (draft.models_dev_id === null) {
+    const fill = filled.current;
+    if (fill === null) {
       patch({ id: nextId });
       return;
     }
-    setDraft({ ...blankBackendModel(), id: nextId });
-    setNameText('');
-    setContextText('');
-    setOutputText('');
+    setDraft((current) => retireModelsDevMatch(current, fill.draft, nextId));
+    if (nameText === fill.name) setNameText('');
+    if (contextText === fill.context) setContextText('');
+    if (outputText === fill.output) setOutputText('');
+    filled.current = null;
   };
 
   // The escape is the last row in every open state, including 「searching」 and
@@ -395,7 +409,16 @@ export const BackendModelEditorDialog: React.FC<{
               labelClassName="model-hub-model-field-label"
             >
               {(id) => (
-                <div className="relative min-w-0">
+                <div
+                  className="relative min-w-0"
+                  // The list is an overlay over the fields below it, so it lives
+                  // exactly as long as the user is in it: focus moving anywhere
+                  // outside closes it, the same containment check
+                  // `SourceDetailPanel` uses. Its own rows never trigger this —
+                  // they refuse focus on mousedown to keep the caret in the
+                  // field — so choosing one still runs.
+                  onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLookup(''); }}
+                >
                   <Input
                     id={id}
                     value={draft.id}

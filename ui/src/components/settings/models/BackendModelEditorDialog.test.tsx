@@ -418,6 +418,63 @@ describe('BackendModelEditorDialog', () => {
     }));
   });
 
+  it('keeps what the user typed over a fill while retiring the rest of it', async () => {
+    // The half the two cases above do not reach: a row that is part fill and
+    // part the user's own typing. Which half a field belongs to is decided
+    // against the fill itself — `retireModelsDevMatch` owns that rule and states
+    // it over every field — so this asserts the wiring the helper cannot see,
+    // the three boxes the editor holds as text until it commits.
+    const user = userEvent.setup();
+    search.mockResolvedValue([match()]);
+    const { onCommit } = renderEditor();
+
+    await user.type(modelField(), 'sonnet');
+    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
+    await user.clear(screen.getByLabelText('Display name'));
+    await user.type(screen.getByLabelText('Display name'), 'House relay');
+    await user.clear(screen.getByLabelText('Maximum output'));
+    await user.type(screen.getByLabelText('Maximum output'), '8000');
+
+    await user.clear(modelField());
+    await user.type(modelField(), 'openai/gpt-5');
+
+    // Theirs stands. Correcting an id is not a decision to retype the form.
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('House relay');
+    // Grouped, because leaving the box is what formats it — their 8000, shown
+    // the way every token count is.
+    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('8,000');
+    // The fill's own answers go, because they describe a model this row no
+    // longer names.
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
+    expect(answered('Reasoning')).toBe('No');
+
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith({
+      ...blankBackendModel(),
+      id: 'openai/gpt-5',
+      display_name: 'House relay',
+      max_output_tokens: 8000,
+    });
+  });
+
+  it('closes the suggestion list once the user is working somewhere else', async () => {
+    // It is an overlay over the fields below it, so an open list the user has
+    // left is covering the controls they moved on to.
+    const user = userEvent.setup();
+    search.mockResolvedValue([match()]);
+    renderEditor();
+
+    await user.type(modelField(), 'sonnet');
+    expect(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ })).toBeTruthy();
+
+    await user.click(screen.getByLabelText('Display name'));
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    // The id the user typed is theirs either way: leaving the list is not
+    // abandoning the field.
+    expect(modelField().value).toBe('sonnet');
+  });
+
   it('keeps a display name optional, trimmed, and null when the box is empty', async () => {
     const user = userEvent.setup();
     const unnamed: BackendModel = { ...blankBackendModel(), id: 'gpt-5-codex', context_window: 400000 };
