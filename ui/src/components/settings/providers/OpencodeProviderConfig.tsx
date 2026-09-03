@@ -46,7 +46,7 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
-import { EFFORT_BY_BACKEND, REASONING_EFFORTS, sortEffortsByVocabulary } from '@/lib/effortOptions';
+import { EFFORT_BY_BACKEND, sortEffortsByVocabulary } from '@/lib/effortOptions';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -92,10 +92,13 @@ const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
 
-// Checkboxes offer the unified 7-value vocabulary so a catalog-declared `ultra`
-// can be selected. The default-checked list is the OpenCode family fallback,
-// which still omits `ultra` so an unknown relay is not over-claimed.
-const defaultReasoningEfforts = () => [...EFFORT_BY_BACKEND.opencode];
+// This form's save path is `_normalize_reasoning_variants` in
+// `vibe/opencode_config.py`, which accepts `none` plus the OpenCode family
+// fallback (`minimal`..`max`). `ultra` is in the unified vocabulary because
+// catalog rows declare it, but offering it here would send a value the
+// save path rejects. Checkboxes and the default-checked list are the same set.
+const OPENCODE_PROVIDER_EFFORTS = EFFORT_BY_BACKEND.opencode;
+const defaultReasoningEfforts = () => [...OPENCODE_PROVIDER_EFFORTS];
 
 const notifyOpenCodeModelOptionsChanged = () => {
   window.dispatchEvent(new CustomEvent('avibe:opencode-model-options-changed'));
@@ -1617,7 +1620,7 @@ export const OpencodeProviderConfig: React.FC<{
                                       <span className="text-[11px] font-medium uppercase text-muted">
                                         {t('settings.backends.opencodeProviderModelReasoning')}
                                       </span>
-                                      {REASONING_EFFORTS.map((effort) => (
+                                      {OPENCODE_PROVIDER_EFFORTS.map((effort) => (
                                         <Button
                                           key={effort}
                                           type="button"

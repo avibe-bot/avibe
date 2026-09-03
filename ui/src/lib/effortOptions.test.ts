@@ -111,6 +111,8 @@ describe('effort options', () => {
   });
 
   it('keeps the OpenCode family fallback inside the vocabulary without ultra', () => {
+    // Same set the OpenCode provider form offers and the save path accepts
+    // (`vibe/opencode_config.py:_VALID_REASONING_VARIANTS` minus `none`).
     expect(EFFORT_BY_BACKEND.opencode).toEqual([...REASONING_EFFORTS].filter((effort) => effort !== 'ultra'));
   });
 });
