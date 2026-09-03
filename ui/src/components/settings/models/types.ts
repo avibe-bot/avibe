@@ -85,12 +85,26 @@ export type SourceUsage = {
   projected_exhaust_at?: string | null;
 };
 
+/**
+ * Which rung of the provenance ladder produced `reasoning_efforts`.
+ *
+ * `upstream` (discovery carried a reasoning capability signal) and `catalog`
+ * (the model id matches a builtin catalog entry) are auto-provided and
+ * read-only. `user` is a list the user typed; `null` means no rung applies.
+ *
+ * Required here because `SuppliedModel` is the v7 API wire shape. The server
+ * normalizes older persisted rows before serialization; compatibility with a
+ * pre-v7 server belongs at the UI parsing boundary.
+ */
+export type ReasoningEffortsSource = 'upstream' | 'catalog' | 'user';
+
 export type SuppliedModel = {
   /** Bare model id (no provider prefix). */
   id: string;
   display_name?: string | null;
   origin: ModelOrigin;
   reasoning_efforts: string[];
+  reasoning_efforts_source: ReasoningEffortsSource | null;
   /** Persistent retirement tombstone; retired entries stay readable but are not callable. */
   retired?: boolean;
   discovered_at?: string | null;
