@@ -203,6 +203,54 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
+  it('asks which row a typed ID names as the ID it would be saved as', async () => {
+    const user = userEvent.setup();
+    // The id the user types is not yet the id the row is saved under: on OpenCode
+    // an unrecognized provider resolves to `custom/`, and the editor applies that
+    // rule when it commits. So the lookup behind this door has to be asked about
+    // the resolved id. Asked about the raw one it misses the row the user already
+    // has and opens a blank one, which then commits over that same saved id and
+    // drops everything they had described about it.
+    const FOO = model('custom/foo', {
+      display_name: 'Foo Air',
+      context_window: 180000,
+      origin: 'manual',
+    });
+    const catalog = [model('zai/glm-4.7'), FOO];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
+      backend: 'opencode',
+      standard_vendors: ['zai'],
+    }));
+    // Nothing offered under this query, which is the only state that offers the
+    // typed id as a custom model at all.
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog({ backend: 'opencode' });
+
+    await user.click(await screen.findByRole('button', { name: 'Remove Foo Air' }));
+    await user.click(screen.getByRole('button', { name: 'Add models' }));
+    await user.type(await screen.findByLabelText('Search models or providers'), 'foo');
+    await user.click(await screen.findByRole('button', { name: 'Add "foo" as a custom model…' }));
+
+    // Their own row, opened as itself: the id fixed, and the description they
+    // wrote still in it. The button is the tell — this is an edit, not an add.
+    expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('custom/foo');
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Foo Air');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
+    await user.type(screen.getByLabelText('Maximum output'), '8000');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    // And the row goes back whole, changed only where they changed it. A blank
+    // row carrying the same id would have saved this list with the name and the
+    // window gone — the write is what the user would have to undo by hand.
+    await waitFor(() => expect(write).toHaveBeenCalledWith('opencode', {
+      baseline: catalog,
+      models: [model('zai/glm-4.7'), { ...FOO, max_output_tokens: 8000 }],
+    }));
+  });
+
   it('edits an existing row without renaming it', async () => {
     const user = userEvent.setup();
     const catalog = [model('alpha', { context_window: 1000 })];
@@ -787,6 +835,46 @@ describe('BackendModelCatalogDialog', () => {
       // The row and its promise go together. What is left is the list the server
       // already holds, so there is nothing to save — the surest statement that
       // the refused projection cannot go out again.
+      await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
+      expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+      expect(write).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes the custom-model door out of a re-ask as the same 「add none of these」', async () => {
+      const user = userEvent.setup();
+      // The third way out of a seeded re-ask, and the one that does not answer
+      // it: leaving by the editor confirms none of the seeded ids just as
+      // walking away does, so their refused projections have to be discharged
+      // on the way out. Kept, they are what the next Save would send — an
+      // agreement the server has already refused, granted by a door.
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
+      vi.spyOn(modelsApi, 'getAgentModelCandidates')
+        .mockResolvedValueOnce(offered({ providers: [shown] }))
+        .mockResolvedValue(offered({ providers: [current] }));
+      vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [{ source_id: 'src_b', model_id: 'glm-5.2' }] }))
+        .mockResolvedValue(agent(CATALOG));
+      renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
+      await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await screen.findByRole('checkbox', { name: /Backup relay/ });
+      await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+
+      // The editor is open on a blank row, and the seeded one left with its
+      // promise: what remains is the list the server already holds, so there is
+      // nothing to save — the surest statement that the refused projection
+      // cannot go out again. Asked back at the catalog, since the door closed
+      // the picker on its way out; the editor's own control is named for it,
+      // because the catalog behind it carries that word too.
+      expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('');
+      const [leave] = within(screen.getByRole('dialog', { name: 'Add model' }))
+        .getAllByRole('button', { name: 'Cancel' });
+      await user.click(leave);
       await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
       expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
       expect(write).toHaveBeenCalledTimes(1);

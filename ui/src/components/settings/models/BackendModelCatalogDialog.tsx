@@ -23,6 +23,7 @@ import {
   applyBackendCatalogIntent,
   backendCatalogIntent,
   backendCatalogIntentApplied,
+  backendModelId,
   catalogModelIds,
   draftRowFor,
   heldRowFor,
@@ -558,14 +559,18 @@ export const BackendModelCatalogDialog: React.FC<{
           // An id the refusal reports with no suppliers left is not a question:
           // there is nothing to offer and so nothing to agree to, and asking
           // about it would only invite a confirmation this dialog could not
-          // send. It loses its agreement and its row together, right now — the
-          // row that disappears and the count that falls are the answer. An id
-          // that still has suppliers keeps its row and takes today's suppliers
-          // as its agreement, so the map this dialog writes from says what the
-          // server just said whatever happens next, and is then re-asked with
-          // them. Only picks: a supplier disagreement may not delete a row the
-          // server already holds, and one it never named is no part of this
-          // write's agreement either.
+          // send. Losing its row is what withdraws it — the row that disappears
+          // and the count that falls are the answer — and losing the row is
+          // enough, because a promise is read per row this write sends, so one
+          // left in the map for a row that is gone describes nothing and can
+          // reach no body. Whatever puts such an id back is what states its
+          // agreement again: every path that re-adds a row writes or clears its
+          // entry first. An id that still has suppliers keeps its row and takes
+          // today's suppliers as its agreement, so the map this dialog writes
+          // from says what the server just said whatever happens next, and is
+          // then re-asked with them. Only picks: a supplier disagreement may not
+          // delete a row the server already holds, and one it never named is no
+          // part of this write's agreement either.
           const saved = new Set(baselineModels.map((model) => model.id));
           const disputed = Object.entries(failure.changedSuppliers)
             .filter(([modelId]) => chosenRef.current.has(modelId) && !saved.has(modelId));
@@ -573,7 +578,6 @@ export const BackendModelCatalogDialog: React.FC<{
             disputed.filter(([, suppliers]) => suppliers.length === 0).map(([modelId]) => modelId),
           );
           const reask = new Map(disputed.filter(([, suppliers]) => suppliers.length > 0));
-          for (const modelId of withdrawn) chosenRef.current.delete(modelId);
           for (const [modelId, suppliers] of reask) {
             const pick = chosenRef.current.get(modelId);
             if (pick) chosenRef.current.set(modelId, { ...pick, expected_suppliers: [...suppliers] });
@@ -936,14 +940,27 @@ export const BackendModelCatalogDialog: React.FC<{
           // still just closes.
           onCancel={() => addCandidates([])}
           onAdd={addCandidates}
-          // The editor is the other door an id becomes a row through, so it asks
-          // the same question first: an id the draft or the baseline already
-          // holds opens as THAT row rather than as a blank one carrying the same
-          // id. Otherwise typing a removed model's id here is the one path that
-          // rebuilds it from nothing — and it would also dead-end on 「already in
-          // the list」 for an id the user can see on screen.
-          onCustom={(seedId) => {
-            setPicking(null);
+          // The editor is the other door an id becomes a row through, so leaving
+          // by it answers this picker's two standing questions in the same order
+          // every other exit answers them, through the same call.
+          //
+          // `addCandidates([])` first, for the same reason Cancel makes that
+          // call: walking out through the editor confirms none of a re-ask's
+          // seeded ids, and a seeded projection this dialog keeps is one the
+          // next Save would send as if it had been agreed.
+          //
+          // Then the id, resolved BEFORE the row lookup and through the rule the
+          // editor itself commits under (`backendModelId`, which `draftWithId`
+          // applies there). The lookup is a total function of the id, so the id
+          // it is asked about has to be the one the row would be saved as: asked
+          // about a typed `foo` it does not find the user's saved `custom/foo`,
+          // and the editor — resolving the id only on commit — would then write
+          // a blank row onto it, dropping the limits, modalities, capabilities
+          // and name they had described. The resolver is idempotent, so the
+          // editor re-applying it to this seed changes nothing.
+          onCustom={(typed) => {
+            addCandidates([]);
+            const seedId = backendModelId(typed, backend, standardVendors);
             const existing = heldRowFor(seedId, draftRef.current, baselineRef.current?.models ?? []);
             setEditing(existing ? { model: existing } : { model: null, seedId });
           }}
