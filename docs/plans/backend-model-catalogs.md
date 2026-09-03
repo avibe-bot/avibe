@@ -138,8 +138,10 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    supplies nothing here. That id is exactly what the menu id will be. The row lists its
    supplying providers in Source order. For OpenCode a
    candidate is the existing OpenCode identifier `vendor/model` (§4.8), so two Sources
-   with the same standard vendor collapse into one candidate and two vendors offering the
-   same bare model stay two candidates, as OpenCode itself would show them.
+   with the same standard vendor collapse into one candidate, two distinct standard vendors
+   offering the same bare model stay two candidates, and Sources whose vendor §4.8 normalizes
+   to `custom/` collapse into one `custom/<model>` candidate with several suppliers — exactly
+   the identities OpenCode itself would show.
 2. **Membership key and metadata owner.** Unchanged: membership is keyed by backend
    model id per backend, and the `BackendModel` row owns display name, capabilities,
    context, output, and reasoning efforts. Selection seeds display name and reasoning
@@ -209,8 +211,11 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 8. **A removed built-in must be recoverable, and nothing removed comes back by itself.**
    Removing any row records its id as removed (C6); the row leaves the menu and its route
    follows the removal rule (C3). A removed built-in reappears in the `Codex built-in` group
-   of the picker, a removed provider model in `From your providers`, and picking either again
-   clears the mark; a removed custom model is re-created through `Add custom model…`.
+   of the picker for as long as the backend still lists it, a removed provider model in
+   `From your providers` for as long as an ordered Source supplies it, and picking either
+   again clears the mark; anything else — a removed custom model, or a built-in the backend has
+   since withdrawn — is re-created through `Add custom model…`. The product keeps no history
+   of candidates it no longer serves.
 9. **New built-ins join the menu by themselves; removed ones stay removed.** When the
    backend's built-in list gains a model (a Codex update, a refreshed remote catalog), the
    product adds it to the menu unless its id is in the removed set (C6), inserting it where the
@@ -249,7 +254,8 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   from the built-in snapshot, for a provider model from its suppliers (display name from the
   first ordered supplier that has one; efforts = union in Source order). The picker copies
   those proposals into the editable catalog draft; the custom editor copies the chosen
-  models.dev suggestion. `PUT` stores the request literally — an empty field in the request
+  models.dev suggestion. A proposal contains only values the catalog can store — an effort
+  value that violates `backend-model.schema.json` is left out of the proposal, never copied. `PUT` stores the request literally — an empty field in the request
   is an empty field — so a value the user cleared before the first Save stays cleared.
   Server-side seeding at write time exists only for built-ins the reconcile (C6) adds without
   a user draft, from the same snapshot values. `origin` records the creation path only —
@@ -263,10 +269,11 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   nonempty `would_remove_hops` (`RouteHopRef` = `{backend, menu_model, source_id, model_id,
   position}`); a retry with `force: true` echoing the plan removes the rows and their routes in
   one transaction and returns `{agent, removed_hops, interrupted}`; rows with empty routes are
-  removed without confirmation and return `{agent}`. Property: every refusal the API emits for
-  this error validates against `guard-refusal.schema.json` after the lane amends that schema
-  and its mirrors (error enum, `detail`, and the nonempty-hop relation for this error), and the
-  response guard exercises it. The v1 hard refusal is retired.
+  removed without confirmation and return `{agent}`. Property: every response this route
+  emits — the plain success, the forced success with `removed_hops` and `interrupted`, and
+  the refusal — validates against the response registry and `guard-refusal.schema.json` after
+  the artifact changes below, and the response guard exercises each of them. The v1 hard
+  refusal is retired.
 - **C4 — The server serves the picker's candidates; the client only renders.** One read,
   `GET /api/models/agents/<backend>/models/candidates`, returns
   `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` where `Candidate` is
@@ -311,6 +318,23 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
 - **C5 — Unchanged.** Source inventories, Source-side manual add, Route dialog, Source order,
   direct/gateway modes, and every runtime projection are byte-for-byte unchanged except
   through C1–C4 and C6.
+
+### Contract artifact changes (complete; the contracts lane's checklist)
+
+Every shape C1–C7 introduces maps to exactly one row here; a delta that needs an artifact not
+listed is a spec defect to report, not a lane decision.
+
+| Artifact | Change |
+| --- | --- |
+| `docs/plans/model-hub-contracts/backend-model.schema.json` and its TypeScript mirror (`ui/src/components/settings/models/types.ts`) | `origin` enum gains `provider` |
+| `docs/plans/model-hub-contracts/api.md` route table | `PUT /api/models/agents/<backend>/models` row: optional `force`, `would_remove_hops`, `would_interrupt`, `expected_suppliers`; refusals `backend_model_in_route`, `candidate_suppliers_changed`; success `{agent}` or `{agent, removed_hops, interrupted}`. New row `GET /api/models/agents/<backend>/models/candidates`. `GET /api/models/catalog/models-dev` row: additive `first_party`, dedupe, ranking, cap 8 |
+| `docs/plans/model-hub-contracts/api-response.schema.json` | the models `PUT` accepts the forced-success shape beside `AgentResponse`; new candidates response (`Candidate` shape from C4); models-dev response gains `first_party` |
+| `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route` and `candidate_suppliers_changed`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route`; `candidate_suppliers_changed` carries its `changed: {<id>: [{source_id, model_id}]}` sibling |
+| `docs/plans/model-hub-contracts/mirror-registry.json` | registers the two new error codes and the new `origin` value with their consumers |
+| `vibe/i18n/*.json` and `ui/src/components/settings/models/serverCopy.ts` | `detail` keys for the two new error codes |
+| `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` with legacy initialization (C6) and a load fixture for the v1 file shape |
+| `vibe/data/model_vendors.json` (new, versioned) | the vendor map and aggregator order C7 defines, covered by a test |
+| `docs/plans/model-hub.md` §4.2 / §4.6 | matching-point wording (C1); removed-id and reconcile rules (C6) |
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
