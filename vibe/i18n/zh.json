@@ -31,7 +31,7 @@
       "back": "返回首页"
     },
     "markdown": {
-      "help": "每个 Show Page URL 都提供 Agent 可读的表示；请求时设置 Accept: text/markdown 即可获取。",
+      "help": "公共 Show Page 链接会自动向 Agent 和命令行客户端返回 Agent 可读的 Markdown。读取已授权的私有页面时，请在请求 URL 时设置 Accept: text/markdown。",
       "errors": {
         "authenticationRequired": "需要先完成身份验证才能读取此 Show Page。",
         "forbidden": "你无权读取此 Show Page。",

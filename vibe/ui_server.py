@@ -2982,6 +2982,23 @@ def compress_materialized_api_response(response: Response) -> Response:
 
 
 @app.after_request
+def add_public_show_representation_vary(response: Response) -> Response:
+    if not getattr(request._request.state, "public_show_representation_varies", False):
+        return response
+    for header in _PUBLIC_SHOW_REPRESENTATION_HEADERS:
+        response.headers["Vary"] = _append_vary_header(
+            response.headers.get("Vary"),
+            header,
+        )
+    if getattr(request._request.state, "public_show_representation_varies_cookie", False):
+        response.headers["Vary"] = _append_vary_header(
+            response.headers.get("Vary"),
+            "Cookie",
+        )
+    return response
+
+
+@app.after_request
 def add_api_timing_headers(response: Response) -> Response:
     started_at = getattr(g, "api_request_started_at", None)
     if started_at is None:
@@ -12854,6 +12871,89 @@ def _show_page_accepts_markdown_value(accept: str) -> bool:
     return markdown_quality > 0.0 and markdown_quality >= html_quality
 
 
+_PUBLIC_SHOW_REPRESENTATION_HEADERS = (
+    "Accept",
+    "Sec-Fetch-Dest",
+    "Sec-Fetch-Mode",
+    "User-Agent",
+)
+_SHOW_PAGE_CRAWLER_USER_AGENT_RE = re.compile(
+    r"(?:bot\b|crawler|spider|slurp|claudebot|perplexitybot|"
+    r"anthropic-ai|cohere-ai|google-extended|bytespider)",
+    re.IGNORECASE,
+)
+_SHOW_PAGE_KNOWN_NON_BROWSER_USER_AGENT_RE = re.compile(
+    r"(?:chatgpt-user|claude-user|perplexity-user|mistralai-user|powershell/)",
+    re.IGNORECASE,
+)
+_SHOW_PAGE_BROWSER_USER_AGENT_RE = re.compile(
+    r"(?:mozilla/|applewebkit/|chrome/|chromium/|firefox/|safari/|edg/|opr/)",
+    re.IGNORECASE,
+)
+_SHOW_PAGE_AGENT_OR_CLI_USER_AGENT_RE = re.compile(
+    r"(?:curl/|wget/|httpie/|python-requests/|python-httpx/|go-http-client/|"
+    r"libwww-perl/|powershell/|openai|anthropic|claude|perplexity|cohere|agent)",
+    re.IGNORECASE,
+)
+
+
+def _public_show_page_explicit_representation(accept: str) -> str | None:
+    """Return an explicit Show representation choice, if the header makes one."""
+    media_types = {
+        item.split(";", 1)[0].strip().lower()
+        for item in accept.split(",")
+    }
+    markdown_quality = _show_page_accept_quality(accept, "text/markdown")
+    html_quality = max(
+        _show_page_accept_quality(accept, "text/html"),
+        _show_page_accept_quality(accept, "application/xhtml+xml"),
+    )
+    html_explicit = bool({"text/html", "application/xhtml+xml"} & media_types)
+    if (
+        _show_page_accepts_markdown_value(accept)
+        and (not html_explicit or markdown_quality >= html_quality)
+    ):
+        return "markdown"
+    if html_explicit and html_quality > 0.0:
+        return "html"
+    if "text/markdown" in media_types:
+        # An explicit Markdown range that loses quality negotiation (including
+        # q=0) must not be turned back into Markdown by implicit client inference.
+        return "html"
+    return None
+
+
+def _public_show_page_prefers_markdown(starlette_request: FastAPIRequest) -> bool:
+    explicit = _public_show_page_explicit_representation(
+        starlette_request.headers.get("accept", "")
+    )
+    if explicit is not None:
+        return explicit == "markdown"
+
+    # Fetch Metadata is a strong browser-shaped signal. Any supplied mode or
+    # destination is conservatively kept on the interactive HTML surface,
+    # including incomplete or contradictory browser requests.
+    if (
+        starlette_request.headers.get("sec-fetch-mode", "").strip()
+        or starlette_request.headers.get("sec-fetch-dest", "").strip()
+    ):
+        return False
+
+    user_agent = starlette_request.headers.get("user-agent", "").strip()
+    if _SHOW_PAGE_CRAWLER_USER_AGENT_RE.search(user_agent):
+        return True
+    # User-initiated Agent fetchers and PowerShell deliberately use
+    # browser-compatible UA prefixes. Their product tokens are more specific
+    # than the surrounding Mozilla/WebKit tokens.
+    if _SHOW_PAGE_KNOWN_NON_BROWSER_USER_AGENT_RE.search(user_agent):
+        return True
+    if _SHOW_PAGE_BROWSER_USER_AGENT_RE.search(user_agent):
+        return False
+    if _SHOW_PAGE_AGENT_OR_CLI_USER_AGENT_RE.search(user_agent):
+        return True
+    return True
+
+
 def _show_page_not_found_html_response():
     language = _request_ui_language()
     title = html.escape(t("show.pageUnavailable.title", language), quote=True)
@@ -13007,6 +13107,29 @@ def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIR
     if not segments or segments[0] in {"api", "__show"}:
         return False
     return True
+
+
+def _is_public_show_page_document_candidate(
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+) -> bool:
+    if starlette_request.method not in {"GET", "HEAD"}:
+        return False
+    if not _is_show_page_entry_asset(asset_path) and _is_show_page_non_document_path(asset_path):
+        return False
+    relative = _decode_show_page_asset_path(asset_path)
+    segments = [segment for segment in relative.split("/") if segment]
+    return not segments or segments[0] not in {"api", "__show"}
+
+
+def _is_public_show_page_markdown_request(
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+) -> bool:
+    return (
+        _is_public_show_page_document_candidate(asset_path, starlette_request)
+        and _public_show_page_prefers_markdown(starlette_request)
+    )
 
 
 def _is_show_page_non_document_path(asset_path: str) -> bool:
@@ -15608,9 +15731,15 @@ async def serve_public_show_page(share_id, asset_path):
     from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
     from vibe import show_identity
 
-    markdown_requested = _is_show_page_markdown_request(asset_path, request._request)
+    representation_candidate = _is_public_show_page_document_candidate(
+        asset_path,
+        request._request,
+    )
+    request._request.state.public_show_representation_varies = representation_candidate
+    markdown_requested = _is_public_show_page_markdown_request(asset_path, request._request)
     config = _load_remote_access_config()
     lease = _show_guest_lease(config, share_id)
+    request._request.state.public_show_representation_varies_cookie = lease is not None
     editor_admitted = False
     limited_authenticated = False
     store = ShowPageStore()
@@ -15628,6 +15757,8 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
+        if page.visibility == "limited":
+            request._request.state.public_show_representation_varies_cookie = True
         limited_guest = (
             lease is not None
             and lease.page_id == page.session_id
@@ -15637,7 +15768,21 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("page_offline", 404)
             return _show_page_offline_response()
-        is_spa_navigation = _is_show_page_spa_route_request(
+        runtime_path_denied = _is_show_page_runtime_denied_path(
+            asset_path,
+            session_id=page.session_id,
+            confine_to_workspace=True,
+        )
+        if not runtime_path_denied:
+            representation_candidate = (
+                representation_candidate
+                and _show_page_markdown_target_is_document(page.session_id, asset_path)
+            )
+            request._request.state.public_show_representation_varies = (
+                representation_candidate
+            )
+            markdown_requested = markdown_requested and representation_candidate
+        is_spa_navigation = markdown_requested or _is_show_page_spa_route_request(
             asset_path,
             request._request,
         )
@@ -15762,18 +15907,10 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(
-            asset_path,
-            session_id=page.session_id,
-            confine_to_workspace=True,
-        ):
+        if runtime_path_denied:
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_file_not_found_response()
-        markdown_requested = markdown_requested and _show_page_markdown_target_is_document(
-            page.session_id,
-            asset_path,
-        )
         if markdown_requested:
             return await _show_page_markdown_runtime_response(
                 page.session_id,
