@@ -1403,20 +1403,20 @@ projection. The server recomputes every listed projection before staging the mut
 difference refuses the whole write with `candidate_suppliers_changed` and a `changed` map
 containing the current projections for the differing ids.
 
-Backend catalogs also persist `removed_model_ids: string[]` and
-`builtin_baseline_initialized: boolean`. Removing any row adds its id to the set
-immediately, even while the baseline marker is false; explicitly adding that id removes
-it. An older catalog without the marker reads as false and is served unchanged until the
-bundled catalog, a last-known-good remote catalog, and the installed CLI's cache have each
-been read. The first complete snapshot atomically changes the marker to true and unions
-the current removed ids with the snapshot ids absent from the menu. Reconcile runs only
-when the marker is true. The controller re-reads the bundled catalog, remote cache file,
-and installed CLI cache before every Model Hub agent read or mutation and at startup. It
-records the content-hash generation it last reconciled, so a changed generation is applied
-within that request without any notification from the UI process. Each later built-in snapshot change adds, but never
+Backend catalogs also persist `removed_model_ids: string[]`. Removing any row adds its id
+to the set; explicitly adding that id removes it. A catalog written without this field
+loads with an empty set and reconciles normally. The controller re-reads the bundled
+catalog, remote cache file, and installed CLI cache before every Model Hub agent read or
+mutation and at startup. CLI cache participation follows the controller's executable
+presence probe independently of backend enablement. It records the content-hash generation
+it last reconciled, so a changed generation is applied within that request without any
+notification from the UI process. A partial snapshot only exposes fewer built-ins at that
+moment; it never infers a removal or tombstone. Each snapshot change adds, but never
 removes, missing built-ins not in the set, in snapshot order among built-ins already present
 (or at the menu tail when none remain), seeds snapshot label and reasoning efforts, and
-runs the same one-time menu-add match. Claude's locked `default` row is excluded.
+runs the same one-time menu-add match. Remote-catalog payload, validators, success, failure,
+and backoff state are keyed by the configured catalog source. Claude's locked `default` row
+is excluded.
 
 A write validates every newly introduced or changed exact pair before commit. An exact
 pair already present in the persisted array may be retained or reordered even when a

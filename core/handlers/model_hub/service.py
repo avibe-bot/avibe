@@ -145,21 +145,6 @@ def _storable_backend_model_metadata(
     return proposed_display_name, proposed_efforts
 
 
-@dataclass(frozen=True)
-class _BuiltinReconcilePreconditions:
-    store_writable: bool
-    snapshot_complete: bool
-    baseline_initialized: bool
-
-    @property
-    def satisfied(self) -> bool:
-        return (
-            self.store_writable
-            and self.snapshot_complete
-            and self.baseline_initialized
-        )
-
-
 AGENT_CHAIN_CONTRACT_VERSION = 7
 PROBE_RESULT_CONTRACT_VERSION = 7
 _REORDER_ORDER_UNSET = object()
@@ -4266,26 +4251,14 @@ class ModelHubService:
             if backend != "opencode"
         }
 
-    def _reconcile_preconditions(
-        self,
-        config: ModelHubConfig,
-        snapshots: Mapping[str, Mapping[str, Any]],
-    ) -> dict[BackendName, _BuiltinReconcilePreconditions]:
-        store_writable = True
+    def _reconcile_store_writable(self) -> bool:
         try:
             self._ensure_config_writable()
         except ModelHubError as exc:
             if exc.code != "config_recovery":
                 raise
-            store_writable = False
-        return {
-            cast(BackendName, backend): _BuiltinReconcilePreconditions(
-                store_writable=store_writable,
-                snapshot_complete=snapshot.get("complete") is True,
-                baseline_initialized=config.agents[backend].builtin_baseline_initialized,
-            )
-            for backend, snapshot in snapshots.items()
-        }
+            return False
+        return True
 
     @staticmethod
     def _builtin_snapshot_generation(snapshot: Mapping[str, Any]) -> str:
@@ -4326,16 +4299,13 @@ class ModelHubService:
     ) -> list[BackendName]:
         async with self._mutation_lock:
             selected_backends = tuple(backends)
-            # A legacy load may initialize its removed-id baseline from the
-            # snapshot. Settle that migration before taking the reconcile view
-            # so one request cannot apply an older pre-migration generation.
             previous = self.store.load()
             snapshots = self._builtin_snapshots(selected_backends)
-            preconditions = self._reconcile_preconditions(previous, snapshots)
+            store_writable = self._reconcile_store_writable()
             changed_snapshots = {
                 backend: snapshot
                 for backend, snapshot in snapshots.items()
-                if preconditions[cast(BackendName, backend)].satisfied
+                if store_writable
                 if self._builtin_snapshot_generations.get(
                     cast(BackendName, backend)
                 )
@@ -4373,7 +4343,7 @@ class ModelHubService:
                     backend
                     for backend in selected_backends
                     if backend in self._pending_builtin_catalog_refresh
-                    and preconditions[backend].satisfied
+                    and store_writable
                 )
                 for backend in pending:
                     await self._refresh_backend_catalog(backend)

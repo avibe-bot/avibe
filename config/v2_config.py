@@ -352,83 +352,6 @@ def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
     return migrated_payload
 
 
-def _initialize_removed_model_ids_on_load(payload: dict) -> dict:
-    """Materialize the v1 absence rule once a complete snapshot is available."""
-
-    model_hub = payload.get("model_hub")
-    if not isinstance(model_hub, dict):
-        return payload
-    agents = model_hub.get("agents")
-    if not isinstance(agents, dict):
-        return payload
-
-    from vibe.backend_model_catalog import backend_builtin_snapshot
-
-    migrated_agents = dict(agents)
-    changed = False
-    for backend in ("claude", "codex", "opencode"):
-        raw_agent = agents.get(backend)
-        if (
-            not isinstance(raw_agent, dict)
-            or raw_agent.get("builtin_baseline_initialized") is True
-        ):
-            continue
-        current_removed = raw_agent.get("removed_model_ids", [])
-        if (
-            not isinstance(current_removed, list)
-            or any(not isinstance(model_id, str) for model_id in current_removed)
-            or len(set(current_removed)) != len(current_removed)
-        ):
-            continue
-        raw_models = raw_agent.get("models")
-        if isinstance(raw_models, list):
-            menu_ids = {
-                item.get("id")
-                for item in raw_models
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-        else:
-            routes = raw_agent.get("routes")
-            menu_ids = set(routes) if isinstance(routes, dict) else set()
-        snapshot = backend_builtin_snapshot(
-            backend,
-            cli_installed=_model_hub_cli_installed(payload, backend),
-            schedule_refresh=False,
-        )
-        if snapshot.get("complete") is not True:
-            continue
-        builtin_ids = {
-            item["id"]
-            for item in snapshot.get("models", [])
-        }
-        migrated_agent = dict(raw_agent)
-        migrated_agent["removed_model_ids"] = sorted(
-            set(current_removed) | (builtin_ids - menu_ids)
-        )
-        migrated_agent["builtin_baseline_initialized"] = True
-        migrated_agents[backend] = migrated_agent
-        changed = True
-
-    if not changed:
-        return payload
-    migrated_model_hub = dict(model_hub)
-    migrated_model_hub["agents"] = migrated_agents
-    migrated_payload = dict(payload)
-    migrated_payload["model_hub"] = migrated_model_hub
-    return migrated_payload
-
-
-def _model_hub_cli_installed(payload: dict, backend: str) -> bool:
-    agents = payload.get("agents")
-    raw_agent = agents.get(backend) if isinstance(agents, dict) else None
-    if not isinstance(raw_agent, dict) or raw_agent.get("enabled") is False:
-        return False
-    cli_path = raw_agent.get("cli_path")
-    if not isinstance(cli_path, str) or not cli_path.strip():
-        return False
-    return shutil.which(str(Path(cli_path).expanduser())) is not None
-
-
 def _legacy_source_eligible_for_backend(source: object, backend: str) -> bool:
     if not isinstance(source, dict):
         return False
@@ -747,7 +670,6 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             "menu",
             "models",
             "removed_model_ids",
-            "builtin_baseline_initialized",
         }:
             return payload, False, ()
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
@@ -960,7 +882,6 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated = _migrate_fixed_menu_routes_on_load(migrated)
-    migrated = _initialize_removed_model_ids_on_load(migrated)
     model_hub_changed = changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
     return migrated, model_hub_changed, warnings
@@ -3494,7 +3415,6 @@ class ModelHubAgentSupplyConfig:
     menu: Optional[ModelHubMenuConfig] = None
     models: list[ModelHubBackendModelConfig] = field(default_factory=list)
     removed_model_ids: list[str] = field(default_factory=list)
-    builtin_baseline_initialized: bool = True
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
@@ -3534,7 +3454,6 @@ class ModelHubAgentSupplyConfig:
             "menu",
             "models",
             "removed_model_ids",
-            "builtin_baseline_initialized",
         }:
             raise ValueError("Config 'model_hub.agents' contains unknown fields")
         raw_backend = payload.get("backend")
@@ -3568,14 +3487,6 @@ class ModelHubAgentSupplyConfig:
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
         models_payload = payload.get("models")
         removed_model_ids = payload.get("removed_model_ids", [])
-        builtin_baseline_initialized = payload.get(
-            "builtin_baseline_initialized",
-            False,
-        )
-        if not isinstance(builtin_baseline_initialized, bool):
-            raise ValueError(
-                "Config 'model_hub.agents.builtin_baseline_initialized' must be a boolean"
-            )
         if (
             not isinstance(removed_model_ids, list)
             or any(
@@ -3638,7 +3549,6 @@ class ModelHubAgentSupplyConfig:
             menu=menu,
             models=models,
             removed_model_ids=list(removed_model_ids),
-            builtin_baseline_initialized=builtin_baseline_initialized,
         )
 
     def to_payload(self) -> dict:
@@ -3655,14 +3565,12 @@ class ModelHubAgentSupplyConfig:
         }
         payload["models"] = [model.to_payload() for model in self.models]
         payload["removed_model_ids"] = list(self.removed_model_ids)
-        payload["builtin_baseline_initialized"] = self.builtin_baseline_initialized
         return payload
 
     def to_agent_supply_payload(self) -> dict:
         payload = self.to_payload()
         payload.pop("models")
         payload.pop("removed_model_ids")
-        payload.pop("builtin_baseline_initialized")
         return payload
 
 

@@ -9,7 +9,6 @@ import re
 import textwrap
 import threading
 from datetime import datetime, timezone
-from itertools import product
 from pathlib import Path
 
 import pytest
@@ -794,7 +793,6 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
         agent_payloads.extend(item for item in body["agents"] if isinstance(item, dict))
     for agent_payload in agent_payloads:
         assert "removed_model_ids" not in agent_payload
-        assert "builtin_baseline_initialized" not in agent_payload
 
 
 def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
@@ -2469,38 +2467,12 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     assert refreshed == ["codex"]
 
 
-def test_builtin_reconcile_waits_for_baseline_initialization(monkeypatch, tmp_path):
-    service, store, _adapter = _service(tmp_path)
-    agent = store.config.agents["codex"]
-    agent.builtin_baseline_initialized = False
-    original = copy.deepcopy(agent.to_payload())
-    monkeypatch.setattr(
-        service,
-        "_builtin_snapshots",
-        lambda _backends: {
-            "codex": {
-                "complete": True,
-                "models": [{"id": "gpt-new"}],
-            }
-        },
-    )
-
-    changed = asyncio.run(service.reconcile_builtin_models(("codex",)))
-
-    assert changed == []
-    assert store.config.agents["codex"].to_payload() == original
-
-
-def test_builtin_reconcile_precondition_matrix_is_read_safe(monkeypatch, tmp_path):
+def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
-    for store_writable, snapshot_complete, baseline_initialized in product(
-        (False, True),
-        repeat=3,
-    ):
+    for store_writable in (False, True):
         service, store, _adapter = _service(tmp_path)
         agent = store.config.agents["codex"]
-        agent.builtin_baseline_initialized = baseline_initialized
         before = copy.deepcopy(agent.to_payload())
         store.recovery = not store_writable
         saves = []
@@ -2517,9 +2489,9 @@ def test_builtin_reconcile_precondition_matrix_is_read_safe(monkeypatch, tmp_pat
             "_builtin_snapshots",
             lambda _backends: {
                 "codex": {
-                    "complete": snapshot_complete,
-                    "generation": "precondition-matrix",
-                    "models": [{"id": "gpt-precondition-matrix"}],
+                    "complete": False,
+                    "generation": "partial-snapshot",
+                    "models": [{"id": "gpt-partial-snapshot"}],
                 }
             },
         )
@@ -2532,11 +2504,10 @@ def test_builtin_reconcile_precondition_matrix_is_read_safe(monkeypatch, tmp_pat
             )
         )
 
-        ready = store_writable and snapshot_complete and baseline_initialized
         current = store.config.agents["codex"]
-        assert len(saves) == int(ready)
-        assert ("gpt-precondition-matrix" in {model.id for model in current.models}) is ready
-        if not ready:
+        assert len(saves) == int(store_writable)
+        assert ("gpt-partial-snapshot" in {model.id for model in current.models}) is store_writable
+        if not store_writable:
             assert current.to_payload() == before
 
 
@@ -2905,7 +2876,6 @@ def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_pat
 
 def test_backend_catalog_removes_model_with_empty_route(tmp_path):
     service, store, _adapter = _service(tmp_path)
-    store.config.agents["codex"].builtin_baseline_initialized = False
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     removed_id = baseline[0]["id"]
 
@@ -2914,7 +2884,6 @@ def test_backend_catalog_removes_model_with_empty_route(tmp_path):
     assert removed_id not in {model["id"] for model in response["agent"]["catalog_models"]}
     assert removed_id not in store.config.agents["codex"].routes
     assert removed_id in store.config.agents["codex"].removed_model_ids
-    assert store.config.agents["codex"].builtin_baseline_initialized is False
 
 
 def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(tmp_path):

@@ -518,7 +518,6 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
         }
         serialized.pop("models", None)
         serialized.pop("removed_model_ids", None)
-        serialized.pop("builtin_baseline_initialized", None)
         if "routes" not in raw_example:
             serialized.pop("routes", None)
         if "sources" not in raw_example:
@@ -1493,172 +1492,28 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
 
 
-def test_v1_backend_catalog_initializes_removed_ids_without_changing_menu(
-    monkeypatch,
-    tmp_path,
-):
-    payload = api.config_to_payload(
-        default_config(),
-        include_secrets=True,
-        include_internal=True,
-    )
-    fixture = json.loads(Path("tests/fixtures/model_hub/backend_catalog_v1.json").read_text(encoding="utf-8"))
-    payload["model_hub"]["agents"]["codex"] = fixture
-    original_menu = copy.deepcopy(fixture["models"])
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_snapshot",
-        lambda backend, **_kwargs: (
-            {
-                "complete": True,
-                "models": [
-                    {"id": "gpt-kept"},
-                    {"id": "gpt-removed-under-v1"},
-                ],
-            }
-            if backend == "codex"
-            else {"complete": True, "models": []}
-        ),
-    )
-
-    loaded = V2Config.load(config_path=config_path)
-    persisted = json.loads(config_path.read_text(encoding="utf-8"))
-
-    assert [model.to_payload() for model in loaded.model_hub.agents["codex"].models] == original_menu
-    assert persisted["model_hub"]["agents"]["codex"]["models"] == original_menu
-    assert loaded.model_hub.agents["codex"].removed_model_ids == ["gpt-removed-under-v1"]
-    assert persisted["model_hub"]["agents"]["codex"]["removed_model_ids"] == ["gpt-removed-under-v1"]
-    assert loaded.model_hub.agents["codex"].builtin_baseline_initialized is True
-    assert persisted["model_hub"]["agents"]["codex"]["builtin_baseline_initialized"] is True
-
-
-def test_pending_backend_catalog_waits_for_complete_snapshot_without_changing_disk(
-    monkeypatch,
-    tmp_path,
-):
-    payload = api.config_to_payload(
-        default_config(),
-        include_secrets=True,
-        include_internal=True,
-    )
-    fixture = json.loads(Path("tests/fixtures/model_hub/backend_catalog_pending_v2.json").read_text(encoding="utf-8"))
-    payload["model_hub"]["agents"]["codex"] = fixture
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(payload), encoding="utf-8")
-    original = config_path.read_bytes()
-
-    monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_snapshot",
-        lambda backend, **_kwargs: {
-            "complete": backend != "codex",
-            "models": [{"id": "gpt-partial"}] if backend == "codex" else [],
-        },
-    )
-
-    loaded = V2Config.load(config_path=config_path)
-
-    assert config_path.read_bytes() == original
-    assert loaded.model_hub.agents["codex"].builtin_baseline_initialized is False
-    assert loaded.model_hub.agents["codex"].removed_model_ids == ["gpt-removed-during-pending"]
-    assert [model.to_payload() for model in loaded.model_hub.agents["codex"].models] == (fixture["models"])
-
-
-def test_initialized_backend_catalog_never_recomputes_legacy_baseline(
-    monkeypatch,
-    tmp_path,
-):
+def test_backend_catalog_without_removed_ids_loads_empty_set(tmp_path):
     payload = api.config_to_payload(
         default_config(),
         include_secrets=True,
         include_internal=True,
     )
     fixture = json.loads(
-        Path("tests/fixtures/model_hub/backend_catalog_initialized_v2.json").read_text(encoding="utf-8")
+        Path("tests/fixtures/model_hub/backend_catalog_without_removed_ids.json").read_text(
+            encoding="utf-8"
+        )
     )
     payload["model_hub"]["agents"]["codex"] = fixture
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    def unexpected_snapshot(*_args, **_kwargs):
-        raise AssertionError("initialized baseline must not read a migration snapshot")
-
-    monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_snapshot",
-        unexpected_snapshot,
-    )
+    original = config_path.read_bytes()
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.model_hub.agents["codex"].builtin_baseline_initialized is True
-    assert loaded.model_hub.agents["codex"].removed_model_ids == ["gpt-removed-during-pending"]
-
-
-def test_fresh_v2_backend_catalog_starts_initialized_with_no_removed_ids(
-    monkeypatch,
-    tmp_path,
-):
-    payload = api.config_to_payload(
-        default_config(),
-        include_secrets=True,
-        include_internal=True,
-    )
-    fixture = json.loads(Path("tests/fixtures/model_hub/backend_catalog_fresh_v2.json").read_text(encoding="utf-8"))
-    payload["model_hub"]["agents"]["codex"] = fixture
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    def unexpected_snapshot(*_args, **_kwargs):
-        raise AssertionError("fresh v2 catalogs must not enter legacy initialization")
-
-    monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_snapshot",
-        unexpected_snapshot,
-    )
-
-    loaded = V2Config.load(config_path=config_path)
-
+    assert config_path.read_bytes() == original
     agent = loaded.model_hub.agents["codex"]
-    assert agent.builtin_baseline_initialized is True
     assert agent.removed_model_ids == []
     assert [model.to_payload() for model in agent.models] == fixture["models"]
-
-
-def test_pending_backend_catalog_initialization_unions_removals_with_snapshot(
-    monkeypatch,
-    tmp_path,
-):
-    payload = api.config_to_payload(
-        default_config(),
-        include_secrets=True,
-        include_internal=True,
-    )
-    fixture = json.loads(Path("tests/fixtures/model_hub/backend_catalog_pending_v2.json").read_text(encoding="utf-8"))
-    payload["model_hub"]["agents"]["codex"] = fixture
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_snapshot",
-        lambda backend, **_kwargs: {
-            "complete": True,
-            "models": ([{"id": "gpt-kept"}, {"id": "gpt-absent-from-v1-menu"}] if backend == "codex" else []),
-        },
-    )
-
-    loaded = V2Config.load(config_path=config_path)
-    persisted = json.loads(config_path.read_text(encoding="utf-8"))
-
-    assert loaded.model_hub.agents["codex"].removed_model_ids == [
-        "gpt-absent-from-v1-menu",
-        "gpt-removed-during-pending",
-    ]
-    assert loaded.model_hub.agents["codex"].builtin_baseline_initialized is True
-    assert persisted["model_hub"]["agents"]["codex"]["removed_model_ids"] == [
-        "gpt-absent-from-v1-menu",
-        "gpt-removed-during-pending",
-    ]
 
 
 def _legacy_model_hub_payload(current: dict) -> dict:
