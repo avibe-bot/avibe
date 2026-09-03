@@ -376,6 +376,18 @@ def _bounded_reasoning_effort_telemetry(value: str) -> str:
     return f"{preview}{suffix}"
 
 
+def _bounded_declared_effort_telemetry(values: Iterable[str]) -> tuple[str, ...]:
+    redacted = tuple(redact_credential_material(value) for value in values)
+    payload = json.dumps(
+        redacted,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if len(payload.encode("utf-8")) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
+        return redacted
+    return (_bounded_reasoning_effort_telemetry(payload),)
+
+
 AttemptObserver = Callable[
     [
         str,
@@ -5877,9 +5889,7 @@ class ModelHubService:
             )
         else:
             filtered_request = payload
-        safe_declared = tuple(
-            _bounded_reasoning_effort_telemetry(effort) for effort in declared
-        )
+        safe_declared = _bounded_declared_effort_telemetry(declared)
         logger.info(
             "Stripped undeclared Model Hub reasoning effort(s) %s for source %s "
             "model %s; declared tiers: %s",

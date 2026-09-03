@@ -1001,11 +1001,15 @@ def test_reasoning_effort_telemetry_is_utf8_bounded_after_redaction(caplog):
         )
 
     [stripped] = result.stripped_efforts
-    assert result.declared_efforts[0] == "low"
-    declared = result.declared_efforts[1]
+    [declared] = result.declared_efforts
     safe_stripped = redact_credential_material(long_stripped)
     stripped_digest = hashlib.sha256(safe_stripped.encode("utf-8")).hexdigest()
-    declared_digest = hashlib.sha256(long_declared.encode("utf-8")).hexdigest()
+    declared_payload = json.dumps(
+        ("low", long_declared),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    declared_digest = hashlib.sha256(declared_payload.encode("utf-8")).hexdigest()
     assert len(stripped.encode("utf-8")) <= 256
     assert len(declared.encode("utf-8")) <= 256
     assert stripped.endswith(f"[sha256:{stripped_digest}]")
@@ -1016,6 +1020,24 @@ def test_reasoning_effort_telemetry_is_utf8_bounded_after_redaction(caplog):
     assert "sk-test-strip-secret-material" not in caplog.text
     assert stripped in caplog.text
     assert declared in caplog.text
+
+
+def test_reasoning_effort_telemetry_bounds_many_short_declared_tiers():
+    source = _source("src_effortmany", ("upstream-model",))
+    source.models[0].reasoning_efforts = [
+        f"tier-{index:04d}" for index in range(1_000)
+    ]
+
+    result = ModelHubService._request_for_exact_reasoning_effort(
+        {"reasoning_effort": "undeclared"},
+        source,
+        "upstream-model",
+    )
+
+    [declared] = result.declared_efforts
+    assert len(declared.encode("utf-8")) <= 256
+    assert declared.endswith("]")
+    assert "[sha256:" in declared
 
 
 def test_reasoning_effort_telemetry_preserves_short_values_exactly():
