@@ -825,17 +825,16 @@ def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
     assert service.native_oauth_adapter._agent_auth_service is agent_auth_service
 
 
-def test_default_service_keeps_startup_reconcile_best_effort(
-    monkeypatch,
-    caplog,
-):
-    async def fail_reconcile(_service, *_args, **_kwargs):
-        raise ModelHubError("config_recovery", status=409)
+def test_default_service_leaves_startup_reconcile_to_controller(monkeypatch):
+    calls = []
+
+    async def record_reconcile(_service, *_args, **_kwargs):
+        calls.append(True)
 
     monkeypatch.setattr(
         ModelHubService,
         "reconcile_builtin_models",
-        fail_reconcile,
+        record_reconcile,
     )
 
     service = create_default_service(
@@ -844,7 +843,7 @@ def test_default_service_keeps_startup_reconcile_best_effort(
     )
 
     assert isinstance(service, ModelHubService)
-    assert "built-in reconciliation failed during startup" in caplog.text
+    assert calls == []
 
 
 def test_runtime_status_observes_engine_without_starting_it(tmp_path):
@@ -2092,20 +2091,15 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     existing_builtin_id = agent.models[0].id
     monkeypatch.setattr(
         service,
-        "_builtin_snapshots",
-        lambda _backends: {
-            "codex": {
-                "generation": "candidate-snapshot",
-                "models": [
-                    {"id": existing_builtin_id},
-                    {
-                        "id": "gpt-restorable",
-                        "display_name": " GPT Restorable ",
-                        "reasoning_efforts": [" low ", "   ", overlong_effort],
-                    },
-                ],
-            }
-        },
+        "_current_builtin_models",
+        lambda _backend: [
+            {"id": existing_builtin_id},
+            {
+                "id": "gpt-restorable",
+                "display_name": " GPT Restorable ",
+                "reasoning_efforts": [" low ", "   ", overlong_effort],
+            },
+        ],
     )
 
     candidates = service.agent_model_candidates("codex")
@@ -2477,8 +2471,6 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
 
 
 def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp_path):
-    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
-
     for store_writable in (False, True):
         service, store, _adapter = _service(tmp_path)
         agent = store.config.agents["codex"]
@@ -2505,13 +2497,7 @@ def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp
             },
         )
 
-        asyncio.run(
-            dispatch_model_hub_rpc(
-                service,
-                "get_agent_sources",
-                {"backend": "codex"},
-            )
-        )
+        asyncio.run(service.reconcile_builtin_models(("codex",)))
 
         current = store.config.agents["codex"]
         assert len(saves) == int(store_writable)
@@ -2530,6 +2516,7 @@ def test_model_producers_emit_admissible_backend_payloads(
     producer,
 ):
     rejected_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    long_display_name = "Model " + "x" * 80
     if producer == "candidates_read":
         producer_backend = "codex"
         service, store, _adapter = _service(tmp_path)
@@ -2546,8 +2533,8 @@ def test_model_producers_emit_admissible_backend_payloads(
                 ModelHubModelConfig(
                     id="gpt-metadata-candidate",
                     provenance="manual",
-                    display_name="   ",
-                    reasoning_efforts=["   ", " high "],
+                    display_name=long_display_name,
+                    reasoning_efforts=[" high "],
                 ),
                 ModelHubModelConfig(
                     id=rejected_id,
@@ -2591,8 +2578,8 @@ def test_model_producers_emit_admissible_backend_payloads(
                     "models": [
                         {
                             "id": "gpt-metadata-reconcile",
-                            "display_name": "   ",
-                            "reasoning_efforts": ["   ", " high "],
+                            "display_name": long_display_name,
+                            "reasoning_efforts": [" high "],
                         },
                         {"id": rejected_id, "display_name": "Rejected seed"},
                     ],
@@ -2620,7 +2607,7 @@ def test_model_producers_emit_admissible_backend_payloads(
                     "name": "OpenAI",
                     "models": {
                         "gpt-metadata-typeahead": {
-                            "name": " Metadata typeahead ",
+                            "name": long_display_name,
                             "reasoning_options": [
                                 {"type": "effort", "values": [" high "]}
                             ],
@@ -2652,6 +2639,7 @@ def test_model_producers_emit_admissible_backend_payloads(
         }
 
     parsed = ModelHubBackendModelConfig.from_payload(payload)
+    assert parsed.display_name == long_display_name
     assert (
         admissible_backend_model(
             producer_backend,
@@ -2660,12 +2648,7 @@ def test_model_producers_emit_admissible_backend_payloads(
         )
         is not None
     )
-    proposed_values = [
-        value
-        for value in [parsed.display_name, *parsed.reasoning_efforts]
-        if value is not None
-    ]
-    assert all(value == value.strip() and 0 < len(value) <= 64 for value in proposed_values)
+    assert parsed == ModelHubBackendModelConfig.from_payload(parsed.to_payload())
 
 
 def test_claude_reconcile_excludes_non_claude_cli_override(monkeypatch, tmp_path):
@@ -2695,8 +2678,6 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
     monkeypatch,
     tmp_path,
 ):
-    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
-
     service, store, _adapter = _service(tmp_path)
     existing = store.config.agents["codex"].models[0].id
     snapshot = {
@@ -2723,12 +2704,59 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
     snapshot["codex"] = {
         "complete": True,
         "generation": "generation-two",
-        "models": [{"id": existing}, {"id": "gpt-pulled-on-read"}],
+        "models": [{"id": existing}, {"id": "gpt-controller-refreshed"}],
     }
-    payload = asyncio.run(dispatch_model_hub_rpc(service, "get_agent_sources", {"backend": "codex"}))
+    before_read = copy.deepcopy(store.config.to_payload())
+    payload = service.get_agent_sources("codex")
 
-    assert "gpt-pulled-on-read" in payload["builtin_models"]
+    assert "gpt-controller-refreshed" not in payload["builtin_models"]
+    assert store.config.to_payload() == before_read
+    assert applies == [("codex",)]
+
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    assert "gpt-controller-refreshed" in {
+        model.id for model in store.config.agents["codex"].models
+    }
     assert applies == [("codex",), ("codex",)]
+
+
+def test_cli_presence_refresh_tick_reconciles_builtins_but_plain_reads_do_not(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, store, _adapter = _service(tmp_path)
+    existing = store.config.agents["codex"].models[0].id
+    snapshot = {
+        "codex": {
+            "generation": "cli-generation-one",
+            "models": [{"id": existing}],
+        }
+    }
+    monkeypatch.setattr(service, "_builtin_snapshots", lambda _backends: snapshot)
+    asyncio.run(service.reconcile_builtin_models(("codex",), notify=False))
+    snapshot["codex"] = {
+        "generation": "cli-generation-two",
+        "models": [{"id": existing}, {"id": "gpt-cli-refresh"}],
+    }
+
+    asyncio.run(dispatch_model_hub_rpc(service, "list_agents", {}))
+    assert "gpt-cli-refresh" not in {
+        model.id for model in store.config.agents["codex"].models
+    }
+
+    asyncio.run(
+        dispatch_model_hub_rpc(
+            service,
+            "list_agents",
+            {"refresh_cli_presence": True},
+        )
+    )
+    assert "gpt-cli-refresh" in {
+        model.id for model in store.config.agents["codex"].models
+    }
 
 
 def test_builtin_reconcile_loads_legacy_baseline_before_reading_snapshot(

@@ -39,9 +39,11 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
-    from vibe import api
+    from vibe import api, backend_model_catalog
 
-    service = object()
+    service = SimpleNamespace(
+        reconcile_builtin_models=AsyncMock(return_value=[]),
+    )
     calls = []
 
     class Gateway:
@@ -66,6 +68,12 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
+    refresh_callbacks = []
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "set_remote_catalog_refresh_completed",
+        refresh_callbacks.append,
+    )
     presence_probes = []
     probe_failure = [False]
     block_full_probe = [False]
@@ -91,6 +99,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(api, "resolve_cli_paths", resolve_cli_paths)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(language="zh")
+    controller._loop = None
     controller.vibe_agent_store = SimpleNamespace(
         get_default_agent=lambda: SimpleNamespace(
             backend="codex",
@@ -108,6 +117,8 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert captured["requested_model_override"]("claude") is None
     assert captured["cli_present_override"]("codex") is True
     assert captured["cli_present_override"]("claude") is False
+    service.reconcile_builtin_models.assert_awaited_once_with(notify=False)
+    assert refresh_callbacks == [controller._model_hub_snapshot_refresh_completed]
     assert presence_probes == [(["claude", "codex", "opencode"], False)]
     probe_failure[0] = True
     captured["cli_presence_refresh"](True, ("opencode",))
@@ -133,6 +144,16 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),
         ("router", service, controller.model_hub_turn_gateway),
     ]
+
+    refresh_callbacks[0]()
+
+    async def drain_refresh() -> None:
+        controller._loop = asyncio.get_running_loop()
+        controller._schedule_model_hub_snapshot_reconcile()
+        await controller._model_hub_snapshot_reconcile_task
+
+    asyncio.run(drain_refresh())
+    assert service.reconcile_builtin_models.await_count == 2
 
     runtime_config = object()
     latest = SimpleNamespace(

@@ -2178,10 +2178,11 @@ def test_gateway_models_endpoint_serves_authenticated_backend_catalog(
     asyncio.run(exercise())
 
 
-def test_runtime_read_reconciles_after_remote_catalog_refresh(
+def test_runtime_resolution_sees_controller_reconcile_after_remote_catalog_refresh(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    from core.controller import Controller
     from vibe import backend_model_catalog
 
     async def exercise() -> None:
@@ -2209,18 +2210,34 @@ def test_runtime_read_reconciles_after_remote_catalog_refresh(
             "_builtin_snapshots",
             lambda _backends: snapshot,
         )
-        service.backend_catalog_models("codex")
+        await service.reconcile_builtin_models(("codex",), notify=False)
 
         snapshot["codex"]["models"] = [
             *snapshot["codex"]["models"],
             {"id": model_id, "display_name": "Runtime refresh"},
         ]
+        snapshot["codex"]["generation"] = "refreshed-upstream-generation"
+        controller = Controller.__new__(Controller)
+        controller.model_hub_service = service
+        controller._loop = asyncio.get_running_loop()
+        controller._model_hub_snapshot_refresh_pending = threading.Event()
+        controller._model_hub_snapshot_reconcile_task = None
+        monkeypatch.setattr(
+            backend_model_catalog,
+            "_REMOTE_REFRESH_COMPLETED",
+            controller._model_hub_snapshot_refresh_completed,
+        )
         monkeypatch.setattr(
             backend_model_catalog,
             "refresh_remote_catalog_now",
             lambda _url: {},
         )
+
         backend_model_catalog._refresh_remote_catalog_worker()
+        await asyncio.sleep(0)
+        reconcile_task = controller._model_hub_snapshot_reconcile_task
+        if reconcile_task is not None:
+            await reconcile_task
 
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)

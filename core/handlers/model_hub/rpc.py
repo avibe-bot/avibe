@@ -41,6 +41,12 @@ async def _run_agent_presence_refresh(
             include_npm_global=True,
             backends=backends,
         )
+        refreshed_backends = backends or ("claude", "codex", "opencode")
+        reconciled_backends = tuple(
+            backend for backend in refreshed_backends if backend != "opencode"
+        )
+        if reconciled_backends:
+            await service.reconcile_builtin_models(reconciled_backends)
     finally:
         current = asyncio.current_task()
         tasks = _cli_presence_refresh_tasks.get(service)
@@ -68,16 +74,6 @@ async def _refresh_payload_backend(
 ) -> None:
     if backend in ("claude", "codex", "opencode"):
         await _refresh_agent_presence(service, (backend,))
-        if backend in ("claude", "codex"):
-            await service.reconcile_builtin_models((backend,))
-
-
-async def _reconcile_payload_backend(
-    service: ModelHubService,
-    backend: object,
-) -> None:
-    if backend in ("claude", "codex"):
-        await service.reconcile_builtin_models((backend,))
 
 
 async def dispatch_model_hub_rpc(
@@ -120,18 +116,15 @@ async def dispatch_model_hub_rpc(
     if operation == "list_agents":
         if payload.get("refresh_cli_presence") is True:
             await _refresh_agent_presence(service)
-        await service.reconcile_builtin_models()
         return await asyncio.to_thread(service.list_agents)
     if operation == "get_agent_sources":
         backend = payload.get("backend")
-        await _reconcile_payload_backend(service, backend)
         return await asyncio.to_thread(
             service.get_agent_sources,
             backend,
         )
     if operation == "agent_model_candidates":
         backend = payload.get("backend")
-        await _reconcile_payload_backend(service, backend)
         return await asyncio.to_thread(service.agent_model_candidates, backend)
     if operation == "set_agent_sources":
         await _refresh_payload_backend(service, payload.get("backend"))
@@ -168,7 +161,6 @@ async def dispatch_model_hub_rpc(
             payload.get("query"),
         )
     if operation == "set_agent_chain":
-        await _reconcile_payload_backend(service, payload.get("backend"))
         return await service.set_agent_chain(
             payload.get("backend"),
             payload.get("model_id"),
@@ -201,15 +193,12 @@ async def dispatch_model_hub_rpc(
             days=payload.get("days", USAGE_DEFAULT_WINDOW_DAYS),
         )
     if operation == "get_agent_chain":
-        await _reconcile_payload_backend(service, payload.get("backend"))
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))
     if operation == "get_agent_chains":
-        await _reconcile_payload_backend(service, payload.get("backend"))
         return service.agent_chains(payload.get("backend"))
     if operation == "get_opencode_public_models":
         return service.opencode_public_models()
     if operation == "probe_agent":
-        await _reconcile_payload_backend(service, payload.get("backend"))
         return await service.probe_agent(
             payload.get("backend"),
             payload.get("model_id"),

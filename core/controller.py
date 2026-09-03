@@ -402,6 +402,49 @@ class Controller:
         # running until backend restoration and exact reconciliation complete.
         self.session_turns.reset_legacy_ownerless_status()
 
+    def _model_hub_snapshot_refresh_completed(self) -> None:
+        """Move a worker completion onto the controller's event loop."""
+
+        pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
+        if pending is None:
+            return
+        pending.set()
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(self._schedule_model_hub_snapshot_reconcile)
+
+    def _schedule_model_hub_snapshot_reconcile(self) -> None:
+        pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
+        service = getattr(self, "model_hub_service", None)
+        if pending is None or not pending.is_set() or service is None:
+            return
+        task = getattr(self, "_model_hub_snapshot_reconcile_task", None)
+        if task is not None and not task.done():
+            return
+        pending.clear()
+
+        async def reconcile() -> None:
+            try:
+                await service.reconcile_builtin_models()
+            except Exception:
+                logger.warning(
+                    "Model Hub built-in reconciliation failed after snapshot refresh",
+                    exc_info=True,
+                )
+            finally:
+                self._model_hub_snapshot_reconcile_task = None
+                if pending.is_set():
+                    self._schedule_model_hub_snapshot_reconcile()
+
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        self._model_hub_snapshot_reconcile_task = loop.create_task(
+            reconcile(),
+            name="model-hub-snapshot-refresh-reconcile",
+        )
+
     def _init_model_hub(self) -> None:
         """Create the Model Hub aggregate only for an explicit release opt-in."""
 
@@ -410,6 +453,8 @@ class Controller:
         self.model_hub_service = None
         self.model_hub_turn_gateway = None
         self.model_hub_runtime = None
+        self._model_hub_snapshot_refresh_pending = threading.Event()
+        self._model_hub_snapshot_reconcile_task = None
         if not is_model_hub_enabled():
             return
 
@@ -419,6 +464,7 @@ class Controller:
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
         from vibe.api import resolve_cli_paths
+        from vibe.backend_model_catalog import set_remote_catalog_refresh_completed
 
         def default_vibe_agent_model(backend: str) -> Optional[str]:
             agent = self.vibe_agent_store.get_default_agent()
@@ -529,6 +575,18 @@ class Controller:
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=backend_catalog_changed,
         )
+        set_remote_catalog_refresh_completed(
+            self._model_hub_snapshot_refresh_completed
+        )
+        try:
+            asyncio.run(
+                self.model_hub_service.reconcile_builtin_models(notify=False)
+            )
+        except Exception:
+            logger.warning(
+                "Model Hub built-in reconciliation failed during startup",
+                exc_info=True,
+            )
         self.model_hub_turn_gateway = ModelHubTurnGateway(
             self.model_hub_service,
             language_provider=lambda: self.config.language,
@@ -3769,6 +3827,7 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            self._schedule_model_hub_snapshot_reconcile()
             memory_runtime = getattr(self, "memory_runtime", None)
             if memory_runtime is not None:
                 self._start_memory_capture_adapter(memory_runtime)

@@ -88,6 +88,26 @@ def test_models_dev_search_normalizes_editable_metadata(monkeypatch, tmp_path):
     assert cached["catalog"] == _catalog()
 
 
+def test_models_dev_search_preserves_validator_accepted_long_names(monkeypatch):
+    model_id = "m" * 80
+    display_name = "Model " + "x" * 80
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: {
+            "provider": {
+                "name": "Provider",
+                "models": {model_id: {"name": display_name}},
+            }
+        },
+    )
+
+    match = models_dev_catalog.search_models_dev(model_id)[0]
+
+    assert match["model_id"] == model_id
+    assert match["display_name"] == display_name
+
+
 def test_models_dev_search_uses_fresh_cache_without_network(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
@@ -241,7 +261,7 @@ def test_models_dev_openai_o_series_does_not_claim_other_o_families(monkeypatch)
     assert matches["olmo-target"]["first_party"] is False
 
 
-def test_models_dev_validates_each_copy_before_ranking_and_deduplication(
+def test_models_dev_normalizes_each_copy_before_ranking_and_deduplication(
     monkeypatch,
 ):
     catalog = {
@@ -270,9 +290,13 @@ def test_models_dev_validates_each_copy_before_ranking_and_deduplication(
 
     matches = models_dev_catalog.search_models_dev("target")
 
-    assert [item["model_id"] for item in matches] == ["gpt-target"]
-    assert matches[0]["provider_id"] == "openrouter"
-    assert matches[0]["first_party"] is False
+    assert [item["model_id"] for item in matches] == [
+        "gpt-unusable-target",
+        "gpt-target",
+    ]
+    assert matches[0]["reasoning_efforts"] == []
+    assert matches[1]["provider_id"] == "openrouter"
+    assert matches[1]["first_party"] is False
 
 
 def test_models_dev_caps_matches_at_eight(monkeypatch):

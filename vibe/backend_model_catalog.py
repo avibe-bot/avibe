@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import Any, Callable, Final, Iterable, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -21,6 +22,9 @@ from vibe.claude_model_catalog import (
     load_catalog_models,
 )
 from vibe.codex_config import get_codex_home
+
+
+logger = logging.getLogger(__name__)
 
 
 REMOTE_CATALOG_URL_ENV = "AVIBE_BACKEND_MODEL_CATALOG_URL"
@@ -104,7 +108,7 @@ _CODEX_CUSTOM_SCAFFOLD_KEYS = (
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
 _REMOTE_MEMORY_CACHE: dict[str, dict[str, Any]] = {}
-_REMOTE_REFRESH_GENERATIONS: dict[str, int] = {}
+_REMOTE_REFRESH_COMPLETED: Callable[[], None] | None = None
 
 
 def get_bundled_catalog_path(repo_root: Path | None = None) -> Path:
@@ -393,12 +397,14 @@ def remote_catalog_refresh_pending(
     return refresh_in_flight or remote_catalog_token(source_key=source_key) != since
 
 
-def remote_catalog_refresh_generation() -> tuple[str, int]:
-    """Identify completed refreshes for the currently configured source."""
+def set_remote_catalog_refresh_completed(
+    callback: Callable[[], None] | None,
+) -> None:
+    """Set the controller-owned completion signal for this process."""
 
-    source_key = _remote_catalog_source_key(_remote_catalog_url())
+    global _REMOTE_REFRESH_COMPLETED
     with _REMOTE_LOCK:
-        return source_key, _REMOTE_REFRESH_GENERATIONS.get(source_key, 0)
+        _REMOTE_REFRESH_COMPLETED = callback
 
 
 def schedule_remote_catalog_refresh() -> bool:
@@ -990,10 +996,16 @@ def _refresh_remote_catalog_worker(
         _write_cached_remote_payload(payload, source_key=source_key)
     finally:
         with _REMOTE_LOCK:
-            _REMOTE_REFRESH_GENERATIONS[source_key] = (
-                _REMOTE_REFRESH_GENERATIONS.get(source_key, 0) + 1
-            )
             _REMOTE_REFRESH_IN_FLIGHT = False
+            completed = _REMOTE_REFRESH_COMPLETED
+        if completed is not None:
+            try:
+                completed()
+            except Exception:
+                logger.warning(
+                    "Backend model catalog refresh completion callback failed",
+                    exc_info=True,
+                )
 
 
 def _read_catalog(path: Path) -> dict[str, Any] | None:

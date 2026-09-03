@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -252,34 +251,6 @@ class ModelHubConfigStore(Protocol):
     def load(self) -> ModelHubConfig: ...
 
     def save(self, config: ModelHubConfig) -> None: ...
-
-
-class _CurrentModelHubConfigStore:
-    """Keep every service consumer on the same reconcile-before-read path."""
-
-    def __init__(self, store: ModelHubConfigStore):
-        self._store = store
-        self._load_current: Callable[[], ModelHubConfig] | None = None
-
-    def bind(self, load_current: Callable[[], ModelHubConfig]) -> None:
-        self._load_current = load_current
-
-    def load(self) -> ModelHubConfig:
-        if self._load_current is None:
-            return self._store.load()
-        return self._load_current()
-
-    def save(self, config: ModelHubConfig) -> None:
-        self._store.save(config)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._store, name)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_"):
-            object.__setattr__(self, name, value)
-            return
-        setattr(self._store, name, value)
 
 
 class V2ModelHubConfigStore:
@@ -762,8 +733,7 @@ class ModelHubService:
         ] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
-        self._stored_config = store
-        self.store: ModelHubConfigStore = _CurrentModelHubConfigStore(store)
+        self.store = store
         self.adapter = adapter
         self.events = events
         self.provenance = provenance or BoundedProvenanceStore(
@@ -808,16 +778,9 @@ class ModelHubService:
         self._runtime_install_reconcile_lock = asyncio.Lock()
         self._runtime_install_reconciled = False
         self._runtime_lifecycle_lock = asyncio.Lock()
-        self._builtin_reconcile_lock = threading.RLock()
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
-        self._builtin_unreconciled_generations: dict[BackendName, str] = {}
-        self._builtin_current_config_initialized = False
-        self._builtin_reconcile_deferred = False
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
-        self._builtin_catalog_refresh_task: asyncio.Task[None] | None = None
-        self._remote_catalog_refresh_generation: tuple[str, int] | None = None
-        cast(_CurrentModelHubConfigStore, self.store).bind(self._load_current_config)
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -4298,165 +4261,6 @@ class ModelHubService:
             if backend != "opencode"
         }
 
-    def _observe_remote_catalog_refresh(self) -> None:
-        from vibe.backend_model_catalog import remote_catalog_refresh_generation
-
-        generation = remote_catalog_refresh_generation()
-        if self._remote_catalog_refresh_generation is None:
-            self._remote_catalog_refresh_generation = generation
-            return
-        if generation != self._remote_catalog_refresh_generation:
-            self._remote_catalog_refresh_generation = generation
-            self._builtin_snapshot_generations.clear()
-            self._builtin_unreconciled_generations.clear()
-
-    def _initialize_current_config_view(self) -> ModelHubConfig:
-        """Establish the read baseline when startup reconciliation was bypassed."""
-
-        with self._builtin_reconcile_lock:
-            previous = self._stored_config.load()
-            self._observe_remote_catalog_refresh()
-            snapshots = self._builtin_snapshots(("claude", "codex"))
-            self._builtin_snapshot_cache.update(
-                {
-                    cast(BackendName, backend): list(snapshot.get("models", []))
-                    for backend, snapshot in snapshots.items()
-                }
-            )
-            if not self._reconcile_store_writable():
-                self._builtin_reconcile_deferred = True
-                return previous
-            generations = {
-                cast(BackendName, backend): self._builtin_snapshot_generation(snapshot)
-                for backend, snapshot in snapshots.items()
-            }
-            self._builtin_snapshot_generations.update(generations)
-            self._builtin_unreconciled_generations.update(generations)
-            self._builtin_current_config_initialized = True
-            return previous
-
-    def _reconcile_current_config(
-        self,
-        backends: Iterable[BackendName] = ("claude", "codex"),
-        *,
-        queue_refresh: bool,
-        include_unreconciled: bool,
-    ) -> tuple[ModelHubConfig, list[BackendName]]:
-        """Read and reconcile once behind the store view every consumer uses."""
-
-        with self._builtin_reconcile_lock:
-            selected_backends = tuple(backends)
-            previous = self._stored_config.load()
-            self._observe_remote_catalog_refresh()
-            snapshots = self._builtin_snapshots(selected_backends)
-            store_writable = self._reconcile_store_writable()
-            changed_snapshots = {
-                backend: snapshot
-                for backend, snapshot in snapshots.items()
-                if store_writable
-                if (
-                    self._builtin_snapshot_generations.get(
-                        cast(BackendName, backend)
-                    )
-                    != self._builtin_snapshot_generation(snapshot)
-                    or (
-                        include_unreconciled
-                        and cast(BackendName, backend)
-                        in self._builtin_unreconciled_generations
-                    )
-                )
-            }
-            self._builtin_snapshot_cache.update(
-                {
-                    cast(BackendName, backend): list(snapshot.get("models", []))
-                    for backend, snapshot in snapshots.items()
-                }
-            )
-            if not store_writable:
-                self._builtin_reconcile_deferred = True
-            if not changed_snapshots:
-                return previous, []
-
-            config = self._clone_config(previous)
-            changed = self._apply_builtin_reconcile(config, changed_snapshots)
-            if changed:
-                try:
-                    self._save_projection_neutral(previous, config)
-                except ModelHubError as exc:
-                    if exc.code != "config_recovery":
-                        raise
-                    return previous, []
-                except ValueError as exc:
-                    if "recovery warnings" not in str(exc):
-                        raise
-                    return previous, []
-            self._builtin_snapshot_generations.update(
-                {
-                    cast(BackendName, backend): self._builtin_snapshot_generation(
-                        snapshot
-                    )
-                    for backend, snapshot in changed_snapshots.items()
-                }
-            )
-            for backend in changed_snapshots:
-                self._builtin_unreconciled_generations.pop(
-                    cast(BackendName, backend),
-                    None,
-                )
-            self._builtin_reconcile_deferred = False
-            self._builtin_current_config_initialized = True
-            if queue_refresh:
-                self._pending_builtin_catalog_refresh.update(changed)
-            return (config if changed else previous), changed
-
-    def _load_current_config(self) -> ModelHubConfig:
-        if (
-            not self._builtin_current_config_initialized
-            and not self._builtin_reconcile_deferred
-        ):
-            return self._initialize_current_config_view()
-        config, _changed = self._reconcile_current_config(
-            queue_refresh=True,
-            include_unreconciled=False,
-        )
-        self._schedule_pending_builtin_catalog_refresh()
-        return config
-
-    async def _refresh_pending_builtin_catalogs_best_effort(self) -> None:
-        try:
-            for backend in tuple(self._pending_builtin_catalog_refresh):
-                try:
-                    await self._refresh_backend_catalog(backend)
-                except ModelHubError:
-                    logger.warning(
-                        "Deferred backend catalog refresh failed for %s",
-                        backend,
-                    )
-                else:
-                    self._pending_builtin_catalog_refresh.discard(backend)
-        finally:
-            if asyncio.current_task() is self._builtin_catalog_refresh_task:
-                self._builtin_catalog_refresh_task = None
-
-    def _schedule_pending_builtin_catalog_refresh(self) -> None:
-        if (
-            self.backend_catalog_changed is None
-            or not self._pending_builtin_catalog_refresh
-            or (
-                self._builtin_catalog_refresh_task is not None
-                and not self._builtin_catalog_refresh_task.done()
-            )
-        ):
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        self._builtin_catalog_refresh_task = loop.create_task(
-            self._refresh_pending_builtin_catalogs_best_effort(),
-            name="model-hub-builtin-catalog-refresh",
-        )
-
     def _reconcile_store_writable(self) -> bool:
         try:
             self._ensure_config_writable()
@@ -4505,16 +4309,51 @@ class ModelHubService:
     ) -> list[BackendName]:
         async with self._mutation_lock:
             selected_backends = tuple(backends)
-            _config, changed = self._reconcile_current_config(
-                selected_backends,
-                queue_refresh=notify,
-                include_unreconciled=True,
+            previous = self.store.load()
+            snapshots = self._builtin_snapshots(selected_backends)
+            store_writable = self._reconcile_store_writable()
+            changed_snapshots = {
+                backend: snapshot
+                for backend, snapshot in snapshots.items()
+                if store_writable
+                if self._builtin_snapshot_generations.get(
+                    cast(BackendName, backend)
+                )
+                != self._builtin_snapshot_generation(snapshot)
+            }
+            self._builtin_snapshot_cache.update(
+                {
+                    cast(BackendName, backend): list(snapshot.get("models", []))
+                    for backend, snapshot in snapshots.items()
+                }
             )
+            changed: list[BackendName] = []
+            if changed_snapshots:
+                config = self._clone_config(previous)
+                changed = self._apply_builtin_reconcile(config, changed_snapshots)
+                if changed:
+                    try:
+                        await self._commit_synced(previous, config)
+                    except ModelHubError as exc:
+                        if exc.code != "config_recovery":
+                            raise
+                        return []
+                self._builtin_snapshot_generations.update(
+                    {
+                        cast(BackendName, backend): self._builtin_snapshot_generation(
+                            snapshot
+                        )
+                        for backend, snapshot in changed_snapshots.items()
+                    }
+                )
+                if notify:
+                    self._pending_builtin_catalog_refresh.update(changed)
             if notify:
                 pending = tuple(
                     backend
                     for backend in selected_backends
                     if backend in self._pending_builtin_catalog_refresh
+                    and store_writable
                 )
                 for backend in pending:
                     await self._refresh_backend_catalog(backend)
@@ -6954,7 +6793,7 @@ def create_default_service(
             cwd=_resolve_claude_status_probe_cwd(config),
         ) is True
 
-    service = ModelHubService(
+    return ModelHubService(
         store=V2ModelHubConfigStore(),
         adapter=adapter,
         events=BoundedEventLog(paths.get_state_dir() / "model_hub_resolution_events.json"),
@@ -6970,8 +6809,3 @@ def create_default_service(
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
     )
-    try:
-        asyncio.run(service.reconcile_builtin_models(notify=False))
-    except Exception:
-        logger.warning("Model Hub built-in reconciliation failed during startup", exc_info=True)
-    return service

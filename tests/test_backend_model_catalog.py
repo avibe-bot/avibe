@@ -29,11 +29,10 @@ class _FakeResponse:
 @pytest.fixture(autouse=True)
 def _reset_remote_cache(monkeypatch):
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
-    backend_model_catalog._REMOTE_REFRESH_GENERATIONS.clear()
     monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", False)
+    monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_COMPLETED", None)
     yield
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
-    backend_model_catalog._REMOTE_REFRESH_GENERATIONS.clear()
 
 
 def _persisted_remote_records(tmp_path: Path) -> dict[str, dict]:
@@ -980,25 +979,22 @@ def test_malformed_refresh_preserves_last_good_catalog(monkeypatch, tmp_path):
     ) is False
 
 
-def test_refresh_worker_advances_only_its_source_generation(monkeypatch):
+def test_refresh_worker_notifies_controller_after_completion(monkeypatch):
     first_url = "https://first.example.test/catalog.json"
-    second_url = "https://second.example.test/catalog.json"
     first_key = backend_model_catalog._remote_catalog_source_key(first_url)
-    second_key = backend_model_catalog._remote_catalog_source_key(second_url)
+    completed = []
     monkeypatch.setattr(
         backend_model_catalog,
         "refresh_remote_catalog_now",
         lambda _url: {},
     )
+    backend_model_catalog.set_remote_catalog_refresh_completed(
+        lambda: completed.append(backend_model_catalog._REMOTE_REFRESH_IN_FLIGHT)
+    )
 
     backend_model_catalog._refresh_remote_catalog_worker(first_url, first_key)
 
-    assert backend_model_catalog._REMOTE_REFRESH_GENERATIONS == {first_key: 1}
-    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, second_url)
-    assert backend_model_catalog.remote_catalog_refresh_generation() == (
-        second_key,
-        0,
-    )
+    assert completed == [False]
 
 
 def test_fetch_remote_catalog_rejects_invalid_model_entries(monkeypatch):

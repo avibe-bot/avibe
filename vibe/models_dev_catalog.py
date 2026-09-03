@@ -234,14 +234,14 @@ def _reasoning_efforts(model: dict[str, Any]) -> list[str] | None:
         if isinstance(values, list):
             normalized: list[str] = []
             for value in values:
-                if not isinstance(value, str) or len(value) > 64:
+                if not isinstance(value, str):
                     continue
                 effort = normalize_storable_backend_model_text(
                     value,
                     field_name="reasoning_efforts",
                 )
                 if effort is None:
-                    return None
+                    continue
                 if effort not in normalized:
                     normalized.append(effort)
             return normalized

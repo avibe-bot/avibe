@@ -3353,8 +3353,6 @@ def normalize_storable_backend_model_text(
     if not isinstance(value, str):
         return None
     normalized = value.strip()
-    if not normalized or len(normalized) > 64:
-        return None
     candidate = {
         "id": "metadata-proposal",
         field_name: (
@@ -3362,10 +3360,12 @@ def normalize_storable_backend_model_text(
         ),
     }
     try:
-        ModelHubBackendModelConfig.from_payload(candidate)
+        model = ModelHubBackendModelConfig.from_payload(candidate)
     except (TypeError, ValueError):
         return None
-    return normalized
+    if field_name == "display_name":
+        return model.display_name
+    return model.reasoning_efforts[0]
 
 
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
