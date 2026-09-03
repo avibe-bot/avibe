@@ -679,10 +679,13 @@ def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
 
 def _protocol_is_persistable_without_shape_proof(
     *,
+    credential_kind: str,
     vendor: str,
     protocol: str,
     protocol_order: Sequence[str],
 ) -> bool:
+    if credential_kind != "api_key":
+        return False
     pinned_protocol = pinned_api_key_protocol(vendor)
     if pinned_protocol == protocol:
         return True
@@ -1530,6 +1533,7 @@ class CLIProxyEngineAdapter:
                 if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
                     received_accepted_unproven_response = True
                     if _protocol_is_persistable_without_shape_proof(
+                        credential_kind=str(credential_kind),
                         vendor=normalized_vendor,
                         protocol=protocol,
                         protocol_order=protocol_order,

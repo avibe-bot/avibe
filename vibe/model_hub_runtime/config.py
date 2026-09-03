@@ -6,6 +6,7 @@ from typing import Any, Iterable
 import yaml
 
 from config.atomic_io import write_atomic
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
 
@@ -80,8 +81,8 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
         return
     if source.protocol == "openai_responses":
         base_url = source.base_url
-        if not base_url and source.vendor in {"openai", "codex"}:
-            base_url = "https://api.openai.com/v1"
+        if not base_url:
+            base_url = official_api_key_base_url(source.vendor)
         if not base_url:
             raise EngineStateError("Responses API source requires a base URL")
         entry = {"api-key": api_key, "prefix": source.prefix, "base-url": base_url}
@@ -91,8 +92,8 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
         return
     if source.protocol == "openai_chat":
         base_url = source.base_url
-        if not base_url and source.vendor == "openai":
-            base_url = "https://api.openai.com/v1"
+        if not base_url:
+            base_url = official_api_key_base_url(source.vendor)
         if not base_url:
             raise EngineStateError("OpenAI-compatible source requires a base URL")
         payload.setdefault("openai-compatibility", []).append(

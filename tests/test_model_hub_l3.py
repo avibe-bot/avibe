@@ -6623,6 +6623,71 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
     assert ambiguous.authenticated is None
 
 
+def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.bind_oauth_credential(
+        "src_oauthcatalog",
+        "openai",
+        "codex-test.json",
+    )
+    client = Mock()
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {
+                "files": [
+                    {
+                        "id": "codex-test",
+                        "auth_index": "auth-index-test",
+                        "name": "codex-test.json",
+                        "provider": "codex",
+                    }
+                ]
+            }
+        raise AssertionError((method, path))
+
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    adapter = CLIProxyEngineAdapter(
+        supervisor=supervisor,
+        state_store=state_store,
+    )
+    accepted_unproven = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_oauth_protocol_response",
+            return_value=accepted_unproven,
+        ) as oauth_probe,
+        patch.object(
+            adapter,
+            "discover_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
+        ) as discover_models,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                None,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    discover_models.assert_not_awaited()
+    assert [call.kwargs["protocol"] for call in oauth_probe.call_args_list] == list(SOURCE_PROTOCOLS)
+
+
 DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD = {
     "error": {
         "message": "Authentication Fails, Your api key: **** is invalid",

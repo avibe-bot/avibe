@@ -1388,6 +1388,11 @@ def test_config_generation_is_private_and_never_logs_secrets(
         vendor="openai",
         protocol="openai_responses",
     )
+    deepseek_ref = store.store_api_key(
+        "deepseek-secret-value",
+        vendor="deepseek",
+        protocol="openai_chat",
+    )
     store.sync_sources(
         [
             _binding(credential_ref),
@@ -1396,6 +1401,13 @@ def test_config_generation_is_private_and_never_logs_secrets(
                 source_id="src_responses1",
                 vendor="openai",
                 protocol="openai_responses",
+                base_url=None,
+            ),
+            _binding(
+                deepseek_ref,
+                source_id="src_deepseekcfg",
+                vendor="deepseek",
+                protocol="openai_chat",
                 base_url=None,
             ),
         ]
@@ -1422,6 +1434,9 @@ def test_config_generation_is_private_and_never_logs_secrets(
     assert payload["remote-management"]["allow-remote"] is False
     assert payload["remote-management"]["disable-control-panel"] is True
     assert payload["openai-compatibility"][0]["api-key-entries"][0]["api-key"] == ("upstream-secret-value")
+    assert {
+        entry["base-url"] for entry in payload["openai-compatibility"]
+    } == {"https://api.example.test/v1", "https://api.deepseek.com"}
     assert payload["codex-api-key"][0]["base-url"] == "https://api.openai.com/v1"
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
@@ -1432,6 +1447,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
         runtime_secrets.gateway_token,
         "upstream-secret-value",
         "responses-secret-value",
+        "deepseek-secret-value",
     ):
         assert secret not in caplog.text
 
