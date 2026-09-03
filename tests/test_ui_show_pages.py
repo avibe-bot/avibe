@@ -1992,8 +1992,43 @@ def _public_representation_runtime_manager() -> _FakeShowRuntimeManager:
             "Authorization": "Bearer caller-secret",
             "X-Vibe-CSRF-Token": "caller-secret",
         },
-        {"User-Agent": "ChatGPT-User/1.0"},
+        {
+            "User-Agent": (
+                "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                "ChatGPT-User/1.0; +https://openai.com/bot)"
+            )
+        },
         {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)"},
+        {
+            "User-Agent": (
+                "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                "Claude-User/1.0; +Claude-User@anthropic.com)"
+            )
+        },
+        {
+            "User-Agent": (
+                "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                "Perplexity-User/1.0; +https://perplexity.ai/perplexity-user)"
+            )
+        },
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; MistralAI-User/1.0; "
+                "+https://docs.mistral.ai/robots)"
+            )
+        },
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.19045; "
+                "en-US) WindowsPowerShell/5.1.19041.5608"
+            )
+        },
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.19045; "
+                "en-US) PowerShell/7.2.6"
+            )
+        },
     ],
 )
 def test_public_show_page_infers_markdown_for_non_browser_reads(
@@ -2503,6 +2538,36 @@ def test_show_page_markdown_keeps_extensionless_assets_on_the_app_proxy(
     assert response.content == b"extensionless asset"
     assert manager.render_markdown_capability_calls == 0
     assert [call[1] for call in manager.calls] == [runtime_path]
+
+
+def test_public_show_page_classifies_non_document_before_limited_admission(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "limited")
+    (ensure_show_page_dir("ses123") / "report").write_text(
+        "extensionless asset",
+        encoding="utf-8",
+    )
+    manager = _FakeShowRuntimeManager(render_markdown_supported=True)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/report",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "*/*", "User-Agent": "curl/8.10.1"},
+            follow_redirects=False,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not_found"}
+    assert manager.calls == []
+    assert manager.render_markdown_capability_calls == 0
 
 
 def test_private_show_page_markdown_requires_auth_then_strips_identity_headers(

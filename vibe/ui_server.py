@@ -12832,8 +12832,12 @@ _PUBLIC_SHOW_REPRESENTATION_HEADERS = (
     "User-Agent",
 )
 _SHOW_PAGE_CRAWLER_USER_AGENT_RE = re.compile(
-    r"(?:bot\b|crawler|spider|slurp|chatgpt-user|claudebot|perplexitybot|"
+    r"(?:bot\b|crawler|spider|slurp|claudebot|perplexitybot|"
     r"anthropic-ai|cohere-ai|google-extended|bytespider)",
+    re.IGNORECASE,
+)
+_SHOW_PAGE_KNOWN_NON_BROWSER_USER_AGENT_RE = re.compile(
+    r"(?:chatgpt-user|claude-user|perplexity-user|mistralai-user|powershell/)",
     re.IGNORECASE,
 )
 _SHOW_PAGE_BROWSER_USER_AGENT_RE = re.compile(
@@ -12891,6 +12895,11 @@ def _public_show_page_prefers_markdown(starlette_request: FastAPIRequest) -> boo
 
     user_agent = starlette_request.headers.get("user-agent", "").strip()
     if _SHOW_PAGE_CRAWLER_USER_AGENT_RE.search(user_agent):
+        return True
+    # User-initiated Agent fetchers and PowerShell deliberately use
+    # browser-compatible UA prefixes. Their product tokens are more specific
+    # than the surrounding Mozilla/WebKit tokens.
+    if _SHOW_PAGE_KNOWN_NON_BROWSER_USER_AGENT_RE.search(user_agent):
         return True
     if _SHOW_PAGE_BROWSER_USER_AGENT_RE.search(user_agent):
         return False
@@ -15713,6 +15722,20 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("page_offline", 404)
             return _show_page_offline_response()
+        runtime_path_denied = _is_show_page_runtime_denied_path(
+            asset_path,
+            session_id=page.session_id,
+            confine_to_workspace=True,
+        )
+        if not runtime_path_denied:
+            representation_candidate = (
+                representation_candidate
+                and _show_page_markdown_target_is_document(page.session_id, asset_path)
+            )
+            request._request.state.public_show_representation_varies = (
+                representation_candidate
+            )
+            markdown_requested = markdown_requested and representation_candidate
         is_spa_navigation = markdown_requested or _is_show_page_spa_route_request(
             asset_path,
             request._request,
@@ -15838,20 +15861,10 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(
-            asset_path,
-            session_id=page.session_id,
-            confine_to_workspace=True,
-        ):
+        if runtime_path_denied:
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_file_not_found_response()
-        representation_candidate = (
-            representation_candidate
-            and _show_page_markdown_target_is_document(page.session_id, asset_path)
-        )
-        request._request.state.public_show_representation_varies = representation_candidate
-        markdown_requested = markdown_requested and representation_candidate
         if markdown_requested:
             return await _show_page_markdown_runtime_response(
                 page.session_id,
