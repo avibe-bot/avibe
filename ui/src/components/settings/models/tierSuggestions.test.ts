@@ -40,10 +40,10 @@ const catalogTiers = (): Map<string, string[]> => {
 
 describe('unified reasoning-effort vocabulary', () => {
   it('is the spec\'s ordered superset, including catalog-only ultra', () => {
-    // The UI-side pin of the frozen vocabulary. The backend lane exports the
-    // same list; when that export lands, a later contract test holds the two
-    // equal. Until then this is what stops the tables below from quietly
-    // shrinking the set the spec named.
+    // The UI-side pin of the frozen vocabulary. The cross-file mirror in
+    // `reasoningEffortVocabulary.mirror.test.ts` holds this list equal to the
+    // backend export when that name exists on the branch, and to this same
+    // frozen 7-list while it does not.
     expect([...REASONING_EFFORTS]).toEqual([
       'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
     ]);

@@ -42,6 +42,20 @@ const DEFAULT_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high'];
 
 export const effortOptionsFor = (backend: string): string[] => EFFORT_BY_BACKEND[backend] ?? DEFAULT_EFFORTS;
 
+/** Rank in the unified vocabulary; unknown tokens sort after every named rung. */
+const effortRank = (effort: string): number => {
+  const index = (REASONING_EFFORTS as readonly string[]).indexOf(effort);
+  // A finite sentinel — not Infinity — so two unknowns subtract to 0 instead of NaN.
+  return index < 0 ? REASONING_EFFORTS.length : index;
+};
+
+/** Order a selected-effort list weakest → strongest, then alphabetically for unknowns. */
+export const sortEffortsByVocabulary = (efforts: readonly string[]): string[] =>
+  [...efforts].sort((left, right) => {
+    const delta = effortRank(left) - effortRank(right);
+    return delta !== 0 ? delta : left.localeCompare(right);
+  });
+
 /** Backends whose catalog carries a "" entry: the set an inherited or custom
  *  model inherits when the catalog does not name it. */
 const SHARED_DEFAULT_EFFORT_BACKENDS = new Set(['claude', 'codex']);

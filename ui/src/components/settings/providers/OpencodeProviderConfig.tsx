@@ -46,6 +46,7 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { EFFORT_BY_BACKEND, REASONING_EFFORTS, sortEffortsByVocabulary } from '@/lib/effortOptions';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -90,9 +91,11 @@ const SERVER_START_MAX_RETRIES = 5;
 const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
-const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
-const defaultReasoningEfforts = () => [...REASONING_EFFORTS];
+// Checkboxes offer the unified 7-value vocabulary so a catalog-declared `ultra`
+// can be selected. The default-checked list is the OpenCode family fallback,
+// which still omits `ultra` so an unknown relay is not over-claimed.
+const defaultReasoningEfforts = () => [...EFFORT_BY_BACKEND.opencode];
 
 const notifyOpenCodeModelOptionsChanged = () => {
   window.dispatchEvent(new CustomEvent('avibe:opencode-model-options-changed'));
@@ -643,7 +646,7 @@ export const OpencodeProviderConfig: React.FC<{
     const next = current.reasoningEfforts.includes(effort)
       ? current.reasoningEfforts.filter((item) => item !== effort)
       : [...current.reasoningEfforts, effort];
-    updateEdit(providerId, { reasoningEfforts: next });
+    updateEdit(providerId, { reasoningEfforts: sortEffortsByVocabulary(next) });
   };
 
   // ---- Default-provider selection ----
