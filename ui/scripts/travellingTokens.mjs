@@ -21,14 +21,35 @@
 // element inherits. A token added to such a class later is covered without
 // editing anything, and a token parked back on a dialog root fails here rather
 // than in a screenshot nobody takes.
+//
+// "Resolves" is the whole difficulty, and it is not "is declared somewhere".
+// A declaration counts only where it is in force, so both halves of its reach
+// are compared against the use: which subtree its selector claims, and which
+// conditions its enclosing at-rules put on it. A rule that answers only the
+// first half sanctions exactly the kind of scope this file exists to catch.
 
-// A selector that can match the document root, so a custom property declared
-// there is inherited by every element regardless of where it mounts. Derived
-// from shape rather than from a list of the project's current scopes: `:root`,
-// `[data-theme="light"]`, `:root:not([data-theme="dark"])` and a bare `html`
-// all qualify because each one's subject is at or above the body, and a scope
-// spelled some new way qualifies on the same grounds.
-const REACHES_EVERY_ELEMENT = /^(:root|html|body|\*|\[)/;
+// A selector that matches the document root itself, so a custom property
+// declared there is inherited by every element regardless of where it mounts.
+// The whole selector has to match, not its prefix. A qualified root reaches
+// every element only while its qualifier holds, which is a narrower promise
+// than the one being consumed: `[data-theme="dark"]` names an attribute this
+// repo also sets on nested elements (`AppWindow.tsx:259`,
+// `AppsEditorPage.tsx:114`, `confirm-dialog.tsx:108`), and even on `<html>` it
+// is one half of a theme pair, so a token declared only there is missing
+// wherever the other half applies. Such tokens resolve because a `:root` base
+// declares them and the themed block overrides it -- and that base is what
+// this looks for.
+const DOCUMENT_ROOT = /^(:root|html|body|\*)$/;
+
+// An at-rule whose body applies only when its condition holds. A declaration
+// inside one is in force for a use only if the use is inside it too, so the
+// chain is compared rather than discarded -- 72 token declarations and 19 uses
+// in this project sit under `@media`, so the difference is not hypothetical.
+// `@layer` and `@theme` are deliberately absent: they set precedence and
+// origin, not whether the body applies. An at-rule spelled some new way counts
+// as unconditional, a miss rather than a false positive -- the same bias as
+// the fallback rule below.
+const CONDITIONAL = new Set(['media', 'supports', 'container', 'scope', 'document']);
 
 // `var(--x)` on an undeclared name draws nothing; `var(--x, 6px)` draws 6px.
 // The second is not this defect, so the fallback is what decides whether a use
@@ -41,6 +62,28 @@ function insideTheme(node) {
     if (at.type === 'atrule' && at.name === 'theme') return true;
   }
   return false;
+}
+
+// Every condition standing between a node and the stylesheet, innermost first.
+// Params are whitespace-collapsed so one query spelled two ways still reads as
+// one condition.
+function conditionsOn(node) {
+  const chain = [];
+  for (let at = node.parent; at; at = at.parent) {
+    if (at.type === 'atrule' && CONDITIONAL.has(at.name)) {
+      chain.push(`@${at.name} ${at.params.replace(/\s+/g, ' ').trim()}`);
+    }
+  }
+  return chain;
+}
+
+// Whether any of `chains` describes a declaration that is in force wherever a
+// use guarded by `conditions` applies. That holds when every condition on the
+// declaration also guards the use: the use cannot apply without them, so the
+// declaration cannot be missing. An unconditional declaration has an empty
+// chain and so is in force everywhere, which is the ordinary case.
+function inForce(chains, conditions) {
+  return (chains ?? []).some((chain) => chain.every((one) => conditions.includes(one)));
 }
 
 // The leftmost compound of a selector is the only part that says which subtree
@@ -118,8 +161,15 @@ function classesRenderedBy(source) {
  */
 function unscopedTokens(sheets, classNames) {
   const travelling = new Set(classNames);
-  const inheritable = new Set();
+  // Both keyed to the conditions the declaration was made under, because a
+  // name being declared somewhere is not the question -- that is what
+  // `customPropertiesIn` answers, and what let this defect ship.
+  const inheritable = new Map();
   const declaredOn = new Map();
+  const record = (into, key, conditions) => {
+    if (!into.has(key)) into.set(key, []);
+    into.get(key).push(conditions);
+  };
 
   for (const [, root] of sheets) {
     // A registered name resolves to its initial value everywhere, so a use of
@@ -127,19 +177,17 @@ function unscopedTokens(sheets, classNames) {
     // `syntax: "*"` does draw nothing, which this treats as resolvable and so
     // will not report -- a miss rather than a false positive, on the same
     // grounds `customProperties.mjs` records the name at all.
-    root.walkAtRules('property', (rule) => inheritable.add(rule.params.trim()));
+    root.walkAtRules('property', (rule) => record(inheritable, rule.params.trim(), conditionsOn(rule)));
 
     root.walkDecls((declaration) => {
       if (!declaration.prop.startsWith('--')) return;
 
       const owner = declaration.parent;
-      if (owner.type !== 'rule') {
-        if (insideTheme(declaration)) inheritable.add(declaration.prop);
-        return;
-      }
-      if (insideTheme(declaration) || owner.selectors.some((one) => REACHES_EVERY_ELEMENT.test(one.trim()))) {
-        inheritable.add(declaration.prop);
-      }
+      const conditions = conditionsOn(declaration);
+      const fromRoot = owner.type === 'rule'
+        && owner.selectors.some((one) => DOCUMENT_ROOT.test(one.trim()));
+      if (insideTheme(declaration) || fromRoot) record(inheritable, declaration.prop, conditions);
+      if (owner.type !== 'rule') return;
 
       for (const one of owner.selectors) {
         const selector = one.trim();
@@ -149,8 +197,7 @@ function unscopedTokens(sheets, classNames) {
           // and no sibling, so counting it would sanction a scope narrower than
           // the one being consumed.
           if (selector !== `.${name}`) continue;
-          if (!declaredOn.has(name)) declaredOn.set(name, new Set());
-          declaredOn.get(name).add(declaration.prop);
+          record(declaredOn, `${name}|${declaration.prop}`, conditions);
         }
       }
     });
@@ -165,13 +212,14 @@ function unscopedTokens(sheets, classNames) {
       const used = [...declaration.value.matchAll(UNGUARDED_USE)].map((match) => match[1]);
       if (used.length === 0) return;
 
+      const conditions = conditionsOn(declaration);
       for (const one of owner.selectors) {
         const selector = one.trim();
         for (const name of classesOf(firstCompound(selector))) {
           if (!travelling.has(name)) continue;
           for (const property of used) {
-            if (inheritable.has(property)) continue;
-            if (declaredOn.get(name)?.has(property)) continue;
+            if (inForce(inheritable.get(property), conditions)) continue;
+            if (inForce(declaredOn.get(`${name}|${property}`), conditions)) continue;
             unresolved.push({ className: name, property, origin, selector, declaration: declaration.prop });
           }
         }

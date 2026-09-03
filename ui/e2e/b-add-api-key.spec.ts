@@ -197,24 +197,30 @@ test.describe('B · add an API-key source', () => {
     await expect(hub.sourceDetailDialog).toBeVisible({ timeout: 30_000 });
 
     const created = (await api.sources()).find((source) => source.display_name === name);
-    expect(created?.models.map((model) => model.id).sort()).toEqual(
-      inventory.map((model) => model.id).sort(),
+
+    // assert-current: everything the upstream said about a model except its id
+    // is discarded on the way to storage. The whole row is stated rather than
+    // its key set, so each drop is asserted as a value and not merely as a name
+    // that exists. `reasoning_efforts_source` is the one that matters: it is
+    // #1836's tier provenance, product shape to record here rather than a leak
+    // to strip, and `null` is the claim — the persisted schema also admits
+    // `catalog` alongside an empty tier list, so a regression stamping it would
+    // make the UI treat these tiers as managed and non-editable while a key
+    // check still passed. A field arriving later fails this too.
+    const byId = (one: { id: string }, other: { id: string }) => one.id.localeCompare(other.id);
+    expect([...(created?.models ?? [])].sort(byId)).toEqual(
+      inventory
+        .map((model) => ({
+          id: model.id,
+          origin: 'discovered',
+          display_name: null,
+          reasoning_efforts: [],
+          reasoning_efforts_source: null,
+          discovered_at: expect.any(String),
+          retired: false,
+        }))
+        .sort(byId),
     );
-    for (const model of created?.models ?? []) {
-      // assert-current: everything the upstream said about a model except its id
-      // is discarded on the way to storage. The set is pinned rather than
-      // sampled so that a field arriving later cannot slip in unnoticed — which
-      // is what it just caught: `reasoning_efforts_source` is #1836's tier
-      // provenance, product shape to record here, not a leak to strip.
-      expect(Object.keys(model).sort()).toEqual(
-        [
-          'discovered_at', 'display_name', 'id', 'origin',
-          'reasoning_efforts', 'reasoning_efforts_source', 'retired',
-        ],
-      );
-      expect(model.display_name).toBeNull();
-      expect(model.reasoning_efforts).toEqual([]);
-    }
   });
 
   test('B4 · a proven interface with no model list can still be added, on the record', async ({ hub, mock, api }) => {

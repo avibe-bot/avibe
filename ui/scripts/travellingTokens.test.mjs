@@ -27,6 +27,27 @@ const TRAVELLING_COMPONENTS = [
   'src/components/settings/models/GuardGapList.tsx',
 ];
 
+// The body's outer wrapper has no component of its own: every caller writes the
+// `<div className="model-hub-guard-body">` itself, so no single file's
+// `className` values name it the way the two components above name theirs.
+// Hence the name here. One name covers every caller, present and future,
+// because what gets asserted is a property of the class -- it resolves its
+// tokens from itself or from an inherited scope -- and that holds under
+// whichever root a caller mounts it in.
+const TRAVELLING_WRAPPERS = ['model-hub-guard-body'];
+
+// Every shipped source, so a class can be asked who renders it. Tests are
+// excluded: a class named only by an assertion does not ship.
+function* shippedSources(directory) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const at = path.join(directory, entry.name);
+    if (entry.isDirectory()) yield* shippedSources(at);
+    else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+      yield fs.readFileSync(at, 'utf8');
+    }
+  }
+}
+
 describe('firstCompound', () => {
   it('keeps the whole selector when nothing follows the subject', () => {
     expect(firstCompound('.model-hub-guard-label')).toBe('.model-hub-guard-label');
@@ -71,11 +92,28 @@ describe('unscopedTokens', () => {
   });
 
   it('accepts a token from a scope every element inherits', () => {
-    for (const scope of [':root', 'html', '[data-theme="light"]', ':root:not([data-theme="dark"])']) {
+    for (const scope of [':root', 'html', 'body', '*']) {
       const sheets = sheetsOf(`${scope} { --gap: 6px } .travels { gap: var(--gap); }`);
 
       expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
     }
+  });
+
+  it('reports a token only a qualified root declares, because the other half has none', () => {
+    // A themed root reaches every element only while that theme applies, so it
+    // cannot answer for a use that applies always.
+    for (const scope of ['[data-theme="light"]', ':root:not([data-theme="dark"])', 'html[data-theme="dark"]']) {
+      const sheets = sheetsOf(`${scope} { --gap: 6px } .travels { gap: var(--gap); }`);
+
+      expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
+    }
+  });
+
+  it('accepts a themed override once a root base declares the same token', () => {
+    // The project's own shape: `:root` states the value, the theme overrides it.
+    const sheets = sheetsOf(':root { --gap: 6px } [data-theme="dark"] { --gap: 8px } .travels { gap: var(--gap); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
   });
 
   it('accepts a token the class declares on itself and a descendant consumes', () => {
@@ -115,16 +153,70 @@ describe('unscopedTokens', () => {
 
     expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
   });
+
+  it('reports a token the class declares only inside a query the use does not share', () => {
+    const sheets = sheetsOf('@media (min-width: 600px) { .travels { --gap: 6px } } .travels { gap: var(--gap); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
+  });
+
+  it('accepts it when the use stands under the same query', () => {
+    const sheets = sheetsOf('@media (min-width: 600px) { .travels { --gap: 6px } .travels { gap: var(--gap); } }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
+  });
+
+  it('accepts a use nested deeper than the declaration it relies on', () => {
+    // The use cannot apply without the query that guards the declaration, so
+    // the declaration cannot be missing where the use is.
+    const sheets = sheetsOf(
+      '@media (min-width: 600px) { .travels { --gap: 6px } @supports (gap: 1px) { .travels { gap: var(--gap); } } }',
+    );
+
+    expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
+  });
+
+  it('reports an inherited scope that is itself conditional, registration included', () => {
+    // The same miss as a class token: `:root`, `@theme` and `@property` each
+    // promise every element, and a query around any of them takes that back.
+    for (const declared of [
+      ':root { --gap: 6px }',
+      '@theme { --gap: 6px }',
+      '@property --gap { syntax: "*"; inherits: true; initial-value: 6px }',
+    ]) {
+      const sheets = sheetsOf(`@media print { ${declared} } .travels { gap: var(--gap); }`);
+
+      expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
+    }
+  });
+
+  it('treats a layer as no condition at all, because its body always applies', () => {
+    const sheets = sheetsOf('@layer base { .travels { --gap: 6px } } .travels { gap: var(--gap); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
+  });
 });
 
 describe('the shared guard body', () => {
   const sheets = [...eachStylesheet(UI_ROOT)];
-  const travelling = new Set();
+  const travelling = new Set(TRAVELLING_WRAPPERS);
   for (const relative of TRAVELLING_COMPONENTS) {
     for (const name of classesRenderedBy(fs.readFileSync(path.join(UI_ROOT, relative), 'utf8'))) {
       travelling.add(name);
     }
   }
+
+  it('names only wrappers the product still renders', () => {
+    // The other half of the subject check below. A wrapper no file renders any
+    // more is a name nobody checks, so it fails here rather than sitting in the
+    // list looking like coverage.
+    const rendered = new Set();
+    for (const source of shippedSources(path.join(UI_ROOT, 'src'))) {
+      for (const name of classesRenderedBy(source)) rendered.add(name);
+    }
+
+    for (const wrapper of TRAVELLING_WRAPPERS) expect(rendered).toContain(wrapper);
+  });
 
   it('renders classes this project styles, so the check has a subject', () => {
     // Without this the assertion below passes by asking about nothing, which is
