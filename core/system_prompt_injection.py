@@ -58,11 +58,13 @@ If you want it sent as an image attachment rather than a regular file, use Markd
 Example: ![Page screenshot](file:///tmp/screenshot.jpg)
 """
 
-_SHOW_PAGES_ROUTING_PROMPT = """\
+_SHOW_PAGES_PROMPT = """\
 
 ## Show Pages
-When a visual page would materially improve the result, load the `use-show-pages` Skill before creating or updating the page.
+{skill_routing}
 """
+
+_SHOW_PAGES_SKILL_ROUTING = "When a visual page would materially improve the result, load the `use-show-pages` Skill before creating or updating the page."
 
 _VAULT_ROUTING_PROMPT = """\
 
@@ -73,7 +75,7 @@ When a task needs credentials, authenticated egress, or signing, load the `use-a
 _HARNESS_ROUTING_PROMPT = """\
 
 ## Harness
-For work that should happen later, repeat, wait for a signal, continue in the background, or move to another Agent, load the `use-avibe-harness` Skill and use Avibe Harness as the default automation layer.
+{skill_routing}
 
 {tool_policy_section}
 
@@ -100,6 +102,8 @@ On the Web chat the user composes with `@` / `#` autocomplete, which inserts sta
 
 Treat these as the user pointing at that Agent or Session, and decide the action from context. Only the bracketed `@<...>` / `#<...>` forms are references; a bare `@` or `#` in prose is ordinary text.
 """
+
+_HARNESS_SKILL_ROUTING = "For work that should happen later, repeat, wait for a signal, continue in the background, or move to another Agent, load the `use-avibe-harness` Skill and use Avibe Harness as the default automation layer."
 
 _SESSION_START_PROMPT = """\
 Current session id: `{default_session_id}`. Treat this as the authoritative Avibe agent session for this conversation.
@@ -497,17 +501,26 @@ def _build_harness_prompt(
     *,
     enabled_agents: Optional[Iterable[Any]] = None,
     current_agent_backend: Optional[str] = None,
+    skill_available: bool = True,
 ) -> str:
     backend = str(current_agent_backend or "unknown").strip() or "unknown"
     return _HARNESS_ROUTING_PROMPT.format(
+        skill_routing=_HARNESS_SKILL_ROUTING if skill_available else "",
         tool_policy_section=_build_tool_policy_section(backend),
         enabled_agents_table=_format_enabled_agents_table(enabled_agents),
     )
 
 
-def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: str | None = None) -> str:
+def _build_show_pages_prompt(
+    context: MessageContext,
+    *,
+    avibe_cloud_guidance: str | None = None,
+    skill_available: bool = True,
+) -> str:
     default_session_id = _extract_default_session_id(context)
-    prompt = _SHOW_PAGES_ROUTING_PROMPT
+    prompt = _SHOW_PAGES_PROMPT.format(
+        skill_routing=_SHOW_PAGES_SKILL_ROUTING if skill_available else ""
+    )
     if avibe_cloud_guidance:
         prompt += f"\n{avibe_cloud_guidance}\n"
     prompt += "\nHistory contract:\n"
@@ -595,6 +608,16 @@ def build_system_prompt_injection(
         if not include_show_pages:
             skills = [skill for skill in skills if skill.name != "use-show-pages"]
 
+    show_pages_skill_available = skills is None or any(
+        skill.name == "use-show-pages" for skill in skills
+    )
+    vault_skill_available = skills is None or any(
+        skill.name == "use-avibe-vault" for skill in skills
+    )
+    harness_skill_available = skills is None or any(
+        skill.name == "use-avibe-harness" for skill in skills
+    )
+
     prompt = _BASE_CAPABILITIES_INTRO
     if context is not None:
         prompt += _build_session_start_prompt(context)
@@ -603,16 +626,21 @@ def build_system_prompt_injection(
         prompt += _build_codex_generated_images_prompt()
     if include_show_pages and context is not None:
         guidance = AVIBE_CLOUD_CONNECT_GUIDANCE if avibe_cloud_connected is False else None
-        prompt += _build_show_pages_prompt(context, avibe_cloud_guidance=guidance)
+        prompt += _build_show_pages_prompt(
+            context,
+            avibe_cloud_guidance=guidance,
+            skill_available=show_pages_skill_available,
+        )
     if include_quick_replies:
         prompt += _QUICK_REPLIES_PROMPT
-    if skills is None or any(skill.name == "use-avibe-vault" for skill in skills):
+    if vault_skill_available:
         prompt += _build_vault_prompt(context, fallback_platform=fallback_platform)
     if context is not None:
         prompt += _build_harness_prompt(
             context,
             enabled_agents=enabled_agents,
             current_agent_backend=current_agent_backend,
+            skill_available=harness_skill_available,
         )
     if include_user_preferences:
         prompt += _build_user_preferences_prompt(
