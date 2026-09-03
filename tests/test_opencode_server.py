@@ -160,7 +160,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._clear_pid_file.call_count, 2)
         self.assertIsNone(manager._process)
         self.assertIsNone(manager._process_loop)
-        self.assertEqual(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"], user_config)
+        self.assertEqual(
+            json.loads(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]),
+            {"permission": "ask", "tools": {"skill": False}},
+        )
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

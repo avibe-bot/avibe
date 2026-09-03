@@ -51,6 +51,26 @@ _CURRENT_OWNER_PID = os.getpid()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 
 
+def _managed_runtime_config_content(raw: str | bytes | None) -> str:
+    """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
+
+    if raw is None:
+        payload: Any = {}
+    else:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("OpenCode runtime config override is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("OpenCode runtime config override must be a JSON object")
+
+    tools = payload.get("tools")
+    managed_tools = dict(tools) if isinstance(tools, dict) else {}
+    managed_tools["skill"] = False
+    payload["tools"] = managed_tools
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+
+
 def _percent_encode_path(path: str) -> str:
     """Percent-encode *path* so it is safe for an HTTP header value.
 
@@ -1608,6 +1628,14 @@ class OpenCodeServerManager:
             # project config. Reasserting the exact overlay here prevents a
             # checked-in opencode.json from replacing Hub provider transport.
             env["OPENCODE_CONFIG_CONTENT"] = content
+
+        # Request-level ``tools.skill=false`` prevents native Skill calls, but
+        # OpenCode 1.x can still advertise its native Catalog in the model
+        # prompt. The runtime-override tier removes that competing Catalog for
+        # every Agent while leaving the user's config files untouched.
+        env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
+            env.get("OPENCODE_CONFIG_CONTENT")
+        )
 
         try:
             self._process = await asyncio.create_subprocess_exec(
