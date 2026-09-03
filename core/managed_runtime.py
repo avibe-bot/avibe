@@ -64,6 +64,7 @@ _ENSURE_FAILURE_SUFFIXES = frozenset(
         "binary_checksum_mismatch",
         "binary_not_runnable",
         "binary_prepare_failed",
+        "candidate_validation_failed",
         "install_already_running",
         "install_claim_failed",
         "install_failed",
@@ -184,6 +185,7 @@ class ManagedRuntimeManager:
         force: bool = False,
         expected_target: Mapping[str, str] | None = None,
         on_resolved: Callable[[dict[str, str]], None] | None = None,
+        validate_candidate: Callable[[Path], str | None] | None = None,
     ) -> dict[str, Any]:
         try:
             file_lock = self._acquire_mutation_lock()
@@ -260,6 +262,21 @@ class ManagedRuntimeManager:
                     existing = candidate
                     break
             if existing is not None and not force:
+                try:
+                    validation_reason = validate_candidate(existing) if validate_candidate else None
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Managed %s runtime candidate validation failed",
+                        self.spec.runtime_id,
+                        exc_info=True,
+                    )
+                    validation_reason = self._reason("candidate_validation_failed")
+                if validation_reason:
+                    return self._failure(
+                        validation_reason,
+                        manifest=manifest,
+                        archive=archive,
+                    )
                 return self._reuse_existing_install(
                     existing,
                     existing_install_dir,
@@ -353,6 +370,25 @@ class ManagedRuntimeManager:
                     archive,
                     binary_sha256=binary_sha256,
                 )
+                try:
+                    validation_reason = (
+                        validate_candidate(installed_binary)
+                        if validate_candidate is not None
+                        else None
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Managed %s runtime candidate validation failed",
+                        self.spec.runtime_id,
+                        exc_info=True,
+                    )
+                    validation_reason = self._reason("candidate_validation_failed")
+                if validation_reason:
+                    return self._failure(
+                        validation_reason,
+                        manifest=manifest,
+                        archive=archive,
+                    )
                 self._write_current_pointer(install_dir, manifest, archive)
                 candidate_install_dir = None
                 self._install_reason = None
@@ -377,6 +413,8 @@ class ManagedRuntimeManager:
                     archive=archive,
                 )
             finally:
+                if candidate_install_dir is not None:
+                    shutil.rmtree(candidate_install_dir, ignore_errors=True)
                 if staging_dir.exists():
                     shutil.rmtree(staging_dir, ignore_errors=True)
         finally:

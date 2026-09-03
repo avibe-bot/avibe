@@ -1395,6 +1395,7 @@
       "dependencyBinaryVerificationFailed": "The {target} binary failed checksum verification.",
       "dependencyBinaryNotRunnable": "The {target} binary is not runnable.",
       "dependencyBinaryPrepareFailed": "The {target} binary could not be prepared.",
+      "dependencyCandidateValidationFailed": "The {target} installation candidate could not be validated.",
       "dependencyInstallMissingBinary": "The {target} archive did not contain its binary.",
       "dependencyInstallLockFailed": "The {target} installation lock could not be acquired: {error}.",
       "dependencyInstallClaimFailed": "The {target} installation claim could not be recorded: {error}.",

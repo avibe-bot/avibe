@@ -223,6 +223,62 @@ def test_force_install_uses_sibling_target_by_default(
     assert Path(installed["install_dir"]).is_dir()
 
 
+def test_force_candidate_is_validated_before_pointer_publication(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="validated-force",
+        version="1.0.0",
+    )
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    observed_candidate: Path | None = None
+
+    def validate_candidate(candidate: Path) -> str | None:
+        nonlocal observed_candidate
+        observed_candidate = candidate
+        assert candidate.is_file()
+        assert candidate != Path(installed["path"])
+        assert pointer_path.read_bytes() == pointer_before
+        return None
+
+    refreshed = manager.ensure(force=True, validate_candidate=validate_candidate)
+
+    assert refreshed["ok"] is True
+    assert observed_candidate == Path(refreshed["path"])
+    assert pointer_path.read_bytes() != pointer_before
+    assert Path(installed["path"]).is_file()
+
+
+def test_force_candidate_rejection_preserves_published_install(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="rejected-force",
+        version="1.0.0",
+    )
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    versions_before = set((manager.runtime_dir / "versions").glob("**/install.json"))
+
+    rejected = manager.ensure(
+        force=True,
+        validate_candidate=lambda _candidate: "fixture_candidate_validation_failed",
+    )
+
+    assert rejected["ok"] is False
+    assert rejected["reason"] == "fixture_candidate_validation_failed"
+    assert pointer_path.read_bytes() == pointer_before
+    assert Path(installed["path"]).read_text(encoding="utf-8") == "1.0.0"
+    assert set((manager.runtime_dir / "versions").glob("**/install.json")) == versions_before
+
+
 def test_force_target_replacement_failure_does_not_publish_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

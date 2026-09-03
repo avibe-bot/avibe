@@ -168,7 +168,7 @@ export const SettingsDependenciesPage: React.FC = () => {
             const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
             const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
             const dependencyOperationBusy = busy !== null;
-            const persistedFailure = isMemoryRuntime && d.status === 'error' && d.reason
+            const persistedFailure = d.status === 'error' && d.reason
               ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
               : null;
             return (
