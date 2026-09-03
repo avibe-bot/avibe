@@ -6465,6 +6465,84 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
     assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
 
 
+def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validation_response(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.store_api_key(
+        "test-qwen-key",
+        vendor="qwen",
+        protocol="openai_chat",
+        base_url=None,
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=Mock(),
+        state_store=state_store,
+    )
+
+    async def scenario() -> tuple[list[str], object, dict[str, object]]:
+        requests: list[str] = []
+
+        async def capture_probe(request: web.Request) -> web.Response:
+            requests.append(request.path)
+            if request.path == _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_path:
+                return web.json_response(
+                    {
+                        "code": "InvalidParameter",
+                        "message": "messages is required",
+                    },
+                    status=400,
+                )
+            return web.json_response({}, status=404)
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", capture_probe)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        origin = f"http://127.0.0.1:{port}"
+        try:
+            with (
+                patch.dict(
+                    "vibe.model_hub_runtime.adapter._OFFICIAL_BASE_URLS",
+                    {"qwen": origin},
+                    clear=False,
+                ),
+                patch(
+                    "vibe.model_hub_runtime.adapter.probe_models",
+                    new=AsyncMock(return_value=(DiscoveredModel(id="qwen-plus"),)),
+                ) as inventory_probe,
+            ):
+                observed = await adapter.observe_source(
+                    "qwen",
+                    None,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
+                )
+                assert inventory_probe.await_args is not None
+                inventory_kwargs = dict(inventory_probe.await_args.kwargs)
+        finally:
+            await runner.cleanup()
+        return requests, observed, inventory_kwargs
+
+    requests, observed, inventory_kwargs = asyncio.run(scenario())
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_chat"
+    assert observed.authenticated is True
+    assert observed.model_ids == ("qwen-plus",)
+    assert requests == [
+        _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
+        for protocol in SOURCE_PROTOCOLS
+    ]
+    assert inventory_kwargs["vendor"] == "qwen"
+    assert inventory_kwargs["protocol"] == "openai_chat"
+    assert inventory_kwargs["base_url"] is None
+
+
 @pytest.mark.parametrize(
     ("vendor", "base_url", "credential_vendor", "credential_protocol", "protocol_order"),
     [
@@ -6983,6 +7061,23 @@ def test_openai_request_error_without_family_param_records_accepted_but_unproven
                     "type": "invalid_request_error",
                     "param": None,
                 }
+            }
+        ),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
+
+
+def test_qwen_wrapperless_invalid_parameter_request_error_counts_as_authenticated_openai_chat() -> None:
+    assert _parse_protocol_authenticated_evidence(
+        "openai_chat",
+        400,
+        json.dumps(
+            {
+                "code": "InvalidParameter",
+                "message": "messages is required",
             }
         ),
     ) == _ProtocolEvidence(

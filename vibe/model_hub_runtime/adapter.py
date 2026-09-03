@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import threading
 import uuid
@@ -215,6 +216,8 @@ _PAIRWISE_EXCLUSION_SHAPES = frozenset(
         _ProtocolObservationShape.UNSTRUCTURED,
     }
 )
+_IDENTIFIER_SEPARATOR_RE = re.compile(r"[^0-9A-Za-z]+")
+_CAMEL_CASE_BOUNDARY_RE = re.compile(r"(?<=[0-9a-z])(?=[A-Z])")
 
 
 def _openai_evidence_rules(
@@ -345,10 +348,21 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
 
 
 def _error_identifiers(error: Mapping[str, Any]) -> frozenset[str]:
+    return _payload_identifiers(error)
+
+
+def _normalized_identifier(value: str) -> str:
+    normalized = _CAMEL_CASE_BOUNDARY_RE.sub("_", value.strip())
+    normalized = _IDENTIFIER_SEPARATOR_RE.sub("_", normalized).strip("_").lower()
+    return normalized
+
+
+def _payload_identifiers(payload: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(
-        value.strip().lower()
-        for value in (error.get("type"), error.get("code"))
+        normalized
+        for value in (payload.get("type"), payload.get("code"))
         if isinstance(value, str)
+        if (normalized := _normalized_identifier(value))
     )
 
 
@@ -392,6 +406,28 @@ def _anthropic_wrapperless_error_kind(
     if _request_error_rejects_credential(status, error):
         return "rejected"
     identifiers = _error_identifiers(error)
+    if status in _REQUEST_ERROR_STATUSES and not (
+        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
+    ).isdisjoint(identifiers):
+        return "accepted"
+    if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "rejected"
+    if status in _SERVER_ERROR_STATUSES and not _SERVER_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    if status in _RATE_LIMIT_STATUSES and not _RATE_LIMIT_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    return None
+
+
+def _openai_wrapperless_error_kind(
+    status: int,
+    payload: Mapping[str, Any],
+) -> str | None:
+    if isinstance(payload.get("error"), dict):
+        return None
+    identifiers = _payload_identifiers(payload)
+    if not identifiers:
+        return None
     if status in _REQUEST_ERROR_STATUSES and not (
         _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
     ).isdisjoint(identifiers):
@@ -456,11 +492,7 @@ def _parse_protocol_authenticated_evidence(
             shape=_default_unproven_shape(status=status),
         )
 
-    top_level_identifiers = {
-        value.strip().lower()
-        for value in (payload.get("type"), payload.get("code"))
-        if isinstance(value, str)
-    }
+    top_level_identifiers = _payload_identifiers(payload)
     if (
         status in _AUTHENTICATION_ERROR_STATUSES
         and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
@@ -504,6 +536,13 @@ def _parse_protocol_authenticated_evidence(
                 shape=rule.shape,
             )
     if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
+        wrapperless = _openai_wrapperless_error_kind(status, payload)
+        if wrapperless == "accepted":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+                shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+            )
         if isinstance(error, dict):
             identifiers = _error_identifiers(error)
             if (
