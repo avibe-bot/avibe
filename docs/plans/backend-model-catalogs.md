@@ -173,34 +173,28 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    2. **`From your providers`** — every configuration-eligible, non-retired Source model
       not already in the menu, deduplicated by the identity rule in question 1, with its
       supplying providers as read-only chips in Source order.
-   3. **`models.dev`** — a browsable catalogue, never a blank box. With an empty query the
-      group shows one row of vendor chips (`Anthropic` `OpenAI` `Google` `DeepSeek` `Zhipu`
-      `Moonshot` `Qwen` `xAI` `Mistral` … `More`); choosing a vendor lists that vendor's
-      models as ordinary rows (the chip stays selected; choosing it again clears). With a
-      query the group lists matching models ranked first-party first (the vendor that makes
-      the model), then exact-id, then name matches. One row per model: when several
-      models.dev providers list the same model, only the first-party entry is shown and the
-      aggregator copies are collapsed, because for Claude Code and Codex the menu id is the
-      bare model id either way, and for OpenCode the id is `vendor/model` with the
-      first-party vendor. A row shows the display name, the mono id, and the vendor as muted
-      text (omitted when a vendor chip already filters the list); it never shows a chip.
-   4. **`Add "{{query}}" by ID`** — not a group and not an input box: one fallback row that
-      appears at the end of the list only while a query is typed, offering the typed text as
-      a model id. Its checkbox joins the selection like any row; it is disabled when the text
-      is not a valid id for the backend. With an empty query there is nothing to add by id,
-      so the row is absent.
+   3. **`Add custom model…`** — the picker's footer-left action (and, when a query matches
+      nothing, an inline `Add "{{query}}" as a custom model…` under `No model matches.`). It
+      opens the existing model editor for a model neither the backend nor your providers
+      list. models.dev lives here, as the lookup that helps fill the form: the editor's
+      first field, `Model`, is a typeahead (`Search models.dev or enter a model ID`) whose
+      suggestions are models.dev matches ranked first-party vendor first, deduplicated by
+      model (aggregator copies collapsed), each showing name, mono id, vendor, and context;
+      choosing one fills id, display name, context, output, modalities, tools, reasoning,
+      and efforts, all still editable; the last suggestion is always `Use "{{query}}" as the
+      model ID` for an id models.dev does not know. The old `Fill from models.dev` button is
+      retired — the typeahead is the same capability, offered before typing instead of after.
+      For OpenCode the filled id is `vendor/model` with the first-party vendor.
    Rules that hold across all groups: a provider chip on any row — built-in included — means
    exactly "one of your providers supplies this id", in Source order, and nothing else ever
-   renders as a chip; models.dev vendor chips are the one exception and live only in the
-   models.dev group's browse row, where they are filters, not suppliers. With an empty query
-   the list shows only what can be added; with a query, models already in the list also
-   appear in their group as disabled rows tagged `In list`, so a search never dead-ends on
-   something that exists. The models.dev group shows a loading state while a query is in
-   flight and `models.dev unavailable` when the catalogue cannot be reached; it is omitted
-   when a query matches nothing there.
-   Checked rows — including a checked `Add "{{query}}" by ID` row — commit together through the footer (`{{count}} selected`
-   · `Add {{count}} models`; with nothing selected the primary button reads `Add models`
-   and is disabled, so the footer never moves) into the catalog draft; the list's single `Save` still writes
+   renders as a chip. With an empty query the list shows only what can be added; with a
+   query, models already in the list also appear in their group as disabled rows tagged
+   `In list`, so a search never dead-ends on something that exists. The editor's typeahead
+   shows a loading state while a lookup is in flight and `models.dev unavailable` when the
+   catalogue cannot be reached; typing an id by hand always still works.
+   Checked rows commit together through the footer primary (`Add {{count}} models`; with
+   nothing selected it reads `Add models` and is disabled, so the footer never moves) into the
+   catalog draft; a custom model returns from the editor into the same draft; the list's single `Save` still writes
    everything with one `PUT`. Whatever the origin, adding a row runs the same one-time
    matching for its initial route (C1); an id no provider supplies simply starts with an
    empty route and the row shows `No model route configured`.
@@ -264,14 +258,12 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
   id that is neither in the menu nor hidden, at the position question 9 defines, running C1
   and C2 for it, and invalidates the backend's runtime projection. It never removes a row.
   Claude Code's locked `default` row is not a built-in candidate and cannot be hidden.
-- **C7 — models.dev read serves browse and ranked search.** `GET /api/models/catalog/models-dev`
-  gains `vendor=<provider_id>` beside `query=`, and returns `{vendors: [{id, name, model_count}],
-  models: [...]}`. `models` is deduplicated by model id, ranked first-party vendor first, then
+- **C7 — models.dev read serves the editor typeahead.** `GET /api/models/catalog/models-dev?query=`
+  returns `{models: [...]}` deduplicated by model id and ranked first-party vendor first, then
   exact-id, then name matches; each item carries `vendor_id`, `vendor_name`, `first_party:
-  boolean`, and the existing metadata fields. With neither parameter the response carries only
-  `vendors`, first-party vendors ordered by model count. First-party means the provider that
-  makes the model; aggregator providers (openrouter, together, fireworks, groq, deepinfra, …)
-  never win the ranking when a first-party entry exists.
+  boolean`, and the existing metadata fields. First-party means the provider that makes the
+  model; aggregator providers (openrouter, together, fireworks, groq, deepinfra, …) never win
+  the ranking when a first-party entry exists. Results are capped at 8 for the typeahead.
 - **C5 — Unchanged.** Source inventories, Source-side manual add, Route dialog, Source
   order, direct/gateway modes, and every runtime projection are byte-for-byte unchanged
   except through C1–C3.
@@ -282,20 +274,21 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 | --- | --- |
 | Catalog dialog add action (the only one) | `Add models` |
 | Picker title | `Add {{backend}} models` |
-| Picker search placeholder | `Search models or vendors` |
-| Group headers | `{{backend}} built-in` · `From your providers` · `models.dev` |
-| models.dev browse row | vendor chips by display name, then `More` |
-| models.dev group, empty query | `Type to search models.dev` |
-| Fallback row (query only) | `Add "{{query}}" by ID` |
-| Group with nothing to offer | the group is omitted, never an empty header |
-| Picker footer count | `{{count}} selected` |
-| Picker confirm | `Add {{count}} models`; disabled `Add models` when nothing is selected |
+| Picker search placeholder | `Search models or providers` |
+| Group headers | `{{backend}} built-in` · `From your providers` |
 | Already-in-list row (search only) | `In list` |
-| models.dev group states | vendor chips (empty query) · loading · `models.dev unavailable` |
+| Picker no match | `No model matches.` · inline action `Add "{{query}}" as a custom model…` |
+| Picker footer, left | `Add custom model…` |
+| Picker confirm | `Add {{count}} models`; disabled `Add models` when nothing is selected |
+| Editor first field | label `Model` · placeholder `Search models.dev or enter a model ID` |
+| Editor typeahead item | `{{name}}` · `{{id}}` · `{{vendor}}` · `{{context}}` |
+| Editor typeahead last item | `Use "{{query}}" as the model ID` |
+| Editor typeahead states | loading · `models.dev unavailable` |
 | Remove with route | `Also removes its route: {{hops}}` · button `Remove` |
 
 Every other existing string in `settings.models.gateway.catalog.*` and
-`settings.models.gateway.modelEditor.*` stays. No string explains mechanism.
+`settings.models.gateway.modelEditor.*` stays, except `Fill from models.dev`, which is removed.
+No string explains mechanism.
 
 ### Acceptance (properties, not enumerations)
 
@@ -318,6 +311,8 @@ Every other existing string in `settings.models.gateway.catalog.*` and
   menu was saved is present in the menu on the next read unless it was removed before, and
   a previously removed id never returns on its own.
 - The picker lists each candidate id exactly once across all groups.
+- In the editor, a models.dev suggestion fills every metadata field it knows and leaves each
+  one editable; an id models.dev does not know can still be entered and saved.
 
 ### Delivery notes
 
