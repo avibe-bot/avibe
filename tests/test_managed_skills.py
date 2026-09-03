@@ -542,6 +542,27 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
     assert render_skill_catalog_prompt([]) == ""
 
 
+def test_catalog_rendering_is_byte_stable_for_any_input_order(tmp_path: Path) -> None:
+    skills = []
+    for name in ("zeta", "alpha", "middle"):
+        skill_file = _write_skill(
+            tmp_path / "skills",
+            name,
+            name,
+            f"Description for {name}",
+        )
+        skill = parse_skill_file(skill_file, priority=(1, 0, 1))
+        assert skill is not None
+        skills.append(skill)
+
+    forward = render_skill_catalog_prompt(skills)
+    reverse = render_skill_catalog_prompt(list(reversed(skills)))
+
+    assert forward == reverse
+    assert forward.index("- alpha:") < forward.index("- middle:")
+    assert forward.index("- middle:") < forward.index("- zeta:")
+
+
 def test_manual_only_skill_is_loadable_but_not_advertised(tmp_path: Path) -> None:
     skill_file = tmp_path / "manual" / "SKILL.md"
     skill_file.parent.mkdir()
@@ -619,6 +640,11 @@ def test_system_prompt_catalog_reflects_add_edit_and_delete_each_render(tmp_path
     skill_file = _write_skill(cwd / ".agents" / "skills", "live", "live", "First")
     after_install = build_system_prompt_injection(skills_cwd=cwd)
     skill_file.write_text(
+        "---\nname: live\ndescription: First\n---\nBody changed without catalog metadata\n",
+        encoding="utf-8",
+    )
+    after_body_update = build_system_prompt_injection(skills_cwd=cwd)
+    skill_file.write_text(
         "---\nname: live\ndescription: Updated\n---\nUpdated body\n",
         encoding="utf-8",
     )
@@ -628,7 +654,9 @@ def test_system_prompt_catalog_reflects_add_edit_and_delete_each_render(tmp_path
 
     assert "## Skills" not in before
     assert "- live: First" in after_install
+    assert after_body_update == after_install
     assert "- live: Updated" in after_update
+    assert after_update != after_body_update
     assert "## Skills" not in after_delete
 
 

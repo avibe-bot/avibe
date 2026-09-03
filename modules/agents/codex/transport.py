@@ -89,6 +89,7 @@ class CodexTransport:
         self._pending: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
         self._write_lock = asyncio.Lock()
         self._initialized = False
+        self.supports_turn_collaboration_mode = True
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_task: Optional[asyncio.Task[None]] = None
 
@@ -161,9 +162,10 @@ class CodexTransport:
                         "title": "Avibe",
                         "version": "1.0.0",
                     },
-                    # Avibe intentionally consumes only the stable app-server
-                    # contract. Omitted server-request capabilities stay off.
-                    "capabilities": {"experimentalApi": False},
+                    # Dynamic developer instructions for an existing native
+                    # thread use turn/start.collaborationMode. Omitted
+                    # server-request capabilities remain disabled.
+                    "capabilities": {"experimentalApi": True},
                 },
             )
             logger.info("Codex app-server initialized: %s", resp)

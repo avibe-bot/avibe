@@ -309,7 +309,7 @@ consistency boundaries.
 | Backend | Native isolation | Avibe prompt application |
 | --- | --- | --- |
 | Claude Code | Configure the SDK with `skills=[]`. | Rebuild when the Skill Catalog changes and resume the same native Session. |
-| Codex | Set `skills.include_instructions=false`. | Render `developerInstructions` for each Turn while retaining the same thread. |
+| Codex | Set `skills.include_instructions=false`. | Apply the current developer instructions through `turn/start.collaborationMode` while retaining the same thread; use one developer-item fallback only when that API is unavailable. |
 | OpenCode | Send `tools.skill=false` in every prompt request. | Send the current system prompt on every new Turn. |
 
 For OpenCode, `tools.skill=false` is a request parameter, not prompt text, and
@@ -364,6 +364,18 @@ permissions, safety boundaries, and the short Skill routing instructions.
 
 Operational modules move incrementally into Avibe built-ins only after the
 replacement Skill has equivalent behavior and regression coverage.
+
+Catalogs and every other generated collection use a canonical order. Backends
+receive byte-identical prompt content when the effective inputs are unchanged:
+Claude reuses its current SDK client, OpenCode resends the same system prefix,
+and Codex's collaboration world state emits a new developer fragment only when
+the rendered instructions change. Model or reasoning changes remain explicit
+inputs to the Codex collaboration state so cache stability never leaves routing
+stale.
+
+The first extracted modules are Show Pages and Vault. Harness detail already
+lives in `use-avibe`; the always-on prompt retains only its routing rule,
+backend-specific safety boundary, live Agent Catalog, and mention semantics.
 
 ## 13. Ownership
 

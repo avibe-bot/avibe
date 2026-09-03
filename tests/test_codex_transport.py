@@ -104,7 +104,7 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                     "title": "Avibe",
                     "version": "1.0.0",
                 },
-                "capabilities": {"experimentalApi": False},
+                "capabilities": {"experimentalApi": True},
             },
         )
 

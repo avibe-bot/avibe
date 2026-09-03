@@ -547,7 +547,9 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
     prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
     assert captured["connected"] is True
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "`vibe show path`" in prompt
+    assert "load the `use-show-pages` Skill" in prompt
+    assert "- use-show-pages:" in prompt
+    assert "`vibe show path`" not in prompt
     assert "--session-id sesk8m4q2p7x" not in prompt
     assert "--session-key" not in prompt
 

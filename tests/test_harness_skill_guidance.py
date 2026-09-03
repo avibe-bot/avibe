@@ -4,6 +4,8 @@ import re
 import shlex
 from pathlib import Path
 
+from core.system_prompt_injection import build_system_prompt_injection
+from modules.im.base import MessageContext
 from vibe import cli
 
 
@@ -56,17 +58,27 @@ def test_avibe_skills_teach_current_harness_defaults() -> None:
         assert "follows the caller or source Session cwd" not in body
 
 
-def test_injected_harness_prompt_examples_parse_against_the_real_cli() -> None:
-    """CLI examples in the injected prompt are live callers, so they must parse.
+def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
+    """CLI examples in the prompt and its routed Skill must parse.
 
     The agent reads this prompt and runs what it finds. An example that argparse
     rejects — a renamed flag, a dropped one, a form that never existed — teaches
     the agent a call that fails at runtime. `tests/test_agent_tool_policy.py`
-    guards the same rule for the native-scheduler denial strings; this guards the
-    Harness prompt itself, which is where scheduled-command guidance lives.
+    guards the same rule for the native-scheduler denial strings. Harness
+    operational detail now lives in ``use-avibe`` while the always-on prompt
+    retains only routing and safety boundaries.
     """
 
-    examples = _embedded_cli_examples(_read("core/system_prompt_injection.py"))
+    prompt = build_system_prompt_injection(
+        context=MessageContext(
+            user_id="user",
+            channel_id="channel",
+            platform="avibe",
+            platform_specific={"agent_session_id": "ses-test"},
+        ),
+        current_agent_backend="codex",
+    )
+    examples = _embedded_cli_examples(prompt + "\n" + _read("skills/use-avibe/SKILL.md"))
     assert examples, "no embedded vibe task/watch examples found — did the regex drift?"
 
     parser = cli.build_parser()

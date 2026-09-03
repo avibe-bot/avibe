@@ -1,8 +1,8 @@
 ---
 name: use-avibe
 slug: use-avibe
-description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state.
-version: 0.6.1
+description: Safely operate Avibe configuration, routing, runtime, Agent Sessions, delegation, scheduled tasks, watches, Avibe Cloud access, and durable background work.
+version: 0.7.0
 ---
 
 # Use Avibe
@@ -782,6 +782,8 @@ Use the harness commands when the user wants an agent to leave the current turn 
 - `vibe runs`: inspect and cancel concrete run records
 
 Agents should prefer these managed harness commands over ad-hoc detached shells when the work should be inspectable, resumable, or report back to the conversation.
+Start with `vibe harness status` when you need one live view of active Runs,
+armed Watches, upcoming Tasks, ownership, and anomalies.
 
 Preferred CLI shape:
 

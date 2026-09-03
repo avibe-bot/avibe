@@ -4,12 +4,16 @@ import argparse
 import json
 import re
 import shlex
+from pathlib import Path
 
 from config import paths
 from core.system_prompt_injection import build_system_prompt_injection
 from modules.im.base import MessageContext
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import cli
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _command_parser(path: tuple[str, ...]):
@@ -95,7 +99,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         assert "--all" not in flags, path
 
 
-def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
+def test_injected_and_builtin_skill_commands_only_use_parser_supported_flags() -> None:
     context = MessageContext(
         user_id="user",
         channel_id="channel",
@@ -103,7 +107,11 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
         platform_specific={"agent_session_id": "ses-test"},
     )
     prompt = build_system_prompt_injection(context=context)
-    commands = re.findall(r"`(vibe [^`\n]+)`", prompt)
+    guidance = [prompt] + [
+        (ROOT / "skills" / name / "SKILL.md").read_text()
+        for name in ("use-avibe", "use-avibe-vault", "use-show-pages")
+    ]
+    commands = re.findall(r"`(vibe [^`\n]+)`", "\n".join(guidance))
     checked_commands = 0
 
     for command in commands:

@@ -161,6 +161,8 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, active model, active reasoning effort)
+        self._thread_model_settings: Dict[str, tuple[str, str, Optional[str]]] = {}
         # base_session_id → (thread_id, AVIBE_* caller env)
         self._thread_caller_env_configs: Dict[str, tuple[str, dict[str, str]]] = {}
         # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
@@ -443,6 +445,7 @@ class CodexAgent(BaseAgent):
             await self._delete_ack(request)
 
             self._turn_registry.remember_request(request)
+            developer_instructions: Optional[str] = None
             try:
                 # Get or create thread (with resume support)
                 thread_id = self._session_mgr.get_thread_id(request.base_session_id)
@@ -477,9 +480,22 @@ class CodexAgent(BaseAgent):
                     if interrupted_request:
                         await self._remove_ack_reaction(interrupted_request)
 
-                await self._refresh_thread_developer_instructions_if_needed(transport, request, thread_id)
+                # Render once at the actual Turn boundary. Besides keeping the
+                # payload byte-stable, this avoids repeating Memory admission
+                # side effects while the same request refreshes and starts.
+                developer_instructions = await self._build_thread_developer_instructions(request)
+                await self._refresh_thread_developer_instructions_if_needed(
+                    transport,
+                    request,
+                    thread_id,
+                )
                 self._bind_runtime_agent_session_id(request)
-                thread_id = await self._start_turn(transport, request, thread_id)
+                thread_id = await self._start_turn(
+                    transport,
+                    request,
+                    thread_id,
+                    developer_instructions=developer_instructions,
+                )
 
             except Exception as e:
                 # Safety net: if the thread is stale (e.g. Codex server-side
@@ -499,8 +515,15 @@ class CodexAgent(BaseAgent):
                             transport = await self._get_or_create_transport(request.working_path, launch)
                         self._touch_transport_activity(request.working_path)
                         thread_id = await self._start_or_resume_thread(transport, request)
+                        if developer_instructions is None:
+                            developer_instructions = await self._build_thread_developer_instructions(request)
                         self._bind_runtime_agent_session_id(request)
-                        await self._start_turn(transport, request, thread_id)
+                        await self._start_turn(
+                            transport,
+                            request,
+                            thread_id,
+                            developer_instructions=developer_instructions,
+                        )
                         return  # retry succeeded
                     except Exception as retry_err:
                         e = retry_err  # fall through to normal error handling
@@ -1923,9 +1946,6 @@ class CodexAgent(BaseAgent):
             "sandbox": "danger-full-access",
         }
         self.ensure_agent_session_id(request)
-        developer_instructions = await self._build_thread_developer_instructions(request)
-        if developer_instructions:
-            params["developerInstructions"] = developer_instructions
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
 
         resp = await transport.send_request("thread/start", params)
@@ -1941,7 +1961,11 @@ class CodexAgent(BaseAgent):
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         # Also persist for resume support
         self.bind_agent_session_id(request, thread_id)
-        self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        self._remember_thread_model_settings_from_response(
+            request.base_session_id,
+            thread_id,
+            resp,
+        )
         self._remember_thread_caller_env_config(
             request.base_session_id,
             thread_id,
@@ -1971,9 +1995,6 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
-        developer_instructions = await self._build_thread_developer_instructions(request)
-        if developer_instructions:
-            params["developerInstructions"] = developer_instructions
         if effective_model:
             params["model"] = effective_model
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
@@ -1997,7 +2018,11 @@ class CodexAgent(BaseAgent):
             self._clear_fork_correction_pending(request.base_session_id)
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         self.bind_agent_session_id(request, thread_id)
-        self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        self._remember_thread_model_settings_from_response(
+            request.base_session_id,
+            thread_id,
+            resp,
+        )
         self._remember_thread_caller_env_config(
             request.base_session_id,
             thread_id,
@@ -2149,10 +2174,8 @@ class CodexAgent(BaseAgent):
         if persisted:
             try:
                 self.bind_agent_session_id(request, persisted)
-                developer_instructions = await self._build_thread_developer_instructions(request)
                 resume_params: Dict[str, Any] = {
                     "threadId": persisted,
-                    "developerInstructions": developer_instructions,
                 }
                 git_path_state, git_path_managed = self._inject_caller_env_config(
                     resume_params,
@@ -2198,10 +2221,10 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise CodexResumeUnavailableError(persisted, detail="thread/resume returned no thread id")
             self._session_mgr.set_thread_id(request.base_session_id, thread_id)
-            self._remember_thread_developer_instructions(
+            self._remember_thread_model_settings_from_response(
                 request.base_session_id,
                 thread_id,
-                resume_params.get("developerInstructions"),
+                resp,
             )
             self._remember_thread_caller_env_config(
                 request.base_session_id,
@@ -2308,12 +2331,7 @@ class CodexAgent(BaseAgent):
         return _CODEX_DEFAULT_PROVIDER_ID
 
     async def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
-        """Build Codex thread-level developer instructions for start/resume.
-
-        Codex treats these as session configuration, not appended chat history.
-        Passing the current value on resume refreshes stale Vibe Remote targeting
-        instructions without growing the thread transcript.
-        """
+        """Render the developer instructions applied at the next Turn boundary."""
         _, _, _, agent_instructions = self._resolve_codex_agent_settings(request)
         platform = (
             request.context.platform
@@ -2389,46 +2407,34 @@ class CodexAgent(BaseAgent):
         request: AgentRequest,
         thread_id: str,
     ) -> None:
-        """Refresh thread-level instructions for already-cached Codex threads."""
+        """Refresh mutable non-prompt thread config before starting a Turn."""
         self.ensure_agent_session_id(request)
-        developer_instructions = await self._build_thread_developer_instructions(request)
-        # Building the instructions also grants/revokes the per-turn Memory CLI
-        # capability, so resolve the caller environment only after that decision.
+        # The caller invokes this after prompt rendering grants or revokes the
+        # per-turn Memory CLI capability, so the environment observes that
+        # decision without rendering the prompt a second time.
         caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 
-        if not hasattr(self, "_thread_developer_instructions"):
-            self._thread_developer_instructions = {}
         if not hasattr(self, "_thread_caller_env_configs"):
             self._thread_caller_env_configs = {}
         if not hasattr(self, "_thread_git_path_configs"):
             self._thread_git_path_configs = {}
 
-        cached = self._thread_developer_instructions.get(request.base_session_id)
         cached_caller_env = self._thread_caller_env_configs.get(request.base_session_id)
         cached_git_path = self._thread_git_path_configs.get(request.base_session_id)
         git_path_changed = cached_git_path is None or cached_git_path[:2] != (
             thread_id,
             git_path_state,
         )
-        git_path_managed = bool(
-            cached_git_path
-            and cached_git_path[0] == thread_id
-            and cached_git_path[2]
-        )
-        if not developer_instructions and not caller_env and not git_path_changed:
-            return
-        if cached == (thread_id, developer_instructions) and (
-            not caller_env or cached_caller_env == (thread_id, caller_env)
-        ) and not git_path_changed:
+        git_path_managed = bool(cached_git_path and cached_git_path[0] == thread_id and cached_git_path[2])
+        caller_env_changed = bool(caller_env) and cached_caller_env != (thread_id, caller_env)
+        if not caller_env_changed and not git_path_changed:
             return
 
         resume_params: Dict[str, Any] = {
             "threadId": thread_id,
         }
-        if cached != (thread_id, developer_instructions):
-            resume_params["developerInstructions"] = developer_instructions
-        if caller_env or git_path_changed:
+        if caller_env_changed or git_path_changed:
             git_path_state, git_path_managed = self._inject_caller_env_config(
                 resume_params,
                 request,
@@ -2438,14 +2444,12 @@ class CodexAgent(BaseAgent):
         if model_provider:
             resume_params["modelProvider"] = model_provider
 
+        if len(resume_params) == 1:
+            return
+
         await transport.send_request(
             "thread/resume",
             resume_params,
-        )
-        self._remember_thread_developer_instructions(
-            request.base_session_id,
-            thread_id,
-            developer_instructions,
         )
         self._remember_thread_caller_env_config(request.base_session_id, thread_id, caller_env)
         self._remember_thread_git_path_config(
@@ -2466,6 +2470,28 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions = {}
         self._thread_developer_instructions[base_session_id] = (thread_id, developer_instructions)
+
+    def _remember_thread_model_settings_from_response(
+        self,
+        base_session_id: str,
+        thread_id: str,
+        response: Any,
+    ) -> None:
+        if not isinstance(response, dict):
+            return
+        model = response.get("model")
+        if not isinstance(model, str) or not model.strip():
+            return
+        effort = response.get("reasoningEffort")
+        if not isinstance(effort, str):
+            effort = None
+        if not hasattr(self, "_thread_model_settings"):
+            self._thread_model_settings = {}
+        self._thread_model_settings[base_session_id] = (
+            thread_id,
+            model.strip(),
+            effort,
+        )
 
     def _remember_thread_caller_env_config(
         self,
@@ -2497,6 +2523,8 @@ class CodexAgent(BaseAgent):
     def _clear_thread_developer_instructions(self, base_session_id: str) -> None:
         if hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions.pop(base_session_id, None)
+        if hasattr(self, "_thread_model_settings"):
+            self._thread_model_settings.pop(base_session_id, None)
         if hasattr(self, "_thread_caller_env_configs"):
             self._thread_caller_env_configs.pop(base_session_id, None)
         if hasattr(self, "_thread_git_path_configs"):
@@ -2516,16 +2544,72 @@ class CodexAgent(BaseAgent):
     def is_fork_correction_pending(self, base_session_id: str) -> bool:
         return base_session_id in self._fork_correction_pending_sessions()
 
+    @staticmethod
+    def _collaboration_mode_is_unsupported(error: BaseException) -> bool:
+        message = str(error).casefold()
+        names_field = "collaborationmode" in message or "collaboration_mode" in message
+        unsupported = any(
+            marker in message
+            for marker in (
+                "experimental api",
+                "experimentalapi",
+                "unknown field",
+                "unsupported",
+                "unrecognized",
+            )
+        )
+        return names_field and unsupported
+
+    async def _inject_thread_developer_instructions(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        thread_id: str,
+        developer_instructions: str,
+    ) -> None:
+        """Fallback for Codex builds without Turn collaboration settings."""
+
+        await transport.send_request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": developer_instructions,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        self._remember_thread_developer_instructions(
+            request.base_session_id,
+            thread_id,
+            developer_instructions,
+        )
+
     async def _start_turn(
         self,
         transport: CodexTransport,
         request: AgentRequest,
         thread_id: str,
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Build input, configure overrides, and send turn/start to Codex."""
         self.ensure_agent_session_id(request)
         input_items = self._build_input(request)
         _, effective_model, effective_effort, _ = self._resolve_codex_agent_settings(request)
+        cached_model_settings = getattr(self, "_thread_model_settings", {}).get(request.base_session_id)
+        if cached_model_settings and cached_model_settings[0] == thread_id:
+            effective_model = effective_model or cached_model_settings[1]
+            if effective_effort is None:
+                effective_effort = cached_model_settings[2]
 
         turn_params: Dict[str, Any] = {
             "threadId": thread_id,
@@ -2538,6 +2622,32 @@ class CodexAgent(BaseAgent):
         if effective_effort:
             turn_params["effort"] = effective_effort
 
+        cached_instructions = getattr(self, "_thread_developer_instructions", {}).get(request.base_session_id)
+        prompt_changed = cached_instructions != (thread_id, developer_instructions)
+        use_collaboration_mode = bool(
+            developer_instructions and effective_model and getattr(transport, "supports_turn_collaboration_mode", True)
+        )
+        if use_collaboration_mode:
+            # Codex keeps the collaboration world state across Turns and emits
+            # a new developer fragment only when these exact bytes change. The
+            # explicit model and effort preserve the route because the mode
+            # takes precedence over the sibling turn fields.
+            turn_params["collaborationMode"] = {
+                "mode": "default",
+                "settings": {
+                    "model": effective_model,
+                    "reasoning_effort": effective_effort,
+                    "developer_instructions": developer_instructions,
+                },
+            }
+        elif developer_instructions and prompt_changed:
+            await self._inject_thread_developer_instructions(
+                transport,
+                request,
+                thread_id,
+                developer_instructions,
+            )
+
         self._write_caller_env_script(request)
         self._turn_registry.begin_turn_start(request, thread_id)
         event_handler = getattr(self, "_event_handler", None)
@@ -2549,7 +2659,40 @@ class CodexAgent(BaseAgent):
         if callable(snapshot_generated_images):
             snapshot_generated_images(thread_id, request.base_session_id)
         mark_backend_dispatch_attempted(request.context)
-        resp = await transport.send_request("turn/start", turn_params)
+        try:
+            resp = await transport.send_request("turn/start", turn_params)
+        except Exception as exc:
+            if not use_collaboration_mode or not self._collaboration_mode_is_unsupported(exc):
+                raise
+            logger.warning(
+                "Codex turn collaboration mode is unavailable; falling back to developer item injection: %s",
+                exc,
+            )
+            transport.supports_turn_collaboration_mode = False
+            if developer_instructions and prompt_changed:
+                await self._inject_thread_developer_instructions(
+                    transport,
+                    request,
+                    thread_id,
+                    developer_instructions,
+                )
+            fallback_turn_params = dict(turn_params)
+            fallback_turn_params.pop("collaborationMode", None)
+            resp = await transport.send_request("turn/start", fallback_turn_params)
+
+        if use_collaboration_mode and developer_instructions:
+            self._remember_thread_developer_instructions(
+                request.base_session_id,
+                thread_id,
+                developer_instructions,
+            )
+        if effective_model:
+            self._thread_model_settings = getattr(self, "_thread_model_settings", {})
+            self._thread_model_settings[request.base_session_id] = (
+                thread_id,
+                effective_model,
+                effective_effort,
+            )
 
         turn_id = resp.get("id", "")
         if not turn_id:
