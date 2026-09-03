@@ -41,6 +41,7 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
+from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
 from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
@@ -674,6 +675,18 @@ def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
         and evidence.authentication is _AuthenticationEvidence.UNKNOWN
         and evidence.shape in _PAIRWISE_EXCLUSION_SHAPES
     )
+
+
+def _protocol_is_persistable_without_shape_proof(
+    *,
+    vendor: str,
+    protocol: str,
+    protocol_order: Sequence[str],
+) -> bool:
+    pinned_protocol = pinned_api_key_protocol(vendor)
+    if pinned_protocol == protocol:
+        return True
+    return vendor == "custom" and len(protocol_order) == 1 and protocol_order[0] == protocol
 
 
 def _anthropic_wrapperless_elimination_proof(
@@ -1428,14 +1441,17 @@ class CLIProxyEngineAdapter:
         credential_ref: str,
         protocol_order: Sequence[str],
     ) -> SourceObservation:
-        """Observe sequentially and stop at the first authenticated proof.
+        """Observe sequentially and stop at the first persistable proof.
 
         ``protocol_order`` orders attempts only. A protocol-specific response
         with accepted authentication proves the current attempt and terminates
-        observation. A shaped credential rejection is recorded while later
-        candidates continue. Vendor, URL, and order never create a conclusion;
-        exhausting the order without any shaped response is the ambiguous
-        boundary. This is the require-proven reading of AC-27.
+        observation. A shipped vendor catalog pin or a concrete `custom`
+        declaration also terminates observation once that exact protocol path
+        is reachable and authenticated, even when the response shape itself
+        stays generic. A shaped credential rejection is recorded while later
+        candidates continue. Vendor, URL, and order never create a conclusion
+        on their own; Auto detect still requires response-backed proof, and
+        exhausting that path without one remains ambiguous.
         """
 
         metadata = await asyncio.to_thread(
@@ -1513,10 +1529,17 @@ class CLIProxyEngineAdapter:
                 received_unproven_response = True
                 if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
                     received_accepted_unproven_response = True
+                    if _protocol_is_persistable_without_shape_proof(
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                        protocol_order=protocol_order,
+                    ):
+                        proved_protocol = protocol
                 if _pairwise_positive_exclusion(evidence):
                     ruled_out_protocols.add(protocol)
                 response_evidence_by_protocol[protocol] = evidence
-                continue
+                if proved_protocol is None:
+                    continue
             try:
                 if credential_kind == "api_key":
                     models = await probe_models(

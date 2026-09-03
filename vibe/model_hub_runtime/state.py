@@ -12,6 +12,7 @@ from typing import Any, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
+from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
 
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
@@ -499,9 +500,25 @@ def _validated_base_url(value: str | None) -> str | None:
 
 
 def _validate_source_target(vendor: str, protocol: str, base_url: str | None) -> None:
-    if protocol == "anthropic" and base_url is None and vendor != "anthropic":
+    pinned_protocol = pinned_api_key_protocol(vendor)
+    if (
+        protocol == "anthropic"
+        and base_url is None
+        and vendor != "anthropic"
+        and pinned_protocol != "anthropic"
+    ):
         raise EngineStateError("Anthropic-compatible source requires a base URL")
-    if protocol == "openai_responses" and base_url is None and vendor not in {"openai", "codex"}:
+    if (
+        protocol == "openai_responses"
+        and base_url is None
+        and vendor not in {"openai", "codex"}
+        and pinned_protocol != "openai_responses"
+    ):
         raise EngineStateError("Responses API source requires a base URL")
-    if protocol == "openai_chat" and base_url is None and vendor != "openai":
+    if (
+        protocol == "openai_chat"
+        and base_url is None
+        and vendor != "openai"
+        and pinned_protocol != "openai_chat"
+    ):
         raise EngineStateError("OpenAI-compatible source requires a base URL")

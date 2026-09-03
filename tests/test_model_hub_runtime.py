@@ -1495,6 +1495,25 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     )
     assert official[0].base_url is None
 
+    official_deepseek_ref = store.store_api_key(
+        "secret",
+        vendor="deepseek",
+        protocol="openai_chat",
+        base_url=None,
+    )
+    official_deepseek = store.sync_sources(
+        [
+            _binding(
+                official_deepseek_ref,
+                source_id="src_deepseek01",
+                vendor="deepseek",
+                protocol="openai_chat",
+                base_url=None,
+            )
+        ]
+    )
+    assert official_deepseek[0].base_url is None
+
     auth_file = store.auth_dir / "oauth.json"
     auth_file.write_text("{}", encoding="utf-8")
     auth_file.chmod(0o644)
@@ -1502,6 +1521,13 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
         store.audit_auth_permissions()
     store.audit_auth_permissions(enforce=True)
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+
+
+def test_api_key_vendor_catalog_populates_runtime_official_base_urls() -> None:
+    assert client_module._OFFICIAL_BASE_URLS["deepseek"] == "https://api.deepseek.com"
+    assert client_module._OFFICIAL_BASE_URLS["openrouter"] == "https://openrouter.ai/api/v1"
+    assert client_module._OFFICIAL_BASE_URLS["openai"] == "https://api.openai.com/v1"
+    assert client_module._OFFICIAL_BASE_URLS["codex"] == "https://api.openai.com/v1"
 
 
 def test_state_removes_secret_bearing_configs_on_upgrade_and_revocation(tmp_path: Path) -> None:

@@ -4523,6 +4523,103 @@ def test_unsaved_observation_route_restricts_a_manual_protocol_to_one_probe(
     assert adapter.revoked == ["cred_test001"]
 
 
+def test_unsaved_observation_route_defaults_a_catalog_vendor_to_its_pinned_protocol(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/sources/observe",
+        json={
+            "vendor": "deepseek",
+            "key": "sk-test-observation-catalog",
+        },
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["observation"]["protocol"] == "openai_chat"
+    assert adapter.observed_protocol_orders == [("openai_chat",)]
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_test001"]
+
+
+def test_unsaved_observation_route_rejects_wrong_protocol_for_a_catalog_vendor(
+    monkeypatch,
+    tmp_path,
+):
+    service, _, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/sources/observe",
+        json={
+            "vendor": "deepseek",
+            "key": "sk-test-observation-wrong-protocol",
+            "protocol": "anthropic",
+        },
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "discovery_failed"
+    assert adapter.secret_lengths == []
+    assert adapter.observed_protocol_orders == []
+    assert adapter.revoked == []
+
+
+def test_create_source_defaults_a_catalog_vendor_to_its_pinned_protocol(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    created = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "deepseek",
+                "key": "sk-test-create-catalog",
+            },
+        )
+    )
+
+    assert created["protocol"] == "openai_chat"
+    assert created["base_url"] is None
+    assert adapter.observed_protocol_orders == [("openai_chat",)]
+    assert store.config.sources[0].protocol == "openai_chat"
+    assert store.config.sources[0].base_url is None
+    assert adapter.revoked == ["cred_test001"]
+
+
+def test_create_source_rejects_wrong_protocol_for_a_catalog_vendor(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "deepseek",
+                    "key": "sk-test-create-wrong-protocol",
+                    "protocol": "anthropic",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources == []
+    assert adapter.secret_lengths == []
+    assert adapter.observed_protocol_orders == []
+    assert adapter.revoked == []
+
+
 @pytest.mark.parametrize(
     ("protocol", "model", "expected_efforts", "expected_source"),
     (

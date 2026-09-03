@@ -5628,7 +5628,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     state_store = EngineStateStore(tmp_path / "engine-state")
     credential_ref = state_store.store_api_key(
         "test-observation-key",
-        vendor="openai",
+        vendor="custom",
         protocol=SOURCE_PROTOCOLS[-1],
         base_url=base_url,
     )
@@ -5688,11 +5688,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         observed = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                hinted_order,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    hinted_order,
             )
         )
 
@@ -5715,11 +5715,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                hinted_order,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    hinted_order,
             )
         )
 
@@ -5749,11 +5749,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         observed = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                pairwise_order,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    pairwise_order,
             )
         )
 
@@ -5781,11 +5781,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                SOURCE_PROTOCOLS,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
             )
         )
 
@@ -5813,11 +5813,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                SOURCE_PROTOCOLS,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
             )
         )
 
@@ -5847,11 +5847,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                SOURCE_PROTOCOLS,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
             )
         )
 
@@ -5883,11 +5883,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                SOURCE_PROTOCOLS,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
             )
         )
 
@@ -5917,11 +5917,11 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         ) as inventory_probe,
     ):
         ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                SOURCE_PROTOCOLS,
+                adapter.observe_source(
+                    "custom",
+                    base_url,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
             )
         )
 
@@ -5957,7 +5957,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         ambiguous = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -5991,7 +5991,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         observed = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6036,7 +6036,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         ambiguous = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6070,7 +6070,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         observed = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6104,7 +6104,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         observed = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6156,7 +6156,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         rejected = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6179,20 +6179,20 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
             new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
         ) as inventory_probe,
     ):
-        ambiguous = asyncio.run(
+        observed = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 ("anthropic",),
             )
         )
 
-    assert ambiguous.outcome.value == "ambiguous"
-    assert ambiguous.protocol is None
-    assert ambiguous.authenticated is True
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "anthropic"
+    assert observed.authenticated is True
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == ["anthropic"]
-    inventory_probe.assert_not_awaited()
+    assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
 
     async def shaped_server_failure(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] == "anthropic":
@@ -6219,7 +6219,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         upstream_error = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6265,7 +6265,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         observed = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6301,7 +6301,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         observed = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6345,7 +6345,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ):
         rejected = asyncio.run(
             adapter.observe_source(
-                "openai",
+                "custom",
                 base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
@@ -6357,6 +6357,175 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert rejected.authenticated is False
     assert rejected.protocol is None
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+
+def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_shape_proof(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    catalog_ref = state_store.store_api_key(
+        "test-deepseek-key",
+        vendor="deepseek",
+        protocol="openai_chat",
+        base_url=None,
+    )
+    custom_ref = state_store.store_api_key(
+        "test-custom-key",
+        vendor="custom",
+        protocol="openai_chat",
+        base_url="https://api.deepseek.com",
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=Mock(),
+        state_store=state_store,
+    )
+    generic_request_accepted = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
+
+    async def identical_three_path_shape(**_kwargs) -> _ProtocolEvidence:
+        return generic_request_accepted
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=identical_three_path_shape),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id="deepseek-chat"),)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "deepseek",
+                None,
+                catalog_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_chat"
+    assert observed.model_ids == ("deepseek-chat",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=identical_three_path_shape),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "custom",
+                "https://api.deepseek.com",
+                custom_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=identical_three_path_shape),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id="deepseek-chat"),)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "custom",
+                "https://api.deepseek.com",
+                custom_ref,
+                ("openai_chat",),
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_chat"
+    assert observed.model_ids == ("deepseek-chat",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == ["openai_chat"]
+    assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
+
+
+@pytest.mark.parametrize(
+    ("vendor", "base_url", "credential_vendor", "credential_protocol", "protocol_order"),
+    [
+        ("deepseek", None, "deepseek", "openai_chat", ("openai_chat",)),
+        (
+            "custom",
+            "https://api.deepseek.com",
+            "custom",
+            "openai_chat",
+            ("openai_chat",),
+        ),
+    ],
+    ids=("catalog_pin", "custom_declared"),
+)
+def test_source_observation_catalog_pin_and_declaration_still_require_authentication(
+    tmp_path: Path,
+    vendor: str,
+    base_url: str | None,
+    credential_vendor: str,
+    credential_protocol: str,
+    protocol_order: tuple[str, ...],
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.store_api_key(
+        "test-observation-key",
+        vendor=credential_vendor,
+        protocol=credential_protocol,
+        base_url=base_url,
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=Mock(),
+        state_store=state_store,
+    )
+    rejected = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(return_value=rejected),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
+        ) as inventory_probe,
+    ):
+        failed = asyncio.run(
+            adapter.observe_source(
+                vendor,
+                base_url,
+                credential_ref,
+                protocol_order,
+            )
+        )
+
+    assert failed.outcome.value == "authentication_failed"
+    assert failed.protocol is None
+    assert failed.authenticated is False
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(protocol_order)
     inventory_probe.assert_not_awaited()
 
 
