@@ -8,6 +8,7 @@ describe('dependencyHasInstallAction', () => {
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'not_required' })).toBe(false);
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'error', action_class: 'operator_only' })).toBe(false);
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'missing', action_class: 'none' })).toBe(false);
+    expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'error', action_class: 'operator_only' })).toBe(false);
   });
 
   it('keeps supported dependency actions unchanged', () => {
@@ -19,6 +20,7 @@ describe('dependencyHasInstallAction', () => {
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'missing' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'ready', action_class: 'repairable' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'ready' })).toBe(true);
+    expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'missing', action_class: 'repairable' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'node', status: 'missing' })).toBe(false);
   });
 });

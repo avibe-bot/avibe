@@ -2445,30 +2445,94 @@ def test_show_runtime_doctor_identifies_legacy_upstream_fallback(monkeypatch):
     assert "repair" not in next(item for item in items if item.get("code") == "show_runtime.not_ready")
 
 
+@pytest.mark.parametrize(
+    ("owner_result", "expected_status", "message_fragment"),
+    [
+        (
+            {
+                "ok": True,
+                "outcome": "healthy",
+                "provider": "manifest-cache",
+                "platform": "linux-x64",
+                "install_dir": "/runtime/old",
+            },
+            "skipped",
+            "no repair is needed",
+        ),
+        (
+            {
+                "ok": True,
+                "outcome": "repaired",
+                "was_installed": True,
+                "provider": "manifest-cache",
+                "platform": "linux-x64",
+                "install_dir": "/runtime/new",
+            },
+            "repaired",
+            "Reinstalled and started",
+        ),
+        (
+            {
+                "ok": False,
+                "outcome": "failed",
+                "reason": "runtime_start_verification_failed",
+                "verification": {"state": "undetermined", "detail": "probe failed"},
+                "verification_phase": "before",
+                "installed": True,
+            },
+            "failed",
+            "no reinstall was attempted",
+        ),
+        (
+            {
+                "ok": False,
+                "outcome": "failed",
+                "reason": "runtime_start_health_timeout",
+                "verification": {
+                    "state": "not_startable",
+                    "reason": "runtime_start_health_timeout",
+                },
+                "verification_phase": "after",
+                "was_installed": True,
+                "installed": True,
+            },
+            "failed",
+            "reinstalled but could not start",
+        ),
+    ],
+)
+def test_repair_show_runtime_renders_manager_owned_outcomes(
+    monkeypatch,
+    owner_result,
+    expected_status,
+    message_fragment,
+):
+    manager = SimpleNamespace(repair=lambda: owner_result)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == expected_status
+    assert message_fragment in result["message"]
+
+
 def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
     archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"
     manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "archive": {"url": archive_url},
-            "install": {"state": "absent", "install_dir": None},
-        },
-        prepare=lambda force=False: {
+        repair=lambda: {
             "ok": False,
+            "outcome": "failed",
+            "reason": "runtime_archive_download_failed",
             "provider": "manifest-cache",
             "platform": "linux-x64",
-            "reason": "runtime_archive_download_failed",
-            "status": {
-                "download_error": {
-                    "kind": "timeout",
-                    "message": "Connection timed out",
-                    "url": archive_url,
-                }
+            "download_error": {
+                "kind": "timeout",
+                "message": "Connection timed out",
+                "url": archive_url,
             },
-        },
+        }
     )
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
 
     result = cli._repair_show_runtime()
 
@@ -2478,385 +2542,29 @@ def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
     assert archive_url in result["message"]
 
 
-def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
-    prepared = []
-    stopped = []
-
-    async def ensure():
-        return SimpleNamespace(available=True, reason=None)
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "command": [str(tmp_path / "runtime-cli")],
-            "status": {"install": {"state": "installed", "install_dir": str(tmp_path / "runtime")}},
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
-            "install": {"state": "absent", "install_dir": None},
-        },
-        prepare=prepare,
-        ensure=ensure,
-        stop=lambda: stopped.append(True),
-    )
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "repaired"
-    assert result["install_dir"] == str(tmp_path / "runtime")
-    assert result["message"] == "Installed and started Show Runtime."
-    assert prepared == [False]
-    assert stopped == [True]
-
-
-def test_repair_show_runtime_does_not_reinstall_startable_runtime(monkeypatch, tmp_path):
-    constructor_calls = []
-    verifier_stops = []
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-        },
-        prepare=lambda force=False: pytest.fail("startable runtime must not be reinstalled"),
-    )
-    verifier = SimpleNamespace(
-        ensure=lambda: asyncio.sleep(0, result=SimpleNamespace(available=True, reason=None)),
-        stop=lambda: verifier_stops.append(True),
-    )
-
-    def manager_factory(**kwargs):
-        constructor_calls.append(kwargs)
-        return verifier if kwargs else manager
-
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "skipped"
-    assert result["install_dir"] == str(tmp_path / "installed")
-    assert "no repair is needed" in result["message"]
-    assert verifier_stops == [True]
-    assert len(constructor_calls) == 2
-    verification_call = constructor_calls[1]
-    assert verification_call["auto_install"] is False
-    assert verification_call["workspace_root"].name == "show"
-    assert verification_call["runtime_dir"].name == "runtime"
-    assert verification_call["workspace_root"].parent == verification_call["runtime_dir"].parent
-
-
-@pytest.mark.parametrize(
-    ("language", "message_fragment"),
-    [("en", "Fix or remove the override"), ("zh", "\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6")],
-)
-def test_repair_show_runtime_refuses_explicit_command_before_hypothetical_recovery(
-    monkeypatch, tmp_path, language, message_fragment
+@pytest.mark.parametrize(("language", "message_fragment"), [("en", "Fix or remove"), ("zh", "\u4fee\u590d\u6216\u79fb\u9664")])
+def test_repair_show_runtime_renders_explicit_command_failure(
+    monkeypatch,
+    language,
+    message_fragment,
 ):
-    prepared = []
-    verification_calls = []
-    verification_results = [
-        SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-        SimpleNamespace(available=True, reason=None),
-    ]
-    explicit_command = str(tmp_path / "explicit-runtime")
     manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "command",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": None},
-            "command": [explicit_command],
-            "explicit_command": explicit_command,
-        },
-        prepare=lambda force=False: prepared.append(force),
+        repair=lambda: {
+            "ok": False,
+            "outcome": "failed",
+            "reason": "runtime_start_health_timeout",
+            "explicit_command": "/custom/runtime",
+            "installed": True,
+        }
     )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-
-        async def ensure():
-            index = len(verification_calls)
-            verification_calls.append(index)
-            return verification_results[index]
-
-        return SimpleNamespace(ensure=ensure, stop=lambda: None)
-
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
     monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
 
     result = cli._repair_show_runtime()
 
     assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_health_timeout"
-    assert result["explicit_command"] == explicit_command
-    assert "VIBE_SHOW_RUNTIME_BIN" in result["message"]
+    assert result["explicit_command"] == "/custom/runtime"
     assert message_fragment in result["message"]
-    assert prepared == []
-    assert verification_calls == [0]
-
-
-def test_repair_show_runtime_reinstalls_unstartable_runtime_and_verifies_recovery(monkeypatch, tmp_path):
-    prepared = []
-    verifier_results = iter(
-        [
-            SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            SimpleNamespace(available=True, reason=None),
-        ]
-    )
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-            "status": {"install": {"state": "installed", "install_dir": str(tmp_path / "installed")}},
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(0, result=next(verifier_results)),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "repaired"
-    assert result["message"] == "Reinstalled and started Show Runtime."
-    assert prepared == [True]
-
-
-def test_repair_show_runtime_reports_runtime_that_still_cannot_start(monkeypatch, tmp_path):
-    prepared = []
-    verifier_stops = []
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-            "status": {"install": {"state": "installed", "install_dir": str(tmp_path / "installed")}},
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(
-                0,
-                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            ),
-            stop=lambda: verifier_stops.append(True),
-        )
-
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_health_timeout"
-    assert result["message"] == "Show Runtime was reinstalled but could not start: runtime_start_health_timeout"
-    assert prepared == [True]
-    assert verifier_stops == [True, True]
-
-
-def test_repair_show_runtime_reports_first_install_that_cannot_start(monkeypatch, tmp_path):
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "archive": {"url": str(tmp_path / "runtime.tgz")},
-            "install": {"state": "absent", "install_dir": None},
-        },
-        prepare=lambda force=False: {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-            "status": {"install": {"state": "installed", "install_dir": str(tmp_path / "installed")}},
-        },
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(
-                0,
-                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            ),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_health_timeout"
-    assert result["message"] == "Show Runtime was installed but could not start: runtime_start_health_timeout"
-
-
-def test_repair_show_runtime_preserves_undetermined_post_repair_verification(monkeypatch, tmp_path):
-    prepared = []
-    verification_index = 0
-    verifier_results = iter(
-        [
-            SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            SimpleNamespace(available=True, reason=None),
-        ]
-    )
-
-    class VerificationDirectory:
-        def __init__(self, *args, **kwargs):
-            nonlocal verification_index
-            del args, kwargs
-            verification_index += 1
-            self.index = verification_index
-
-        def __enter__(self):
-            root = tmp_path / f"verification-{self.index}"
-            root.mkdir()
-            return str(root)
-
-        def __exit__(self, exc_type, exc, traceback):
-            del exc_type, exc, traceback
-            if self.index == 2:
-                raise OSError("post-repair verification cleanup failed")
-            return False
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-            "status": {"install": {"state": "installed", "install_dir": str(tmp_path / "installed")}},
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-            "archive": {"url": str(tmp_path / "runtime.tgz")},
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(0, result=next(verifier_results)),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr(cli.tempfile, "TemporaryDirectory", VerificationDirectory)
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_verification_failed"
-    assert result["start_error"] == "post-repair verification cleanup failed"
-    assert "preparation completed" in result["message"]
-    assert prepared == [True]
-
-
-def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remains_installed(
-    monkeypatch,
-    tmp_path,
-):
-    prepared = []
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": False,
-            "reason": "runtime_archive_download_failed",
-            "provider": "archive",
-            "platform": "linux-x64",
-            "command": None,
-            "status": {
-                "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-                "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-            },
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "archive",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-            "archive": {"url": str(tmp_path / "runtime.tgz")},
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(
-                0,
-                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            ),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_archive_download_failed"
-    assert result["installed"] is True
-    assert result["install_dir"] == str(tmp_path / "installed")
-    assert prepared == [True]
 
 
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
@@ -3448,68 +3156,6 @@ def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
     assert warnings == [
         f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source.lower()} is retired; using manifest-cache instead"
     ]
-
-
-@pytest.mark.parametrize("failure_phase", ["temporary_directory", "verifier", "cleanup"])
-def test_repair_show_runtime_reports_verification_workspace_failures(monkeypatch, tmp_path, failure_phase):
-    prepared = []
-
-    class VerificationDirectory:
-        def __init__(self, *args, **kwargs):
-            if failure_phase == "temporary_directory":
-                raise OSError("verification workspace failed")
-
-        def __enter__(self):
-            root = tmp_path / "verification"
-            root.mkdir(exist_ok=True)
-            return str(root)
-
-        def __exit__(self, exc_type, exc, traceback):
-            if failure_phase == "cleanup":
-                raise OSError("verification workspace failed")
-            return False
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": True,
-            "provider": "archive",
-            "platform": "linux-x64",
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-            "status": {"install": {"state": "installed", "install_dir": str(tmp_path / "installed")}},
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "archive",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(tmp_path / "installed")},
-            "archive": {"url": str(tmp_path / "runtime.tgz")},
-            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        if failure_phase == "verifier":
-            raise OSError("verification workspace failed")
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(0, result=SimpleNamespace(available=True, reason=None)),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr(cli.tempfile, "TemporaryDirectory", VerificationDirectory)
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_verification_failed"
-    assert result["start_error"] == "verification workspace failed"
-    assert "no reinstall was attempted" in result["message"]
-    assert prepared == []
 
 
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):

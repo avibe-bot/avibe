@@ -66,6 +66,48 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('SettingsDependenciesPage Show Runtime status', () => {
+  it('renders inspection failure without authorizing install or repair', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'show-runtime',
+        installed: null,
+        status: 'error',
+        action_class: 'operator_only',
+        version: null,
+        reason: 'runtime_install_inspection_failed',
+      })],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('settings.dependencies.statusError')).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toBe('errors.runtime_install_inspection_failed');
+    expect(screen.queryByRole('button', { name: 'settings.dependencies.install' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'settings.dependencies.repair' })).toBeNull();
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
+  it('keeps a proven absence installable', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'show-runtime',
+        installed: false,
+        status: 'missing',
+        action_class: 'repairable',
+        version: null,
+      })],
+    });
+
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.install' }));
+
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('show-runtime'));
+  });
+});
+
 describe('SettingsDependenciesPage Memory runtime', () => {
   it('routes repairable Python package bootstrap through its own dependency action', async () => {
     api.listDependencies.mockResolvedValue({
