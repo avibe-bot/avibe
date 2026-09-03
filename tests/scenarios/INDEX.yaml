@@ -150,6 +150,7 @@ capabilities:
       - ui/src/components/settings/models/UsageTab.test.tsx
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
       - ui/src/components/settings/models/RouteChainDialog.test.tsx
+      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
       - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

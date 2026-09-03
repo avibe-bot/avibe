@@ -140,7 +140,7 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.queryByText('src_a')).toBeNull();
   });
 
-  it('adds what the providers offer, and promises the suppliers it displayed', async () => {
+  it('MH-MENU-COMPOSE-001: adds what the providers offer, and promises the suppliers it displayed', async () => {
     const user = userEvent.setup();
     const catalog = [locked, model('alpha')];
     const glm = candidate('glm-5.2', {
