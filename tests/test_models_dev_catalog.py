@@ -208,6 +208,39 @@ def test_models_dev_deduplicates_by_model_id_and_ranks_first_party_then_match(
     assert matches[1]["first_party"] is False
 
 
+def test_models_dev_openai_o_series_does_not_claim_other_o_families(monkeypatch):
+    catalog = {
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {
+                "o3-target": {"name": "O3 proxy"},
+                "olmo-target": {"name": "OLMo proxy"},
+            },
+        },
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "o3-target": {"name": "O3 target"},
+                "olmo-target": {"name": "OLMo OpenAI copy"},
+            },
+        },
+    }
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: catalog,
+    )
+
+    matches = {
+        item["model_id"]: item for item in models_dev_catalog.search_models_dev("target")
+    }
+
+    assert matches["o3-target"]["provider_id"] == "openai"
+    assert matches["o3-target"]["first_party"] is True
+    assert matches["olmo-target"]["provider_id"] == "openrouter"
+    assert matches["olmo-target"]["first_party"] is False
+
+
 def test_models_dev_validates_each_copy_before_ranking_and_deduplication(
     monkeypatch,
 ):

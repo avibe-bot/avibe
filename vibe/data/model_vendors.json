@@ -11,7 +11,9 @@
     {"prefix": "kimi-", "vendor_id": "moonshotai"},
     {"prefix": "glm-", "vendor_id": "zhipuai"},
     {"prefix": "qwen", "vendor_id": "alibaba"},
-    {"prefix": "o", "vendor_id": "openai"}
+    {"prefix": "o1", "vendor_id": "openai"},
+    {"prefix": "o3", "vendor_id": "openai"},
+    {"prefix": "o4", "vendor_id": "openai"}
   ],
   "aggregators": ["openrouter", "together", "fireworks-ai", "groq", "deepinfra"]
 }
