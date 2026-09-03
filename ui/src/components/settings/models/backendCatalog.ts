@@ -11,7 +11,7 @@
 // model the Agent may select; which supplier serves it stays with the Route, and
 // mixing the two here is what the contract's 「no Source id, no upstream model
 // id, no priority, no fallback」 rule exists to prevent.
-import { buildIdentifier, inferProvider, type StandardVendors } from './menus/identifiers';
+import { buildIdentifier, type StandardVendors } from './menus/identifiers';
 import type { ModelsApi } from './modelsApi';
 import type {
   AgentBackend,
@@ -323,10 +323,12 @@ const OPENCODE_PROVIDER_SEGMENT = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
  * the dialog calls `openai/` valid, saves, and the `PUT` rejects the whole list
  * for a row the user was told was fine.
  *
- * Both halves or neither. A recognized provider prefix proves only that the left
- * half is admissible — `openai/` has no right half at all, and `custom/` is the
- * same hole behind the fallback prefix this file adds itself. Splitting on the
- * FIRST separator is what the backend does, so a reseller id keeps its own
+ * Both halves or neither. A provider prefix proves only that the left half is
+ * admissible — `openai/` has no right half at all, and `custom/` is the same
+ * hole behind the fallback prefix this file adds itself. This is the only rule
+ * that judges admissibility, which is why `backendModelId` can hand a malformed
+ * identity straight back instead of inventing a well-formed one. Splitting on
+ * the FIRST separator is what the backend does, so a reseller id keeps its own
  * slashes (`openrouter/anthropic/claude-…` is provider `openrouter`, model
  * `anthropic/claude-…`).
  *
@@ -357,18 +359,30 @@ export const opencodeMenuIdentity = (id: string, backend: AgentBackend): boolean
  * rule. An id the user types character by character is not produced here; it is
  * theirs, and the id field validates it rather than rewriting it underneath them.
  *
- * OpenCode identifiers are `provider/model`, and the provider segment has to be
- * one the backend recognizes: an unrecognized vendor is `custom` there, never
- * the vendor's own name (`menus/identifiers`). So an id that already carries an
- * admissible provider is taken as given, and anything else is prefixed with the
- * normalization of `vendor` — the proposing provider when there is one, and
- * nothing when there is not, which `inferProvider` answers with `custom` for the
- * same reason the backend does. Every other backend takes the id verbatim,
- * because its ids have no segment to satisfy.
+ * OpenCode identifiers are `provider/model`, and what this function contributes
+ * is the provider segment an id does not have. So the question it asks is
+ * whether one is there at all, never whether the backend recognizes it:
+ * `canonical_opencode_menu_identity` admits any segment matching its grammar,
+ * `standard_vendors` membership included and not required, so `acme/model` is a
+ * public identity the server accepts, and rewriting it to `custom/acme/model`
+ * saves a different model than the user asked for — one the server accepts too,
+ * because it splits on the first separator, so nothing downstream would notice.
  *
- * Admissibility is asked of `inferProvider` rather than of the vendor list
- * directly, so an id that already says `custom/…` passes for exactly the reason
- * the backend accepts it.
+ * The vendor list answers a different question, and only that one: which
+ * provider segment a SOURCE's vendor maps to, which has to byte-match
+ * `opencode_model_id(source.vendor, model.id)` or the menu rejects the checked
+ * value. That is what `vendor` is normalized through here — the proposing
+ * provider when there is one, and nothing when there is not, which
+ * `buildIdentifier` answers with `custom` for the same reason the backend does.
+ * Every other backend takes the id verbatim, because its ids have no segment to
+ * satisfy.
+ *
+ * An id that carries a provider segment is therefore taken as typed even when
+ * the whole identity is malformed. `openai/` is not a bare model id, and
+ * prefixing it would mint `custom/openai/` — a typo the server then accepts as
+ * the model `openai/`. Admissibility is `opencodeMenuIdentity`'s question, asked
+ * of this function's output at the field, and the only honest answer to a broken
+ * identity is to refuse it rather than to complete it into a different one.
  */
 export const backendModelId = (
   id: string,
@@ -377,9 +391,7 @@ export const backendModelId = (
   vendor = '',
 ): string => {
   if (backend !== 'opencode' || id === '') return id;
-  const slash = id.indexOf('/');
-  const provider = slash > 0 ? id.slice(0, slash) : '';
-  if (provider !== '' && inferProvider(provider, standardVendors) === provider) return id;
+  if (id.includes('/')) return id;
   return buildIdentifier(vendor, id, standardVendors);
 };
 

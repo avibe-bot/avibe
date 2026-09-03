@@ -269,22 +269,57 @@ describe('the id chokepoint', () => {
    *  vendor, a models.dev match names its provider, standard or not. */
   const OFFERED_BY = ['', 'zhipuai', 'nosuchvendor'];
 
-  /** Admissible as the backend decides it, not as this test decides it: whatever
-   *  provider segment the id carries, OpenCode's own normalization must already
-   *  agree it is that segment — the check `set_opencode_menu` applies. An id
-   *  with no slash carries no segment, which fails for the same reason a wrong
-   *  one does. */
-  const admissible = (id: string): boolean => {
-    const slash = id.indexOf('/');
-    const provider = slash > 0 ? id.slice(0, slash) : '';
-    return inferProvider(provider, VENDORS) === provider;
+  /** Admissible as the backend decides it, not as this test decides it. This
+   *  used to ask the vendor list — whether OpenCode's own normalization agreed
+   *  the segment was that segment — and that was the defect, stated as the
+   *  property: `canonical_opencode_menu_identity` admits any segment matching
+   *  its grammar and never consults `standard_vendors`, so the test called
+   *  `nosuchvendor/glm-5.2` inadmissible and locked in a rewrite the server had
+   *  no objection to. The one mirror of that rule is the authority here too. */
+  const admissible = (id: string): boolean => opencodeMenuIdentity(id, 'opencode');
+  /** Each bucket asserted below, and asserted to be inhabited: a filter that
+   *  matches nothing states its property vacuously forever. */
+  const bucket = (of: (id: string) => boolean): string[] => {
+    const ids = HANDED.filter(of);
+    expect(ids.length).toBeGreaterThan(0);
+    return ids;
   };
 
-  it('writes only ids OpenCode admits, whatever it is handed', () => {
-    for (const handed of HANDED) {
+  it('round-trips an identity that already names a provider, standard or not', () => {
+    for (const handed of bucket(admissible)) {
+      for (const vendor of OFFERED_BY) {
+        // Byte-identical, `nosuchvendor/…` included. An id the user gave is the
+        // public model they asked for, and the server splits on the first
+        // separator, so `custom/nosuchvendor/glm-5.2` would be accepted as a
+        // different model with nothing downstream to notice the substitution.
+        expect(draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id).toBe(handed);
+      }
+    }
+  });
+
+  it('gives an id that names no provider exactly one, from whoever offered it', () => {
+    for (const handed of bucket((id) => !id.includes('/'))) {
       for (const vendor of OFFERED_BY) {
         const written = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id;
+        // The vendor list's one job: which segment a SOURCE's vendor maps to,
+        // byte-matching `opencode_model_id(source.vendor, model.id)`.
+        expect(written).toBe(`${inferProvider(vendor, VENDORS)}/${handed}`);
         expect(admissible(written), `${handed} from ${vendor || 'nobody'} was written as ${written}`).toBe(true);
+      }
+    }
+  });
+
+  it('leaves a malformed identity malformed instead of completing it into another one', () => {
+    for (const handed of bucket((id) => id.includes('/') && !admissible(id))) {
+      for (const vendor of OFFERED_BY) {
+        const written = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id;
+        // The prefix is for an id that names no provider, and these name a
+        // broken one. `custom//leading` and `custom/trailing/` are both
+        // admissible to the server and neither is what was typed, so a typo
+        // would be saved as a row instead of refused at the field — which is
+        // where admissibility is asked, of this write's own output.
+        expect(written).toBe(handed);
+        expect(admissible(written)).toBe(false);
       }
     }
   });
@@ -346,9 +381,9 @@ describe('the OpenCode identity rule', () => {
   it.each([
     // `not separator`: nothing splits the halves.
     ['glm-5.2', false],
-    // `not model_id`: the hole this closes. A recognized provider prefix is
-    // taken as given by the chokepoint, which hands `openai/` straight back —
-    // and `custom/` is the same hole behind the fallback prefix it adds itself.
+    // `not model_id`: the hole this closes. Any provider prefix is taken as
+    // given by the chokepoint, which hands `openai/` straight back — and
+    // `custom/` is the same hole behind the fallback prefix it adds itself.
     ['openai/', false],
     ['custom/', false],
     // `not provider`: a leading separator names no provider.

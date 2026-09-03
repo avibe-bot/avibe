@@ -269,8 +269,8 @@ describe('BackendModelEditorDialog', () => {
 
   it('takes the query as the ID and, on OpenCode, as one OpenCode accepts', async () => {
     const user = userEvent.setup();
-    // The one id rule this dialog owns: OpenCode addresses `provider/model` and
-    // resolves an unrecognized provider to `custom`, so the escape offers the id
+    // The one id rule this dialog owns: OpenCode addresses `provider/model`, so
+    // the escape supplies the provider a query does not name and offers the id
     // the backend will accept rather than the one it would reject after saving.
     const { onCommit } = renderEditor({ backend: 'opencode', standardVendors: new Set(['zai']) });
 
@@ -279,12 +279,20 @@ describe('BackendModelEditorDialog', () => {
 
     await user.clear(modelField());
     await user.type(modelField(), 'zai/glm-4.7');
-    await user.click(await screen.findByRole('option', { name: 'Use "zai/glm-4.7" as the model ID' }));
+    // A query that already names a provider is taken as typed.
+    expect(await screen.findByRole('option', { name: 'Use "zai/glm-4.7" as the model ID' })).toBeTruthy();
 
-    // A query that already names an admissible provider is taken as typed.
-    expect(modelField().value).toBe('zai/glm-4.7');
+    await user.clear(modelField());
+    await user.type(modelField(), 'acme/glm-4.7');
+    // Including a provider the standard vendor list does not know. The server
+    // admits any provider segment its grammar accepts, so offering
+    // `custom/acme/glm-4.7` would save a different public model id than the one
+    // that was typed — and save it silently, because the server accepts that too.
+    await user.click(await screen.findByRole('option', { name: 'Use "acme/glm-4.7" as the model ID' }));
+
+    expect(modelField().value).toBe('acme/glm-4.7');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'zai/glm-4.7', origin: 'manual' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'acme/glm-4.7', origin: 'manual' }));
   });
 
   it('takes the query verbatim on a backend whose IDs have no provider segment', async () => {
