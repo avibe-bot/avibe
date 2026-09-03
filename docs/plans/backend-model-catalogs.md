@@ -272,7 +272,7 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` where `Candidate` is
   `{id, display_name, reasoning_efforts, suppliers: [{source_id, source_name, model_id}],
   origin}`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
-  (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, hidden ones
+  (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, removed ones
   included; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
   configuration-eligible Sources minus menu ids and minus ids already in `builtin`; `in_list`
   is every current menu row with the same projection, so an already-added model is found by
