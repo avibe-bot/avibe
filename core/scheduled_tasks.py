@@ -5189,8 +5189,21 @@ class ScheduledTaskService:
             return True
         if runtime.current_process_owns_service_instance():
             return True
-        logger.error("Scheduled task service stopping because this process no longer owns the service lock")
-        self._begin_stop()
+        logger.error(
+            "Scheduled task service lost the service lock; requesting controller shutdown"
+        )
+        self._running = False
+        request_shutdown = getattr(self.controller, "request_shutdown", None)
+        if callable(request_shutdown):
+            # Lease loss is process-wide. A service-local teardown would settle
+            # durable Turns and cancel their executor wrappers while backend
+            # receivers remain alive, splitting Run/Turn ownership from the
+            # native runtime. Let the controller stop all runtime owners as one
+            # generation instead.
+            request_shutdown("service lease lost")
+        else:
+            # Preserve standalone/lightweight controller behavior.
+            self._begin_stop()
         return False
 
     async def stop(self) -> None:

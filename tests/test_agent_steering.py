@@ -566,6 +566,8 @@ async def test_shared_boundary_finishes_native_reconciliation_before_propagating
 
         assert agent._steering_generation("runtime-key") == 1
         assert agent._pending_steering_input_state("runtime-key") == "accepted"
+        assert agent.claude_sessions["runtime-key"] is client
+        assert agent.receiver_tasks["runtime-key"] is receiver_task
         assert agent._pending_requests["runtime-key"] == [primary]
         assert not receiver_task.done()
     finally:

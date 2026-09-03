@@ -898,6 +898,7 @@ def test_session_handler_retires_model_hub_scope_for_dead_cached_client(
         handler._cleanup_session_locked.assert_awaited_once_with(
             composite_key,
             retire_model_hub_scope=True,
+            reason="cached_process_terminated",
         )
 
     asyncio.run(exercise())
@@ -2489,6 +2490,56 @@ def test_reap_orphaned_sessions_disables_in_tree_when_auth_client_pid_unknown(
     asyncio.run(handler.reap_orphaned_claude_sessions())
 
     assert captured["reap_in_tree"] is False
+
+
+def test_cleanup_session_logs_exact_runtime_generation(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeAgentOptions",
+        _StubClaudeAgentOptions,
+    )
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeSDKClient",
+        _disconnect_counting_client(captured),
+    )
+
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    identity = getattr(client, "_vibe_runtime_activation_identity")
+
+    async def _exercise_cleanup() -> int:
+        receiver = asyncio.create_task(asyncio.sleep(3600))
+        controller.receiver_tasks[composite_key] = receiver
+        handler.mark_session_active(composite_key)
+        receiver_identity = id(receiver)
+        with caplog.at_level("INFO", logger="core.handlers.session_handler"):
+            await handler.cleanup_session(
+                composite_key,
+                reason="test_requested_teardown",
+            )
+        return receiver_identity
+
+    receiver_identity = asyncio.run(_exercise_cleanup())
+
+    evidence = caplog.text
+    assert f"session={composite_key}" in evidence
+    assert "reason=test_requested_teardown" in evidence
+    assert "busy=True" in evidence
+    assert f"runtime_generation={identity.generation}" in evidence
+    assert f"client_identity={id(client)}" in evidence
+    assert f"receiver_identity={receiver_identity}" in evidence
+    assert "receiver_done=False" in evidence
 
 
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:

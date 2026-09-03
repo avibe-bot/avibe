@@ -3093,7 +3093,7 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
     shutdown_entrypoint: str,
     user_stopped: bool,
 ) -> None:
-    """HFR-103: every service teardown settles the transferred scheduled Run."""
+    """HFR-103: full teardown settles Runs; lease loss first stops the controller."""
     from storage.background import attach_agent_run_delivery_in_connection
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3270,10 +3270,12 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
         raise AssertionError("unreachable")
 
     monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _never_returns)
+    shutdown_reasons: list[str] = []
     controller = SimpleNamespace(
         config=SimpleNamespace(language="en"),
         set_agent_status=lambda *_args, **_kwargs: None,
         _get_session_key=lambda ctx: f"avibe::{ctx.channel_id}",
+        request_shutdown=shutdown_reasons.append,
     )
     service = ScheduledTaskService(
         controller=controller,
@@ -3320,13 +3322,22 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
             lambda: False,
         )
         assert service._owns_service_instance() is False
-        teardown = service._service_teardown_task
-        assert teardown is not None
+        assert shutdown_reasons == ["service lease lost"]
+        assert service._service_teardown_task is None
         assert service._owns_service_instance() is False
-        assert service._service_teardown_task is teardown
-        await teardown
+        assert shutdown_reasons == ["service lease lost", "service lease lost"]
+        assert service._service_teardown_task is None
+        live_run = request_store.get_run(run_id)
+        assert live_run is not None
+        assert live_run["status"] == "running"
+        with engine.connect() as conn:
+            live_turn = message_deliveries.get_turn(conn, turn_id)
+        assert live_turn is not None
+        assert live_turn["state"] == "active"
+        assert session_id in manager.in_flight
+        assert not manager.in_flight[session_id].task.done()
         await service.stop()
-        assert service._service_teardown_task is teardown
+        assert service._service_teardown_task is not None
 
     asyncio.run(_stop())
 

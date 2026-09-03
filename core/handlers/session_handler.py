@@ -449,6 +449,7 @@ class SessionHandler(BaseHandler):
             # when the current turn resolves to a different channel. Retire the
             # cached generation's process credential before recreating it.
             retire_model_hub_scope=True,
+            reason="cached_process_terminated",
         )
         return True
 
@@ -479,6 +480,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="model_hub_channel_changed",
             )
             return None
 
@@ -499,6 +501,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="system_prompt_changed",
             )
             return None
 
@@ -511,6 +514,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="caller_env_changed",
             )
             return None
         managed_skills_env = managed_skill_environment(
@@ -537,6 +541,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="git_path_changed",
             )
             return None
 
@@ -592,6 +597,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_model_hub_channel_changed",
             )
             return None
         self.ensure_agent_session_id(
@@ -620,6 +626,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_system_prompt_changed",
             )
             return None
         caller_env = self._caller_env_for_context(context)
@@ -631,6 +638,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_caller_env_changed",
             )
             return None
         managed_skills_env = managed_skill_environment(
@@ -657,6 +665,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_git_path_changed",
             )
             return None
         if desired_model:
@@ -2014,6 +2023,7 @@ class SessionHandler(BaseHandler):
         retire_model_hub_scope: bool = True,
         activation_retired: bool = False,
         expected_client=None,
+        reason: str = "unspecified",
     ):
         """Clean up one Claude generation under the same lock used by creation.
 
@@ -2030,6 +2040,7 @@ class SessionHandler(BaseHandler):
                 retire_model_hub_scope=retire_model_hub_scope,
                 activation_retired=activation_retired,
                 expected_client=expected_client,
+                reason=reason,
             )
 
     async def _cleanup_session_locked(
@@ -2040,6 +2051,7 @@ class SessionHandler(BaseHandler):
         retire_model_hub_scope: bool = True,
         activation_retired: bool = False,
         expected_client=None,
+        reason: str = "unspecified",
     ):
         """Clean up a specific session by composite key"""
         client = self.claude_sessions.get(composite_key)
@@ -2048,8 +2060,9 @@ class SessionHandler(BaseHandler):
             # by a client that owns the key now. Containing a stale teardown
             # must not become a second teardown.
             logger.info(
-                "Skipping Claude cleanup for session %s: the named generation no longer owns the key",
+                "Skipping Claude cleanup for session %s: reason=%s named generation no longer owns the key",
                 composite_key,
+                reason,
             )
             return
         activation_retired = activation_retired or bool(
@@ -2062,6 +2075,22 @@ class SessionHandler(BaseHandler):
                 lambda: self.claude_sessions.get(composite_key) is client,
             ):
                 return
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if client is not None or receiver_task is not None:
+            identity = self._claude_runtime_activation_identity(client)
+            logger.info(
+                "Retiring Claude runtime session=%s reason=%s busy=%s "
+                "runtime_generation=%s client_identity=%s receiver_identity=%s "
+                "receiver_done=%s pid=%s",
+                composite_key,
+                reason,
+                composite_key in self.active_sessions,
+                identity.generation if identity is not None else None,
+                id(client) if client is not None else None,
+                id(receiver_task) if receiver_task is not None else None,
+                receiver_task.done() if receiver_task is not None else None,
+                get_claude_client_pid(client),
+            )
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
         if client is not None and retire_model_hub_scope:
@@ -2084,9 +2113,18 @@ class SessionHandler(BaseHandler):
             # retrying cancellation on every event-loop tick.
             if client is not None:
                 if cleanup_from_receiver:
-                    self._disconnect_client_after_receiver(client, composite_key, receiver_task)
+                    self._disconnect_client_after_receiver(
+                        client,
+                        composite_key,
+                        receiver_task,
+                        reason=reason,
+                    )
                 else:
-                    await self._disconnect_client(client, composite_key)
+                    await self._disconnect_client(
+                        client,
+                        composite_key,
+                        reason=reason,
+                    )
         finally:
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task, composite_key)
@@ -2144,14 +2182,32 @@ class SessionHandler(BaseHandler):
             logger=logger,
         )
 
-    async def _disconnect_client(self, client, composite_key: str) -> None:
+    async def _disconnect_client(
+        self,
+        client,
+        composite_key: str,
+        *,
+        reason: str,
+    ) -> None:
         try:
             await client.disconnect()
         except Exception as e:
             logger.error(f"Error disconnecting Claude session {composite_key}: {e}")
-        logger.info(f"Cleaned up Claude session {composite_key}")
+        logger.info(
+            "Cleaned up Claude session %s reason=%s client_identity=%s",
+            composite_key,
+            reason,
+            id(client),
+        )
 
-    def _disconnect_client_after_receiver(self, client, composite_key: str, receiver_task) -> None:
+    def _disconnect_client_after_receiver(
+        self,
+        client,
+        composite_key: str,
+        receiver_task,
+        *,
+        reason: str,
+    ) -> None:
         async def _run() -> None:
             if receiver_task is not None:
                 try:
@@ -2160,7 +2216,7 @@ class SessionHandler(BaseHandler):
                     pass
                 except Exception as e:
                     logger.warning("Claude receiver ended with error before deferred disconnect: %s", e)
-            await self._disconnect_client(client, composite_key)
+            await self._disconnect_client(client, composite_key, reason=reason)
 
         asyncio.create_task(_run())
 
@@ -2570,6 +2626,7 @@ class SessionHandler(BaseHandler):
                         await self._cleanup_session_locked(
                             composite_key,
                             activation_retired=True,
+                            reason="stuck_active_eviction",
                         )
                 else:
                     logger.info(
@@ -2580,6 +2637,7 @@ class SessionHandler(BaseHandler):
                     await self._cleanup_session_locked(
                         composite_key,
                         activation_retired=True,
+                        reason="idle_eviction",
                     )
                 evicted += 1
 
@@ -2695,6 +2753,7 @@ class SessionHandler(BaseHandler):
                 # This failure may belong to a generation a replacement has
                 # already taken over from; retire that exact client or nothing.
                 expected_client=client,
+                reason="intentional_teardown_signal",
             )
             return True
         if returncode is not None:
@@ -2715,6 +2774,7 @@ class SessionHandler(BaseHandler):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 expected_client=client,
+                reason="process_terminated",
             )
             await self._get_im_client(context).send_message(
                 context,
@@ -2725,7 +2785,11 @@ class SessionHandler(BaseHandler):
             return False
         if "read() called while another coroutine" in error_msg:
             logger.error(f"Session {composite_key} has concurrent read error - cleaning up")
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                reason="concurrent_read",
+            )
 
             # Notify user and suggest retry
             await self._get_im_client(context).send_message(
@@ -2741,7 +2805,11 @@ class SessionHandler(BaseHandler):
             or is_claude_sdk_buffer_error(error)
         ):
             logger.error(f"Session {composite_key} is broken - cleaning up")
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                reason="connection_broken",
+            )
 
             # Notify user
             await self._get_im_client(context).send_message(
