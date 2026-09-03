@@ -1546,6 +1546,26 @@ def test_publication_charges_file_growth_at_copy_time(
         publish_builtin_skills(source_root=source, destination_root=destination)
 
 
+def test_authoritative_builtin_source_contains_prompt_modules() -> None:
+    source = managed_skills.builtin_skills_source()
+
+    expected = {
+        "use-avibe-harness": "Avibe Harness turns user intent into durable Agent work",
+        "use-avibe-vault": "the child process receives static secrets as environment variables",
+        "use-show-pages": "History is saved automatically around each turn",
+    }
+    for name, migrated_text in expected.items():
+        skill = parse_skill_file(
+            source / name / "SKILL.md",
+            priority=(0, 0, 0),
+            include_body=True,
+        )
+        assert skill is not None
+        assert skill.name == name
+        assert skill.body is not None
+        assert migrated_text in skill.body
+
+
 def test_builtin_source_ignores_an_unrelated_top_level_skills_directory(
     tmp_path: Path,
     monkeypatch,

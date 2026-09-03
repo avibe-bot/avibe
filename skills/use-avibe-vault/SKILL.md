@@ -2,102 +2,57 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or digest signing without exposing secret values to the agent.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # Use Avibe Vault
 
-Use this skill whenever a task needs credentials, authenticated egress, or a
-signing key. Refer to secrets only by name, tag, or skill tag; users should not
-paste secret values into chat.
+When a task needs API keys, access tokens, passwords, wallet private keys, or other sensitive credentials, prefer Avibe Vault: agents reference secrets by name, tag, or skill tag, and users do not need to paste plaintext into chat.
 
-## Secret Types
+Core concepts:
+- Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress.
+- Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`.
+- Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
+- Protected: for high-risk secrets, such as production databases or wallet/funds keys. Because protected secrets are end-to-end encrypted, use requires browser approval and passkey unlock.
 
-- A static secret is an API key, token, or password. Use it with
-  `vibe vault run` for environment injection or `vibe vault fetch` for
-  authenticated HTTP egress.
-- A keypair secret signs digests or transactions. It cannot be exported as an
-  environment variable and cannot be used with `run` or `fetch`; use
-  `vibe vault sign`.
-- Standard secrets support lower-risk routine automation.
-- Protected secrets require browser approval and passkey unlock.
+Rules:
+- Refer to secrets only by secret name, tag, or skill tag.
+- Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
+- With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
+- When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access. After the user approves, Avibe resumes this session; it does not replay the command for you, so run the same `run` / `fetch` command again.
+- When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, follow the callback instruction to read the completed request result and continue with the returned signature.
 
-## Rules
+Common commands:
 
-- Never print, log, or ask the user to paste a secret value.
-- Never use a keypair secret with `run` or `fetch`.
-- With `vibe vault run`, avoid commands that print environment variables,
-  debug configuration, or secret-bearing errors.
-- Protected `run` and `fetch` may pause for approval. After approval resumes
-  the Session, run the same command again because Avibe does not replay it.
-- Protected `sign` returns immediately with a browser signing request. Do not
-  rerun it; follow the callback instruction to read the completed result.
+Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
+`vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
 
-## Find Existing Secrets
+For a missing keypair/signing key, ask the user to create a keypair secret in the Vault UI; do not request or store private-key material as a static secret.
 
-```bash
-vibe vault list
-vibe vault list --tag prod
-vibe vault find --kind static --protection protected
-vibe vault find openai --tag prod
-vibe vault tags
-```
+On Avibe Web chat, a lighter manual prompt can mention the missing secret as a clickable placeholder in your reply, for example `$<OPENAI_API_KEY>`. The user can click it and fill the secret from Web chat. This has no reason or structured prefill metadata; use `vibe vault request` when those are needed.
 
-## Request A Missing Secret
+List or find existing Vault entries:
+`vibe vault list`
+`vibe vault list --tag prod`
+`vibe vault find --kind static --protection protected`
+`vibe vault find openai --tag prod`
+`vibe vault tags`
 
-Request a static secret with non-secret metadata only:
+Run a command with selected static secrets injected as environment variables:
+`vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN -- python script.py`
+`vibe vault run --env GITHUB_TOKEN=GH_PAT --env OPENAI_API_KEY -- python script.py`
+`vibe vault run --tag deploy -- ./deploy.sh`
+`vibe vault run --skill github-release -- ./release.sh`
 
-```bash
-vibe vault request OPENAI_API_KEY \
-  --reason "Need OpenAI API access" \
-  --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'
-```
+Make an authenticated HTTP request. The credential is attached only at egress, and the agent never sees the secret:
+`vibe vault fetch --auth GITHUB_PAT --url https://api.github.com/user`
 
-For a missing keypair, ask the user to create a keypair secret in the Vault UI.
-Never request private-key material as a static secret.
+Request approval before a protected `run` with an existing static secret:
+`vibe vault access PROD_DB_URL --skill deploy --command "run database migration" --egress "connect to production database"`
 
-On Avibe Web chat, a lighter manual request may mention a clickable placeholder
-such as `$<OPENAI_API_KEY>`. Use `vibe vault request` when policy, reason, tags,
-or other structured metadata matter.
+For protected `fetch`, run `vibe vault fetch`; it creates the correct fetch approval request when needed.
 
-## Run With Static Secrets
+Sign a 32-byte digest with a keypair secret. Standard keys may return the signature directly; protected keys create a browser approval request:
+`vibe vault sign WALLET_KEY --digest <64-hex-digest> --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
 
-```bash
-vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN -- python script.py
-vibe vault run --env GITHUB_TOKEN=GH_PAT --env OPENAI_API_KEY -- python script.py
-vibe vault run --tag deploy -- ./deploy.sh
-vibe vault run --skill github-release -- ./release.sh
-```
-
-Use `vibe vault access` when an existing protected secret should be approved
-before a command:
-
-```bash
-vibe vault access PROD_DB_URL \
-  --skill deploy \
-  --command "run database migration" \
-  --egress "connect to production database"
-```
-
-## Authenticated HTTP Egress
-
-The credential is attached only at egress and is not returned to the agent:
-
-```bash
-vibe vault fetch --auth GITHUB_PAT --url https://api.github.com/user
-```
-
-Run `vibe vault fetch` directly for protected fetches; it creates the required
-approval request when needed.
-
-## Sign A Digest
-
-```bash
-vibe vault sign WALLET_KEY \
-  --digest <64-hex-digest> \
-  --scheme ecdsa-secp256k1-recoverable \
-  --command "sign deployment transaction"
-```
-
-Standard keys may return a signature directly. Protected keys create a browser
-approval request. Run `vibe vault --help` when command behavior is uncertain.
+For more details, run `vibe vault --help`.

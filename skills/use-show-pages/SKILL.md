@@ -2,130 +2,78 @@
 name: use-show-pages
 slug: use-show-pages
 description: Build, inspect, update, or share an Avibe Show Page when a visual explanation, diagram, dashboard, report, or interactive prototype would materially help.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # Use Show Pages
 
-Use this skill when a visual page would make a relationship, process, result, or
-decision substantially easier to understand than chat alone.
+When a visual page would help the user understand a problem, plan, process, result, or complex information more clearly, use Show Pages. They are useful for diagrams, flowcharts, mind maps, timelines, architecture maps, comparison views, dashboards, visual reports, interactive explanations, and small prototypes.
 
-## Core Workflow
+Each Agent Session has one Show Page. Get this session's page directory:
 
-1. Resolve the current Session's workspace with `vibe show path`.
-2. Inspect the current state with `vibe show status`.
-3. Build or update the page in that workspace.
-4. Keep it private unless the user explicitly asks for a shareable public page.
-5. After updating it, send the active URL and a short description of what it shows.
+`vibe show path`
 
-If public visibility is requested and `vibe show status` reports that Avibe
-Cloud is not connected, load the `use-avibe` Skill and follow its remote pairing
-workflow. Do not assume connection state from the System Prompt.
+Check status:
 
-Visibility commands:
+`vibe show status`
 
-```bash
-vibe show update --visibility public
-vibe show update --visibility private
-vibe show update --visibility offline
-```
+Change visibility:
 
-Read `vibe show --help` or the relevant subcommand help when behavior is
-uncertain. The current Avibe Agent Session is the default target; pass an
-explicit Session only when the task names a different one.
+`vibe show update --visibility public`
+`vibe show update --visibility private`
+`vibe show update --visibility offline`
 
-## Choose The Right Visual
+For more usage details, run `vibe show --help` or a subcommand help such as `vibe show update --help`.
 
-- Use a flowchart or state machine for a process.
-- Use a timeline for ordered events.
-- Use a table for exact mappings or comparisons.
-- Use a graph or tree for relationships and hierarchy.
-- Use a dashboard for several related metrics.
-- Use a side-by-side view for trade-offs.
+### Agent-readable representation
+- Every Show Page URL is agent-readable without page-specific code: request the same private or public URL with `Accept: text/markdown` to receive its rendered Markdown representation.
+- Author semantic HTML so that representation stays dense and useful: use headings for sections, lists for sequences or groups, and `<table>` for genuinely tabular data.
+- Add `data-agent-hidden` to visual-only or sensitive-to-representation elements that should be omitted from Markdown. Add `agent-note="..."` when an element needs short agent-only context; the note text is preserved in the representation.
 
-Do not create a page merely to restate prose. Design for inspection,
-comparison, confirmation, and the next decision.
+### Show Page annotations & reverse marks
+- Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
+- After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
+- Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`.
 
-## Page Runtime
+### Avibe Cloud availability
 
-New workspaces are managed React/Vite applications with a minimal file-based
-router. When `src/router.tsx` exists, add routes under `src/pages/`; folders are
-nested path segments and `[param]` files are dynamic segments. Customize shared
-layout in `src/App.tsx`, styles in `src/styles.css`, and optional handlers in
-`api/*.ts`.
+Check `vibe show status`. When Avibe Cloud is not connected, apply this guidance:
 
-Older workspaces without `src/router.tsx` render `src/App.tsx` directly. Update
-that file or deliberately adopt the router scaffold; files placed under
-`src/pages/` are otherwise unreachable.
+⚠️ Avibe Cloud is not connected, so this page cannot be accessed from the public internet through your domain. To fully use Show Pages, register an avibe.bot account, claim your dedicated domain and pairing key, then run `vibe remote pair`.
 
-Treat `index.html` and `src/main.tsx` as runtime-owned shell files. Do not
-replace them to add a page unless repairing the shell. Hot reload is available,
-so prefer component-level edits that preserve state.
+History contract:
 
-Use the built-in shadcn components before hand-rolling controls. Common imports
-include `@/components/ui/button`, `@/components/ui/card`,
-`@/components/ui/badge`, `@/components/ui/dialog`,
-`@/components/ui/input`, and `@/components/ui/progress`; import `cn` from
-`@/lib/utils`.
+When Avibe manages the Show Page workspace:
+1. History is saved automatically around each turn; do not manage versions yourself.
+2. Read freely: `git -C <workspace> status / log / diff / show`.
+3. Restore only via `git restore --source=<ref> -- <path>`; the turn-end checkpoint records it as a forward commit.
+4. Never move HEAD, switch branches, rewrite history, or run gc; if you do, the platform self-heals with the worktree as truth.
+5. Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks.
 
-`src/styles.css` must keep these imports at the top:
+When the workspace is the user's own repository:
+1. Avibe's shadow history continues automatically in the background; you don't manage it.
+2. `git -C <workspace>` addresses the **user's repo**, not Avibe history: never commit, push, or publish on their behalf, and never use it for Avibe restore.
+3. Never locate or mutate Avibe's shadow gitdir on your own initiative. Only if the user explicitly asks to recover from Avibe history, use standard git with explicit `--git-dir` and `--work-tree` against the session's shadow gitdir for read or restore only; never commit to it.
 
-```css
-@import "tailwindcss";
-@import "@avibe/show-ui/theme.css";
-```
+When automatic Show Page history is unavailable:
+1. Automatic Show Page history is unavailable because Git could not be resolved for this process. Continue editing normally, but do not use history or restore commands for this workspace.
 
-Tailwind CSS v4 utilities are available. Theme with standard shadcn variables
-such as `--background`, `--foreground`, `--card`, `--primary`, `--muted`,
-`--border`, `--ring`, and `--radius`. Override the same variables under `.dark`
-or `[data-theme="dark"]` for dark mode.
-
-Optional server handlers export HTTP method functions, for example:
-
-```ts
-export async function GET(request) {
-  return Response.json({ ok: true })
-}
-```
-
-## Agent-Readable Pages
-
-Every private or public Show Page URL can be requested with
-`Accept: text/markdown`. Author semantic HTML so this representation remains
-dense and useful: use headings for sections, lists for sequences or groups, and
-`<table>` for genuinely tabular data.
-
-Add `data-agent-hidden` to visual-only or sensitive elements that should be
-omitted from Markdown. Add `agent-note="..."` when an element needs short
-agent-only context.
-
-## Annotations
-
-User annotations arrive as chat messages tagged `[show-annotation]` with an
-event id. Respond either by editing the page or through the page reply command,
-depending on what the annotation asks.
-
-After reworking an area, you may leave at most one or two short callouts:
-
-```bash
-vibe show mark <selector-or-anchor> --message '...'
-```
-
-Inspect or withdraw marks with `vibe show marks` and `vibe show unmark`. Toggle
-annotation mode with `vibe show annotate --on|--off [--mode smart|screenshot]`.
-
-## Design And Safety
-
-- Make the page polished, responsive, and usable on mobile.
-- Prefer React components. React Flow, Mermaid, Markmap, Chart.js, and
-  Cytoscape.js are available when they fit the visual.
-- Add a recognizable `favicon.svg` so the page stands out in the Dock and App
-  Library.
-- Keep pages private by default.
-- Never publish secrets, credentials, private logs, or sensitive user data.
-- Avibe may checkpoint managed Show Page history around turns. Do not manage
-  versions yourself: never create commits, move HEAD, rewrite history, add
-  remotes, push, or publish unless the user explicitly asks. Read-only
-  `git status`, `log`, `diff`, and `show` are fine.
-- If the workspace is already the user's own repository, treat its Git history
-  as user-owned and do not commit or restore on their behalf.
+Guidance:
+- New Show Page workspaces are managed React/Vite apps that start as a clean "being generated" placeholder page (what the user sees while you build) plus a minimal file-based router (`src/router.tsx`) and one example page. When that router is present, add a route by creating a file under `src/pages/` — a folder becomes a nested path segment and a `[param]` file a dynamic segment — and customize the layout in `src/App.tsx`, styles in `src/styles.css`, and optional `api/*.ts` handlers. The starter is only a starting point, not a required structure: replace the placeholder with the real page, add or remove pages, and organize them however fits the app (flat, sections, or nested). Built-in UI is available to import, e.g. `@/components/ui/card`, `@/components/ui/button`, `@/components/ui/badge`.
+- An older Show Page with no `src/router.tsx` is a single-page app that renders `src/App.tsx` directly. There, edit `src/App.tsx` (or adopt the router scaffold: add `src/router.tsx` + `src/pages/` and render it from `App.tsx`) — do not just drop files under `src/pages/`, since nothing would route them.
+- Treat `index.html` and `src/main.tsx` as the runtime-owned app shell — you never edit them to add a page, and should not replace them unless you are repairing the shell.
+- Hot reload is available while `/show/<session-id>/` is open. Users will see page changes live. Prefer component-level changes that preserve React state.
+- Built-in UI uses the standard shadcn aliases: import components from paths such as `@/components/ui/button`, `@/components/ui/card`, `@/components/ui/badge`, `@/components/ui/dialog`, `@/components/ui/input`, and `@/components/ui/progress`, and import `cn` from `@/lib/utils`.
+- Tailwind CSS v4 utility classes are built in and work in any `className`, including to restyle the built-in `@/components/ui/*` components (a utility overrides the component default). `src/styles.css` is the CSS entry and must keep `@import "tailwindcss";` and `@import "@avibe/show-ui/theme.css";` at the top. Theme with standard shadcn variables such as `--background`, `--foreground`, `--card`, `--primary`, `--muted`, `--border`, `--ring`, and `--radius`; values are complete CSS colors usable directly through `var(...)`. Override the same variables under `.dark` or `[data-theme="dark"]` for dark mode. Do not use runtime-prefixed private variables.
+- Prefer the built-in UI primitives over hand-rolled controls. They include Show Page motion for changed text, numbers, badges, cards, and progress without extra animation calls.
+- Optional server handlers live under `api/` and run only when requested. Export functions named like HTTP methods, for example `export async function GET(request) { return Response.json({ ok: true }) }`.
+- Design for user understanding, not just for moving text onto a webpage. Choose the visual form that best helps the user inspect, compare, confirm, and continue the discussion.
+- Use diagrams or mind maps for relationships, flowcharts or state machines for processes, timelines for sequences, charts or dashboards for metrics, and side-by-side views for tradeoffs.
+- Make the page visually polished: use clear hierarchy, spacing, typography, contrast, and consistent components. Avoid rough default-looking pages.
+- Give the app a recognizable icon so it stands out in the Dock and App Library: drop a `public/favicon.svg` (or `favicon.svg` at the workspace root) and it is picked up automatically, or add `<link rel="icon" href="./favicon.svg">` to `index.html` (an icon edit to the shell is fine).
+- Make the page work reasonably on mobile because users may open links from an IM app on their phone.
+- Prefer React component implementations. Useful visualization libraries include React Flow, Mermaid, Markmap, Chart.js, and Cytoscape.js.
+- Keep pages private by default. Publish publicly only when the user asks for a shareable or public link.
+- Do not publish secrets, credentials, private logs, or sensitive user data publicly.
+- If a Show Page would clearly help but the user's preference is unclear, briefly ask whether they want one.
+- After creating or updating a page, send the active URL and a short summary of what the page shows.

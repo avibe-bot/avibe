@@ -35,7 +35,7 @@ def _embedded_cli_examples(body: str) -> list[str]:
     return sorted(found)
 
 
-def test_avibe_skills_teach_current_harness_defaults() -> None:
+def test_avibe_compatibility_skill_teaches_current_harness_defaults() -> None:
     for path in ("skills/use-avibe/SKILL.md",):
         body = _read(path)
 
@@ -65,8 +65,8 @@ def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
     rejects — a renamed flag, a dropped one, a form that never existed — teaches
     the agent a call that fails at runtime. `tests/test_agent_tool_policy.py`
     guards the same rule for the native-scheduler denial strings. Harness
-    operational detail now lives in ``use-avibe`` while the always-on prompt
-    retains only routing and safety boundaries.
+    operational detail now lives in ``use-avibe-harness`` while the always-on
+    prompt retains only routing and live safety boundaries.
     """
 
     prompt = build_system_prompt_injection(
@@ -78,7 +78,9 @@ def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
         ),
         current_agent_backend="codex",
     )
-    examples = _embedded_cli_examples(prompt + "\n" + _read("skills/use-avibe/SKILL.md"))
+    examples = _embedded_cli_examples(
+        prompt + "\n" + _read("skills/use-avibe-harness/SKILL.md")
+    )
     assert examples, "no embedded vibe task/watch examples found — did the regex drift?"
 
     parser = cli.build_parser()
@@ -140,6 +142,20 @@ def test_use_avibe_skill_keeps_its_broad_scope_without_a_session_lifecycle_proto
             "active Agent Session context",
         ):
             assert text not in body
+
+
+def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
+    body = _read("skills/use-avibe-harness/SKILL.md")
+
+    assert "Avibe Harness turns user intent into durable Agent work" in body
+    assert "Avibe Harness is the first-choice automation layer" in body
+    assert "### Mental model" in body
+    assert "### Inspecting Harness state" in body
+    assert "### Choosing the right Harness shape" in body
+    assert "Watch waiter contract" in body
+    assert "That existing-Session send is a P1 delivery by default" in body
+    assert "### Agents" in body
+    assert "### Mentions in user messages" in body
 
 
 def test_background_watch_skill_defaults_to_current_session() -> None:
