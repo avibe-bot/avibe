@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. It extends the unsaved observation request with display, reconciliation, and explicit unavailable-inventory consent data; the server still owns Source identity, response proof, discovered inventory, health, usage, custody metadata, and timestamps. Optional protocol restricts observation to one user-selected interface; omission auto-detects across the supported interfaces. Neither branch persists a protocol without matching upstream response proof. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
+  "description": "API-key Source creation input. It extends the unsaved observation request with display, reconciliation, and explicit unavailable-inventory consent data; the server still owns Source identity, protocol, discovered inventory, health, usage, custody metadata, and timestamps. Optional protocol restricts observation to one interface; omission auto-detects across the supported interfaces. A supplied protocol is persisted when observation is authenticated and either vendor has a shipped catalog pin for that protocol, the client declared it on custom, or a matching protocol-shaped upstream response proves it. Auto-detect without a catalog pin still requires matching response proof. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
@@ -29,7 +29,7 @@
     },
     "protocol": {
       "enum": ["anthropic", "openai_responses", "openai_chat"],
-      "description": "Optional user-selected interface. When present, observation probes exactly this protocol and persists it only after matching response proof. Omission auto-detects across the authoritative protocol vocabulary."
+      "description": "Optional user-selected or catalog-pinned interface. When present, observation probes exactly this protocol. Persistence requires authentication plus one of: a shipped vendor catalog pin for this protocol, a declaration on vendor custom, or matching protocol-shaped upstream response proof. Omission auto-detects across the authoritative protocol vocabulary and still requires matching response proof."
     },
     "client_nonce": {
       "type": "string",

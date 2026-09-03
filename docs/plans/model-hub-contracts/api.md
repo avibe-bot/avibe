@@ -25,7 +25,7 @@ compatibility path.
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
-| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. Omitted `protocol` auto-detects; a supplied value restricts observation to that one interface and still requires matching response proof. No credential reference is returned. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. Omitted `protocol` auto-detects and still requires matching response proof. A supplied value restricts observation to that one interface and is established when authentication succeeds and either `vendor` has a shipped catalog pin, the client declared the protocol on `custom`, or a matching protocol-shaped response proves it. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated, protocol-proven observation whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
@@ -83,8 +83,10 @@ create request:
 
 `base_url` may be null for an official vendor endpoint. `protocol`, when present,
 restricts observation to exactly that interface; omitting it probes the authoritative
-three-value order. The selected value is a constraint, not evidence: the endpoint still
-requires a matching protocol-shaped upstream response. The protocol probe is deliberately
+three-value order. Auto-detect on `custom` still requires a matching protocol-shaped
+upstream response. A supplied protocol is established when authentication succeeds and
+either `vendor` has a shipped catalog pin, the client declared that protocol on
+`custom`, or a matching protocol-shaped response proves it. The protocol probe is deliberately
 schema-invalid and names no synthetic model, so a relay can authenticate and classify it
 without selecting or invoking an upstream model. A bare-origin Base URL uses the
 standard `/v1` endpoint paths, while a URL with a path is treated as the complete API

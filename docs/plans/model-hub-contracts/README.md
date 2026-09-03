@@ -58,12 +58,14 @@ Contract prose points to those authorities and does not add branches.
 1. Plaintext upstream credentials never appear in config, API payloads, events, logs,
    or Agent runtime configuration. Hub-held material is referenced by an opaque engine
    credential id; native credentials remain in the sanctioned CLI store.
-2. Every persisted Source has a protocol proved by a real upstream response before
-   commit. `POST /api/models/sources/observe` is the non-persisting API-key observation
-   surface; API-key `POST /api/models/sources` performs the same observation before
-   its independent committed credential provisioning, while subscription OAuth uses
-   its vendor-specific observation flow. Vendor names, Base URLs, and manual hints may
-   order probes but cannot create a saved protocol value.
+2. Every persisted Source has a protocol with a named owner before commit: a shipped
+   api-key vendor catalog pin, a user declaration on `custom`, or a matching
+   protocol-shaped upstream response. `POST /api/models/sources/observe` is the
+   non-persisting API-key observation surface; API-key `POST /api/models/sources`
+   performs the same observation before its independent committed credential
+   provisioning, while subscription OAuth uses its vendor-specific observation flow.
+   A typed Base URL never creates a saved protocol value. Catalog pin and declaration
+   still require reachability and authentication; they never bypass those failures.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs
    must validate.

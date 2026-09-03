@@ -254,13 +254,15 @@ The Source workflow is complete at both entry points:
   discovered-only immutable list would leave the capability permanently undeclarable.
 
 **Source-create boundary.** `source-create.schema.json` is the complete API-key create
-request: `vendor` and transient `key`, plus optional `display_name`, `base_url`, probe-
-constraining `protocol`, client-generated `client_nonce`, and boolean
+request: `vendor` and transient `key`, plus optional `display_name`, `base_url`,
+`protocol`, client-generated `client_nonce`, and boolean
 `accept_unavailable_inventory`; omission is `false`, and the boolean consents only when
-the server's repeated response-backed observation proves a protocol but returns
-`discovery: failed`. Omitted `protocol` auto-detects across the supported interfaces;
-a supplied value probes exactly that interface but is not evidence and is persisted only
-after a matching response. Source identity, protocol
+the server's repeated observation has established a protocol (catalog pin, user
+declaration, or matching response shape) but returns
+`discovery: failed`. Omitted `protocol` auto-detects across the supported interfaces and
+still requires matching response proof. A supplied value is persisted when observation
+is authenticated and either the vendor catalog pins that protocol, the client declared
+it on `custom`, or a matching protocol-shaped response proves it. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is unique among live Sources and live-process
 create reservations. The server reserves it atomically in process before observation or
@@ -340,25 +342,35 @@ nonempty. Create materialization and re-auth failures with no stranded sibling e
 plain-error row. No later Source read can reconstruct the historical report, so the
 error envelope carries it exactly once.
 
-**Protocol observation (owner ruling 2026-08-26, superseding the 2026-08-09
-ambiguity-only selector ruling).** Every stored `protocol` is traceable to a real response
-from that upstream before Save. Avibe never infers the value from vendor name or Base URL.
-The form exposes Auto detect plus the three supported protocols before the first request.
-Auto detect tries the authoritative sequence; a concrete selection restricts the attempt
-to exactly that protocol. Neither is a save-time conclusion: the selected adapter must
-still receive matching upstream response evidence before Save. A failed observation
-therefore stores nothing rather than guessing.
+**Protocol observation (owner ruling 2026-09-04, superseding the 2026-08-26
+response-shape-only ruling, which itself superseded the 2026-08-09 ambiguity-only
+selector ruling).** Every stored `protocol` has a named owner before Save. Avibe
+never infers the value from a typed Base URL string. The owner is one of three
+rungs, documented in `docs/plans/model-hub-vendor-preset-protocol.md`:
+
+1. **Catalog pin.** The user picked a shipped api-key vendor (not `custom`).
+   Observation must still prove reachability and authentication. The catalog
+   row supplies `protocol`. Shape proof is not required.
+2. **Response proof.** `custom` plus Auto detect. Today's evidence table:
+   a matching protocol-shaped upstream response is required.
+3. **User declaration.** `custom` plus a concrete interface. Observation must
+   prove reachability and authentication on that protocol's path. Shape proof
+   is not required. A wrong declaration fails on a later real call.
+
+The form exposes a vendor select first (V4 06r / 模型网关 05). Auto detect plus
+the three supported protocols remain on `custom`. A failed observation still
+stores nothing rather than guessing. Unreachable, rejected, timeout, and
+adapter-error paths still cannot save.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
 the stored adapter and never rewrite it. Changing protocol means creating a new Source,
 so a later operation cannot silently reinterpret existing inventory or configured hops.
 The stored shape carries no manual/automatic provenance marker and no unverified
-protocol state: manual and automatic preflight become indistinguishable after the
-same response-backed conclusion. “Add anyway” is available only after protocol has been
-proved and some other information, such as model inventory, remains unavailable; that
+protocol state. “Add anyway” is available only after protocol has been
+established on one of the three rungs and some other information, such as model inventory, remains unavailable; that
 uncertainty belongs to Source health, not protocol identity. Every saved Source therefore
-has a response-proven protocol, and any path without that proof produces no Source.
+has a protocol with a named owner, and any path without that owner produces no Source.
 
 `openai_chat` is the one Chat Completions-compatible transport; there is no separate
 `openai_compatible` value because both names drove the same engine section and endpoint.
