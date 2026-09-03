@@ -50,6 +50,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     removed: list[str] = []
     request_sessions: list[tuple[str, str, str, str]] = []
     prompt_calls: list[dict] = []
+    inactive_runs: list[str] = []
 
     class _Server:
         def __init__(self):
@@ -72,6 +73,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return None
 
         async def mark_run_inactive(self, session_id):
+            inactive_runs.append(session_id)
             return None
 
         async def get_session_status(self, session_id, directory):
@@ -147,6 +149,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._get_server = _get_server
     agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
     agent._test_prompt_calls = prompt_calls
+    agent._test_inactive_runs = inactive_runs
     agent._test_server = server
     return agent, status_writes, removed, request_sessions
 
@@ -650,6 +653,7 @@ def test_restore_reconciles_definitive_missing_start_attempt() -> None:
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert reconciled == [("logical-missing", ATTEMPT_ID, "opencode")]
     assert removed == ["oc-1"]
+    assert agent._test_inactive_runs == ["oc-1"]
 
 
 def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> None:
@@ -707,6 +711,7 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
 
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert removed == ["oc-1"]
+    assert agent._test_inactive_runs == ["oc-1"]
 
 
 def test_restore_excludes_baseline_assistant_from_steer_evidence() -> None:

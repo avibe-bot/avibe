@@ -94,6 +94,18 @@ class _StubAgent(BaseAgent):
         return None
 
 
+def _resolved_core_skills(*, manual_only: bool = False) -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(
+            name=name,
+            description=f"{name} workflow",
+            directory=Path("/tmp") / name,
+            disable_model_invocation=manual_only,
+        )
+        for name in ("use-show-pages", "use-avibe-vault", "use-avibe-harness")
+    ]
+
+
 class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_can_exclude_quick_replies(self):
         with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
@@ -148,8 +160,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Never emit variables, placeholder paths, or sandbox paths like `/mnt/data/...`", prompt)
 
     def test_prompt_routes_vault_work_to_builtin_skill(self):
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            prompt = build_system_prompt_injection(include_quick_replies=False)
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                skills_cwd=Path("/tmp/project"),
+            )
 
         self.assertIn("## Vault", prompt)
         self.assertIn("load the `use-avibe-vault` Skill", prompt)
@@ -173,9 +191,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             for platform in ("avibe", "slack")
         ]
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
             prompts = [
-                build_system_prompt_injection(include_quick_replies=False, context=context) for context in contexts
+                build_system_prompt_injection(
+                    include_quick_replies=False,
+                    context=context,
+                    skills_cwd=Path("/tmp/project"),
+                )
+                for context in contexts
             ]
 
         self.assertEqual(
@@ -216,11 +242,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
             prompt = build_system_prompt_injection(
                 include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
             )
 
         self.assertNotIn("## Show Pages", prompt)
@@ -1777,12 +1807,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
             patch("core.system_prompt_injection._claude_sdk_hooks_available", return_value=True),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
         ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,
                 context=context,
                 enabled_agents=enabled_agents,
                 current_agent_backend="codex",
+                skills_cwd=Path("/tmp/project"),
             )
 
         self.assertIn("## Show Pages", prompt)
@@ -1911,16 +1943,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
             disconnected = build_system_prompt_injection(
                 include_quick_replies=False,
                 avibe_cloud_connected=False,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
             )
             connected = build_system_prompt_injection(
                 include_quick_replies=False,
                 avibe_cloud_connected=True,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
             )
 
         self.assertNotEqual(disconnected, connected)
@@ -1974,6 +2011,59 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("load the `use-show-pages` Skill", prompt)
         self.assertNotIn("- use-show-pages:", prompt)
         self.assertIn("- use-avibe-vault:", prompt)
+
+    def test_manual_only_core_skills_are_not_advertised_or_routed(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch(
+                "core.managed_skills.resolve_skills",
+                return_value=_resolved_core_skills(manual_only=True),
+            ),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+                skills_cwd=Path("/tmp/project"),
+            )
+
+        self.assertNotIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-harness` Skill", prompt)
+        self.assertNotIn("- use-show-pages:", prompt)
+        self.assertNotIn("- use-avibe-vault:", prompt)
+        self.assertNotIn("- use-avibe-harness:", prompt)
+        self.assertIn("History contract:", prompt)
+        self.assertIn("### Agents", prompt)
+
+    def test_missing_skill_binding_does_not_advertise_routes(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+        with patch.object(
+            paths,
+            "get_user_preferences_path",
+            return_value=Path("/tmp/user_preferences.md"),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+                skills_cwd=None,
+            )
+
+        self.assertNotIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-harness` Skill", prompt)
+        self.assertIn("History contract:", prompt)
+        self.assertIn("### Agents", prompt)
 
     def test_prompt_uses_fallback_platform_for_unannotated_context(self):
         context = MessageContext(

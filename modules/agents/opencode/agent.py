@@ -2485,6 +2485,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         )
                         continue
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
+                await server.mark_run_inactive(poll_info.opencode_session_id)
                 await self._poll_loop.remove_restored_ack(poll_info)
                 stale_poll_ids.append(session_id)
                 continue

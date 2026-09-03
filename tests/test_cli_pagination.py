@@ -5,6 +5,8 @@ import json
 import re
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from config import paths
 from core.system_prompt_injection import build_system_prompt_injection
@@ -136,7 +138,18 @@ def test_managed_harness_session_queue_commands_name_real_subcommands() -> None:
         platform="avibe",
         platform_specific={"agent_session_id": "ses-test"},
     )
-    prompt = build_system_prompt_injection(context=context)
+    with patch(
+        "core.managed_skills.resolve_skills",
+        return_value=[
+            SimpleNamespace(
+                name="use-avibe-harness",
+                description="Harness workflow",
+                directory=ROOT / "skills" / "use-avibe-harness",
+                disable_model_invocation=False,
+            )
+        ],
+    ):
+        prompt = build_system_prompt_injection(context=context, skills_cwd=ROOT)
     harness_skill = (ROOT / "skills" / "use-avibe-harness" / "SKILL.md").read_text()
 
     assert "load the `use-avibe-harness` Skill" in prompt

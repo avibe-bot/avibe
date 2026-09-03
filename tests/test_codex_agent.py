@@ -143,6 +143,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 CodexAgent = _MODULE.CodexAgent
+CODEX_FALLBACK_PROMPT_METADATA_KEY = _MODULE.CODEX_FALLBACK_PROMPT_METADATA_KEY
 CodexConnectionProbeRuntimeMismatchError = (
     _MODULE.CodexConnectionProbeRuntimeMismatchError
 )
@@ -2220,6 +2221,69 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "codex",
             "ses-target",
             "thread-fork",
+        )
+
+    async def test_fork_carries_persisted_fallback_prompt_strategy(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", reply_enhancements=False)
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker_getter = Mock(
+            return_value={"thread_id": "thread-source", "sha256": "a" * 64}
+        )
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+            get_agent_session_runtime_marker=marker_getter,
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model="gpt-5.2",
+            vibe_agent_reasoning_effort="high",
+        )
+        transport = SimpleNamespace(
+            send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}})
+        )
+
+        thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual(
+            agent._thread_prompt_strategies["ses-target"],
+            ("thread-fork", "fallback"),
+        )
+        marker_getter.assert_called_once_with(
+            "ses-source",
+            backend="codex",
+            native_session_id="thread-source",
+            key=CODEX_FALLBACK_PROMPT_METADATA_KEY,
         )
 
     async def test_start_or_resume_thread_does_not_bind_failed_fork_correction(self):

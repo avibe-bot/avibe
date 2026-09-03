@@ -1991,6 +1991,7 @@ class CodexAgent(BaseAgent):
     ) -> str:
         """Fork an existing Codex thread and bind the new thread id."""
         self.ensure_agent_session_id(request)
+        source_uses_fallback_prompt = self._fork_source_uses_fallback_prompt(fork)
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
@@ -2018,6 +2019,12 @@ class CodexAgent(BaseAgent):
             if should_trim:
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
+            if source_uses_fallback_prompt:
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    "fallback",
+                )
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
@@ -2512,6 +2519,26 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_thread_prompt_strategies"):
             self._thread_prompt_strategies = {}
         self._thread_prompt_strategies[base_session_id] = (thread_id, strategy)
+
+    def _fork_source_uses_fallback_prompt(self, fork: dict[str, Any]) -> bool:
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        source_thread_id = str(fork.get("source_native_session_id") or "").strip()
+        if not source_session_id or not source_thread_id:
+            return False
+
+        cached_strategy = getattr(self, "_thread_prompt_strategies", {}).get(
+            source_session_id
+        )
+        if cached_strategy and cached_strategy[0] == source_thread_id:
+            return cached_strategy[1] == "fallback"
+
+        return (
+            self._read_persisted_fallback_prompt_marker(
+                source_thread_id,
+                agent_session_id=source_session_id,
+            )
+            is not None
+        )
 
     def _remember_thread_model_settings_from_response(
         self,

@@ -608,14 +608,19 @@ def build_system_prompt_injection(
         if not include_show_pages:
             skills = [skill for skill in skills if skill.name != "use-show-pages"]
 
-    show_pages_skill_available = skills is None or any(
-        skill.name == "use-show-pages" for skill in skills
+    advertisable_skills = (
+        []
+        if skills is None
+        else [skill for skill in skills if not skill.disable_model_invocation]
     )
-    vault_skill_available = skills is None or any(
-        skill.name == "use-avibe-vault" for skill in skills
+    show_pages_skill_available = any(
+        skill.name == "use-show-pages" for skill in advertisable_skills
     )
-    harness_skill_available = skills is None or any(
-        skill.name == "use-avibe-harness" for skill in skills
+    vault_skill_available = any(
+        skill.name == "use-avibe-vault" for skill in advertisable_skills
+    )
+    harness_skill_available = any(
+        skill.name == "use-avibe-harness" for skill in advertisable_skills
     )
 
     prompt = _BASE_CAPABILITIES_INTRO
