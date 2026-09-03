@@ -246,8 +246,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   with an empty route. The picker echoes what it showed: `PUT` accepts
   `expected_suppliers?: {<id>: [{source_id, model_id}]}` for caller-added ids, and when the
   server's matching result differs for any listed id it commits nothing and refuses with
-  `409 candidate_suppliers_changed` carrying the current projection for those ids; the picker
-  refreshes its candidates and asks again. The success response is the existing
+  `409 {ok: false, contract_version, error: "candidate_suppliers_changed", changed: {<id>:
+  [{source_id, model_id}]}}` — its own registered response shape, not a guard refusal, since
+  nothing is removed or interrupted; the picker refreshes its candidates and asks again. The success response is the existing
   `{agent: AgentSupply}`.
 - **C2 — Proposed values travel in the candidates read; the save is literal.** The server
   proposes `display_name` and `reasoning_efforts` for every candidate (C4): for a built-in
@@ -297,8 +298,11 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   in the set, at the position question 9 defines, seeds it per C1 and C2, and invalidates the
   backend's runtime projection; it never removes a row. The picker's `builtin` group lists
   removed built-ins so they are one click away. Legacy initialization: a persisted catalog
-  without the field is initialized once, at load, to `built-in snapshot ids − menu ids` and
-  persisted. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
+  without the field is initialized once to `built-in snapshot ids − menu ids` and persisted —
+  but only when the snapshot is complete: the bundled catalog, a last-known-good remote
+  catalog, and the local CLI cache (when that CLI is installed) have each been read at least
+  once. Until then the field stays absent, reconcile does not run, and the menu is served
+  unchanged, so a partial snapshot can never be mistaken for the user's removals. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
   the price is that a built-in that entered the snapshot between the v1 save and the first v2
   load is treated as removed — recoverable from the picker, not auto-added. Reconcile runs only
   once the field exists. Claude Code's locked `default` row is not a built-in candidate and
@@ -322,15 +326,21 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
 ### Contract artifact changes (complete; the contracts lane's checklist)
 
 Every shape C1–C7 introduces maps to exactly one row here; a delta that needs an artifact not
-listed is a spec defect to report, not a lane decision.
+listed is a spec defect to report, not a lane decision. The closure property is normative: the
+contract guard, the response guard, authorization coverage, and version closure all pass with
+the v2 shapes on the same head.
 
 | Artifact | Change |
 | --- | --- |
 | `docs/plans/model-hub-contracts/backend-model.schema.json` and its TypeScript mirror (`ui/src/components/settings/models/types.ts`) | `origin` enum gains `provider` |
 | `docs/plans/model-hub-contracts/api.md` route table | `PUT /api/models/agents/<backend>/models` row: optional `force`, `would_remove_hops`, `would_interrupt`, `expected_suppliers`; refusals `backend_model_in_route`, `candidate_suppliers_changed`; success `{agent}` or `{agent, removed_hops, interrupted}`. New row `GET /api/models/agents/<backend>/models/candidates`. `GET /api/models/catalog/models-dev` row: additive `first_party`, dedupe, ranking, cap 8 |
 | `docs/plans/model-hub-contracts/api-response.schema.json` | the models `PUT` accepts the forced-success shape beside `AgentResponse`; new candidates response (`Candidate` shape from C4); models-dev response gains `first_party` |
-| `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route` and `candidate_suppliers_changed`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route`; `candidate_suppliers_changed` carries its `changed: {<id>: [{source_id, model_id}]}` sibling |
-| `docs/plans/model-hub-contracts/mirror-registry.json` | registers the two new error codes and the new `origin` value with their consumers |
+| `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route` |
+| `docs/plans/model-hub-contracts/api-response.schema.json` (stale-candidate refusal) | new registered shape for `409 candidate_suppliers_changed` — `{ok, contract_version, error, changed}` — outside the guard-refusal `anyOf` |
+| `contract_version` closure (every registered location listed in `docs/plans/model-hub-contracts/README.md` "Version closure", server and UI mirrors alike) | 6 → 7, because v1 shipped closed shapes (`additionalProperties: false`) that v2 extends |
+| `vibe/authorization.py` role table and its coverage test (`tests/test_instance_authorization.py`) | `GET /api/models/agents/<backend>/models/candidates` is admitted for every role that may `GET /api/models/agents/<backend>/models` |
+| `docs/plans/model-hub-contracts/README.md` (product model) and `docs/plans/model-hub-contracts/opencode-overlay.md` | Add Source is no longer the sole matching/placement point: a menu-model add (C1) and a reconcile add (C6) are the other one-time points; runtime still never re-matches |
+| `docs/plans/model-hub-contracts/mirror-registry.json` | registers the two new error codes, the new `origin` value, and the new response shapes with their consumers |
 | `vibe/i18n/*.json` and `ui/src/components/settings/models/serverCopy.ts` | `detail` keys for the two new error codes |
 | `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` with legacy initialization (C6) and a load fixture for the v1 file shape |
 | `vibe/data/model_vendors.json` (new, versioned) | the vendor map and aggregator order C7 defines, covered by a test |
