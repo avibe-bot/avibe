@@ -111,7 +111,10 @@ export const oauthStartFailureKey = (code: string | undefined): string =>
  * otherwise render to the user as a machine string.
  */
 const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, string>> = {
+  // authority-consumer: catalog.guard.error backend_model_in_route
+  // authority-consumer: candidate.error candidate_suppliers_changed
   'modelHub.errors.backend_model_in_route': 'settings.models.gateway.catalog.saveRouted',
+  'modelHub.errors.candidate_suppliers_changed': 'settings.models.gateway.catalog.saveSuppliersChanged',
   'modelHub.errors.backend_model_conflict': 'settings.models.gateway.catalog.saveConflict',
   'modelHub.errors.backend_model_id_prefix': 'settings.models.gateway.catalog.saveIdPrefix',
   'modelHub.errors.backend_model_id_invalid': 'settings.models.gateway.catalog.saveIdInvalid',

@@ -9,10 +9,15 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from config import paths
 from config.atomic_io import write_atomic
+from config.v2_config import (
+    normalize_storable_backend_model_text,
+)
+from core.handlers.model_hub.catalog_admission import admissible_backend_model
 
 
 MODELS_DEV_URL_ENV = "AVIBE_MODELS_DEV_URL"
@@ -20,8 +25,54 @@ DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_TIMEOUT_SECONDS = 8.0
 MODELS_DEV_CACHE_TTL_SECONDS = 24 * 60 * 60
 MODELS_DEV_MAX_BYTES = 16 * 1024 * 1024
-MODELS_DEV_MAX_MATCHES = 20
+MODELS_DEV_MAX_MATCHES = 8
 _CACHE_LOCK = threading.Lock()
+
+
+def _vendor_map_path() -> Path:
+    return Path(__file__).with_name("data") / "model_vendors.json"
+
+
+def load_model_vendor_map() -> dict[str, Any]:
+    payload = json.loads(_vendor_map_path().read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("families"), list)
+        or not isinstance(payload.get("aggregators"), list)
+    ):
+        raise ValueError("model vendor map is invalid")
+    return payload
+
+
+def _first_party_vendor(
+    model_id: str,
+    vendor_map: dict[str, Any],
+) -> str | None:
+    matches = [
+        item
+        for item in vendor_map["families"]
+        if isinstance(item, dict)
+        and isinstance(item.get("prefix"), str)
+        and isinstance(item.get("vendor_id"), str)
+        and model_id.lower().startswith(item["prefix"])
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item["prefix"]))["vendor_id"]
+
+
+def _vendor_rank(
+    vendor_id: str,
+    *,
+    first_party_vendor: str | None,
+    aggregators: list[str],
+) -> tuple[int, int, str]:
+    if vendor_id == first_party_vendor:
+        return (0, 0, vendor_id)
+    if vendor_id in aggregators:
+        return (1, aggregators.index(vendor_id), vendor_id)
+    return (2, 0, vendor_id)
 
 
 def _cache_path():
@@ -172,7 +223,7 @@ def _match_score(
     return None
 
 
-def _reasoning_efforts(model: dict[str, Any]) -> list[str]:
+def _reasoning_efforts(model: dict[str, Any]) -> list[str] | None:
     options = model.get("reasoning_options")
     if not isinstance(options, list):
         return []
@@ -181,13 +232,19 @@ def _reasoning_efforts(model: dict[str, Any]) -> list[str]:
             continue
         values = option.get("values")
         if isinstance(values, list):
-            return list(
-                dict.fromkeys(
-                    value
-                    for value in values
-                    if isinstance(value, str) and value
+            normalized: list[str] = []
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                effort = normalize_storable_backend_model_text(
+                    value,
+                    field_name="reasoning_efforts",
                 )
-            )
+                if effort is None:
+                    continue
+                if effort not in normalized:
+                    normalized.append(effort)
+            return normalized
     return []
 
 
@@ -213,7 +270,9 @@ def _modalities(model: dict[str, Any], direction: str) -> list[str]:
 def search_models_dev(query: str) -> list[dict[str, Any]]:
     tokens = _search_tokens(query)
     catalog = load_models_dev_catalog()
-    matches: list[tuple[int, str, str, dict[str, Any]]] = []
+    vendor_map = load_model_vendor_map()
+    aggregators = vendor_map["aggregators"]
+    candidates: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
     for provider_key, provider in catalog.items():
         if not isinstance(provider_key, str) or not isinstance(provider, dict):
             continue
@@ -243,6 +302,13 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                 if isinstance(model.get("name"), str)
                 else model_id
             )
+            display_name = normalize_storable_backend_model_text(
+                display_name,
+                field_name="display_name",
+            )
+            reasoning_efforts = _reasoning_efforts(model)
+            if display_name is None or reasoning_efforts is None:
+                continue
             score = _match_score(tokens, provider_id, model_id, display_name)
             if score is None:
                 continue
@@ -280,8 +346,63 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                     if isinstance(model.get("reasoning"), bool)
                     else None
                 ),
-                "reasoning_efforts": _reasoning_efforts(model),
+                "reasoning_efforts": reasoning_efforts,
             }
-            matches.append((score, provider_id, model_id, row))
-    matches.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [row for _score, _provider, _model, row in matches[:MODELS_DEV_MAX_MATCHES]]
+            admitted = admissible_backend_model(
+                None,
+                row["model_id"],
+                {
+                    "origin": "models_dev",
+                    "models_dev_id": row["models_dev_id"],
+                    "display_name": row["display_name"],
+                    "context_window": row["context_window"],
+                    "max_output_tokens": row["max_output_tokens"],
+                    "input_modalities": row["input_modalities"],
+                    "output_modalities": row["output_modalities"],
+                    "supports_tools": row["supports_tools"],
+                    "supports_reasoning": row["supports_reasoning"],
+                    "reasoning_efforts": row["reasoning_efforts"],
+                },
+            )
+            if admitted is None:
+                continue
+            row.update(
+                {
+                    "model_id": admitted.id,
+                    "models_dev_id": admitted.models_dev_id,
+                    "display_name": admitted.display_name,
+                    "context_window": admitted.context_window,
+                    "max_output_tokens": admitted.max_output_tokens,
+                    "input_modalities": admitted.input_modalities,
+                    "output_modalities": admitted.output_modalities,
+                    "supports_tools": admitted.supports_tools,
+                    "supports_reasoning": admitted.supports_reasoning,
+                    "reasoning_efforts": admitted.reasoning_efforts,
+                }
+            )
+            candidates.setdefault(admitted.id, []).append((score, provider_id, row))
+
+    matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []
+    for model_id, copies in candidates.items():
+        first_party_vendor = _first_party_vendor(model_id, vendor_map)
+        _score, _vendor_id, row = min(
+            copies,
+            key=lambda item: _vendor_rank(
+                item[1],
+                first_party_vendor=first_party_vendor,
+                aggregators=aggregators,
+            ),
+        )
+        first_party = row["provider_id"] == first_party_vendor
+        row["first_party"] = first_party
+        matches.append(
+            (
+                not first_party,
+                min(item[0] for item in copies),
+                row["display_name"].lower(),
+                model_id,
+                row,
+            )
+        )
+    matches.sort(key=lambda item: item[:-1])
+    return [row for *_, row in matches[:MODELS_DEV_MAX_MATCHES]]

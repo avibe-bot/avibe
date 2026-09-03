@@ -39,9 +39,11 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
-    from vibe import api
+    from vibe import api, backend_model_catalog
 
-    service = object()
+    service = SimpleNamespace(
+        reconcile_builtin_models=AsyncMock(return_value=[]),
+    )
     calls = []
 
     class Gateway:
@@ -66,6 +68,12 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
+    refresh_callbacks = []
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "set_remote_catalog_refresh_completed",
+        refresh_callbacks.append,
+    )
     presence_probes = []
     probe_failure = [False]
     block_full_probe = [False]
@@ -91,6 +99,8 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(api, "resolve_cli_paths", resolve_cli_paths)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(language="zh")
+    controller._loop = None
+    controller._shutdown_requested = False
     controller.vibe_agent_store = SimpleNamespace(
         get_default_agent=lambda: SimpleNamespace(
             backend="codex",
@@ -108,6 +118,8 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert captured["requested_model_override"]("claude") is None
     assert captured["cli_present_override"]("codex") is True
     assert captured["cli_present_override"]("claude") is False
+    service.reconcile_builtin_models.assert_awaited_once_with(notify=False)
+    assert refresh_callbacks == [controller._model_hub_snapshot_refresh_completed]
     assert presence_probes == [(["claude", "codex", "opencode"], False)]
     probe_failure[0] = True
     captured["cli_presence_refresh"](True, ("opencode",))
@@ -133,6 +145,16 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),
         ("router", service, controller.model_hub_turn_gateway),
     ]
+
+    refresh_callbacks[0]()
+
+    async def drain_refresh() -> None:
+        controller._loop = asyncio.get_running_loop()
+        controller._schedule_model_hub_snapshot_reconcile()
+        await controller._model_hub_snapshot_reconcile_task
+
+    asyncio.run(drain_refresh())
+    assert service.reconcile_builtin_models.await_count == 2
 
     runtime_config = object()
     latest = SimpleNamespace(
@@ -169,6 +191,84 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     )
     controller.backend_restart_coordinator.request_restart.assert_not_awaited()
     controller.agent_service.refresh_runtime_config.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_controller_periodic_tick_reconciles_cross_process_snapshot_changes():
+    reconciled = asyncio.Event()
+
+    async def reconcile_builtin_models():
+        reconciled.set()
+        return []
+
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_builtin_models=reconcile_builtin_models,
+    )
+    controller._loop = asyncio.get_running_loop()
+    controller._shutdown_requested = False
+    controller._model_hub_snapshot_refresh_pending = threading.Event()
+    controller._model_hub_snapshot_reconcile_task = None
+    controller._model_hub_snapshot_reconcile_loop_task = None
+    controller._model_hub_snapshot_reconcile_stopping = False
+    controller._model_hub_snapshot_reconcile_interval_seconds = 0.01
+
+    controller._start_model_hub_snapshot_reconcile_loop()
+    await asyncio.wait_for(reconciled.wait(), 1)
+    controller._shutdown_requested = True
+    await controller._stop_model_hub_snapshot_reconciliation()
+
+    assert controller._model_hub_snapshot_reconcile_loop_task is None
+    assert controller._model_hub_snapshot_reconcile_task is None
+
+
+@pytest.mark.anyio
+async def test_controller_shutdown_joins_reconcile_and_rejects_late_completion():
+    reconcile_started = asyncio.Event()
+    release_reconcile = asyncio.Event()
+    service_stopped = asyncio.Event()
+    calls = []
+
+    async def reconcile_builtin_models():
+        calls.append("reconcile")
+        reconcile_started.set()
+        await release_reconcile.wait()
+        return []
+
+    async def stop():
+        calls.append("stop")
+        service_stopped.set()
+
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_builtin_models=reconcile_builtin_models,
+        stop=stop,
+    )
+    controller.runtime_work_supervisor = None
+    controller._runtime_work_tokens = []
+    controller._shutdown_tainted = False
+    controller._loop = asyncio.get_running_loop()
+    controller._shutdown_requested = False
+    controller._model_hub_snapshot_refresh_pending = threading.Event()
+    controller._model_hub_snapshot_reconcile_task = None
+    controller._model_hub_snapshot_reconcile_loop_task = None
+    controller._model_hub_snapshot_reconcile_stopping = False
+
+    controller._model_hub_snapshot_refresh_completed()
+    await asyncio.wait_for(reconcile_started.wait(), 1)
+
+    controller._shutdown_requested = True
+    shutdown = asyncio.create_task(controller._stop_runtime_work_stack())
+    await asyncio.sleep(0)
+    controller._model_hub_snapshot_refresh_completed()
+    release_reconcile.set()
+    await asyncio.wait_for(service_stopped.wait(), 1)
+    await shutdown
+
+    assert calls == ["reconcile", "stop"]
+    assert not controller._model_hub_snapshot_refresh_pending.is_set()
+    assert controller._model_hub_snapshot_reconcile_task is None
+    assert controller._model_hub_snapshot_reconcile_loop_task is None
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

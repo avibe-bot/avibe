@@ -112,10 +112,18 @@ async def dispatch_model_hub_rpc(
             await _refresh_agent_presence(service)
         return await asyncio.to_thread(service.list_agents)
     if operation == "get_agent_sources":
+        backend = payload.get("backend")
         return await asyncio.to_thread(
             service.get_agent_sources,
-            payload.get("backend"),
+            backend,
         )
+    if operation == "agent_model_candidates":
+        backend = payload.get("backend")
+        if backend in ("claude", "codex", "opencode"):
+            await _refresh_agent_presence(service, (backend,))
+            if backend != "opencode":
+                await service.reconcile_builtin_models((backend,))
+        return await asyncio.to_thread(service.agent_model_candidates, backend)
     if operation == "set_agent_sources":
         await _refresh_payload_backend(service, payload.get("backend"))
         return await service.set_agent_sources(
@@ -135,10 +143,15 @@ async def dispatch_model_hub_rpc(
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))
     if operation == "set_agent_models":
         await _refresh_payload_backend(service, payload.get("backend"))
+        backend = payload.get("backend")
         return await service.set_agent_models(
-            payload.get("backend"),
+            backend,
             payload.get("baseline"),
             payload.get("models"),
+            expected_suppliers=payload.get("expected_suppliers"),
+            force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
     if operation == "models_dev_matches":
         return await asyncio.to_thread(
@@ -150,12 +163,6 @@ async def dispatch_model_hub_rpc(
             payload.get("backend"),
             payload.get("model_id"),
             payload.get("chain"),
-        )
-    if operation == "set_opencode_menu":
-        await _refresh_agent_presence(service, ("opencode",))
-        return await service.set_opencode_menu(
-            payload.get("baseline"),
-            payload.get("menu"),
         )
     if operation == "add_custom_model":
         return await service.add_custom_model(payload.get("source_id"), payload.get("model"))

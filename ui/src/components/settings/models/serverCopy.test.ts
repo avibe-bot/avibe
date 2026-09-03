@@ -161,6 +161,7 @@ describe('catalogSaveFailureKey', () => {
   // service's taxonomy drift apart.
   const REFUSALS = [
     ['backend_model_in_route', 'saveRouted'],
+    ['candidate_suppliers_changed', 'saveSuppliersChanged'],
     ['backend_model_conflict', 'saveConflict'],
     ['backend_model_id_prefix', 'saveIdPrefix'],
     ['backend_model_id_invalid', 'saveIdInvalid'],

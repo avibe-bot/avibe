@@ -162,7 +162,7 @@ export type AgentMenu = {
 // ── backend-model.schema.json ───────────────────────────────────────────
 /** How the row was first created. User edits stay authoritative afterwards,
  *  which is why this never gates editability — only `locked` does. */
-export type BackendModelOrigin = 'builtin' | 'models_dev' | 'manual';
+export type BackendModelOrigin = 'builtin' | 'provider' | 'models_dev' | 'manual';
 export const BACKEND_MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const;
 export type BackendModelInputModality = (typeof BACKEND_MODEL_INPUT_MODALITIES)[number];
 /** One member shorter than the input vocabulary: the schema declares no `pdf`

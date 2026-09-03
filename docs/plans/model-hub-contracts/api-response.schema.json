@@ -22,9 +22,9 @@
     {"method": "POST", "path": "/api/models/agents/<backend>/chains/reorder", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/chains/reorder", "status": 200}},
     {"method": "PATCH", "path": "/api/models/agents/<backend>/mode", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/mode", "status": 200, "json": {"mode": "hub"}}},
     {"method": "GET", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentCatalogResponse", "exercise": {"path": "/api/models/agents/claude/models", "status": 200}},
-    {"method": "PUT", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/models", "status": 200, "json": {"baseline": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}], "models": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}]}}},
+    {"method": "GET", "path": "/api/models/agents/<backend>/models/candidates", "response_schema": "AgentModelCandidatesResponse", "exercise": {"path": "/api/models/agents/claude/models/candidates", "status": 200}},
+    {"method": "PUT", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentModelsResponse", "exercises": [{"path": "/api/models/agents/claude/models", "status": 200, "json": {"baseline": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}], "models": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}]}}, {"path": "/api/models/agents/claude/models", "status": 409, "setup": "backend_model_guard"}, {"path": "/api/models/agents/claude/models", "status": 200, "setup": "backend_model_forced_removal"}, {"path": "/api/models/agents/claude/models", "status": 409, "setup": "candidate_suppliers_guard"}]},
     {"method": "GET", "path": "/api/models/catalog/models-dev?query=<text>", "response_schema": "ModelsDevResponse", "exercise": {"path": "/api/models/catalog/models-dev?query=contract-model", "status": 200}},
-    {"method": "PUT", "path": "/api/models/agents/opencode/menu", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/opencode/menu", "status": 200, "json": {"baseline": {"view": "featured", "checked": []}, "menu": {"view": "featured", "checked": []}}}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chains", "response_schema": "ChainListResponse", "exercise": {"path": "/api/models/agents/claude/chains", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200}},
     {"method": "PUT", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainMutationResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200, "json": {"hops": [{"source_id": "src_conform001", "model_id": "claude-opus-4-6"}]}}},
@@ -227,6 +227,54 @@
         "agent": {"$ref": "#/definitions/AgentSupplyApi"}
       }
     },
+    "AgentModelsResponse": {
+      "oneOf": [
+        {"$ref": "#/definitions/AgentResponse"},
+        {
+          "type": "object",
+          "required": ["ok", "contract_version", "agent", "removed_hops", "interrupted"],
+          "additionalProperties": false,
+          "properties": {
+            "ok": {"const": true},
+            "contract_version": {"const": 7},
+            "agent": {"$ref": "#/definitions/AgentSupplyApi"},
+            "removed_hops": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/RouteHopRef"}, "uniqueItems": true},
+            "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}, "uniqueItems": true}
+          }
+        },
+        {"$ref": "model-hub/guard-refusal.schema.json"},
+        {"$ref": "#/definitions/CandidateSuppliersChangedResponse"}
+      ]
+    },
+    "ExpectedSupplier": {
+      "type": "object",
+      "required": ["source_id", "model_id"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {"type": "string", "pattern": "^src_[a-z0-9]{8,}$"},
+        "model_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "CandidateSuppliersChangedResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "error", "detail", "changed"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": false},
+        "contract_version": {"const": 7},
+        "error": {"const": "candidate_suppliers_changed"},
+        "detail": {"type": "string", "minLength": 1},
+        "changed": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "items": {"$ref": "#/definitions/ExpectedSupplier"},
+            "uniqueItems": true
+          }
+        }
+      }
+    },
     "AgentCatalogResponse": {
       "type": "object",
       "required": ["ok", "contract_version", "agent"],
@@ -249,6 +297,54 @@
         }
       }
     },
+    "CandidateSupplier": {
+      "type": "object",
+      "required": ["source_id", "source_name", "model_id"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {"type": "string", "pattern": "^src_[a-z0-9]{8,}$"},
+        "source_name": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "ModelCandidate": {
+      "type": "object",
+      "required": ["id", "display_name", "reasoning_efforts", "suppliers", "origin"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "display_name": {"type": ["string", "null"]},
+        "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true},
+        "suppliers": {"type": "array", "items": {"$ref": "#/definitions/CandidateSupplier"}, "uniqueItems": true},
+        "origin": {"enum": ["builtin", "provider", "models_dev", "manual"]},
+        "group_if_removed": {"anyOf": [{"enum": ["builtin", "providers"]}, {"type": "null"}]}
+      }
+    },
+    "AddableModelCandidate": {
+      "allOf": [
+        {"$ref": "#/definitions/ModelCandidate"},
+        {"not": {"required": ["group_if_removed"]}}
+      ]
+    },
+    "AgentModelCandidatesResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "candidates"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 7},
+        "candidates": {
+          "type": "object",
+          "required": ["builtin", "providers", "in_list"],
+          "additionalProperties": false,
+          "properties": {
+            "builtin": {"type": "array", "items": {"$ref": "#/definitions/AddableModelCandidate"}},
+            "providers": {"type": "array", "items": {"$ref": "#/definitions/AddableModelCandidate"}},
+            "in_list": {"type": "array", "items": {"$ref": "#/definitions/ModelCandidate"}}
+          }
+        }
+      }
+    },
     "ModelsDevResponse": {
       "type": "object",
       "required": ["ok", "contract_version", "matches"],
@@ -258,13 +354,15 @@
         "contract_version": {"const": 7},
         "matches": {
           "type": "array",
+          "maxItems": 8,
           "items": {
             "type": "object",
-            "required": ["provider_id", "provider_name", "model_id", "models_dev_id", "display_name", "context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning", "reasoning_efforts"],
+            "required": ["provider_id", "provider_name", "first_party", "model_id", "models_dev_id", "display_name", "context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning", "reasoning_efforts"],
             "additionalProperties": false,
             "properties": {
               "provider_id": {"type": "string", "minLength": 1},
               "provider_name": {"type": "string", "minLength": 1},
+              "first_party": {"type": "boolean"},
               "model_id": {"type": "string", "minLength": 1},
               "models_dev_id": {"type": "string", "minLength": 3},
               "display_name": {"type": "string", "minLength": 1},
@@ -274,7 +372,7 @@
               "output_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video"]}, "uniqueItems": true},
               "supports_tools": {"type": ["boolean", "null"]},
               "supports_reasoning": {"type": ["boolean", "null"]},
-              "reasoning_efforts": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+              "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true}
             }
           }
         }

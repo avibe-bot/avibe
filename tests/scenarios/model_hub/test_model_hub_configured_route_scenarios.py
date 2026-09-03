@@ -49,10 +49,7 @@ def _route_pairs(
     backend: str,
     menu_model: str,
 ) -> tuple[tuple[str, str], ...]:
-    return tuple(
-        (hop.source_id, hop.model_id)
-        for hop in config.agents[backend].routes[menu_model].hops
-    )
+    return tuple((hop.source_id, hop.model_id) for hop in config.agents[backend].routes[menu_model].hops)
 
 
 def test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity() -> None:
@@ -76,9 +73,7 @@ def test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity() -> None
 
     changed = round_trip(config)
     changed.sources[0].state.status = "needs_action"
-    changed.sources[0].state.detail_key = (
-        "models.source.needs_action.credential_revoked"
-    )
+    changed.sources[0].state.detail_key = "models.source.needs_action.credential_revoked"
     changed.sources[1].models.append(source_model("catalog-only-new-model"))
     after = resolve_model_hub_turn(
         changed,
@@ -87,20 +82,10 @@ def test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity() -> None
         now=datetime(2030, 8, 1, tzinfo=timezone.utc),
     )
 
-    assert (
-        before.source_model_ids
-        == after.source_model_ids
-        == _route_pairs(config, "claude", menu_model)
-    )
-    assert tuple(
-        (item.source_id, item.model_id) for item in after.inspected_hops
-    ) == before.source_model_ids
-    assert {item.id for item in after.candidates} <= {
-        source_id for source_id, _ in before.source_model_ids
-    }
-    assert after.target_model in {
-        model_id for _, model_id in before.source_model_ids
-    }
+    assert before.source_model_ids == after.source_model_ids == _route_pairs(config, "claude", menu_model)
+    assert tuple((item.source_id, item.model_id) for item in after.inspected_hops) == before.source_model_ids
+    assert {item.id for item in after.candidates} <= {source_id for source_id, _ in before.source_model_ids}
+    assert after.target_model in {model_id for _, model_id in before.source_model_ids}
 
 
 def test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit(
@@ -141,17 +126,16 @@ def test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit(
             },
         )
     )
-    assert [
-        (hop["source_id"], hop["model_id"]) for hop in result["chain"]["chain"]
-    ] == [(second.id, menu_model), (first.id, menu_model)]
+    assert [(hop["source_id"], hop["model_id"]) for hop in result["chain"]["chain"]] == [
+        (second.id, menu_model),
+        (first.id, menu_model),
+    ]
     assert _route_pairs(round_trip(store.load()), "claude", menu_model) == (
         (second.id, menu_model),
         (first.id, menu_model),
     )
     assert adapter.observation_calls == []
-    assert adapter.discovery_calls == [
-        (first.vendor, first.protocol, first.base_url, first.credential_ref)
-    ]
+    assert adapter.discovery_calls == [(first.vendor, first.protocol, first.base_url, first.credential_ref)]
 
 
 def test_mh_match_001_add_source_persists_and_reports_each_exact_position(
@@ -194,21 +178,13 @@ def test_mh_match_001_add_source_persists_and_reports_each_exact_position(
     )
     added_id = result["source"]["id"]
     route = store.load().agents["claude"].routes[menu_model]
-    positions = {
-        (hop.source_id, hop.model_id): index
-        for index, hop in enumerate(route.hops, start=1)
-    }
-    returned = {
-        (item["source_id"], item["model_id"]): item["position"]
-        for item in result["added_to"]
-    }
+    positions = {(hop.source_id, hop.model_id): index for index, hop in enumerate(route.hops, start=1)}
+    returned = {(item["source_id"], item["model_id"]): item["position"] for item in result["added_to"]}
 
     assert returned
     assert all(item["source_id"] == added_id for item in result["added_to"])
     assert returned == {pair: positions[pair] for pair in returned}
-    assert result["adopted_by"] == [
-        {"backend": "claude", "menu_model": menu_model}
-    ]
+    assert result["adopted_by"] == [{"backend": "claude", "menu_model": menu_model}]
     assert store.load().agents["claude"].sources.order[-1] == added_id
     assert adapter.revoked == adapter.provisioned_transient
 
@@ -216,10 +192,7 @@ def test_mh_match_001_add_source_persists_and_reports_each_exact_position(
     asyncio.run(service.refresh_source(added_id))
     restarted = service_for(tmp_path / "restart", store, adapter)
     assert _route_pairs(store.load(), "claude", menu_model) == persisted_after_add
-    assert (
-        _route_pairs(round_trip(restarted.store.load()), "claude", menu_model)
-        == persisted_after_add
-    )
+    assert _route_pairs(round_trip(restarted.store.load()), "claude", menu_model) == persisted_after_add
     assert len(adapter.observation_calls) == 1
 
 
@@ -265,6 +238,74 @@ def test_mh_match_002_matching_tie_break_is_independent_of_inventory_order() -> 
     assert set(first_order.values()) == {"claude-opus-4-6-20260115"}
 
 
+def test_mh_menu_add_001_seeds_overlapping_suppliers_in_source_order(
+    tmp_path: Path,
+) -> None:
+    """MH-MENU-ADD-001: one menu add persists the complete ordered supplier projection."""
+
+    model_id = "overlapping-provider-model"
+    first = source(
+        "src_menuadd01",
+        [source_model(model_id, provenance="discovered")],
+        vendor="openai",
+        protocol="openai_responses",
+    )
+    second = source(
+        "src_menuadd02",
+        [source_model(model_id, provenance="manual")],
+        vendor="custom",
+        protocol="openai_chat",
+    )
+    config = config_with_sources([first, second], backend="codex")
+    config.agents["codex"].sources.order = [second.id, first.id]
+    store = MemoryModelHubStore(config)
+    service = service_for(tmp_path, store, ModelHubScenarioAdapter())
+    baseline = service.backend_catalog_models("codex")
+    before = store.load().to_payload()
+    added = {
+        "id": model_id,
+        "display_name": "Overlapping provider model",
+        "origin": "provider",
+        "models_dev_id": None,
+        "context_window": None,
+        "max_output_tokens": None,
+        "input_modalities": [],
+        "output_modalities": [],
+        "supports_tools": None,
+        "supports_reasoning": None,
+        "reasoning_efforts": [],
+        "locked": False,
+        "routeable": True,
+    }
+
+    asyncio.run(
+        service.set_agent_models(
+            "codex",
+            baseline,
+            [*baseline, added],
+            expected_suppliers={
+                model_id: [
+                    {"source_id": second.id, "model_id": model_id},
+                    {"source_id": first.id, "model_id": model_id},
+                ]
+            },
+        )
+    )
+
+    after = store.load().to_payload()
+    assert _route_pairs(store.load(), "codex", model_id) == (
+        (second.id, model_id),
+        (first.id, model_id),
+    )
+    assert after["sources"] == before["sources"]
+    assert after["agents"]["codex"]["sources"] == before["agents"]["codex"]["sources"]
+    assert {key: value for key, value in after["agents"]["codex"]["routes"].items() if key != model_id} == before[
+        "agents"
+    ]["codex"]["routes"]
+    assert after["agents"]["claude"] == before["agents"]["claude"]
+    assert after["agents"]["opencode"] == before["agents"]["opencode"]
+
+
 def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order(
     tmp_path: Path,
 ) -> None:
@@ -296,10 +337,7 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
             agent.menu.checked = [opencode_model]
             agent.models = [ModelHubBackendModelConfig(id=opencode_model)]
         agent.routes[menu_model] = ModelHubRouteConfig(
-            hops=tuple(
-                ModelHubRouteHopConfig(item.id, upstream_model)
-                for item in (first, doomed, last)
-            )
+            hops=tuple(ModelHubRouteHopConfig(item.id, upstream_model) for item in (first, doomed, last))
         )
     store = MemoryModelHubStore(config)
     adapter = ModelHubScenarioAdapter()
@@ -325,10 +363,7 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
         ("opencode", opencode_model),
     ):
         assert doomed.id not in store.load().agents[backend].sources.order
-        assert [
-            hop.source_id
-            for hop in store.load().agents[backend].routes[menu_model].hops
-        ] == [first.id, last.id]
+        assert [hop.source_id for hop in store.load().agents[backend].routes[menu_model].hops] == [first.id, last.id]
     assert round_trip(store.load()).to_payload() == store.load().to_payload()
     assert adapter.revoked == [doomed.credential_ref]
 
@@ -373,11 +408,7 @@ def test_mh_supply_gap_001_empty_chain_remains_visible_after_inventory_loss(
             "position": 1,
         }
     ]
-    model_supply = next(
-        row
-        for row in service.list_agents()[0]["model_supply"]
-        if row["model_id"] == menu_model
-    )
+    model_supply = next(row for row in service.list_agents()[0]["model_supply"] if row["model_id"] == menu_model)
     assert model_supply["chain_length"] == 0
     assert service.agent_chain("claude", menu_model)["chain"] == []
 
@@ -451,9 +482,7 @@ def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state
 def test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports() -> None:
     """MH-PROTOCOL-002: the schema and adapter authority have one exact protocol vocabulary."""
 
-    schema = json.loads(
-        Path("docs/plans/model-hub-contracts/source.schema.json").read_text()
-    )
+    schema = json.loads(Path("docs/plans/model-hub-contracts/source.schema.json").read_text())
     schema_protocols = tuple(schema["properties"]["protocol"]["enum"])
     assert schema_protocols == SOURCE_PROTOCOLS
     assert len(schema_protocols) == len(set(schema_protocols))
@@ -490,9 +519,7 @@ def test_mh_protocol_003_manual_selection_requires_matching_response_proof(
     )
 
     assert created["source"]["protocol"] == "openai_responses"
-    assert adapter.observation_calls == [
-        ("custom", "https://relay.example/v1", ("openai_responses",))
-    ]
+    assert adapter.observation_calls == [("custom", "https://relay.example/v1", ("openai_responses",))]
     assert adapter.revoked == adapter.provisioned_transient
 
     mismatch_store = MemoryModelHubStore(config_with_sources([]))
@@ -601,9 +628,7 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     persisted_sources = {item.id: item.to_payload() for item in reloaded.sources}
     response_sources = {}
     for item in result["sources"]:
-        persisted = json.loads(
-            json.dumps({key: value for key, value in item.items() if key != "adopted_by"})
-        )
+        persisted = json.loads(json.dumps({key: value for key, value in item.items() if key != "adopted_by"}))
         for model in persisted["models"]:
             if model.get("retired") is False:
                 model.pop("retired")
@@ -616,6 +641,5 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     assert set(_route_pairs(reloaded, "claude", menu_model)) == {
         (position["source_id"], position["model_id"])
         for position in result["added_to"]
-        if position["backend"] == "claude"
-        and position["menu_model"] == menu_model
+        if position["backend"] == "claude" and position["menu_model"] == menu_model
     }

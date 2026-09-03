@@ -669,6 +669,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             "routes",
             "menu",
             "models",
+            "removed_model_ids",
         }:
             return payload, False, ()
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
@@ -881,8 +882,9 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated = _migrate_fixed_menu_routes_on_load(migrated)
+    model_hub_changed = changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
-    return migrated, changed, warnings
+    return migrated, model_hub_changed, warnings
 
 
 # The spellings a hand-edited config may use for a boolean, both sides in one
@@ -3196,7 +3198,7 @@ _BACKEND_MODEL_OUTPUT_MODALITIES = frozenset(
 @dataclass
 class ModelHubBackendModelConfig:
     id: str
-    origin: Literal["builtin", "models_dev", "manual"] = "manual"
+    origin: Literal["builtin", "provider", "models_dev", "manual"] = "manual"
     display_name: Optional[str] = None
     models_dev_id: Optional[str] = None
     context_window: Optional[int] = None
@@ -3249,7 +3251,7 @@ class ModelHubBackendModelConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.models.id' is invalid")
-        if origin not in {"builtin", "models_dev", "manual"}:
+        if origin not in {"builtin", "provider", "models_dev", "manual"}:
             raise ValueError("Config 'model_hub.agents.models.origin' is invalid")
         for name, value in (
             ("display_name", display_name),
@@ -3341,6 +3343,31 @@ class ModelHubBackendModelConfig:
         }
 
 
+def normalize_storable_backend_model_text(
+    value: object,
+    *,
+    field_name: Literal["display_name", "reasoning_efforts"],
+) -> Optional[str]:
+    """Normalize one proposed metadata value through the persisted model contract."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    candidate = {
+        "id": "metadata-proposal",
+        field_name: (
+            normalized if field_name == "display_name" else [normalized]
+        ),
+    }
+    try:
+        model = ModelHubBackendModelConfig.from_payload(candidate)
+    except (TypeError, ValueError):
+        return None
+    if field_name == "display_name":
+        return model.display_name
+    return model.reasoning_efforts[0]
+
+
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
     if backend not in {"claude", "codex"}:
         return []
@@ -3387,6 +3414,7 @@ class ModelHubAgentSupplyConfig:
     routes: dict[str, ModelHubRouteConfig] = field(default_factory=dict)
     menu: Optional[ModelHubMenuConfig] = None
     models: list[ModelHubBackendModelConfig] = field(default_factory=list)
+    removed_model_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
@@ -3425,6 +3453,7 @@ class ModelHubAgentSupplyConfig:
             "routes",
             "menu",
             "models",
+            "removed_model_ids",
         }:
             raise ValueError("Config 'model_hub.agents' contains unknown fields")
         raw_backend = payload.get("backend")
@@ -3457,6 +3486,20 @@ class ModelHubAgentSupplyConfig:
         }
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
         models_payload = payload.get("models")
+        removed_model_ids = payload.get("removed_model_ids", [])
+        if (
+            not isinstance(removed_model_ids, list)
+            or any(
+                not isinstance(model_id, str)
+                or not model_id
+                or _contains_model_hub_credential_material(model_id)
+                for model_id in removed_model_ids
+            )
+            or len(set(removed_model_ids)) != len(removed_model_ids)
+        ):
+            raise ValueError(
+                "Config 'model_hub.agents.removed_model_ids' must be a unique array of strings"
+            )
         if models_payload is None:
             if backend == "opencode":
                 legacy_ids = list(menu.checked if menu else ())
@@ -3505,6 +3548,7 @@ class ModelHubAgentSupplyConfig:
             routes=routes,
             menu=menu,
             models=models,
+            removed_model_ids=list(removed_model_ids),
         )
 
     def to_payload(self) -> dict:
@@ -3520,6 +3564,13 @@ class ModelHubAgentSupplyConfig:
             "menu": self.menu.to_payload() if self.menu else None,
         }
         payload["models"] = [model.to_payload() for model in self.models]
+        payload["removed_model_ids"] = list(self.removed_model_ids)
+        return payload
+
+    def to_agent_supply_payload(self) -> dict:
+        payload = self.to_payload()
+        payload.pop("models")
+        payload.pop("removed_model_ids")
         return payload
 
 

@@ -112,6 +112,12 @@ scenarios:
     kind: determinism
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_002_matching_tie_break_is_independent_of_inventory_order
+  - id: MH-MENU-ADD-001
+    name: Adding a provider menu model seeds every overlapping supplier in Source order
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_menu_add_001_seeds_overlapping_suppliers_in_source_order
   - id: MH-SRC-DELETE-001
     name: Source deletion removes every reference while preserving survivor order
     status: covered

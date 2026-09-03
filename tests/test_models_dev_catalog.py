@@ -35,7 +35,10 @@ def _catalog():
                     "name": "DeepSeek V4",
                     "reasoning": True,
                     "reasoning_options": [
-                        {"type": "effort", "values": ["low", "high", "low"]}
+                        {
+                            "type": "effort",
+                            "values": ["low", "x" * 65, "high", "low"],
+                        }
                     ],
                     "tool_call": True,
                     "modalities": {
@@ -67,6 +70,7 @@ def test_models_dev_search_normalizes_editable_metadata(monkeypatch, tmp_path):
         {
             "provider_id": "deepseek",
             "provider_name": "DeepSeek",
+            "first_party": True,
             "model_id": "deepseek-v4",
             "models_dev_id": "deepseek/deepseek-v4",
             "display_name": "DeepSeek V4",
@@ -82,6 +86,26 @@ def test_models_dev_search_normalizes_editable_metadata(monkeypatch, tmp_path):
     cached = json.loads(cache_path.read_text(encoding="utf-8"))
     assert cached["etag"] == '"catalog-v1"'
     assert cached["catalog"] == _catalog()
+
+
+def test_models_dev_search_preserves_validator_accepted_long_names(monkeypatch):
+    model_id = "m" * 80
+    display_name = "Model " + "x" * 80
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: {
+            "provider": {
+                "name": "Provider",
+                "models": {model_id: {"name": display_name}},
+            }
+        },
+    )
+
+    match = models_dev_catalog.search_models_dev(model_id)[0]
+
+    assert match["model_id"] == model_id
+    assert match["display_name"] == display_name
 
 
 def test_models_dev_search_uses_fresh_cache_without_network(monkeypatch, tmp_path):
@@ -103,9 +127,7 @@ def test_models_dev_search_uses_fresh_cache_without_network(monkeypatch, tmp_pat
 
     monkeypatch.setattr(models_dev_catalog.urllib.request, "urlopen", unexpected)
 
-    assert models_dev_catalog.search_models_dev("deepseek/deepseek-v4")[0][
-        "models_dev_id"
-    ] == "deepseek/deepseek-v4"
+    assert models_dev_catalog.search_models_dev("deepseek/deepseek-v4")[0]["models_dev_id"] == "deepseek/deepseek-v4"
 
 
 def test_models_dev_search_falls_back_to_stale_cache(monkeypatch, tmp_path):
@@ -127,9 +149,7 @@ def test_models_dev_search_falls_back_to_stale_cache(monkeypatch, tmp_path):
 
     monkeypatch.setattr(models_dev_catalog.urllib.request, "urlopen", unavailable)
 
-    assert models_dev_catalog.search_models_dev("DeepSeek V4")[0][
-        "context_window"
-    ] == 1_048_576
+    assert models_dev_catalog.search_models_dev("DeepSeek V4")[0]["context_window"] == 1_048_576
 
 
 def test_models_dev_stale_cache_is_scoped_to_its_url(monkeypatch, tmp_path):
@@ -157,3 +177,142 @@ def test_models_dev_stale_cache_is_scoped_to_its_url(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="unavailable"):
         models_dev_catalog.search_models_dev("deepseek-v4")
+
+
+def test_model_vendor_map_is_versioned_unambiguous_and_ordered():
+    vendor_map = models_dev_catalog.load_model_vendor_map()
+    families = vendor_map["families"]
+    aggregators = vendor_map["aggregators"]
+
+    assert vendor_map["schema_version"] == 1
+    assert families
+    assert all(set(item) == {"prefix", "vendor_id"} and item["prefix"] and item["vendor_id"] for item in families)
+    assert len({item["prefix"] for item in families}) == len(families)
+    assert aggregators
+    assert len(set(aggregators)) == len(aggregators)
+    assert all(isinstance(provider_id, str) and provider_id for provider_id in aggregators)
+
+
+def test_models_dev_deduplicates_by_model_id_and_ranks_first_party_then_match(
+    monkeypatch,
+):
+    catalog = {
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {
+                "gpt-target": {"name": "Target proxy"},
+                "target": {"name": "Target"},
+            },
+        },
+        "openai": {
+            "name": "OpenAI",
+            "models": {"gpt-target": {"name": "GPT target"}},
+        },
+        "zeta": {
+            "name": "Zeta",
+            "models": {"target": {"name": "Target"}},
+        },
+    }
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: catalog,
+    )
+
+    matches = models_dev_catalog.search_models_dev("target")
+
+    assert [item["model_id"] for item in matches] == ["gpt-target", "target"]
+    assert matches[0]["provider_id"] == "openai"
+    assert matches[0]["first_party"] is True
+    assert matches[1]["provider_id"] == "openrouter"
+    assert matches[1]["first_party"] is False
+
+
+def test_models_dev_openai_o_series_does_not_claim_other_o_families(monkeypatch):
+    catalog = {
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {
+                "o3-target": {"name": "O3 proxy"},
+                "olmo-target": {"name": "OLMo proxy"},
+            },
+        },
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "o3-target": {"name": "O3 target"},
+                "olmo-target": {"name": "OLMo OpenAI copy"},
+            },
+        },
+    }
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: catalog,
+    )
+
+    matches = {
+        item["model_id"]: item for item in models_dev_catalog.search_models_dev("target")
+    }
+
+    assert matches["o3-target"]["provider_id"] == "openai"
+    assert matches["o3-target"]["first_party"] is True
+    assert matches["olmo-target"]["provider_id"] == "openrouter"
+    assert matches["olmo-target"]["first_party"] is False
+
+
+def test_models_dev_normalizes_each_copy_before_ranking_and_deduplication(
+    monkeypatch,
+):
+    catalog = {
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "gpt-target": {"name": "   "},
+                "gpt-unusable-target": {
+                    "name": "Unusable target",
+                    "reasoning_options": [
+                        {"type": "effort", "values": ["   "]}
+                    ],
+                },
+            },
+        },
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {"gpt-target": {"name": "Valid aggregator copy"}},
+        },
+    }
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: catalog,
+    )
+
+    matches = models_dev_catalog.search_models_dev("target")
+
+    assert [item["model_id"] for item in matches] == [
+        "gpt-unusable-target",
+        "gpt-target",
+    ]
+    assert matches[0]["reasoning_efforts"] == []
+    assert matches[1]["provider_id"] == "openrouter"
+    assert matches[1]["first_party"] is False
+
+
+def test_models_dev_caps_matches_at_eight(monkeypatch):
+    catalog = {
+        "unknown": {
+            "name": "Unknown",
+            "models": {f"test-{index:02d}": {"name": f"Test {index:02d}"} for index in range(12)},
+        }
+    }
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "load_models_dev_catalog",
+        lambda: catalog,
+    )
+
+    matches = models_dev_catalog.search_models_dev("test")
+
+    assert len(matches) == models_dev_catalog.MODELS_DEV_MAX_MATCHES == 8
+    assert [item["model_id"] for item in matches] == sorted(item["model_id"] for item in matches)

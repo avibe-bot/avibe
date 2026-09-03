@@ -417,12 +417,14 @@ order and applies it to existing Routes without changing their hop membership or
 mappings. There is no backend Source-order policy discriminator
 and no per-model route policy. Runtime executes the exact hop order stored for each model.
 
-Matching is an **Add Source write-time operation**. After connectivity, protocol, and
-inventory have been observed, the add transaction proposes exact Source/model matches,
-writes the accepted hops, and returns their visible positions. A later refresh,
-restart, health change, catalog change, or turn never repeats matching. Users maintain
-the persisted chains directly: add or remove a hop, move it, or edit its explicit
-upstream `model_id` mapping.
+Matching has exactly three one-time write points. Add Source matches the discovered
+inventory observed by that transaction and appends accepted hops. A backend menu-model
+add matches that one new row against the complete non-retired inventory (discovered and
+manual) of configuration-eligible Sources in the backend's stored Source order, then
+writes accepted hops in that order. A built-in reconcile add uses that same menu-model
+match and seeds the built-in snapshot's label and reasoning efforts. A later refresh,
+restart, health change, or turn never repeats any match for an existing row. Users maintain persisted chains directly after creation:
+add or remove a hop, move it, or edit its explicit upstream `model_id` mapping.
 
 Cancellation of Source creation has one commit boundary. Before the durable Source
 commit, AC-26's transient-reference cleanup and pending-revocation accounting complete
@@ -441,10 +443,11 @@ user setting, or persisted policy discriminator.
 
 **Current policy value (`placement-v1`).** Append a newly added Source to each
 configuration-eligible backend Source order, and append every accepted exact match to
-that menu model's current Route-chain tail. This is only the current policy value, not
+that menu model's current Route-chain tail. For a newly added menu model, write one
+accepted hop per supplier in the already stored Source order. This is only the current policy value, not
 an API, UI, or acceptance invariant. A later version may choose a better visible
 position from model fit or a fixed Source-reliability priority, but it must still run
-only during Add Source, persist the chosen position, and leave runtime to execute that
+only at one of the three one-time write points, persist the chosen position, and leave runtime to execute that
 configuration verbatim. There is no “new Source not enabled” state or prompt, and the
 UI never uses position to distinguish new from old.
 
@@ -473,11 +476,11 @@ assembles the returned AgentSupply. An existing native Source, an absent or
 unrecognized login, or another mode transition creates nothing. Repetition cannot
 create a second native Source.
 
-**Current matching value (`matching-v1`).** Add Source uses the same observed-inventory
-matching semantics that preceded the configured-chain freeze, then persists the concrete
-upstream id in the Route hop. It runs once, after connectivity, protocol, and inventory
-observation, and is never re-run by refresh, restart, catalog changes, health changes, or
-turn execution.
+**Current matching value (`matching-v1`).** Add Source uses the discovered inventory
+observed by that transaction. A menu-model add uses the same matcher, including the
+Claude alias rule, over each ordered eligible Source's complete non-retired inventory.
+All three persist the concrete upstream id in the Route hop. Matching runs once for each add
+and is never re-run by refresh, restart, health changes, or turn execution.
 
 | Backend/source case | Candidate set | Accepted match and tie-break |
 | --- | --- | --- |
@@ -1234,6 +1237,7 @@ the other array remains a complete projection and may independently be empty or 
 | --- | --- | --- | --- |
 | `guard_error.source_in_route_chain` | `source_in_route_chain` | `would_remove_hops` | `would_interrupt` remains complete |
 | `guard_error.source_model_in_route_chain` | `source_model_in_route_chain` | `would_remove_hops` | `would_interrupt` remains complete |
+| `guard_error.backend_model_in_route` | `backend_model_in_route` | `would_remove_hops` | `would_interrupt` remains complete |
 | `guard_error.source_last_supplier` | `source_last_supplier` | `would_interrupt` | `would_remove_hops` remains complete |
 
 **Source-mutation envelope matrix (authoritative and exhaustive; owner rulings
@@ -1385,10 +1389,34 @@ order alone leaves every Route byte-identical. A per-model Route PUT is instead 
 user-authored `hops` replacement: its handler does not read `sources.order`, even when the
 client used its already-held Source-order projection as a local draft-sorting aid.
 
-`hops` may be empty and is always present. A newly introduced menu model starts with an
-empty route; catalog expansion and inventory refresh do not retroactively match it.
-Only Add Source's one-time match or an explicit user edit changes the array. Hop order,
-Source identity, and model mapping are user-visible configuration.
+`hops` may be empty and is always present. A newly introduced menu model runs
+`matching-v1` once at that write and starts empty only when no ordered Source supplies it.
+Refresh, restart, health changes, and turns do not retroactively match it. Only either
+add-time match, an explicit user edit, or a confirmed guarded cascade changes the array.
+Hop order, Source identity, and model mapping are user-visible configuration.
+
+The full-list model PUT keeps its three-way merge. Caller additions are the ids in the
+desired list but not its baseline; only one still absent from the latest stored list is
+seeded, so a concurrently added row and its Route survive untouched. For caller additions,
+the optional `expected_suppliers` map echoes the picker's ordered `(source_id, model_id)`
+projection. The server recomputes every listed projection before staging the mutation. Any
+difference refuses the whole write with `candidate_suppliers_changed` and a `changed` map
+containing the current projections for the differing ids.
+
+Backend catalogs also persist `removed_model_ids: string[]`. Removing any row adds its id
+to the set; explicitly adding that id removes it. A catalog written without this field
+loads with an empty set and reconciles normally. The controller re-reads the bundled
+catalog, remote cache file, and installed CLI cache before every Model Hub agent read or
+mutation and at startup. CLI cache participation follows the controller's executable
+presence probe independently of backend enablement. It records the content-hash generation
+it last reconciled, so a changed generation is applied within that request without any
+notification from the UI process. A partial snapshot only exposes fewer built-ins at that
+moment; it never infers a removal or tombstone. Each snapshot change adds, but never
+removes, missing built-ins not in the set, in snapshot order among built-ins already present
+(or at the menu tail when none remain), seeds snapshot label and reasoning efforts, and
+runs the same one-time menu-add match. Remote-catalog payload, validators, success, failure,
+and backoff state are keyed by the configured catalog source. Claude's locked `default` row
+is excluded.
 
 A write validates every newly introduced or changed exact pair before commit. An exact
 pair already present in the persisted array may be retained or reordered even when a
@@ -1711,9 +1739,9 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
       Completions, and shows Auto detect plus those three protocol choices before
       observation; an ambiguous Auto result requires one concrete choice to retry.
-- [ ] §4.2 alone owns Add Source placement: every accepted match is persisted at one
-      deterministic policy-chosen position that is visible and adjustable; no later
-      path reruns placement, and no UI test infers newness from position.
+- [ ] §4.2 alone owns one-time placement: Add Source, menu-model add, and built-in
+      reconcile persist every accepted match at one deterministic policy-chosen position;
+      no runtime path reruns placement, and no UI test infers newness from position.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
       native CLI's sanctioned-backend binding.
 - [ ] §4.3 is the document's only configured-chain execution algorithm: it reads stored
