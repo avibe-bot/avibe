@@ -41,11 +41,11 @@ pytest lane uses. It runs standalone on a port you pick, so a checkout needs
 nothing else —
 
 ```
-python3 -m tests.e2e.drivers.mock_llm_upstream --port 8791
+python3 -m tests.e2e.drivers.mock_llm_upstream --port 9931
 ```
 
-— and `VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:8791` is what the specs then
-steer. It binds loopback unless `--host` says otherwise, which is the same
+— and `VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931`, the port both runnable
+examples below already pass, is what the specs then steer. It binds loopback unless `--host` says otherwise, which is the same
 reachability caveat below: the instance is what dials the mock, so a remote
 target needs an address that resolves from there. Nothing about the driver is
 privileged, though: the suite talks to it over HTTP alone, so any server

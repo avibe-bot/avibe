@@ -438,8 +438,13 @@ No string explains mechanism.
 - A built-in that enters the snapshot through any process's refresh is in the menu within one
   controller tick, and immediately when the picker's candidates read runs.
 - No reconcile task outlives Model Hub shutdown.
-- Every producer predicate is the persisted validator itself: a proposal is admissible exactly
-  when `ModelHubBackendModelConfig.from_payload` accepts the row it would create.
+- Every producer shares one admission predicate, and it is stricter than the persisted shape
+  alone: a proposal is admissible exactly when the backend's identity policy admits the id —
+  it equals its own canonical form, an OpenCode id is a valid menu identity, and a Claude id
+  is either a current built-in or `claude-`/`anthropic-` prefixed — and
+  `ModelHubBackendModelConfig.from_payload` then accepts the row it would create, with the id
+  it persists unchanged. The validator alone is the weaker half: it accepts ids that the
+  identity policy, and therefore the shipped API, refuses.
 - A catalog file without `removed_model_ids` loads with an empty set and reconciles normally.
 - In the editor, a models.dev suggestion fills every metadata field it knows and leaves each
   one editable; an id models.dev does not know can still be entered and saved.
