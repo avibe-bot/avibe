@@ -339,6 +339,24 @@
           "paths": ["/definitions/ModelCandidate/properties/origin"]
         }
       ]
+    },
+    {
+      "id": "M10",
+      "vocabulary": "candidate removal destination to creation origin",
+      "rule": "mapping",
+      "home": {
+        "schema": "api-response.schema.json",
+        "path": "/definitions/ModelCandidate/properties/group_if_removed/anyOf/0"
+      },
+      "target": {
+        "schema": "api-response.schema.json",
+        "path": "/definitions/ModelCandidate/properties/origin",
+        "exclude": ["models_dev", "manual"]
+      },
+      "mapping": {
+        "builtin": "builtin",
+        "providers": "provider"
+      }
     }
   ],
   "decision_tables": [

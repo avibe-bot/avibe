@@ -2131,6 +2131,7 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
             },
         ],
         "origin": "provider",
+        "group_if_removed": "providers",
     }
     assert candidates["providers"] == [
         {
@@ -2153,6 +2154,14 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
         }
     ]
     assert len(candidates["in_list"]) == len(service.backend_catalog_models("codex"))
+    assert next(
+        item for item in candidates["in_list"] if item["id"] == existing_builtin_id
+    )["group_if_removed"] == "builtin"
+    assert next(
+        item for item in candidates["in_list"] if item["id"] == legacy_overlong_id
+    )["group_if_removed"] is None
+    assert all("group_if_removed" not in item for item in candidates["builtin"])
+    assert all("group_if_removed" not in item for item in candidates["providers"])
     assert legacy_overlong_id in {item["id"] for item in candidates["in_list"]}
     assert "gpt-withdrawn" not in {item["id"] for group in candidates.values() for item in group}
     validator = Draft7Validator(
@@ -2166,6 +2175,29 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
                 "ok": True,
                 "contract_version": CONTRACT_VERSION,
                 "candidates": candidates,
+            }
+        )
+    )
+    rolling_upgrade = copy.deepcopy(candidates)
+    for item in rolling_upgrade["in_list"]:
+        item.pop("group_if_removed")
+    assert not list(
+        validator.iter_errors(
+            {
+                "ok": True,
+                "contract_version": CONTRACT_VERSION,
+                "candidates": rolling_upgrade,
+            }
+        )
+    )
+    invalid_group = copy.deepcopy(candidates)
+    invalid_group["builtin"][0]["group_if_removed"] = "builtin"
+    assert list(
+        validator.iter_errors(
+            {
+                "ok": True,
+                "contract_version": CONTRACT_VERSION,
+                "candidates": invalid_group,
             }
         )
     )
@@ -2721,7 +2753,7 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
     assert applies == [("codex",), ("codex",)]
 
 
-def test_cli_presence_refresh_tick_reconciles_builtins_but_plain_reads_do_not(
+def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
     monkeypatch,
     tmp_path,
 ):
@@ -2752,6 +2784,17 @@ def test_cli_presence_refresh_tick_reconciles_builtins_but_plain_reads_do_not(
             service,
             "list_agents",
             {"refresh_cli_presence": True},
+        )
+    )
+    assert "gpt-cli-refresh" not in {
+        model.id for model in store.config.agents["codex"].models
+    }
+
+    asyncio.run(
+        dispatch_model_hub_rpc(
+            service,
+            "agent_model_candidates",
+            {"backend": "codex"},
         )
     )
     assert "gpt-cli-refresh" in {

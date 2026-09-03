@@ -316,8 +316,15 @@
         "display_name": {"type": ["string", "null"]},
         "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true},
         "suppliers": {"type": "array", "items": {"$ref": "#/definitions/CandidateSupplier"}, "uniqueItems": true},
-        "origin": {"enum": ["builtin", "provider", "models_dev", "manual"]}
+        "origin": {"enum": ["builtin", "provider", "models_dev", "manual"]},
+        "group_if_removed": {"anyOf": [{"enum": ["builtin", "providers"]}, {"type": "null"}]}
       }
+    },
+    "AddableModelCandidate": {
+      "allOf": [
+        {"$ref": "#/definitions/ModelCandidate"},
+        {"not": {"required": ["group_if_removed"]}}
+      ]
     },
     "AgentModelCandidatesResponse": {
       "type": "object",
@@ -331,8 +338,8 @@
           "required": ["builtin", "providers", "in_list"],
           "additionalProperties": false,
           "properties": {
-            "builtin": {"type": "array", "items": {"$ref": "#/definitions/ModelCandidate"}},
-            "providers": {"type": "array", "items": {"$ref": "#/definitions/ModelCandidate"}},
+            "builtin": {"type": "array", "items": {"$ref": "#/definitions/AddableModelCandidate"}},
+            "providers": {"type": "array", "items": {"$ref": "#/definitions/AddableModelCandidate"}},
             "in_list": {"type": "array", "items": {"$ref": "#/definitions/ModelCandidate"}}
           }
         }

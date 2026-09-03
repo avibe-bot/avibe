@@ -100,6 +100,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(language="zh")
     controller._loop = None
+    controller._shutdown_requested = False
     controller.vibe_agent_store = SimpleNamespace(
         get_default_agent=lambda: SimpleNamespace(
             backend="codex",
@@ -190,6 +191,84 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     )
     controller.backend_restart_coordinator.request_restart.assert_not_awaited()
     controller.agent_service.refresh_runtime_config.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_controller_periodic_tick_reconciles_cross_process_snapshot_changes():
+    reconciled = asyncio.Event()
+
+    async def reconcile_builtin_models():
+        reconciled.set()
+        return []
+
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_builtin_models=reconcile_builtin_models,
+    )
+    controller._loop = asyncio.get_running_loop()
+    controller._shutdown_requested = False
+    controller._model_hub_snapshot_refresh_pending = threading.Event()
+    controller._model_hub_snapshot_reconcile_task = None
+    controller._model_hub_snapshot_reconcile_loop_task = None
+    controller._model_hub_snapshot_reconcile_stopping = False
+    controller._model_hub_snapshot_reconcile_interval_seconds = 0.01
+
+    controller._start_model_hub_snapshot_reconcile_loop()
+    await asyncio.wait_for(reconciled.wait(), 1)
+    controller._shutdown_requested = True
+    await controller._stop_model_hub_snapshot_reconciliation()
+
+    assert controller._model_hub_snapshot_reconcile_loop_task is None
+    assert controller._model_hub_snapshot_reconcile_task is None
+
+
+@pytest.mark.anyio
+async def test_controller_shutdown_joins_reconcile_and_rejects_late_completion():
+    reconcile_started = asyncio.Event()
+    release_reconcile = asyncio.Event()
+    service_stopped = asyncio.Event()
+    calls = []
+
+    async def reconcile_builtin_models():
+        calls.append("reconcile")
+        reconcile_started.set()
+        await release_reconcile.wait()
+        return []
+
+    async def stop():
+        calls.append("stop")
+        service_stopped.set()
+
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_builtin_models=reconcile_builtin_models,
+        stop=stop,
+    )
+    controller.runtime_work_supervisor = None
+    controller._runtime_work_tokens = []
+    controller._shutdown_tainted = False
+    controller._loop = asyncio.get_running_loop()
+    controller._shutdown_requested = False
+    controller._model_hub_snapshot_refresh_pending = threading.Event()
+    controller._model_hub_snapshot_reconcile_task = None
+    controller._model_hub_snapshot_reconcile_loop_task = None
+    controller._model_hub_snapshot_reconcile_stopping = False
+
+    controller._model_hub_snapshot_refresh_completed()
+    await asyncio.wait_for(reconcile_started.wait(), 1)
+
+    controller._shutdown_requested = True
+    shutdown = asyncio.create_task(controller._stop_runtime_work_stack())
+    await asyncio.sleep(0)
+    controller._model_hub_snapshot_refresh_completed()
+    release_reconcile.set()
+    await asyncio.wait_for(service_stopped.wait(), 1)
+    await shutdown
+
+    assert calls == ["reconcile", "stop"]
+    assert not controller._model_hub_snapshot_refresh_pending.is_set()
+    assert controller._model_hub_snapshot_reconcile_task is None
+    assert controller._model_hub_snapshot_reconcile_loop_task is None
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

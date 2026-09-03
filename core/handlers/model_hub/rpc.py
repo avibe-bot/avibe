@@ -41,12 +41,6 @@ async def _run_agent_presence_refresh(
             include_npm_global=True,
             backends=backends,
         )
-        refreshed_backends = backends or ("claude", "codex", "opencode")
-        reconciled_backends = tuple(
-            backend for backend in refreshed_backends if backend != "opencode"
-        )
-        if reconciled_backends:
-            await service.reconcile_builtin_models(reconciled_backends)
     finally:
         current = asyncio.current_task()
         tasks = _cli_presence_refresh_tasks.get(service)
@@ -125,6 +119,10 @@ async def dispatch_model_hub_rpc(
         )
     if operation == "agent_model_candidates":
         backend = payload.get("backend")
+        if backend in ("claude", "codex", "opencode"):
+            await _refresh_agent_presence(service, (backend,))
+            if backend != "opencode":
+                await service.reconcile_builtin_models((backend,))
         return await asyncio.to_thread(service.agent_model_candidates, backend)
     if operation == "set_agent_sources":
         await _refresh_payload_backend(service, payload.get("backend"))

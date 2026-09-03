@@ -82,6 +82,7 @@ logger = logging.getLogger(__name__)
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
 _DISABLED_MEMORY_CLEANUP_WAIT_SECONDS = 1.0
+_MODEL_HUB_SNAPSHOT_RECONCILE_INTERVAL_SECONDS = 5 * 60
 
 
 def _load_memory_capture_types() -> tuple[type, type, type]:
@@ -405,6 +406,12 @@ class Controller:
     def _model_hub_snapshot_refresh_completed(self) -> None:
         """Move a worker completion onto the controller's event loop."""
 
+        if getattr(self, "_shutdown_requested", False) or getattr(
+            self,
+            "_model_hub_snapshot_reconcile_stopping",
+            False,
+        ):
+            return
         pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
         if pending is None:
             return
@@ -415,6 +422,12 @@ class Controller:
         loop.call_soon_threadsafe(self._schedule_model_hub_snapshot_reconcile)
 
     def _schedule_model_hub_snapshot_reconcile(self) -> None:
+        if getattr(self, "_shutdown_requested", False) or getattr(
+            self,
+            "_model_hub_snapshot_reconcile_stopping",
+            False,
+        ):
+            return
         pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
         service = getattr(self, "model_hub_service", None)
         if pending is None or not pending.is_set() or service is None:
@@ -434,7 +447,15 @@ class Controller:
                 )
             finally:
                 self._model_hub_snapshot_reconcile_task = None
-                if pending.is_set():
+                if (
+                    pending.is_set()
+                    and not getattr(self, "_shutdown_requested", False)
+                    and not getattr(
+                        self,
+                        "_model_hub_snapshot_reconcile_stopping",
+                        False,
+                    )
+                ):
                     self._schedule_model_hub_snapshot_reconcile()
 
         loop = getattr(self, "_loop", None)
@@ -444,6 +465,89 @@ class Controller:
             reconcile(),
             name="model-hub-snapshot-refresh-reconcile",
         )
+
+    async def _model_hub_snapshot_reconcile_loop(self) -> None:
+        """Re-read cross-process snapshot inputs on the controller cadence."""
+
+        try:
+            while True:
+                interval = max(
+                    0.01,
+                    float(
+                        getattr(
+                            self,
+                            "_model_hub_snapshot_reconcile_interval_seconds",
+                            _MODEL_HUB_SNAPSHOT_RECONCILE_INTERVAL_SECONDS,
+                        )
+                    ),
+                )
+                await asyncio.sleep(interval)
+                if getattr(self, "_shutdown_requested", False) or getattr(
+                    self,
+                    "_model_hub_snapshot_reconcile_stopping",
+                    False,
+                ):
+                    return
+                pending = getattr(
+                    self,
+                    "_model_hub_snapshot_refresh_pending",
+                    None,
+                )
+                if pending is None:
+                    return
+                pending.set()
+                self._schedule_model_hub_snapshot_reconcile()
+        finally:
+            if getattr(
+                self,
+                "_model_hub_snapshot_reconcile_loop_task",
+                None,
+            ) is asyncio.current_task():
+                self._model_hub_snapshot_reconcile_loop_task = None
+
+    def _start_model_hub_snapshot_reconcile_loop(self) -> None:
+        if (
+            getattr(self, "model_hub_service", None) is None
+            or getattr(self, "_shutdown_requested", False)
+            or getattr(self, "_model_hub_snapshot_reconcile_stopping", False)
+        ):
+            return
+        task = getattr(self, "_model_hub_snapshot_reconcile_loop_task", None)
+        if task is not None and not task.done():
+            return
+        self._model_hub_snapshot_reconcile_loop_task = asyncio.create_task(
+            self._model_hub_snapshot_reconcile_loop(),
+            name="model-hub-snapshot-reconcile-loop",
+        )
+
+    async def _stop_model_hub_snapshot_reconciliation(self) -> None:
+        """Quiesce snapshot tasks before the Model Hub service is stopped."""
+
+        self._model_hub_snapshot_reconcile_stopping = True
+        pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
+        if pending is not None:
+            pending.clear()
+
+        loop_task = getattr(
+            self,
+            "_model_hub_snapshot_reconcile_loop_task",
+            None,
+        )
+        if loop_task is not None and not loop_task.done():
+            loop_task.cancel()
+            await asyncio.gather(loop_task, return_exceptions=True)
+        self._model_hub_snapshot_reconcile_loop_task = None
+
+        reconcile_task = getattr(
+            self,
+            "_model_hub_snapshot_reconcile_task",
+            None,
+        )
+        if reconcile_task is not None and not reconcile_task.done():
+            await asyncio.gather(reconcile_task, return_exceptions=True)
+        self._model_hub_snapshot_reconcile_task = None
+        if pending is not None:
+            pending.clear()
 
     def _init_model_hub(self) -> None:
         """Create the Model Hub aggregate only for an explicit release opt-in."""
@@ -455,6 +559,8 @@ class Controller:
         self.model_hub_runtime = None
         self._model_hub_snapshot_refresh_pending = threading.Event()
         self._model_hub_snapshot_reconcile_task = None
+        self._model_hub_snapshot_reconcile_loop_task = None
+        self._model_hub_snapshot_reconcile_stopping = False
         if not is_model_hub_enabled():
             return
 
@@ -2801,6 +2907,15 @@ class Controller:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
 
         try:
+            self._start_model_hub_snapshot_reconcile_loop()
+        except Exception as e:
+            logger.error(
+                "Failed to start Model Hub snapshot reconciliation: %s",
+                e,
+                exc_info=True,
+            )
+
+        try:
             claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
             if (claude_timeout > 0 or codex_timeout > 0) and (
                 self.cleanup_task is None or self.cleanup_task.done()
@@ -3792,6 +3907,8 @@ class Controller:
         drain_activity = getattr(dispatcher, "drain_agent_run_activity", None)
         if callable(drain_activity):
             await drain_activity()
+
+        await self._stop_model_hub_snapshot_reconciliation()
 
         service_stops: list[asyncio.Task[None]] = []
         for service_name in (

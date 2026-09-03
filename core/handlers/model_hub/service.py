@@ -3830,17 +3830,10 @@ class ModelHubService:
         menu_models = self._catalog_models_payload(agent)
         menu_ids = {model["id"] for model in menu_models}
         snapshot = self._current_builtin_models(agent_backend)
-        builtin_ids = {item["id"] for item in snapshot}
+        builtin_ids: set[str] = set()
         builtin = []
         for item in snapshot:
             model_id = item["id"]
-            if model_id in menu_ids:
-                continue
-            suppliers, _source_label, _source_efforts = self._candidate_suppliers(
-                config,
-                agent_backend,
-                model_id,
-            )
             display_name, reasoning_efforts = _storable_backend_model_metadata(
                 item.get("display_name"),
                 item.get("reasoning_efforts"),
@@ -3857,6 +3850,14 @@ class ModelHubService:
             )
             if admitted is None:
                 continue
+            builtin_ids.add(admitted.id)
+            if admitted.id in menu_ids:
+                continue
+            suppliers, _source_label, _source_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                admitted.id,
+            )
             builtin.append(
                 {
                     "id": admitted.id,
@@ -3919,10 +3920,20 @@ class ModelHubService:
             )
         in_list = []
         for model in menu_models:
-            suppliers, _source_label, _source_efforts = self._candidate_suppliers(
+            suppliers, source_label, source_efforts = self._candidate_suppliers(
                 config,
                 agent_backend,
                 model["id"],
+            )
+            provider_candidate = admissible_backend_model(
+                agent_backend,
+                model["id"],
+                {
+                    "origin": "provider",
+                    "display_name": source_label,
+                    "reasoning_efforts": source_efforts,
+                },
+                claude_builtin_ids=_builtin_model_ids("claude"),
             )
             in_list.append(
                 {
@@ -3931,6 +3942,13 @@ class ModelHubService:
                     "reasoning_efforts": model["reasoning_efforts"],
                     "suppliers": suppliers,
                     "origin": model["origin"],
+                    "group_if_removed": (
+                        "builtin"
+                        if model["id"] in builtin_ids
+                        else "providers"
+                        if suppliers and provider_candidate is not None
+                        else None
+                    ),
                 }
             )
         return {"builtin": builtin, "providers": providers, "in_list": in_list}
