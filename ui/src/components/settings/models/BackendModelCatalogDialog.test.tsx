@@ -271,66 +271,97 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
-  it('shows what a removal takes with it, and echoes exactly that plan', async () => {
+  it('shows what a removal takes with it, then echoes the guard byte for byte whatever order it was clicked in', async () => {
     const user = userEvent.setup();
-    const catalog = [model('alpha'), model('beta')];
-    /** The plan, written once. It is the fixture for both halves of the property
-     *  below — what the confirmation shows and what the forced save claims are
-     *  the same arrays, so the test may not state them twice. */
+    const catalog = [model('alpha'), model('beta'), model('gamma')];
+    /**
+     * The server's plan, in the server's order: it walks the baseline it was
+     * sent, so `beta` comes before `gamma` no matter which the user clicked
+     * first. Written once, because it is the fixture for every half of the
+     * property below — what each question shows, and what the forced save
+     * carries, are these same bytes.
+     */
     const hops = [
-      { backend: 'claude' as const, menu_model: 'alpha', source_id: 'src_a', model_id: 'glm-5.2-air', position: 1 },
-      { backend: 'claude' as const, menu_model: 'alpha', source_id: 'src_gone', model_id: 'backup', position: 2 },
+      { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
+      { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_gone', model_id: 'beta-backup', position: 2 },
+      { backend: 'claude' as const, menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
     ];
+    const routed = (menuModel: string) => hops.filter((hop) => hop.menu_model === menuModel);
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
-      routes: {
-        alpha: { hops: hops.map(({ source_id, model_id }) => ({ source_id, model_id })) },
-      },
+      routes: Object.fromEntries(['beta', 'gamma'].map((menuModel) => [
+        menuModel,
+        { hops: routed(menuModel).map(({ source_id, model_id }) => ({ source_id, model_id })) },
+      ])),
     }));
-    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route',
+        'modelHub.errors.backend_model_in_route',
+        true,
+        [],
+        [],
+        hops,
+        409,
+      ))
+      .mockResolvedValue(agent([model('alpha')]));
     renderDialog();
 
-    // A route is the only thing a removal takes that the user did not name, so
-    // it is the only removal that asks first.
-    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    // A route is the only thing a removal takes with it that the user did not
+    // name, so it is the only removal that asks — and it asks on the click,
+    // from the routes the dialog already holds, not after a round-trip.
+    await user.click(await screen.findByRole('button', { name: 'Remove alpha' }));
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByText('1 model')).toBeTruthy();
+    expect(screen.getByText('2 models')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'Remove alpha' }));
+    await user.click(screen.getByRole('button', { name: 'Remove beta' }));
     const asked = screen.getByRole('alert');
     // The shared guard body, as the Route dialog shows it: every hop the plan
     // names, at the order it sits at, and however many there are.
     expect(asked.textContent).toContain('2 hops');
-    for (const hop of hops) {
+    for (const hop of routed('beta')) {
       expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
     }
-    // Nothing is stranded, so it says so — rather than showing an interruption
-    // the guard never reported.
+    // Whether anything is stranded is the guard's answer, not this dialog's, so
+    // the preview says what it knows rather than inventing an interruption.
     expect(within(asked).queryByText('Models that will be left with no source')).toBeNull();
     expect(asked.textContent).toContain('These models still have another source available.');
-    expect(screen.getByText('1 model')).toBeTruthy();
+    expect(screen.getByText('2 models')).toBeTruthy();
 
     // Asking is not doing.
     await user.click(confirmation().getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByText('1 model')).toBeTruthy();
+    expect(screen.getByText('2 models')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'Remove alpha' }));
-    await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+    // Answered in the order the user chose, which is the reverse of the order
+    // the server will report them in.
+    const clicked = ['gamma', 'beta'];
+    for (const menuModel of clicked) {
+      await user.click(screen.getByRole('button', { name: `Remove ${menuModel}` }));
+      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+    }
     expect(screen.getByText('0 models')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
-    // The save echoes the plan the user was shown, one-based like the server's
-    // own positions, so the guard is answered for exactly that plan and not for
-    // whatever the routes hold by the time it lands. Both arrays: a confirmation
-    // confirms the whole plan, and the empty one here is empty because this plan
-    // strands nothing, not because the surface cannot carry it.
-    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
-      baseline: catalog,
-      models: [],
-      force: true,
-      would_remove_hops: hops,
-      would_interrupt: [],
-    }));
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    // Nothing was asked twice: the guard named the consequences the user had
+    // already accepted, so the retry is the dialog's own business rather than a
+    // second confirmation of the same removal.
+    expect(screen.queryByRole('alert')).toBeNull();
+    const [first, second] = write.mock.calls.map(([, body]) => body as Record<string, unknown>);
+    // The first attempt claims no agreement at all. Only the server states what
+    // a write would take with it, so until it has, there is nothing to echo.
+    expect(Object.keys(first)).toEqual(['baseline', 'models']);
+    // The second is the refusal itself, byte for byte and in the server's own
+    // order — byte-equal because that is how the server reads it, element by
+    // element against what it sent, so the same consequences in another order
+    // is a different answer and not the one it asked for.
+    expect(second.force).toBe(true);
+    expect(JSON.stringify(second.would_remove_hops)).toBe(JSON.stringify(hops));
+    expect(JSON.stringify(second.would_interrupt)).toBe(JSON.stringify([]));
+    // And the fixture earns that: the order the rows were clicked in is not the
+    // order the echo carries, so nothing reassembled from the questions could
+    // have passed the line above.
+    expect(clicked).not.toEqual([...new Set(hops.map((hop) => hop.menu_model))]);
   });
 
   it('re-asks with the current suppliers when the ones it displayed went stale', async () => {
@@ -537,9 +568,6 @@ describe('BackendModelCatalogDialog', () => {
     /** A hand edit no refusal is about, so it has to survive every one of them. */
     const EDITED = model('alpha', { context_window: 2000 });
     const CATALOG = [ALPHA, model('beta')];
-    const ROUTED = agent(CATALOG, {
-      routes: { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } },
-    });
 
     const shown = candidate('glm-5.2', {
       display_name: 'GLM 5.2',
@@ -560,10 +588,11 @@ describe('BackendModelCatalogDialog', () => {
 
     type Member = {
       what: string;
-      /** What the server serves, in order. A refusal that re-reads needs a
-       *  second answer; one that does not must not be handed one it could pass
-       *  on. */
-      reads: AgentSupply[];
+      /** What the server serves. One answer, not a sequence: a refusal that
+       *  commits nothing has nothing to re-read, and the runner holds every
+       *  member to that — so a member needing a second answer here is a member
+       *  that has left this property. */
+      read: AgentSupply;
       /** The draft the user builds, hand edit included — placed where this
        *  refusal could spend it, which is the whole question. */
       arrange: (user: ReturnType<typeof userEvent.setup>) => Promise<void>;
@@ -595,7 +624,7 @@ describe('BackendModelCatalogDialog', () => {
     const MEMBERS: readonly Member[] = [
       {
         what: 'the suppliers the picker displayed went stale',
-        reads: [agent(CATALOG)],
+        read: agent(CATALOG),
         arrange: async (user) => {
           vi.spyOn(modelsApi, 'getAgentModelCandidates')
             .mockResolvedValueOnce(offered({ providers: [shown] }))
@@ -625,14 +654,16 @@ describe('BackendModelCatalogDialog', () => {
       },
       {
         what: 'a route the client could not see guarded the removal',
-        // The route appears only in the second read: it was created after the
-        // baseline, which is why the client removed the row without asking and
-        // only the server could refuse it.
-        reads: [agent(CATALOG), ROUTED],
+        // No route in the read at all: it was created after the baseline, which
+        // is why the client removed the row without asking and only the server
+        // could refuse it. And why the list is not read again — the refusal
+        // answers the exact write that was sent, so the draft is rebased onto
+        // the same baseline it was built from.
+        read: agent(CATALOG),
         arrange: async (user) => {
           // A removal cannot carry an edit, so the work at stake is the rest of
-          // the draft: this refusal re-reads the list, and rebasing onto it is
-          // where an edit goes missing.
+          // the draft: this refusal hands the removal back, and rebasing it in
+          // is where an edit goes missing.
           await widen(user, 'alpha');
           await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
           expect(screen.queryByRole('alert')).toBeNull();
@@ -676,9 +707,7 @@ describe('BackendModelCatalogDialog', () => {
     for (const member of MEMBERS) {
       it(`asks again and keeps the draft when ${member.what}`, async () => {
         const user = userEvent.setup();
-        const read = vi.spyOn(modelsApi, 'getAgentSources');
-        for (const served of member.reads) read.mockResolvedValueOnce(served);
-        read.mockResolvedValue(member.reads[member.reads.length - 1] as AgentSupply);
+        const read = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(member.read);
         const write = vi.spyOn(modelsApi, 'putAgentModels')
           .mockRejectedValueOnce(member.refusal)
           .mockResolvedValue(agent([EDITED]));
@@ -693,6 +722,10 @@ describe('BackendModelCatalogDialog', () => {
         expect(screen.queryByRole('status')).toBeNull();
         expect(onSaved).not.toHaveBeenCalled();
         expect(onClose).not.toHaveBeenCalled();
+        // And the list is never read a second time: a refusal commits nothing,
+        // so the draft still stands on the baseline it was built from, and the
+        // agreement below still answers the write that was actually sent.
+        expect(read).toHaveBeenCalledTimes(1);
 
         await member.answer(user);
         await user.click(await screen.findByRole('button', { name: 'Save' }));
@@ -1004,22 +1037,22 @@ describe('BackendModelCatalogDialog', () => {
       })));
     });
 
-    it('discards a queued question the fresh list left no row for, and asks the next one', async () => {
+    it('discards a queued question whose row has already left the draft, and asks no more', async () => {
       const user = userEvent.setup();
-      // The re-read behind a guard refusal is a new list, and it may no longer
-      // hold a model the queue still has a question about. There is nothing
-      // left to remove and nowhere to ask — the confirmation renders in the row
-      // — so the question goes with the row. Left pending it would be worse
-      // than invisible: it is the head, and the row that could advance the queue
-      // is the one that is gone, so every question behind it goes unasked and
-      // the removal the user did ask for can never be answered.
-      const catalog = [model('alpha'), model('beta'), model('gamma')];
-      vi.spyOn(modelsApi, 'getAgentSources')
-        .mockResolvedValueOnce(agent(catalog))
-        // beta is gone from the list itself, not merely un-routed.
-        .mockResolvedValue(agent([model('alpha'), model('gamma')], {
-          routes: { gamma: { hops: [{ source_id: 'src_a', model_id: 'gamma-air' }] } },
-        }));
+      // The queue outlives the question on screen, and the rows behind the head
+      // keep their own controls — so the user can remove one before its turn
+      // comes. There is then nothing left to remove and nowhere to ask, because
+      // the confirmation renders inside the row, so the question goes with the
+      // row. Left pending it would be worse than invisible: it is the head, and
+      // the row that could advance the queue is the one that is gone, so every
+      // question behind it goes unasked and the removals the user did ask for
+      // can never be confirmed — the guard would refuse the list forever.
+      const catalog = [model('alpha'), model('beta'), model('gamma'), model('delta')];
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
+        // The one route this dialog can see. The others were created after the
+        // read, which is why only the server could refuse them.
+        routes: { delta: { hops: [{ source_id: 'src_a', model_id: 'delta-air' }] } },
+      }));
       const hops = [
         { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
         { backend: 'claude' as const, menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
@@ -1034,30 +1067,49 @@ describe('BackendModelCatalogDialog', () => {
           hops,
           409,
         ))
-        .mockResolvedValue(agent([model('alpha')]));
+        .mockResolvedValue(agent([model('alpha'), model('delta')]));
       renderDialog();
 
       await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
       await user.click(screen.getByRole('button', { name: 'Remove gamma' }));
       await user.click(screen.getByRole('button', { name: 'Save' }));
 
-      // The question that is asked is the first one with a row to ask it in.
+      // Both removals come back with a question each, the first of them on
+      // screen with the server's own hop.
       const asked = await screen.findByRole('alert');
-      expect(within(asked).getByText('gamma-air · Order #1')).toBeTruthy();
-      expect(within(asked).queryByText(/beta-air/)).toBeNull();
-      expect(screen.queryByText('beta')).toBeNull();
-      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+      expect(within(asked).getByText('beta-air · Order #1')).toBeTruthy();
+
+      // The user answers the second one their own way instead: gamma has no
+      // route this dialog knows of, so it simply leaves — and takes both the
+      // pending question and its own queued one with it.
+      await user.click(screen.getByRole('button', { name: 'Remove gamma' }));
       expect(screen.queryByRole('alert')).toBeNull();
 
-      // And the save forces exactly the plan that was answered — nothing on
-      // behalf of the question nobody could be asked.
+      // A question about a row that is still here, so the queue gets another
+      // chance to reach the one about the row that is not.
+      await user.click(screen.getByRole('button', { name: 'Remove delta' }));
+      expect(within(screen.getByRole('alert')).getByText('delta-air · Order #1')).toBeTruthy();
+      await user.click(confirmation().getByRole('button', { name: 'Cancel' }));
+
+      // Nothing is asked in gamma's name. The dialog is answering the user
+      // again — not holding a question with no row to hold it, behind which
+      // beta's removal could never be confirmed.
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByText('delta')).toBeTruthy();
+
+      await user.click(screen.getByRole('button', { name: 'Remove beta' }));
       await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The same list the guard refused, so its refusal still answers it — and
+      // what goes back is that refusal whole, the server's account of this
+      // write rather than a transcript of which questions happened to be asked.
       await waitFor(() => expect(write).toHaveBeenLastCalledWith('claude', expect.objectContaining({
-        models: [model('alpha')],
+        models: [model('alpha'), model('delta')],
         force: true,
-        would_remove_hops: [hops[1]],
+        would_remove_hops: hops,
         would_interrupt: [],
       })));
+      expect(write).toHaveBeenCalledTimes(2);
     });
   });
 

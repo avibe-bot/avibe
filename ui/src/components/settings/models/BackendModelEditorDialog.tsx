@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
+import { isComposingKey } from '@/lib/imeComposition';
 import { cn } from '@/lib/utils';
 import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
@@ -353,6 +354,10 @@ export const BackendModelEditorDialog: React.FC<{
   };
 
   const onIdKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    // Every key below is one an IME candidate window uses too — Enter accepts
+    // the characters being composed, the arrows move through the candidates —
+    // so while one is open none of them are aimed at this list.
+    if (isComposingKey(event)) return;
     if (!lookupOpen) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
@@ -640,6 +645,9 @@ export const BackendModelEditorDialog: React.FC<{
                         placeholder={t('settings.models.gateway.modelEditor.customEffortPlaceholder') as string}
                         onChange={(event) => setCustomEffort(event.target.value)}
                         onKeyDown={(event) => {
+                          // The Enter that accepts an IME candidate is not the
+                          // Enter that names an effort.
+                          if (isComposingKey(event)) return;
                           if (event.key === 'Enter') {
                             event.preventDefault();
                             addCustomEffort();

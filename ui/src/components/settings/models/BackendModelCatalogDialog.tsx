@@ -29,6 +29,7 @@ import {
   heldRowFor,
   readBackendCatalogBaseline,
   sameCatalog,
+  samePlanContents,
   type BackendCatalogBaseline,
   type BackendCatalogIntent,
   type ChosenCandidate,
@@ -74,20 +75,32 @@ const matchesQuery = (model: BackendModel, query: string, renderedLabel: string)
  *  the plan it was raised from. */
 type RemovalQuestion = { modelId: string; plan: GuardPlan };
 
+/** A guard refusal, as received, together with the write it refused. Both
+ *  halves are needed to use it: the arrays are what a retry echoes, and the
+ *  write is what makes them true — the same refusal says nothing about a
+ *  different list. */
+type StoredRefusal = {
+  hops: readonly RouteHopRef[];
+  gaps: readonly SupplyGap[];
+  baseline: readonly BackendModel[];
+  models: readonly BackendModel[];
+};
+
 /**
  * The guard's refusal, split into the questions it forces.
  *
- * The server reports one plan for the whole write, and the confirmation lives
- * inside a row — so each held-back removal is asked with the part of that plan
+ * The server reports one plan for the whole write and the confirmation lives
+ * inside a row, so each held-back removal is asked with the part of that plan
  * that names it: hops by the menu model they serve, gaps by the model they
- * would strand. A confirmation may then force exactly what its own question
- * showed, and a removal the user cancels takes its share out of the next save
- * with it.
+ * would strand. Splitting decides what to SHOW and nothing else — what the next
+ * save echoes is the refusal exactly as it arrived, never these pieces
+ * reassembled (C3) — so a split that cannot cover every element still asks
+ * everything it can rather than editing the plan down to what it understood.
  *
  * Anything the refusal names that this write does not remove belongs to no
- * question this dialog can ask. It is left out rather than echoed, because an
- * echo is a claim that the user saw it; with nothing left to ask, the caller
- * falls through to the failure sentence instead of retrying forever.
+ * question this dialog can ask, so it produces none; with nothing to ask at
+ * all, the caller falls through to the failure sentence instead of retrying
+ * forever.
  */
 const refusalPlans = (
   hops: readonly RouteHopRef[],
@@ -181,10 +194,33 @@ export const BackendModelCatalogDialog: React.FC<{
    * the list on screen is the decision, and this is what it was made against.
    */
   const chosenRef = React.useRef(new Map<string, ChosenCandidate>());
-  /** Per removed id, the plan the user confirmed (C3), in the same shape the
-   *  guard reports it — so the save echoes both consequences that were shown
-   *  rather than ones recomputed after the fact. */
-  const forcedRef = React.useRef(new Map<string, GuardPlan>());
+  /**
+   * Per removed id, the consequence the user was shown and accepted (C3).
+   *
+   * A record of what was asked, never a source of what is sent: the arrays a
+   * forced write carries come from `refusalRef` and from nowhere else. This one
+   * answers a different question — 「does the server's refusal say what the user
+   * already agreed to?」 — and its only effect is whether the same consequence is
+   * put to them a second time.
+   */
+  const previewRef = React.useRef(new Map<string, GuardPlan>());
+  /**
+   * The last guard refusal, stored exactly as it arrived and bound to the write
+   * it refused.
+   *
+   * The single source of a forced body (C3). The two arrays are the server's
+   * own, kept verbatim and in the server's order, because that is what the
+   * server compares the echo against — a client that rebuilt them from what it
+   * showed would be answering with its own sentence and be refused for the
+   * wording, not the meaning.
+   *
+   * The write is stored with them so the echo cannot outlive its subject. A
+   * refusal answers one exact `baseline` + `models` pair; the moment the draft
+   * moves, the plan describes consequences of a write nobody is making any
+   * more, and `putBody` finds it no longer matching rather than having to be
+   * told to forget it.
+   */
+  const refusalRef = React.useRef<StoredRefusal | null>(null);
   /** Removals the guard held back, still owed an answer, each with the plan the
    *  server refused them for. The confirmation lives inside the row it is about,
    *  so they are asked one at a time — and all of them, because a row that came
@@ -239,10 +275,11 @@ export const BackendModelCatalogDialog: React.FC<{
 
   React.useEffect(() => {
     if (!open) return;
-    // Both maps describe decisions taken against one baseline, so a dialog that
-    // is reading a new one starts with none of them.
+    // All of these describe decisions taken against one baseline, so a dialog
+    // that is reading a new one starts with none of them.
     chosenRef.current = new Map();
-    forcedRef.current = new Map();
+    previewRef.current = new Map();
+    refusalRef.current = null;
     guardedRef.current = [];
     setPicking(null);
     setRemoving(null);
@@ -378,18 +415,23 @@ export const BackendModelCatalogDialog: React.FC<{
   };
 
   /**
-   * What a removal would take with it, in the shape the guard reports it.
+   * A preview of what a removal would take with it, from the routes this dialog
+   * already holds.
    *
-   * The hops are read off the same baseline the save will send, one-based like
-   * the server's own positions, so the plan the user confirms is the plan the
-   * server is asked to carry out (C3). The gaps are empty and honestly so: this
-   * ask happens before the write, and whether a removal strands anything is the
-   * guard's answer, not a client's. `GuardImpact` then reads 「still has another
-   * source available」 — a claim the save itself verifies, because the guard
-   * refuses with the real gaps before anything commits, which is the same
-   * optimistic merge every other field of this write settles through.
+   * It exists so the question can be asked when the user clicks the trash,
+   * rather than after a round-trip — but it is a picture, not a plan, and
+   * nothing it produces is ever sent. Only the server states the consequences
+   * of a write (C3); this reads the baseline's own hops in their one-based
+   * positions so that the picture matches the statement, and when it does the
+   * save goes through without asking the same question twice.
+   *
+   * The gaps are empty and honestly so: whether a removal strands an Agent is
+   * the guard's answer, not a client's. `GuardImpact` therefore reads 「still
+   * has another source available」 here, and the save verifies it — the guard
+   * refuses with the real gaps before anything commits, and those are what the
+   * user is then shown.
    */
-  const removePlan = (modelId: string): GuardPlan => ({
+  const removalPreview = (modelId: string): GuardPlan => ({
     hops: (baseline?.agent.routes?.[modelId]?.hops ?? []).map((hop, index) => ({
       ...hop,
       backend,
@@ -402,13 +444,13 @@ export const BackendModelCatalogDialog: React.FC<{
   /** The row leaves the draft; its route leaves with it when the list saves. */
   const dropModel = (modelId: string, plan: GuardPlan) => {
     chosenRef.current.delete(modelId);
-    if (plan.hops.length > 0 || plan.gaps.length > 0) forcedRef.current.set(modelId, plan);
-    else forcedRef.current.delete(modelId);
+    if (plan.hops.length > 0 || plan.gaps.length > 0) previewRef.current.set(modelId, plan);
+    else previewRef.current.delete(modelId);
     mutate(draftRef.current.filter((entry) => entry.id !== modelId));
   };
 
   const removeModel = (model: BackendModel) => {
-    const plan = removePlan(model.id);
+    const plan = removalPreview(model.id);
     // A route is the only thing a removal takes with it that the user did not
     // name, so it is the only removal that asks first.
     if (plan.hops.length > 0) {
@@ -473,7 +515,7 @@ export const BackendModelCatalogDialog: React.FC<{
     for (const pick of picked) {
       chosenRef.current.set(pick.candidate.id, pick);
       // Re-adding a row voids the removal that was confirmed for it.
-      forcedRef.current.delete(pick.candidate.id);
+      previewRef.current.delete(pick.candidate.id);
     }
     const held = new Set(draftRef.current.map((model) => model.id));
     const additions = picked
@@ -488,31 +530,34 @@ export const BackendModelCatalogDialog: React.FC<{
    * `baseline` + `models` is the whole list settling through a single optimistic
    * merge (C1). The other three fields exist only because two of that merge's
    * consequences are not derivable from the list: `force` answers the route
-   * guard by echoing back exactly the plan the user was shown — both arrays,
-   * because both are what a confirmation confirms (C3) — while
-   * `expected_suppliers` states, per addition, the projection the picker
-   * displayed for it. Only per addition: a row the baseline already holds is not
-   * matched again, so a promise about it would describe nothing this write does.
+   * guard, and `expected_suppliers` states, per addition, the projection the
+   * picker displayed for it. Only per addition: a row the baseline already holds
+   * is not matched again, so a promise about it would describe nothing this
+   * write does.
    *
-   * Every field here is read out of the two maps and nowhere else. A plan is
-   * recorded when its question is answered and an agreement when its pick is
-   * confirmed, so what this body claims was shown is what was shown.
+   * The forced arrays are produced HERE and only here, from the stored refusal
+   * and only from it, verbatim and in the server's own order (C3). That is what
+   * makes the echo an echo: the server compares it against what it sent, and
+   * it compares element by element, so a plan reassembled from per-row pieces
+   * would carry the order they were clicked in and be refused for saying the
+   * same thing differently. Nothing this dialog composes can reach these two
+   * fields — there is no path to them that does not pass through a refusal the
+   * server wrote.
+   *
+   * The refusal is used only while it is still about this write. It answers one
+   * `baseline` + `models` pair, and a draft that has moved since is a different
+   * question — so the check is the write itself, not a flag someone has to
+   * remember to clear.
    */
-  const putBody = (
-    baselineModels: BackendModel[],
-    requested: BackendModel[],
-    intent: BackendCatalogIntent,
-  ): BackendModelsPut => {
+  const putBody = (baselineModels: BackendModel[], requested: BackendModel[]): BackendModelsPut => {
     const body: BackendModelsPut = { baseline: baselineModels, models: requested };
-    const plans = [...forcedRef.current]
-      .filter(([modelId]) => intent.removed.has(modelId))
-      .map(([, plan]) => plan);
-    const hops = plans.flatMap((plan) => plan.hops);
-    const gaps = plans.flatMap((plan) => plan.gaps);
-    if (hops.length > 0 || gaps.length > 0) {
+    const refusal = refusalRef.current;
+    if (refusal
+      && sameCatalog(refusal.baseline, baselineModels)
+      && sameCatalog(refusal.models, requested)) {
       body.force = true;
-      body.would_remove_hops = hops;
-      body.would_interrupt = gaps;
+      body.would_remove_hops = [...refusal.hops];
+      body.would_interrupt = [...refusal.gaps];
     }
     const baselineIds = new Set(baselineModels.map((model) => model.id));
     const expected = Object.fromEntries(
@@ -534,10 +579,11 @@ export const BackendModelCatalogDialog: React.FC<{
     const requested = draftRef.current;
     const intent = backendCatalogIntent(baselineModels, requested);
     setSaveFailedKey(null);
+    const body = putBody(baselineModels, requested);
     void catalogWrite.track(async () => {
       let echoed: AgentSupply;
       try {
-        echoed = await modelsApi.putAgentModels(backend, putBody(baselineModels, requested, intent));
+        echoed = await modelsApi.putAgentModels(backend, body);
       } catch (error) {
         const failure = apiFailure(error);
         if (failure?.code === CANDIDATES_CHANGED) {
@@ -602,37 +648,63 @@ export const BackendModelCatalogDialog: React.FC<{
           // promised nothing for is not one this dialog can answer, so it keeps
           // the failure sentence below rather than resolving into silence.
         }
-        // The route guard, answering with a plan this dialog never showed: a
-        // route was created after the baseline was read, so the consequences
-        // the user confirmed — if they were asked at all — are not the ones the
-        // server has. Nothing was committed here either, so those removals are
-        // held back and asked again against the fresh baseline, through the same
-        // confirmation that records what a save may force, now carrying the
-        // server's own plan. Rebasing the removal into the draft with nothing
-        // recorded is what would refuse every later save on the same unanswered
-        // question.
-        const guardedPlans = failure?.code === MODEL_IN_ROUTE
-          ? refusalPlans(failure.wouldRemoveHops, failure.wouldInterrupt, intent.removed, backend)
+        // The route guard. Nothing was committed, so this is not a failed save
+        // but an unanswered question: the server has now stated what this exact
+        // write would take with it, and the only thing missing is the user's
+        // agreement to it.
+        //
+        // The statement is kept whole and unedited, bound to the write it
+        // answers, because that is what the retry will echo. What follows
+        // decides only whether the user has to be asked.
+        const refusal = failure?.code === MODEL_IN_ROUTE ? failure : null;
+        const guardedPlans = refusal
+          ? refusalPlans(refusal.wouldRemoveHops, refusal.wouldInterrupt, intent.removed, backend)
           : [];
-        if (guardedPlans.length > 0) {
-          const guarded = new Set(guardedPlans.map((question) => question.modelId));
-          try {
-            const observed = await readBackendCatalogBaseline(modelsApi, backend);
-            const current = observed.models;
-            const held: BackendCatalogIntent = {
-              ...intent,
-              removed: new Set([...intent.removed].filter((id) => !guarded.has(id))),
-            };
-            applyBaseline(observed, current ? applyBackendCatalogIntent(current, held) : []);
-            await Promise.resolve(onObserved(observed.agent)).catch(() => {});
-            // A confirmation recorded against the stale plan is void: the next
-            // save may only force what this baseline's plan states.
-            for (const modelId of guarded) forcedRef.current.delete(modelId);
-            guardedRef.current = [...guardedPlans];
-            askNextGuarded();
-          } catch {
-            setReadState('error');
+        if (refusal && guardedPlans.length > 0) {
+          refusalRef.current = {
+            hops: refusal.wouldRemoveHops,
+            gaps: refusal.wouldInterrupt,
+            baseline: baselineModels,
+            models: requested,
+          };
+          // Does the server's plan say what the user already accepted? Compared
+          // as contents, not as sequence: the previews were recorded row by row
+          // as the trash was clicked, the server walks its own baseline, and two
+          // orders of the same consequences are not a disagreement about them.
+          const shown = [...previewRef.current]
+            .filter(([modelId]) => intent.removed.has(modelId))
+            .map(([, plan]) => plan);
+          const agreed = samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops))
+            && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps));
+          // Already agreed, and this attempt did not carry the agreement: the
+          // user answered this question before they pressed Save, and asking it
+          // again would only be the dialog telling them what they just told it.
+          // The same list goes again, this time echoing the server's own plan.
+          // It terminates — that retry is forced, so it cannot take this branch
+          // a second time.
+          if (agreed && body.force !== true) {
+            void save();
+            return;
           }
+          // Not what was shown — a route created since the baseline was read, or
+          // an Agent stranded by a removal that looked free — so every held-back
+          // removal comes back into the draft and is asked again, through the
+          // same confirmation, now carrying the server's own plan. The baseline
+          // is deliberately NOT re-read: the refusal above answers this
+          // `baseline` + `models` pair, and reading a newer list would leave the
+          // dialog holding a plan about a write it can no longer make.
+          const heldBack = new Set(guardedPlans.map((question) => question.modelId));
+          const held: BackendCatalogIntent = {
+            ...intent,
+            removed: new Set([...intent.removed].filter((id) => !heldBack.has(id))),
+          };
+          mutate(applyBackendCatalogIntent(baselineModels, held));
+          // What the user accepted for these rows was the preview, and it is not
+          // what the server says. Confirming a question below records the
+          // server's own account in its place.
+          for (const modelId of heldBack) previewRef.current.delete(modelId);
+          guardedRef.current = [...guardedPlans];
+          askNextGuarded();
           return;
         }
         // A route that named its failure has decided what it did, and for this

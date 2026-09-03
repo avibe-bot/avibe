@@ -259,6 +259,13 @@ export type ModelCandidate = {
    *  without pinning a version this branch does not implement. Drop the `|
    *  'provider'` at the rebase; the field is `BackendModelOrigin` afterwards. */
   origin: BackendModelOrigin | 'provider';
+  /** Where the server would offer this id if it left the menu (C4). Set on
+   *  `in_list` candidates only, because they are the only ones already in it —
+   *  `null` means nowhere, which is a real answer. It exists because `origin`
+   *  cannot answer this: `origin` is the path a row was created by, not what
+   *  supplies it now. Optional while the backend lane is landing it; the
+   *  fallback that covers its absence is `pickerGroups`'. */
+  group_if_removed?: 'builtin' | 'providers' | null;
 };
 
 /** The picker's one read. Groups are rendered in this order and a candidate id

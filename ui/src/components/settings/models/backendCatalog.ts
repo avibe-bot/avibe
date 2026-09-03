@@ -205,6 +205,31 @@ export type PickerGroups = {
 export const EMPTY_PICKER_GROUPS: PickerGroups = { builtin: [], providers: [], listed: [] };
 
 /**
+ * Which group would offer a menu row again, if the draft's removal of it saved.
+ *
+ * The server answers it — `group_if_removed` is its own reading of what supplies
+ * the id right now (C4) — and this returns that answer whenever it is present,
+ * `null` included: 「nowhere」 is an answer, not a missing one.
+ *
+ * Until every server sends the field, the fallback asks the only current-supply
+ * question this read can still answer: `suppliers` is the server's own
+ * `matching-v1` projection for the id, and its emptiness is meaningful (C4), so
+ * a row something supplies re-enters `providers` and a row nothing supplies
+ * re-enters nothing. It cannot see the built-in snapshot — `builtin` is served
+ * 「minus menu ids」, so a row still in the menu is by construction absent from
+ * it — and it does not guess: a built-in falls back to no group and comes back
+ * through `Add custom model…` rather than under a heading that may be stale.
+ *
+ * `origin` answers none of this. It records the path a row was created by (C2),
+ * so reading current availability out of it offers a model whose provider was
+ * deleted months ago under 「From your providers」.
+ */
+const reentryGroup = (candidate: ModelCandidate): 'builtin' | 'providers' | null => {
+  if (candidate.group_if_removed !== undefined) return candidate.group_if_removed;
+  return candidate.suppliers.length > 0 ? 'providers' : null;
+};
+
+/**
  * The three groups the picker renders, reconciled against the draft the catalog
  * dialog holds.
  *
@@ -214,10 +239,10 @@ export const EMPTY_PICKER_GROUPS: PickerGroups = { builtin: [], providers: [], l
  * decides membership; the server still decides what a candidate is, which group
  * serves it, and which suppliers it has.
  *
- * A draft-removed row re-enters the group its own `origin` names — the same
- * group the server will serve it from once that removal saves. A custom row has
- * no such group, and `Add custom model…` is its way back, so it is absent rather
- * than filed under a provider that does not supply it.
+ * A draft-removed row re-enters the group `reentryGroup` names, or no group at
+ * all. `Add custom model…` is the way back for anything that ends up nowhere, so
+ * being absent costs the user nothing — while being present under a heading that
+ * claims a supplier costs them a row nothing can serve.
  *
  * Filing each id once, in group order, is what makes 「every candidate appears
  * exactly once」 a property of the code rather than of the response.
@@ -235,8 +260,7 @@ export const pickerGroups = (
       groups.listed.push(candidate);
       return;
     }
-    const target = group
-      ?? (candidate.origin === 'builtin' ? 'builtin' : candidate.origin === 'provider' ? 'providers' : null);
+    const target = group ?? reentryGroup(candidate);
     if (target) groups[target].push(candidate);
   };
   for (const candidate of candidates.in_list) file(candidate, null);
@@ -414,6 +438,41 @@ export const sameBackendModel = (left: BackendModel, right: BackendModel): boole
 
 export const sameCatalog = (left: readonly BackendModel[], right: readonly BackendModel[]): boolean =>
   left.length === right.length && left.every((model, index) => sameBackendModel(model, right[index]));
+
+/** A value written so that two equal values always read the same: object keys in
+ *  one fixed order, absent and undefined fields spelled the same way. */
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const fields = Object.entries(value as Record<string, unknown>)
+      .filter(([, field]) => field !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : 1));
+    return `{${fields.map(([key, field]) => `${JSON.stringify(key)}:${canonicalJson(field)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+};
+
+/**
+ * Whether two halves of a guard plan name the same consequences, in whatever
+ * order each of them happens to list them.
+ *
+ * It exists for one decision and produces nothing that is sent: it answers
+ * 「is the server's refusal the one the user already confirmed?」, so a retry
+ * that would ask the same question twice can be automatic instead. The arrays
+ * the client echoes with `force` are always the server's own, verbatim and in
+ * the server's order (C3) — which is exactly why comparing as a set is safe
+ * here. Both orders are legitimate: the client's preview follows the order the
+ * user clicked, the server's follows its own walk of the baseline, and neither
+ * is a disagreement about what would happen.
+ *
+ * Only that outer list is read as a set. A list nested inside one element — a
+ * gap's `agents`, say — has no such story: one side produced it, so an order
+ * that differs there is a real change and the user is asked again. Strictness
+ * costs a question; laxity would skip one.
+ */
+export const samePlanContents = (left: readonly unknown[], right: readonly unknown[]): boolean =>
+  left.length === right.length
+  && sameList(left.map(canonicalJson).sort(), right.map(canonicalJson).sort());
 
 export type BackendCatalogIntent = {
   removed: ReadonlySet<string>;

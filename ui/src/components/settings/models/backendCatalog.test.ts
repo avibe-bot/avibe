@@ -21,6 +21,7 @@ import {
   readBackendCatalogBaseline,
   retireModelsDevMatch,
   sameBackendModel,
+  samePlanContents,
 } from './backendCatalog';
 import { inferProvider, type StandardVendors } from './menus/identifiers';
 import type {
@@ -28,6 +29,7 @@ import type {
   BackendModel,
   BackendModelCandidates,
   ModelCandidate,
+  ModelCandidateSupplier,
   ModelsDevMatch,
 } from './types';
 
@@ -645,9 +647,13 @@ describe('pickerGroups', () => {
     // groups overlap, and only the client can hold the line — the read is three
     // lists, not a map.
     const groups = pickerGroups(read({
-      builtin: [offered('shared'), offered('shared'), offered('gpt-6', { origin: 'builtin' })],
+      builtin: [offered('shared'), offered('shared'), offered('gpt-6')],
       providers: [offered('shared'), offered('glm-5.2')],
-      in_list: [offered('shared'), offered('kimi-k3'), offered('gpt-6', { origin: 'builtin' })],
+      in_list: [
+        offered('shared', { group_if_removed: 'providers' }),
+        offered('kimi-k3'),
+        offered('gpt-6', { group_if_removed: 'builtin' }),
+      ],
     }), new Set(['kimi-k3']));
 
     const filed = [...groups.builtin, ...groups.providers, ...groups.listed].map((entry) => entry.id);
@@ -660,9 +666,9 @@ describe('pickerGroups', () => {
     // Reading `in_list` literally would call a row the user just removed
     // 「already in the list」 and offer a row they just added as if it were new.
     const response = read({
-      builtin: [offered('gpt-6', { origin: 'builtin' })],
+      builtin: [offered('gpt-6')],
       providers: [offered('glm-5.2')],
-      in_list: [offered('kimi-k3', { origin: 'builtin' })],
+      in_list: [offered('kimi-k3', { group_if_removed: 'builtin' })],
     });
 
     const groups = pickerGroups(response, new Set(['glm-5.2']));
@@ -675,12 +681,102 @@ describe('pickerGroups', () => {
     expect(groups.providers).toEqual([]);
   });
 
-  it('leaves a removed custom row to the action that can recreate it', () => {
-    // A hand-written row belongs to no group: no backend ships it and no
-    // provider supplies it. Filing it under one would name a supplier that does
-    // not exist, so `Add custom model…` is its way back instead.
-    const groups = pickerGroups(read({ in_list: [offered('internal/house', { origin: 'manual' })] }), new Set());
+  it('files a draft-removed row by what supplies it now, never by the path that created it', () => {
+    // Why `group_if_removed` exists at all (C4): `origin` records the creation
+    // path and nothing else (C2), so a row added through a provider whose Source
+    // was deleted months ago still reads `provider`. Filing by that would offer
+    // it under 「From your providers」 and name a supplier that no longer exists.
+    // So the group is a function of the supply facts alone — and a row those
+    // facts place nowhere is absent from the picker, with `Add custom model…` as
+    // its way back, which costs the user far less than a row nothing can serve.
+    const ORIGINS: ModelCandidate['origin'][] = ['builtin', 'models_dev', 'manual', 'provider'];
+    const SUPPLIED: ModelCandidateSupplier[] = [{ source_id: 'src', source_name: 'Src', model_id: 'upstream' }];
 
-    expect(groups).toEqual({ builtin: [], providers: [], listed: [] });
+    /** One row per shape the read can state current supply in, absence included,
+     *  each paired with the group it must reach. Seeded over the field's closed
+     *  domain rather than listed as cases: a value the server gains is one row
+     *  here, and every origin below then covers it. The first three pair the
+     *  server's answer with a `suppliers` that would disagree, so a result can
+     *  only have come from the answer itself. */
+    const FACTS: {
+      what: string;
+      supply: Partial<ModelCandidate>;
+      group: 'builtin' | 'providers' | null;
+    }[] = [
+      { what: 'the server names the built-in snapshot', supply: { group_if_removed: 'builtin', suppliers: SUPPLIED }, group: 'builtin' },
+      { what: 'the server names the providers', supply: { group_if_removed: 'providers', suppliers: [] }, group: 'providers' },
+      { what: 'the server names nowhere', supply: { group_if_removed: null, suppliers: SUPPLIED }, group: null },
+      { what: 'no answer yet, and a provider supplies it', supply: { suppliers: SUPPLIED }, group: 'providers' },
+      { what: 'no answer yet, and nothing supplies it', supply: { suppliers: [] }, group: null },
+    ];
+
+    /** The one group a candidate reaches, and proof there is only one. */
+    const groupOf = (candidate: ModelCandidate): 'builtin' | 'providers' | 'listed' | null => {
+      const groups = pickerGroups(read({ in_list: [candidate] }), new Set());
+      const reached = (['builtin', 'providers', 'listed'] as const).filter((name) => groups[name].length > 0);
+      expect(reached.length).toBeLessThan(2);
+      return reached[0] ?? null;
+    };
+
+    for (const fact of FACTS) {
+      const reached = ORIGINS.map((origin) => groupOf(offered('kimi-k3', { ...fact.supply, origin })));
+      // One group for one set of supply facts, whatever origin arrived with them…
+      expect(new Set(reached).size, fact.what).toBe(1);
+      // …and it is the group those facts name.
+      expect(reached[0], fact.what).toBe(fact.group);
+    }
+  });
+});
+
+describe('samePlanContents', () => {
+  const hop = (position: number) => ({
+    source_id: 'src', model_id: 'kimi-k3', backend: 'claude', menu_model: 'kimi-k3', position,
+  });
+  const gap = (agents: string[]) => ({ backend: 'claude', model_id: 'kimi-k3', agents });
+
+  /** Every ordering of a list. */
+  const orderings = <T>(list: readonly T[]): T[][] => (
+    list.length <= 1
+      ? [[...list]]
+      : list.flatMap((head, index) => orderings([...list.slice(0, index), ...list.slice(index + 1)])
+        .map((rest) => [head, ...rest]))
+  );
+
+  it('reads any two orderings of the same consequences as one plan', () => {
+    // The decision it serves: 「is the server's refusal the one the user already
+    // confirmed?」. The preview follows the order the user clicked and the
+    // refusal follows the server's own walk of the baseline, so an order that
+    // differs between them is not a disagreement about what would happen — and
+    // asking the same question twice for it is the bug.
+    const plan = [hop(1), hop(2), gap(['reviewer'])];
+    const every = orderings(plan);
+    expect(every).toHaveLength(6);
+    expect(every.filter((ordering) => !samePlanContents(plan, ordering))).toEqual([]);
+  });
+
+  it('reads consequences that are not the same as a different plan', () => {
+    // What makes the automatic retry safe: a server whose answer moved between
+    // the question and the retry has to ask it again.
+    const plan = [hop(1), hop(2)];
+    const moved = [
+      [],                       // nothing left
+      [hop(1)],                 // one fewer
+      [hop(1), hop(2), hop(3)], // one more
+      [hop(1), hop(1)],         // one replaced by a copy of the other
+      [hop(1), hop(9)],         // one altered
+    ];
+    expect(moved.filter((other) => samePlanContents(plan, other))).toEqual([]);
+    // Including inside an element, where no story explains a reordering: one
+    // side produced that list, so a different order there is a real change.
+    expect(samePlanContents([gap(['a', 'b'])], [gap(['b', 'a'])])).toBe(false);
+  });
+
+  it('reads no difference into how the same element happens to be written', () => {
+    // Both halves are JSON off a wire, and neither side controls the other's
+    // key order or how it spells a field it has nothing to say about.
+    expect(samePlanContents(
+      [{ source_id: 'src', model_id: 'kimi-k3', position: 1 }],
+      [{ position: 1, model_id: 'kimi-k3', source_id: 'src', menu_model: undefined }],
+    )).toBe(true);
   });
 });
