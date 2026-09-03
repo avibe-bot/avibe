@@ -627,8 +627,53 @@
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: var(--model-hub-add-key-hint-size);
 }
-.model-hub-add-key-test-row { min-height: 34px; }
-.model-hub-add-key-secondary,
+.model-hub-add-key-protocol-area {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--model-hub-add-key-field-gap);
+}
+.model-hub-add-key-protocol-area.is-idle { opacity: 0.55; }
+.model-hub-add-key-protocol-idle-row,
+.model-hub-add-key-protocol-detecting,
+.model-hub-add-key-protocol-manual {
+  display: flex;
+  gap: 3px;
+}
+.model-hub-add-key-protocol-idle-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.model-hub-add-key-protocol-manual {
+  flex-direction: column;
+}
+.model-hub-add-key-protocol-detecting {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--model-hub-add-key-strip-gap);
+  color: var(--foreground);
+  font-size: var(--model-hub-add-key-strip-title-size);
+  font-weight: 600;
+}
+.model-hub-add-key-protocol-disclosure {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--model-hub-muted-b3);
+  font-size: var(--model-hub-add-key-hint-size);
+  font-weight: 600;
+}
+.model-hub-add-key-protocol-glyph {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
 .model-hub-add-key-action {
   height: auto;
   border-radius: var(--model-hub-add-key-action-radius);
@@ -666,6 +711,9 @@
   font-size: var(--model-hub-add-key-strip-title-size);
   font-weight: 600;
 }
+.model-hub-add-key-strip--success .model-hub-add-key-protocol-glyph {
+  color: var(--mint-ink);
+}
 .model-hub-add-key-strip-title {
   font-size: var(--model-hub-add-key-strip-title-size);
   font-weight: 600;
@@ -688,6 +736,9 @@
   background: var(--model-hub-wash-0a);
 }
 .model-hub-add-key-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border-radius: var(--model-hub-add-key-segment-radius);
   padding: var(--model-hub-add-key-segment-padding-y) var(--model-hub-add-key-segment-padding-x);
   color: var(--muted);

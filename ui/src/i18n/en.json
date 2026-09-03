@@ -1352,7 +1352,7 @@
       },
       "addKey": {
         "title": "Add API key",
-        "subtitle": "Add connects once: it identifies the interface and fetches the model list",
+        "subtitle": "Detect the connection and interface first, then confirm to add",
         "field": {
           "name": "Name (optional)",
           "protocol": "Interface type",
@@ -1363,16 +1363,17 @@
           "apiKey.reveal": "Show API key",
           "apiKey.conceal": "Hide API key"
         },
-        "test": "Fetch models",
-        "test.hint": "Optional · Add fetches once anyway",
         "pull": {
           "result_one": "Fetched {{count}} model",
           "result_other": "Fetched {{count}} models",
           "empty": "Connected, but this source lists no models"
         },
-        "submit": "Add",
+        "detect": "Detect",
+        "confirm": "Confirm & add",
         "adding": "Connecting…",
         "adding.detail": "Connect, validate the interface, fetch the model list · usually 1–3s",
+        "saving": "Saving…",
+        "saving.detail": "Saving this source",
         "fail": {
           "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
           "auth": "The upstream rejected this credential",
@@ -1394,7 +1395,10 @@
           "auto": "Auto detect",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
-          "openaiChatCompletions": "OpenAI Chat Completions"
+          "openaiChatCompletions": "OpenAI Chat Completions",
+          "idleHint": "Identified automatically once Base URL and API key are filled",
+          "detecting": "Identifying the interface…",
+          "manual": "Manually specify interface type"
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"
