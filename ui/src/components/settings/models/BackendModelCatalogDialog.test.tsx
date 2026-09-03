@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
-import { blankBackendModel } from './backendCatalog';
+import { blankBackendModel, candidateBackendModel } from './backendCatalog';
 import { ApiCallError, modelsApi } from './modelsApi';
-import type { AgentSupply, BackendModel } from './types';
+import type { AgentSupply, BackendModel, ModelCandidate, RouteHop, Source } from './types';
 
 const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel => ({
   ...blankBackendModel(),
@@ -17,6 +17,55 @@ const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel 
 });
 
 const locked = model('claude-default', { locked: true, routeable: false });
+
+const source = (id: string, displayName: string): Source => ({
+  id,
+  last_discovered_at: null,
+  kind: 'api_key',
+  vendor: 'anthropic',
+  display_name: displayName,
+  protocol: 'anthropic',
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: { status: 'active', retry_at: null, detail_key: null },
+  models: [],
+});
+
+const candidate = (id: string, overrides: Partial<ModelCandidate> = {}): ModelCandidate => ({
+  id,
+  display_name: null,
+  reasoning_efforts: [],
+  suppliers: [],
+  origin: 'provider',
+  ...overrides,
+});
+
+/** What the one read behind the picker answers. Stubbed per test rather than by
+ *  default: a test that never opens the picker must not be able to pass on a
+ *  group it silently supplied. */
+const offered = (groups: Partial<Record<'builtin' | 'providers' | 'in_list', ModelCandidate[]>> = {}) => ({
+  builtin: groups.builtin ?? [],
+  providers: groups.providers ?? [],
+  in_list: groups.in_list ?? [],
+});
+
+/** The stale-candidate refusal: nothing was committed, and the `changed` map is
+ *  the whole answer — hence its own shape rather than a guard refusal. */
+const staleCandidates = (changed: Record<string, RouteHop[]>) => new ApiCallError(
+  'candidate_suppliers_changed',
+  'modelHub.errors.candidate_suppliers_changed',
+  true,
+  [],
+  [],
+  [],
+  409,
+  undefined,
+  changed,
+);
+
+/** The confirmation lives inside the row it is about, and its Cancel is one of
+ *  three on screen. */
+const confirmation = () => within(screen.getByRole('alert').parentElement as HTMLElement);
 
 const agent = (catalog: BackendModel[] | undefined, overrides: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
@@ -40,6 +89,8 @@ const renderDialog = (overrides: Partial<React.ComponentProps<typeof BackendMode
       <BackendModelCatalogDialog
         open
         backend="claude"
+        sources={[source('src_a', 'Primary relay')]}
+        canReadSources
         onClose={onClose}
         onSaved={onSaved}
         onObserved={onObserved}
@@ -99,17 +150,23 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.queryByText('src_a')).toBeNull();
   });
 
-  it('adds a model through the editor and settles the whole list in one write', async () => {
+  it('adds what the providers offer, and promises the suppliers it displayed', async () => {
     const user = userEvent.setup();
     const catalog = [locked, model('alpha')];
-    const echoed = agent([...catalog, model('added')]);
+    const glm = candidate('glm-5.2', {
+      display_name: 'GLM 5.2',
+      reasoning_efforts: ['low'],
+      suppliers: [{ source_id: 'src_a', source_name: 'Primary relay', model_id: 'glm-5.2-air' }],
+    });
+    const echoed = agent([...catalog, model('glm-5.2')]);
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ providers: [glm] }));
     const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(echoed);
     const { onSaved, onClose } = renderDialog();
 
-    await user.click(await screen.findByRole('button', { name: 'Add model' }));
-    await user.type(screen.getByLabelText('Backend model ID'), 'added');
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    await user.click(await screen.findByRole('button', { name: 'Add models' }));
+    await user.click(await screen.findByRole('checkbox', { name: /GLM 5\.2/ }));
+    await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
 
     // Nothing is written until the list itself is saved.
     expect(putAgentModels).not.toHaveBeenCalled();
@@ -119,10 +176,41 @@ describe('BackendModelCatalogDialog', () => {
 
     await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
       baseline: catalog,
-      models: [...catalog, model('added')],
+      models: [...catalog, candidateBackendModel(glm)],
+      // Per addition, the projection the picker displayed for it. The server
+      // matches the addition itself, so this is what makes the seeded route the
+      // one the user agreed to rather than whatever supply exists at commit
+      // time. The rows the baseline already holds are matched by nobody, so
+      // promising anything about them would describe nothing this write does.
+      expected_suppliers: { 'glm-5.2': [{ source_id: 'src_a', model_id: 'glm-5.2-air' }] },
     }));
     expect(onSaved).toHaveBeenCalledWith(echoed);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('hands a model nobody offers to the editor, and promises nothing about it', async () => {
+    const user = userEvent.setup();
+    const catalog = [locked, model('alpha')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([...catalog, model('added')]));
+    renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Add models' }));
+    await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
+    await user.type(screen.getByLabelText('Model'), 'added');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(await screen.findByText('3 models')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    // A row written by hand was never shown a supplier, so the write states no
+    // expectation for it: there is nothing for the server to disagree with.
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+      baseline: catalog,
+      models: [...catalog, model('added')],
+    }));
   });
 
   it('edits an existing row without renaming it', async () => {
@@ -133,7 +221,7 @@ describe('BackendModelCatalogDialog', () => {
     renderDialog();
 
     await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
-    expect((screen.getByLabelText('Backend model ID') as HTMLInputElement).readOnly).toBe(true);
+    expect((screen.getByLabelText('Model') as HTMLInputElement).readOnly).toBe(true);
     await user.clear(screen.getByLabelText('Context window'));
     await user.type(screen.getByLabelText('Context window'), '2000');
     await user.click(screen.getByRole('button', { name: 'Save model' }));
@@ -145,21 +233,121 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
-  it('refuses to remove a model that still has a route', async () => {
+  it('names what a removal takes with it, and removes both together once agreed', async () => {
     const user = userEvent.setup();
-    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], {
-      routes: { alpha: { hops: [{ source_id: 'src_a', model_id: 'alpha' }] } },
+    const catalog = [model('alpha'), model('beta')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
+      routes: {
+        alpha: {
+          hops: [
+            { source_id: 'src_a', model_id: 'glm-5.2-air' },
+            { source_id: 'src_gone', model_id: 'backup' },
+          ],
+        },
+      },
     }));
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([]));
     renderDialog();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove alpha' }));
-    expect(screen.getByRole('alert').textContent).toBe('This model still has a route. Clear its route first, then remove it.');
-    expect(screen.getByText('2 models')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
-
-    await user.click(screen.getByRole('button', { name: 'Remove beta' }));
+    // A route is the only thing a removal takes that the user did not name, so
+    // it is the only removal that asks first.
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByText('1 model')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Remove alpha' }));
+    // Named by the Sources and upstream models the user can recognise, in route
+    // order — and by the id for a Source this client never read, because the
+    // consequence is worth stating either way.
+    expect(screen.getByRole('alert').textContent)
+      .toBe('Also removes its route: Primary relay → glm-5.2-air, src_gone → backup');
+    expect(screen.getByText('1 model')).toBeTruthy();
+
+    // Asking is not doing.
+    await user.click(confirmation().getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByText('1 model')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Remove alpha' }));
+    await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+    expect(screen.getByText('0 models')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    // The save echoes the plan the user was shown, one-based like the server's
+    // own positions, so the guard is answered for exactly that plan and not for
+    // whatever the routes hold by the time it lands.
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+      baseline: catalog,
+      models: [],
+      force: true,
+      would_remove_hops: [
+        { backend: 'claude', menu_model: 'alpha', source_id: 'src_a', model_id: 'glm-5.2-air', position: 1 },
+        { backend: 'claude', menu_model: 'alpha', source_id: 'src_gone', model_id: 'backup', position: 2 },
+      ],
+      // This dialog never showed an interruption plan, so it cannot claim one
+      // was confirmed.
+      would_interrupt: [],
+    }));
+  });
+
+  it('re-asks with the current suppliers when the ones it displayed went stale', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha')];
+    const shown = candidate('glm-5.2', {
+      display_name: 'GLM 5.2',
+      suppliers: [{ source_id: 'src_a', source_name: 'Primary relay', model_id: 'glm-5.2-air' }],
+    });
+    const current = candidate('glm-5.2', {
+      display_name: 'GLM 5.2',
+      suppliers: [{ source_id: 'src_b', source_name: 'Backup relay', model_id: 'glm-5.2' }],
+    });
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    const read = vi.spyOn(modelsApi, 'getAgentModelCandidates')
+      .mockResolvedValueOnce(offered({ providers: [shown] }))
+      .mockResolvedValue(offered({ providers: [current] }));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [{ source_id: 'src_b', model_id: 'glm-5.2' }] }))
+      .mockResolvedValue(agent([...catalog, model('glm-5.2')]));
+    const { onSaved, onObserved } = renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Add models' }));
+    await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
+    await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    // Nothing was committed, so there is nothing to report and nothing to
+    // re-read: the answer to this refusal is the same question again, asked
+    // against the suppliers the server matched this time.
+    expect(await screen.findByRole('checkbox', { name: /Backup relay/ })).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(onObserved).not.toHaveBeenCalled();
+    expect(screen.queryByRole('status')).toBeNull();
+
+    // Still picked, because it is still what the user asked for — only the
+    // supply behind it changed.
+    await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(write).toHaveBeenLastCalledWith('claude', expect.objectContaining({
+      expected_suppliers: { 'glm-5.2': [{ source_id: 'src_b', model_id: 'glm-5.2' }] },
+    })));
+    expect(onSaved).toHaveBeenCalled();
+  });
+
+  it('offers no way in to a role that may not read Sources', async () => {
+    // The candidates read names Sources, and the editor is reached through the
+    // picker, so the whole add path goes where the page's other Source-reading
+    // surfaces go. What is left is still a complete surface: the list, its
+    // order, its edits and its removals.
+    const read = vi.spyOn(modelsApi, 'getAgentModelCandidates');
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    renderDialog({ canReadSources: false });
+
+    expect(await screen.findByRole('button', { name: 'Reorder alpha' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Add models' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Edit alpha' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove alpha' })).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('reorders with the keyboard, announces the move, and leaves the locked row where it is', async () => {
@@ -227,7 +415,7 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('legacy-b')).toBeTruthy();
     expect(screen.getByText('This model engine build does not offer an editable model list yet. These are the models it currently exposes.')).toBeTruthy();
     expect(screen.getByText('2 models')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Add model' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Add models' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
     expect(screen.queryByRole('button', { name: /^Reorder / })).toBeNull();
     expect(putAgentModels).not.toHaveBeenCalled();

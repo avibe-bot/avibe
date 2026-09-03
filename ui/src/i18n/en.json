@@ -946,7 +946,7 @@
           "title": "{{backend}} models",
           "description": "Add, edit, reorder, and remove the models this backend offers. The order here is the order the Agent sees.",
           "search": "Search name or model ID",
-          "add": "Add model",
+          "add": "Add models",
           "columnModel": "Model",
           "columnActions": "Actions",
           "columnState": "State",
@@ -955,7 +955,8 @@
           "edit": "Edit {{model}}",
           "remove": "Remove {{model}}",
           "reorder": "Reorder {{model}}",
-          "removeBlocked": "This model still has a route. Clear its route first, then remove it.",
+          "removeConsequence": "Also removes its route: {{hops}}",
+          "removeConfirm": "Remove",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
@@ -982,6 +983,20 @@
           "dropped_other": "Dropped {{model}} at position {{position}} of {{count}}.",
           "grabCancelled": "Cancelled moving {{model}} and restored its original position."
         },
+        "picker": {
+          "title": "Add {{backend}} models",
+          "description": "Pick the models to add to this backend's list.",
+          "search": "Search models or providers",
+          "groupBuiltin": "{{backend}} built-in",
+          "groupProviders": "From your providers",
+          "groupListed": "Already in the list",
+          "noMatch": "No model matches.",
+          "unavailable": "The models you can add could not be read.",
+          "customFromQuery": "Add \"{{query}}\" as a custom model…",
+          "custom": "Add custom model…",
+          "confirm_one": "Add {{count}} model",
+          "confirm_other": "Add {{count}} models"
+        },
         "modelEditor": {
           "eyebrow": "{{backend}} · Model list",
           "addTitle": "Add model",
@@ -993,8 +1008,8 @@
             "capabilities": "Capabilities"
           },
           "id": {
-            "label": "Backend model ID",
-            "placeholder": "The ID the backend requests this model by",
+            "label": "Model",
+            "placeholder": "Search models.dev or enter a model ID",
             "required": "Enter a backend model ID.",
             "tooLong": "A model ID may be at most 256 characters.",
             "duplicate": "This list already has a model with this ID."
@@ -1003,12 +1018,10 @@
             "label": "Display name",
             "placeholder": "Optional — the list shows the model ID when this is empty"
           },
-          "fill": "Fill from models.dev",
-          "fillEmpty": "models.dev has no model matching this ID.",
-          "fillFailed": "models.dev could not be reached.",
-          "fillUnavailable": "The models.dev catalog is unavailable right now. You can fill these fields in by hand.",
-          "filled": "Filled the fields below; every one stays editable.",
-          "viewMatches": "View",
+          "lookupLoading": "Searching models.dev…",
+          "useAsId": "Use \"{{query}}\" as the model ID",
+          "fillFailed": "models.dev could not be reached",
+          "fillUnavailable": "models.dev unavailable",
           "matches": "models.dev matches",
           "contextWindow": "Context window",
           "maxOutput": "Maximum output",

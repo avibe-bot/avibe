@@ -1894,6 +1894,7 @@
   --model-hub-catalog-row-height: 62px;
   --model-hub-catalog-row-radius: 10px;
   --model-hub-catalog-row-pad-x: 16px;
+  --model-hub-catalog-row-pad-y: 10px;
   --model-hub-catalog-row-gap: 14px;
   --model-hub-catalog-row-locked-fill: var(--model-hub-wash-05);
   --model-hub-catalog-grip-size: 16px;
@@ -1905,6 +1906,9 @@
   --model-hub-catalog-foot-pad-y: 14px;
   --model-hub-catalog-count-size: 12px;
   --model-hub-catalog-note-size: 11px;
+  --model-hub-catalog-consequence-size: 12px;
+  --model-hub-catalog-confirm-height: 32px;
+  --model-hub-catalog-confirm-pad-x: 14px;
 }
 
 .model-hub-catalog-head {
@@ -1941,13 +1945,19 @@
 
 .model-hub-catalog-row {
   min-height: var(--model-hub-catalog-row-height);
-  padding: 10px var(--model-hub-catalog-row-pad-x);
+  padding: var(--model-hub-catalog-row-pad-y) var(--model-hub-catalog-row-pad-x);
   border: 1px solid var(--border);
   border-radius: var(--model-hub-catalog-row-radius);
   background: var(--background);
 }
 .model-hub-catalog-row--locked { background: var(--model-hub-catalog-row-locked-fill); }
 .model-hub-catalog-row--static { min-height: 48px; }
+/* A row being asked about is the row the answer applies to, so the question
+ * stays inside it and the stronger border says which one is waiting. */
+.model-hub-catalog-row.is-confirming { border-color: var(--border-strong); }
+.model-hub-catalog-row.is-confirming .model-hub-catalog-action--danger {
+  background: var(--model-hub-wash-14);
+}
 
 .model-hub-catalog-grip {
   display: inline-flex;
@@ -2005,6 +2015,30 @@
   font-weight: 600;
   color: var(--model-hub-danger-ink);
 }
+/* The removal question, drawn as the row's own lower half: full-bleed to the
+ * row's border on three sides, which is why the negative margins are the row's
+ * own padding tokens rather than numbers. */
+.model-hub-catalog-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin:
+    var(--model-hub-catalog-row-pad-y)
+    calc(-1 * var(--model-hub-catalog-row-pad-x))
+    calc(-1 * var(--model-hub-catalog-row-pad-y));
+  padding: 12px var(--model-hub-catalog-row-pad-x);
+  border-top: 1px solid var(--border);
+  background: var(--model-hub-wash-05);
+}
+.model-hub-catalog-consequence {
+  font-size: var(--model-hub-catalog-consequence-size);
+  color: var(--foreground);
+}
+.model-hub-catalog-confirm-action {
+  height: var(--model-hub-catalog-confirm-height);
+  padding: 0 var(--model-hub-catalog-confirm-pad-x);
+}
+
 .model-hub-catalog-legacy {
   padding: 0 2px 4px;
   font-size: var(--model-hub-catalog-note-size);
@@ -2033,7 +2067,7 @@
   --model-hub-model-chip-radius: 7px;
   --model-hub-model-chip-size: 12px;
   --model-hub-model-note-size: 11px;
-  --model-hub-model-strip-fill: var(--model-hub-wash-05);
+  --model-hub-model-match-height: 31px;
 }
 
 .model-hub-model-editor-head {
@@ -2113,48 +2147,54 @@
 .model-hub-model-chip--add { border-style: dashed; }
 .model-hub-model-chip--custom { padding-right: 6px; }
 
-.model-hub-model-source-strip {
-  min-height: var(--model-hub-model-control-height);
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--model-hub-model-control-radius);
-  background: var(--model-hub-model-strip-fill);
-}
-.model-hub-model-source-id {
-  font-size: 11.5px;
-  color: var(--foreground);
-}
-.model-hub-model-source-note {
-  font-size: 11px;
-  color: var(--muted);
-}
-.model-hub-model-source-view {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--mint-ink);
-}
-.model-hub-model-source-view:disabled { color: var(--muted); }
-
+/* The 「Model」 typeahead. It floats over the fields below it rather than
+ * displacing them: the frame draws it in layout flow, but every field it can
+ * fill sits underneath, and pushing them down on each keystroke moves the very
+ * values the user is about to check. Same metrics, overlay layering. */
 .model-hub-model-match-list {
-  overflow: hidden;
-  border: 1px solid var(--border);
+  /* Nine rows: the ranked read returns at most eight matches, and the 「use what
+   * I typed」 escape is always the last one, so the cap is reached rather than
+   * guessed — and a shorter list is still exactly as tall as its rows. */
+  max-height: calc(var(--model-hub-model-match-height) * 9);
+  overflow: hidden auto;
+  border: 1px solid var(--border-strong);
   border-radius: var(--model-hub-model-control-radius);
-  background: var(--background);
+  background: var(--surface-2);
+  box-shadow: var(--model-hub-menu-shadow);
 }
 .model-hub-model-match {
+  min-height: var(--model-hub-model-match-height);
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
 .model-hub-model-match:last-child { border-bottom: none; }
 .model-hub-model-match:hover { background: var(--model-hub-wash-05); }
 .model-hub-model-match.is-selected { background: var(--model-hub-mint-14); }
+/* The 「use what I typed」 row is an escape, not a suggestion: no fill, so it
+ * reads as the plain sentence the frame draws. */
+.model-hub-model-match--literal { border-bottom: none; }
+.model-hub-model-match--literal.is-selected { background: var(--model-hub-wash-08); }
 .model-hub-model-match-name {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--foreground);
 }
-.model-hub-model-match-id {
+/* The id, the vendor and the context window: one type, three facts, so they are
+ * one rule. Which of them a match carries is the read's answer, not a style. */
+.model-hub-model-match-id,
+.model-hub-model-match-meta {
   font-size: 11px;
+  color: var(--muted);
+}
+.model-hub-model-match-literal {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+.model-hub-model-match-state {
+  min-height: var(--model-hub-model-match-height);
+  padding: 8px 12px;
+  font-size: 12.5px;
   color: var(--muted);
 }
 
@@ -2166,4 +2206,118 @@
   font-size: var(--model-hub-model-note-size);
   font-weight: 600;
   color: var(--model-hub-danger-ink);
+}
+
+/* ---------------------------------------------------------------------------
+ * The 「Add models」 picker.
+ *
+ * It wears .model-hub-catalog-dialog for the shell — same width, head height,
+ * title size, body padding, 40px search, footer padding — because it IS the
+ * catalog's other half and the two are seen back to back. Only what the picker
+ * has and the catalog does not lives here: the grouped list and its 36px
+ * multi-select rows, a third of the catalog row's height because a pick is one
+ * line of text, not an editable record.
+ */
+
+.model-hub-picker {
+  --model-hub-picker-group-gap: 8px;
+  --model-hub-picker-group-inner-gap: 4px;
+  --model-hub-picker-head-size: 11px;
+  --model-hub-picker-row-height: 36px;
+  --model-hub-picker-row-radius: 8px;
+  --model-hub-picker-row-pad-x: 12px;
+  --model-hub-picker-row-gap: 10px;
+  --model-hub-picker-name-size: 12.5px;
+  --model-hub-picker-id-size: 11px;
+  --model-hub-picker-suppliers-row-height: 52px;
+}
+
+.model-hub-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-picker-group-gap);
+}
+.model-hub-picker-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-picker-group-inner-gap);
+}
+.model-hub-picker-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 0;
+  font-size: var(--model-hub-picker-head-size);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.model-hub-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--model-hub-picker-row-gap);
+  min-height: var(--model-hub-picker-row-height);
+  padding: 0 var(--model-hub-picker-row-pad-x);
+  border: 1px solid var(--border);
+  border-radius: var(--model-hub-picker-row-radius);
+  background: var(--background);
+  text-align: left;
+}
+.model-hub-picker-row.is-picked {
+  border-color: var(--mint);
+  background: var(--mint-soft);
+}
+/* An already-listed row is shown, not offered: it stays legible so the search
+ * answers 「it exists」, and greys its name so it never looks pickable. */
+.model-hub-picker-row--listed .model-hub-picker-name { color: var(--muted); }
+
+.model-hub-picker-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.model-hub-picker-name {
+  font-size: var(--model-hub-picker-name-size);
+  font-weight: 600;
+  color: var(--foreground);
+}
+/* A row with no display name shows its id where the name would go — same size,
+ * lighter weight, monospaced, because then the id IS the label. */
+.model-hub-picker-name--id { font-weight: 500; }
+.model-hub-picker-id {
+  font-size: var(--model-hub-picker-id-size);
+  color: var(--muted);
+}
+
+.model-hub-picker-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-hub-picker-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: var(--model-hub-picker-name-size);
+  color: var(--muted);
+}
+
+@media (max-width: 767px) {
+  /* Narrow enough that a name, an id, and a supplier strip cannot share one
+   * line. Only rows that actually carry chips stack — declared by the row, not
+   * inferred with :has(), so the height is decided where the data is known. */
+  .model-hub-picker-row--suppliers {
+    min-height: var(--model-hub-picker-suppliers-row-height);
+    padding: 6px var(--model-hub-picker-row-pad-x);
+  }
+  .model-hub-picker-row--suppliers .model-hub-picker-line {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
 }

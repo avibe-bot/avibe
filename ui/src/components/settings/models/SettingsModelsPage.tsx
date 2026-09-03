@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
@@ -340,6 +341,11 @@ const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
 export const SettingsModelsPage: React.FC = () => {
   const { t } = useTranslation();
   const { showToast } = useToast();
+  /** The catalog's 「Add models」 action reads the candidates endpoint, which
+   *  names Sources — so it is offered on the same capability that lets a role
+   *  administer this instance's Agents, and read here rather than in the dialog
+   *  because the page is where this surface's authorization already lands. */
+  const { capabilities } = useInstanceAuthorization();
   const [sourcesRead, setSourcesRead] = React.useState<RegionRead<Source[]>>(loadingRegion);
   const [supplyRead, setSupplyRead] = React.useState<RegionRead<AgentSupply[]>>(loadingRegion);
   const [chainsRead, setChainsRead] = React.useState<RegionRead<ModelChainIndex>>(loadingRegion);
@@ -1387,7 +1393,7 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} sources={sources} canReadSources={capabilities.can_manage_agents} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         sources={sources}

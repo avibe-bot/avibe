@@ -955,7 +955,8 @@
           "edit": "编辑 {{model}}",
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
-          "removeBlocked": "该模型仍配置了路由，请先清空它的路由再移除。",
+          "removeConsequence": "同时会移除它的路由：{{hops}}",
+          "removeConfirm": "移除",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
@@ -982,6 +983,20 @@
           "dropped_other": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
           "grabCancelled": "已取消移动 {{model}}，位置已还原。"
         },
+        "picker": {
+          "title": "添加 {{backend}} 模型",
+          "description": "挑选要加入这个后端模型列表的模型。",
+          "search": "搜索模型或供应商",
+          "groupBuiltin": "{{backend}} 内置",
+          "groupProviders": "来自你的供应商",
+          "groupListed": "已在列表中",
+          "noMatch": "没有匹配的模型。",
+          "unavailable": "没能读取可添加的模型。",
+          "customFromQuery": "把「{{query}}」添加为自定义模型…",
+          "custom": "添加自定义模型…",
+          "confirm_one": "添加 {{count}} 个模型",
+          "confirm_other": "添加 {{count}} 个模型"
+        },
         "modelEditor": {
           "eyebrow": "{{backend}} · 模型列表",
           "addTitle": "添加模型",
@@ -993,8 +1008,8 @@
             "capabilities": "能力"
           },
           "id": {
-            "label": "Backend 模型 ID",
-            "placeholder": "后端请求这个模型时使用的 ID",
+            "label": "模型",
+            "placeholder": "搜索 models.dev 或输入模型 ID",
             "required": "请填写 Backend 模型 ID。",
             "tooLong": "模型 ID 最多 256 个字符。",
             "duplicate": "列表中已存在相同 ID 的模型。"
@@ -1003,12 +1018,10 @@
             "label": "显示名称",
             "placeholder": "可选，留空时列表显示模型 ID"
           },
-          "fill": "从 models.dev 填充",
-          "fillEmpty": "models.dev 上没有匹配该 ID 的模型。",
-          "fillFailed": "没能访问 models.dev。",
-          "fillUnavailable": "models.dev 目录暂时不可用，你可以手动填写这些字段。",
-          "filled": "已填入下列字段，可逐项修改",
-          "viewMatches": "查看",
+          "lookupLoading": "正在搜索 models.dev…",
+          "useAsId": "把「{{query}}」作为模型 ID",
+          "fillFailed": "没能访问 models.dev",
+          "fillUnavailable": "models.dev 不可用",
           "matches": "models.dev 匹配结果",
           "contextWindow": "上下文窗口",
           "maxOutput": "最大输出",

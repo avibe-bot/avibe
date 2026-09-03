@@ -23,16 +23,28 @@ import {
   applyBackendCatalogIntent,
   backendCatalogIntent,
   backendCatalogIntentApplied,
+  candidateBackendModel,
   catalogModelIds,
   readBackendCatalogBaseline,
   sameCatalog,
   type BackendCatalogBaseline,
+  type BackendCatalogIntent,
 } from './backendCatalog';
 import { BackendModelEditorDialog } from './BackendModelEditorDialog';
+import { BackendModelPickerDialog } from './BackendModelPickerDialog';
 import { apiFailure, modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
 import { catalogSaveFailureKey, catalogSaveLeftUnloaded } from './serverCopy';
-import type { AgentBackend, AgentSupply, BackendModel } from './types';
+import type {
+  AgentBackend,
+  AgentSupply,
+  BackendModel,
+  BackendModelsPut,
+  ModelCandidate,
+  RouteHop,
+  RouteHopRef,
+  Source,
+} from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
 
@@ -54,14 +66,36 @@ const matchesQuery = (model: BackendModel, query: string, renderedLabel: string)
     || renderedLabel.toLowerCase().includes(needle);
 };
 
+/** A hop's Source, named the way the user knows it. Falls back to the id: a
+ *  removal consequence is worth stating even for a Source this client never
+ *  read. */
+const sourceName = (sources: readonly Source[], sourceId: string): string =>
+  sources.find((source) => source.id === sourceId)?.display_name ?? sourceId;
+
+/** The stale-candidate refusal (C1), named by the route's own `error` rather
+ *  than by status: nothing was committed and nothing was interrupted, so it is
+ *  answered by asking again with today's suppliers, not by a failure sentence. */
+const CANDIDATES_CHANGED = 'candidate_suppliers_changed';
+
+/** Nothing pre-picked, held once so opening the picker is not a new object each
+ *  render — the picker applies its seed when it opens. */
+const NO_SEED: ReadonlySet<string> = new Set();
+
 export const BackendModelCatalogDialog: React.FC<{
   open: boolean;
   backend: AgentBackend;
+  /** Only to name the Sources a removal's hops point at. The catalog itself
+   *  still knows nothing about them. */
+  sources: Source[];
+  /** Whether this role may read Sources. The candidates read names them, so the
+   *  action that opens it is offered exactly where the page's other
+   *  Source-reading surfaces are (C4). */
+  canReadSources: boolean;
   onClose: () => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   onObserved: (observed: AgentSupply) => void | Promise<void>;
   catalogWrite: PendingWrite;
-}> = ({ open, backend, onClose, onSaved, onObserved, catalogWrite }) => {
+}> = ({ open, backend, sources, canReadSources, onClose, onSaved, onObserved, catalogWrite }) => {
   const { t } = useTranslation();
   const [baseline, setBaseline] = React.useState<BackendCatalogBaseline | null>(null);
   const baselineRef = React.useRef<BackendCatalogBaseline | null>(null);
@@ -70,13 +104,22 @@ export const BackendModelCatalogDialog: React.FC<{
   const draftRef = React.useRef<BackendModel[]>([]);
   const [query, setQuery] = React.useState('');
   const [saveFailedKey, setSaveFailedKey] = React.useState<string | null>(null);
-  const [editing, setEditing] = React.useState<{ model: BackendModel | null } | null>(null);
-  const [removeBlocked, setRemoveBlocked] = React.useState<string | null>(null);
+  const [editing, setEditing] = React.useState<{ model: BackendModel | null; seedId?: string } | null>(null);
+  const [picking, setPicking] = React.useState<{ seed: ReadonlySet<string> } | null>(null);
+  const [removing, setRemoving] = React.useState<string | null>(null);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState<Announcement>(null);
   const readAttempt = React.useRef(0);
   const grips = React.useRef(new Map<string, HTMLButtonElement>());
   const grabbedFrom = React.useRef<string[] | null>(null);
+  /** Per added id, the suppliers the picker DISPLAYED for it (C1). Kept in a ref
+   *  because it is not rendered: the list on screen is the user's decision, and
+   *  this is the projection that decision was made against. */
+  const expectedRef = React.useRef(new Map<string, RouteHop[]>());
+  /** Per removed id, the hop plan the user confirmed (C3), in the same shape the
+   *  guard reports it — so the save echoes the consequence that was shown rather
+   *  than one recomputed after the fact. */
+  const forcedRef = React.useRef(new Map<string, RouteHopRef[]>());
 
   const applyBaseline = React.useCallback((observed: BackendCatalogBaseline, models: BackendModel[]) => {
     baselineRef.current = observed;
@@ -106,14 +149,21 @@ export const BackendModelCatalogDialog: React.FC<{
   }, [applyBaseline, backend]);
 
   React.useEffect(() => {
-    if (open) loadBaseline(false);
+    if (!open) return;
+    // Both maps describe decisions taken against one baseline, so a dialog that
+    // is reading a new one starts with none of them.
+    expectedRef.current = new Map();
+    forcedRef.current = new Map();
+    setPicking(null);
+    setRemoving(null);
+    loadBaseline(false);
     return () => { readAttempt.current += 1; };
   }, [loadBaseline, open]);
 
   const mutate = (next: BackendModel[]) => {
     draftRef.current = next;
     setDraft(next);
-    setRemoveBlocked(null);
+    setRemoving(null);
     setSaveFailedKey(null);
   };
 
@@ -141,7 +191,12 @@ export const BackendModelCatalogDialog: React.FC<{
   const movableIds = draft.filter((model) => !model.locked).map((model) => model.id);
   const takenIds = new Set(draft.map((model) => model.id));
   const effortSuggestions = [...new Set(draft.flatMap((model) => model.reasoning_efforts))];
-  const routeLength = (modelId: string): number => baseline?.agent.routes?.[modelId]?.hops.length ?? 0;
+  /** Threaded from the server's own projection rather than mirrored here: the
+   *  editor's id rule has to agree with the backend that will accept the id. */
+  const standardVendors = React.useMemo(
+    () => new Set(baseline?.agent.standard_vendors ?? []),
+    [baseline?.agent.standard_vendors],
+  );
 
   /** Reordering permutes which movable row sits in which movable slot; a locked
    *  row keeps its absolute index, so the order sent never moves one. */
@@ -218,20 +273,113 @@ export const BackendModelCatalogDialog: React.FC<{
     if (neighbour) focusGrip(neighbour);
   };
 
+  /**
+   * The hops a removal would take with it, in the shape the guard reports them.
+   *
+   * Read off the same baseline the save will send, and one-based like the
+   * server's own positions, so the plan the user confirms is the plan the server
+   * is asked to carry out (C3).
+   */
+  const removePlan = (modelId: string): RouteHopRef[] =>
+    (baseline?.agent.routes?.[modelId]?.hops ?? []).map((hop, index) => ({
+      ...hop,
+      backend,
+      menu_model: modelId,
+      position: index + 1,
+    }));
+
+  /** The row leaves the draft; its route leaves with it when the list saves. */
+  const dropModel = (modelId: string, plan: RouteHopRef[]) => {
+    expectedRef.current.delete(modelId);
+    if (plan.length > 0) forcedRef.current.set(modelId, plan);
+    else forcedRef.current.delete(modelId);
+    mutate(draftRef.current.filter((entry) => entry.id !== modelId));
+  };
+
   const removeModel = (model: BackendModel) => {
-    if (routeLength(model.id) > 0) {
-      setRemoveBlocked(model.id);
+    const plan = removePlan(model.id);
+    // A route is the only thing a removal takes with it that the user did not
+    // name, so it is the only removal that asks first.
+    if (plan.length > 0) {
+      setRemoving(model.id);
       return;
     }
-    mutate(draft.filter((entry) => entry.id !== model.id));
+    dropModel(model.id, plan);
   };
 
   const commitEdit = (model: BackendModel) => {
     const existing = draft.findIndex((entry) => entry.id === model.id);
+    // A row written by hand promises nothing about its suppliers, so an id
+    // created here carries no displayed projection into the save. Editing an
+    // existing row keeps whatever it already carried: the editor holds its id
+    // fixed, so the projection is still about the same addition.
+    if (existing < 0) expectedRef.current.delete(model.id);
     mutate(existing >= 0
       ? draft.map((entry, index) => (index === existing ? { ...model, locked: entry.locked, routeable: entry.routeable } : entry))
       : [...draft, model]);
     setEditing(null);
+  };
+
+  /**
+   * Picks, poured into the draft.
+   *
+   * Each one carries the suppliers it was shown with into `expectedRef`: the
+   * server matches the addition itself at commit time, and this states which
+   * projection the user agreed to, so a changed one is re-asked instead of
+   * silently seeding a route the picker never displayed (C1).
+   */
+  const addCandidates = (chosen: ModelCandidate[]) => {
+    setPicking(null);
+    const held = new Set(draftRef.current.map((model) => model.id));
+    const additions = chosen.filter((candidate) => !held.has(candidate.id));
+    if (additions.length === 0) return;
+    for (const candidate of additions) {
+      expectedRef.current.set(
+        candidate.id,
+        candidate.suppliers.map((supplier) => ({ source_id: supplier.source_id, model_id: supplier.model_id })),
+      );
+      // Re-adding a row voids the removal that was confirmed for it.
+      forcedRef.current.delete(candidate.id);
+    }
+    mutate([...draftRef.current, ...additions.map(candidateBackendModel)]);
+  };
+
+  /**
+   * The one write this dialog makes.
+   *
+   * `baseline` + `models` is the whole list settling through a single optimistic
+   * merge (C1). The other three fields exist only because two of that merge's
+   * consequences are not derivable from the list: `force` answers the route
+   * guard with exactly the hops the user confirmed — and an empty interruption
+   * plan, because this dialog never showed one and so cannot claim one was
+   * confirmed (C3) — while `expected_suppliers` states, per addition, the
+   * projection the picker displayed for it. Only per addition: a row the
+   * baseline already holds is not matched again, so a promise about it would
+   * describe nothing this write does.
+   */
+  const putBody = (
+    baselineModels: BackendModel[],
+    requested: BackendModel[],
+    intent: BackendCatalogIntent,
+  ): BackendModelsPut => {
+    const body: BackendModelsPut = { baseline: baselineModels, models: requested };
+    const hops = [...forcedRef.current]
+      .filter(([modelId]) => intent.removed.has(modelId))
+      .flatMap(([, plan]) => plan);
+    if (hops.length > 0) {
+      body.force = true;
+      body.would_remove_hops = hops;
+      body.would_interrupt = [];
+    }
+    const baselineIds = new Set(baselineModels.map((model) => model.id));
+    const expected = Object.fromEntries(
+      requested.flatMap((model) => {
+        const suppliers = baselineIds.has(model.id) ? undefined : expectedRef.current.get(model.id);
+        return suppliers ? [[model.id, suppliers] as const] : [];
+      }),
+    );
+    if (Object.keys(expected).length > 0) body.expected_suppliers = expected;
+    return body;
   };
 
   const save = () => {
@@ -246,9 +394,20 @@ export const BackendModelCatalogDialog: React.FC<{
     void catalogWrite.track(async () => {
       let echoed: AgentSupply;
       try {
-        echoed = await modelsApi.putAgentModels(backend, { baseline: baselineModels, models: requested });
+        echoed = await modelsApi.putAgentModels(backend, putBody(baselineModels, requested, intent));
       } catch (error) {
         const failure = apiFailure(error);
+        if (failure?.code === CANDIDATES_CHANGED) {
+          // Nothing was committed, so there is nothing to re-read and nothing to
+          // report: the answer is the same question again. The stale rows leave
+          // the draft so the picker offers them from their own groups, already
+          // picked, showing the suppliers the server matched this time.
+          const stale = new Set(Object.keys(failure.changedSuppliers));
+          for (const modelId of stale) expectedRef.current.delete(modelId);
+          mutate(draftRef.current.filter((model) => !stale.has(model.id)));
+          setPicking({ seed: stale });
+          return;
+        }
         // A route that named its failure has decided what it did, and for this
         // endpoint 「decided」 can still mean 「wrote」: the server commits the
         // catalog and only then asks the backend to load it, so `engine_down`
@@ -324,11 +483,47 @@ export const BackendModelCatalogDialog: React.FC<{
     );
   };
 
-  const blockedNote = (model: BackendModel) => (
-    removeBlocked === model.id
-      ? <p className="model-hub-catalog-blocked" role="alert">{t('settings.models.gateway.catalog.removeBlocked')}</p>
-      : null
-  );
+  /**
+   * The question a routed removal asks, inside the row it is about.
+   *
+   * It names the hops rather than the mechanism: a route is a consequence the
+   * user did not choose when they chose the model, and the Sources it names are
+   * the only part of it they can recognise. Answering it removes the row and its
+   * route together, in one transaction, when the list saves (C3).
+   */
+  const removeConfirmation = (model: BackendModel) => {
+    if (removing !== model.id) return null;
+    const plan = removePlan(model.id);
+    return (
+      <div className="model-hub-catalog-confirm">
+        <p className="model-hub-catalog-consequence" role="alert">
+          {t('settings.models.gateway.catalog.removeConsequence', {
+            hops: plan.map((hop) => `${sourceName(sources, hop.source_id)} → ${hop.model_id}`).join(', '),
+          })}
+        </p>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="model-hub-catalog-confirm-action rounded-md text-[12.5px] font-semibold"
+            disabled={busy}
+            onClick={() => setRemoving(null)}
+          >
+            {t('settings.models.gateway.catalog.cancel')}
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            className="model-hub-catalog-confirm-action rounded-md text-[12.5px] font-bold"
+            disabled={busy}
+            onClick={() => dropModel(model.id, plan)}
+          >
+            {t('settings.models.gateway.catalog.removeConfirm')}
+          </Button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <>
@@ -364,16 +559,24 @@ export const BackendModelCatalogDialog: React.FC<{
                   disabled={!editable || busy}
                 />
               </div>
-              <Button
-                type="button"
-                variant="brand"
-                className="model-hub-catalog-control shrink-0 rounded-md px-4 text-[12.5px] font-semibold"
-                disabled={!editable || busy}
-                onClick={() => setEditing({ model: null })}
-              >
-                <Plus aria-hidden="true" />
-                {t('settings.models.gateway.catalog.add')}
-              </Button>
+              {/* One action for both paths. The picker offers what this backend
+                  and the user's providers already have, and hands off to the
+                  editor for anything they do not — so 「add a model」 is one
+                  decision with a fallback, not two entry points the user has to
+                  choose between up front. It reads Sources, so it is offered
+                  only where the page's other Source-reading surfaces are. */}
+              {canReadSources && (
+                <Button
+                  type="button"
+                  variant="brand"
+                  className="model-hub-catalog-control shrink-0 rounded-md px-4 text-[12.5px]"
+                  disabled={!editable || busy}
+                  onClick={() => setPicking({ seed: NO_SEED })}
+                >
+                  <Plus aria-hidden="true" />
+                  {t('settings.models.gateway.catalog.add')}
+                </Button>
+              )}
             </div>
 
             {ready && (draft.length > 0 || legacyIds.length > 0) && (
@@ -436,6 +639,7 @@ export const BackendModelCatalogDialog: React.FC<{
                           key={model.id}
                           model={model}
                           grabbed={grabbedId === model.id}
+                          confirming={removing === model.id}
                           draggable={!filtering && !busy}
                           registerGrip={(node) => {
                             if (node) grips.current.set(model.id, node);
@@ -444,7 +648,7 @@ export const BackendModelCatalogDialog: React.FC<{
                           onGripKeyDown={(event) => handleGripKey(model.id, event)}
                           body={rowBody(model)}
                           actions={rowActions(model)}
-                          note={blockedNote(model)}
+                          note={removeConfirmation(model)}
                         />
                       )
                   ))}
@@ -490,13 +694,27 @@ export const BackendModelCatalogDialog: React.FC<{
         </DialogContent>
       </Dialog>
 
+      {picking && (
+        <BackendModelPickerDialog
+          open
+          backend={backend}
+          listedIds={takenIds}
+          seedPicked={picking.seed}
+          onCancel={() => setPicking(null)}
+          onAdd={addCandidates}
+          onCustom={(seedId) => { setPicking(null); setEditing({ model: null, seedId }); }}
+        />
+      )}
+
       {editing && (
         <BackendModelEditorDialog
           open
           backend={backend}
           model={editing.model}
+          seedId={editing.seedId}
           takenIds={takenIds}
           effortSuggestions={effortSuggestions}
+          standardVendors={standardVendors}
           onCancel={() => setEditing(null)}
           onCommit={commitEdit}
         />
@@ -508,13 +726,14 @@ export const BackendModelCatalogDialog: React.FC<{
 const CatalogRow: React.FC<{
   model: BackendModel;
   grabbed: boolean;
+  confirming: boolean;
   draggable: boolean;
   registerGrip: (node: HTMLButtonElement | null) => void;
   onGripKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   body: React.ReactNode;
   actions: React.ReactNode;
   note: React.ReactNode;
-}> = ({ model, grabbed, draggable, registerGrip, onGripKeyDown, body, actions, note }) => {
+}> = ({ model, grabbed, confirming, draggable, registerGrip, onGripKeyDown, body, actions, note }) => {
   const { t } = useTranslation();
   const controls = useDragControls();
   return (
@@ -522,7 +741,10 @@ const CatalogRow: React.FC<{
       value={model.id}
       dragListener={false}
       dragControls={controls}
-      className="model-hub-catalog-row flex min-w-0 list-none flex-col justify-center"
+      className={cn(
+        'model-hub-catalog-row flex min-w-0 list-none flex-col justify-center',
+        confirming && 'is-confirming',
+      )}
     >
       <div className="flex min-w-0 items-center gap-3">
         <button

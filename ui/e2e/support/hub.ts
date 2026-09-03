@@ -143,6 +143,15 @@ export class ModelHubPage {
     return this.agentCard(backend).getByRole('button', { name: hub('gateway.sourceOrder') });
   }
 
+  /** The card's own "Manage models", scoped to the card head: a gateway backend
+   *  whose list is empty offers the same action a second time from the body,
+   *  and either one alone is the wrong thing for a name to match twice. */
+  manageModelsButton(backend: string): Locator {
+    return this.agentCard(backend)
+      .locator('.model-hub-agent-head-action')
+      .filter({ hasText: hub('gateway.manageModels') });
+  }
+
   // --- Dialogs --------------------------------------------------------------
 
   /** Add / replace API key. Both modes render the same surface. */
@@ -278,7 +287,69 @@ export class ModelHubPage {
   get installDialog(): Locator {
     return this.page.locator('.model-hub-adopt-dialog').filter({ hasText: hub('install.title') });
   }
+
+  // --- The backend's model list ---------------------------------------------
+
+  /**
+   * "Manage models" itself. The picker is built on the same surface — same
+   * chrome, same search, same footer — and both can be mounted at once, which
+   * is the whole point of the flow, so the class alone names two dialogs and
+   * the list is the one that is not the picker.
+   */
+  get catalogDialog(): Locator {
+    return this.page.locator('.model-hub-catalog-dialog:not(.model-hub-picker)');
+  }
+
+  get pickerDialog(): Locator {
+    return this.page.locator('.model-hub-picker');
+  }
+
+  get modelEditorDialog(): Locator {
+    return this.page.locator('.model-hub-model-editor');
+  }
+
+  get catalogRows(): Locator {
+    return this.catalogDialog.locator('.model-hub-catalog-row');
+  }
+
+  /** One row of the list, named by the id the row shows. Exact, because the
+   *  list is where `claude-3-5` and `claude-3-5-haiku` sit next to each other,
+   *  and a row with no display name shows its id as the name instead — so the
+   *  text is asked of the row rather than of either span. */
+  catalogRow(modelId: string): Locator {
+    return this.catalogRows.filter({ has: this.page.getByText(modelId, { exact: true }) });
+  }
+
+  /** The candidates the picker is offering right now: a row for an id already
+   *  in the list is rendered checked and disabled, and adding it is not
+   *  something a user can do or a spec can ask for. */
+  get pickerOffers(): Locator {
+    return this.pickerDialog.locator('.model-hub-picker-row:not(:disabled)');
+  }
+
+  /** The editor's first field, which is also its models.dev search box. */
+  get modelIdField(): Locator {
+    return this.modelEditorDialog.getByLabel(hub('gateway.modelEditor.id.label'), { exact: true });
+  }
+
+  /** The last row of the editor's typeahead: take the query as the id. It is
+   *  present in every open state, including "searching" and "unavailable", and
+   *  it names the id it will actually create — which on a backend with an
+   *  identifier scheme of its own is not the query as typed. */
+  get literalIdOption(): Locator {
+    return this.modelEditorDialog.locator('.model-hub-model-match--literal');
+  }
 }
+
+/** The model id a picker row names, wherever that row put it: a candidate with
+ *  a display name shows the id beside the name, and one without shows the id AS
+ *  the name. */
+export const pickerRowId = async (row: Locator): Promise<string> => {
+  const beside = row.locator('.model-hub-picker-id');
+  const asName = row.locator('.model-hub-picker-name--id');
+  const text = (await beside.count()) > 0 ? await beside.innerText() : await asName.innerText();
+  return text.trim();
+};
 
 /**
  * The button a user would READ as `name`, inside a surface that also has an

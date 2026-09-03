@@ -6,12 +6,20 @@ import {
   backendCatalogIntent,
   backendCatalogIntentApplied,
   blankBackendModel,
+  candidateBackendModel,
   catalogModelIds,
   catalogModels,
+  pickerGroups,
   readBackendCatalogBaseline,
   sameBackendModel,
 } from './backendCatalog';
-import type { AgentSupply, BackendModel, ModelsDevMatch } from './types';
+import type {
+  AgentSupply,
+  BackendModel,
+  BackendModelCandidates,
+  ModelCandidate,
+  ModelsDevMatch,
+} from './types';
 
 const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel => ({
   ...blankBackendModel(),
@@ -78,16 +86,36 @@ describe('catalogModelIds', () => {
 });
 
 describe('applyModelsDevMatch', () => {
-  it('fills metadata without ever renaming the row', () => {
-    const filled = applyModelsDevMatch(model('anthropic/claude-sonnet-4-5-20250929'), match, 'models_dev');
+  it('names the row after the model that was picked and fills the rest from it', () => {
+    const draft = model('half-typed-anthro', { locked: true, routeable: false });
 
-    expect(filled.id).toBe('anthropic/claude-sonnet-4-5-20250929');
-    expect(filled.models_dev_id).toBe('anthropic/claude-sonnet-4-5');
-    expect(filled.display_name).toBe('Claude Sonnet 4.5');
-    expect(filled.context_window).toBe(200000);
-    expect(filled.max_output_tokens).toBe(64000);
-    expect(filled.input_modalities).toEqual(['text', 'image', 'pdf']);
-    expect(filled.reasoning_efforts).toEqual(['low', 'high']);
+    const filled = applyModelsDevMatch(draft, match, 'models_dev');
+
+    // Choosing a suggestion is choosing a model, not decorating one, so the row
+    // carries that model's own id — the one a backend accepts, not the
+    // models.dev catalog key.
+    expect(filled.id).toBe(match.model_id);
+    expect(filled.id).not.toBe(match.models_dev_id);
+    // Asserted as the whole row rather than field by field: every field is
+    // either answered by the match or left as the draft had it, so a field the
+    // mirror gains fails here instead of quietly arriving unfilled.
+    expect(filled).toEqual({
+      ...draft,
+      id: match.model_id,
+      origin: 'models_dev',
+      models_dev_id: match.models_dev_id,
+      display_name: match.display_name,
+      context_window: match.context_window,
+      max_output_tokens: match.max_output_tokens,
+      input_modalities: match.input_modalities,
+      output_modalities: match.output_modalities,
+      supports_tools: match.supports_tools,
+      supports_reasoning: match.supports_reasoning,
+      reasoning_efforts: match.reasoning_efforts,
+    });
+    // The server's own projections are not the match's to state.
+    expect(filled.locked).toBe(true);
+    expect(filled.routeable).toBe(false);
   });
 
   it('takes the origin from the caller so a re-fill never rewrites how the row was created', () => {
@@ -100,6 +128,40 @@ describe('applyModelsDevMatch', () => {
     filled.reasoning_efforts.push('mutated');
 
     expect(match.reasoning_efforts).toEqual(['low', 'high']);
+  });
+});
+
+describe('candidateBackendModel', () => {
+  const candidate: ModelCandidate = {
+    id: 'glm-5.2',
+    display_name: 'GLM 5.2',
+    reasoning_efforts: ['low', 'high'],
+    suppliers: [{ source_id: 'src_relay0001', source_name: 'relay.example', model_id: 'glm-5.2-air' }],
+    origin: 'provider',
+  };
+
+  it('copies what the server proposed and leaves every other field at the blank floor', () => {
+    const drafted = candidateBackendModel(candidate);
+
+    // `PUT` stores the request literally, so a context window nobody stated
+    // would persist as if the user had. Whole-row equality is what says so: a
+    // value the proposal grows is either answered here or still the floor.
+    expect(drafted).toEqual({
+      ...blankBackendModel(),
+      id: candidate.id,
+      display_name: candidate.display_name,
+      origin: candidate.origin,
+      reasoning_efforts: candidate.reasoning_efforts,
+    });
+    // The suppliers the picker displayed travel as the write's
+    // `expected_suppliers`; a catalog row names no Source at all.
+    expect(Object.keys(drafted)).not.toContain('suppliers');
+  });
+
+  it('copies the proposed efforts instead of aliasing them', () => {
+    candidateBackendModel(candidate).reasoning_efforts.push('mutated');
+
+    expect(candidate.reasoning_efforts).toEqual(['low', 'high']);
   });
 });
 
@@ -224,5 +286,67 @@ describe('readBackendCatalogBaseline', () => {
 
     await expect(readBackendCatalogBaseline({ getAgentSources: vi.fn().mockResolvedValue(direct) }, 'claude'))
       .rejects.toThrow('Backend model catalog is unavailable');
+  });
+});
+
+describe('pickerGroups', () => {
+  const offered = (id: string, overrides: Partial<ModelCandidate> = {}): ModelCandidate => ({
+    id,
+    display_name: null,
+    reasoning_efforts: [],
+    suppliers: [],
+    origin: 'provider',
+    ...overrides,
+  });
+
+  const read = (groups: Partial<BackendModelCandidates> = {}): BackendModelCandidates => ({
+    builtin: groups.builtin ?? [],
+    providers: groups.providers ?? [],
+    in_list: groups.in_list ?? [],
+  });
+
+  it('files every id exactly once, whatever the response repeats', () => {
+    // The property the picker's own copy depends on: a count beside a group
+    // header, and an id under one of them. Neither survives a response whose
+    // groups overlap, and only the client can hold the line — the read is three
+    // lists, not a map.
+    const groups = pickerGroups(read({
+      builtin: [offered('shared'), offered('shared'), offered('gpt-6', { origin: 'builtin' })],
+      providers: [offered('shared'), offered('glm-5.2')],
+      in_list: [offered('shared'), offered('kimi-k3'), offered('gpt-6', { origin: 'builtin' })],
+    }), new Set(['kimi-k3']));
+
+    const filed = [...groups.builtin, ...groups.providers, ...groups.listed].map((entry) => entry.id);
+    expect(filed).toHaveLength(new Set(filed).size);
+    expect(new Set(filed)).toEqual(new Set(['shared', 'gpt-6', 'glm-5.2', 'kimi-k3']));
+  });
+
+  it('takes membership from the draft rather than from the saved list', () => {
+    // The read projects the SAVED menu; the list behind the dialog is a draft.
+    // Reading `in_list` literally would call a row the user just removed
+    // 「already in the list」 and offer a row they just added as if it were new.
+    const response = read({
+      builtin: [offered('gpt-6', { origin: 'builtin' })],
+      providers: [offered('glm-5.2')],
+      in_list: [offered('kimi-k3', { origin: 'builtin' })],
+    });
+
+    const groups = pickerGroups(response, new Set(['glm-5.2']));
+
+    // Added in the draft, so it is listed even though the server has not seen it.
+    expect(groups.listed.map((entry) => entry.id)).toEqual(['glm-5.2']);
+    // Removed in the draft, so it returns to the group that will serve it once
+    // that removal saves.
+    expect(groups.builtin.map((entry) => entry.id)).toEqual(['kimi-k3', 'gpt-6']);
+    expect(groups.providers).toEqual([]);
+  });
+
+  it('leaves a removed custom row to the action that can recreate it', () => {
+    // A hand-written row belongs to no group: no backend ships it and no
+    // provider supplies it. Filing it under one would name a supplier that does
+    // not exist, so `Add custom model…` is its way back instead.
+    const groups = pickerGroups(read({ in_list: [offered('internal/house', { origin: 'manual' })] }), new Set());
+
+    expect(groups).toEqual({ builtin: [], providers: [], listed: [] });
   });
 });

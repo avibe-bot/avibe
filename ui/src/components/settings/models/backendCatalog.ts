@@ -12,7 +12,15 @@
 // mixing the two here is what the contract's 「no Source id, no upstream model
 // id, no priority, no fallback」 rule exists to prevent.
 import type { ModelsApi } from './modelsApi';
-import type { AgentBackend, AgentSupply, BackendModel, BackendModelOrigin, ModelsDevMatch } from './types';
+import type {
+  AgentBackend,
+  AgentSupply,
+  BackendModel,
+  BackendModelCandidates,
+  BackendModelOrigin,
+  ModelCandidate,
+  ModelsDevMatch,
+} from './types';
 
 /**
  * The model list the server says this backend exposes, derived from the
@@ -90,13 +98,92 @@ export const blankBackendModel = (): BackendModel => ({
 });
 
 /**
- * A models.dev match, poured into a draft.
+ * A picked candidate, poured into a draft row.
  *
- * `id` is never touched: the backend model id is the routing identity the user
- * typed, and models.dev is a metadata source, not an authority over it. `origin`
- * is passed in rather than derived because the schema defines it as how the row
- * was FIRST created — an existing row keeps its own answer no matter how often
- * it is later re-filled.
+ * Copies exactly the three values the server proposed (C2) and leaves every
+ * other field at the blank floor. That asymmetry is the contract: the proposal
+ * covers what the product already knows about the model — its label and the
+ * efforts its suppliers accept — and the rest stays empty until the user fills
+ * it, because `PUT` stores the request literally and an invented context window
+ * would persist as if the user had stated it.
+ *
+ * `origin` comes from the candidate rather than from the group the row was
+ * rendered in: the server names the creation path, and reading it back off the
+ * group would be this client re-deriving something it was told. The cast is
+ * transitional — `provider` joins `BackendModelOrigin` on the head that carries
+ * the version bump, and it goes away when this branch rebases onto it.
+ */
+export const candidateBackendModel = (candidate: ModelCandidate): BackendModel => ({
+  ...blankBackendModel(),
+  id: candidate.id,
+  display_name: candidate.display_name,
+  origin: candidate.origin as BackendModelOrigin,
+  reasoning_efforts: [...candidate.reasoning_efforts],
+});
+
+export type PickerGroups = {
+  builtin: ModelCandidate[];
+  providers: ModelCandidate[];
+  /** Search-only, and never pickable. */
+  listed: ModelCandidate[];
+};
+
+export const EMPTY_PICKER_GROUPS: PickerGroups = { builtin: [], providers: [], listed: [] };
+
+/**
+ * The three groups the picker renders, reconciled against the draft the catalog
+ * dialog holds.
+ *
+ * The read projects the SAVED menu, and the list behind that dialog is a draft,
+ * so `in_list` on its own would call a row the user just removed 「already in the
+ * list」 and offer a row the user just added as though it were new. The draft
+ * decides membership; the server still decides what a candidate is, which group
+ * serves it, and which suppliers it has.
+ *
+ * A draft-removed row re-enters the group its own `origin` names — the same
+ * group the server will serve it from once that removal saves. A custom row has
+ * no such group, and `Add custom model…` is its way back, so it is absent rather
+ * than filed under a provider that does not supply it.
+ *
+ * Filing each id once, in group order, is what makes 「every candidate appears
+ * exactly once」 a property of the code rather than of the response.
+ */
+export const pickerGroups = (
+  candidates: BackendModelCandidates,
+  listedIds: ReadonlySet<string>,
+): PickerGroups => {
+  const groups: PickerGroups = { builtin: [], providers: [], listed: [] };
+  const filed = new Set<string>();
+  const file = (candidate: ModelCandidate, group: 'builtin' | 'providers' | null) => {
+    if (!candidate.id || filed.has(candidate.id)) return;
+    filed.add(candidate.id);
+    if (listedIds.has(candidate.id)) {
+      groups.listed.push(candidate);
+      return;
+    }
+    const target = group
+      ?? (candidate.origin === 'builtin' ? 'builtin' : candidate.origin === 'provider' ? 'providers' : null);
+    if (target) groups[target].push(candidate);
+  };
+  for (const candidate of candidates.in_list) file(candidate, null);
+  for (const candidate of candidates.builtin) file(candidate, 'builtin');
+  for (const candidate of candidates.providers) file(candidate, 'providers');
+  return groups;
+};
+
+/**
+ * A models.dev match, poured into a draft — the id included.
+ *
+ * Choosing a suggestion is choosing a model, not decorating one: the row it
+ * creates is the model that was picked, so it carries that model's own id
+ * (`model_id`, the id a backend accepts — not the catalog key `models_dev_id`).
+ * The user typed a search, and every filled field including the id stays
+ * editable afterwards. Keeping what was typed is the 「use what I typed」 escape,
+ * which never reaches this function.
+ *
+ * `origin` is passed in rather than derived because the schema defines it as how
+ * the row was FIRST created — an existing row keeps its own answer no matter how
+ * often it is later re-filled.
  */
 export const applyModelsDevMatch = (
   draft: BackendModel,
@@ -104,6 +191,7 @@ export const applyModelsDevMatch = (
   origin: BackendModelOrigin,
 ): BackendModel => ({
   ...draft,
+  id: match.model_id,
   display_name: match.display_name,
   origin,
   models_dev_id: match.models_dev_id,

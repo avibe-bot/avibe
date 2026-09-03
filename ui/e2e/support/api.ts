@@ -12,7 +12,7 @@
 //     failures as routing failures.
 //
 // The line is: whatever the scenario is about goes through the browser.
-import type { APIRequestContext } from '@playwright/test';
+import type { APIRequestContext, APIResponse } from '@playwright/test';
 
 import { BASE_URL, E2E_SOURCE_PREFIX } from './env';
 
@@ -244,17 +244,22 @@ export class HubApi {
    */
   async read<T>(path: string): Promise<T> {
     const response = await this.request.get(path);
-    if (!response.ok()) {
-      const text = await response.text();
-      const refusal = remoteAuthRefusal(response.status(), text);
-      if (refusal) throw new Error(refusal);
-      throw new Error(
-        `GET ${path} → ${response.status()} ${response.statusText()}. `
-          + `This is the instance at ${BASE_URL} failing a read, not a missing capability: `
-          + `${text.slice(0, 300)}`,
-      );
-    }
+    if (!response.ok()) throw await this.readFailure(path, response);
     return (await response.json()) as T;
+  }
+
+  /** The sentence a failed read owes the operator, kept in one place so a probe
+   *  that must not throw for one particular answer still throws it for every
+   *  other one. */
+  private async readFailure(path: string, response: APIResponse): Promise<Error> {
+    const text = await response.text();
+    const refusal = remoteAuthRefusal(response.status(), text);
+    if (refusal) return new Error(refusal);
+    return new Error(
+      `GET ${path} → ${response.status()} ${response.statusText()}. `
+        + `This is the instance at ${BASE_URL} failing a read, not a missing capability: `
+        + `${text.slice(0, 300)}`,
+    );
   }
 
   private async mutate(
@@ -304,6 +309,33 @@ export class HubApi {
 
   async agents(): Promise<Agent[]> {
     return (await this.read<{ agents: Agent[] }>('/api/models/agents')).agents ?? [];
+  }
+
+  /**
+   * Whether this instance answers the read the picker's built-in and provider
+   * groups are made of.
+   *
+   * Judged on the PAYLOAD, because the status cannot say. `vibe/ui_server.py`
+   * registers its static catch-all last, and that route's SPA fallback answers
+   * any unmatched extension-less GET with `index.html` at 200 — so an instance
+   * that has never heard of this path reports the same status as one serving
+   * it, and the browser's own failure there is a non-JSON body rather than a
+   * named 404. Any other refusal is a read failing and throws: whether the Hub
+   * is on at all is `requireModelHub`'s question, already answered.
+   */
+  async servesModelCandidates(backend: string): Promise<boolean> {
+    const path = `/api/models/agents/${backend}/models/candidates`;
+    const response = await this.request.get(path);
+    if (response.status() === 404) return false;
+    if (!response.ok()) throw await this.readFailure(path, response);
+    let payload: unknown;
+    try {
+      payload = (await response.json()) as unknown;
+    } catch {
+      return false;
+    }
+    const candidates = (payload as { candidates?: unknown }).candidates;
+    return typeof candidates === 'object' && candidates !== null;
   }
 
   /** `null` here means the payload carried no `runtime` — an answered read with
