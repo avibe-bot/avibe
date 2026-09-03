@@ -246,9 +246,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   with an empty route. The picker echoes what it showed: `PUT` accepts
   `expected_suppliers?: {<id>: [{source_id, model_id}]}` for caller-added ids, and when the
   server's matching result differs for any listed id it commits nothing and refuses with
-  `409 {ok: false, contract_version, error: "candidate_suppliers_changed", changed: {<id>:
-  [{source_id, model_id}]}}` — its own registered response shape, not a guard refusal, since
-  nothing is removed or interrupted; the picker refreshes its candidates and asks again. The success response is the existing
+  `409 {ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed:
+  {<id>: [{source_id, model_id}]}}` — its own registered response shape (with the `detail` key
+  every `ModelHubError` carries), not a guard refusal, since nothing is removed or interrupted; the picker refreshes its candidates and asks again. The success response is the existing
   `{agent: AgentSupply}`.
 - **C2 — Proposed values travel in the candidates read; the save is literal.** The server
   proposes `display_name` and `reasoning_efforts` for every candidate (C4): for a built-in
@@ -310,7 +310,13 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   `removed_model_ids` is set to its current contents ∪ (`built-in snapshot ids − menu ids`).
   Removals made while the marker is false are recorded in `removed_model_ids` immediately, like
   any other removal, and survive initialization. Until the marker is true the menu is served
-  unchanged, so a partial snapshot can never be mistaken for the user's removals. A catalog
+  unchanged, so a partial snapshot can never be mistaken for the user's removals. Reconcile is
+  controller-owned and pull-based: the controller records the generation (content hash) of the
+  built-in snapshot it last reconciled against, and re-reads the snapshot inputs — bundled
+  catalog, remote catalog cache file, CLI cache file — before serving any Model Hub agent read
+  or mutation and at startup; a changed generation triggers reconcile in that same request.
+  No cache producer (the UI process's background refresher included) has to notify the
+  controller, so the two processes stay decoupled as `AGENTS.md` requires. A catalog
   created fresh under v2 is written with the marker already true and an empty removed set, so
   the pending window exists only for files that predate the marker; a fresh-install fixture is
   distinct from the v1 migration fixtures. Both fields are persisted configuration only: the
@@ -349,7 +355,7 @@ the v2 shapes on the same head.
 | `docs/plans/model-hub-contracts/api.md` route table | `PUT /api/models/agents/<backend>/models` row: optional `force`, `would_remove_hops`, `would_interrupt`, `expected_suppliers`; refusals `backend_model_in_route`, `candidate_suppliers_changed`; success `{agent}` or `{agent, removed_hops, interrupted}`. New row `GET /api/models/agents/<backend>/models/candidates`. `GET /api/models/catalog/models-dev` row: additive `first_party`, dedupe, ranking, cap 8 |
 | `docs/plans/model-hub-contracts/api-response.schema.json` | the models `PUT` accepts the forced-success shape beside `AgentResponse`; new candidates response (`Candidate` shape from C4); models-dev response gains `first_party` |
 | `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route` |
-| `docs/plans/model-hub-contracts/api-response.schema.json` (stale-candidate refusal) | new registered shape for `409 candidate_suppliers_changed` — `{ok, contract_version, error, changed}` — outside the guard-refusal `anyOf` |
+| `docs/plans/model-hub-contracts/api-response.schema.json` (stale-candidate refusal) | new registered shape for `409 candidate_suppliers_changed` — `{ok, contract_version, error, detail, changed}` — outside the guard-refusal `anyOf` |
 | `contract_version` closure (every registered location listed in `docs/plans/model-hub-contracts/README.md` "Version closure", server and UI mirrors alike) | 6 → 7, because v1 shipped closed shapes (`additionalProperties: false`) that v2 extends |
 | `vibe/authorization.py` role table and its coverage test (`tests/test_instance_authorization.py`) | `GET /api/models/agents/<backend>/models/candidates` is **member-tier**, the same boundary as Source inventory reads, because it carries supplier ids and names; the editor-tier catalog read stays supplier-free |
 | `docs/plans/model-hub-contracts/README.md` (product model) and `docs/plans/model-hub-contracts/opencode-overlay.md` | Add Source is no longer the sole matching/placement point: a menu-model add (C1) and a reconcile add (C6) are the other one-time points; runtime still never re-matches |
