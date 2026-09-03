@@ -97,6 +97,9 @@ menu, so showing this editor there would falsely imply that these rows change Di
 
 ### Why v1 is wrong as a product
 
+Revision 2026-09-03 (owner review): one add action with four origins, recoverable built-ins,
+and automatic arrival of new built-ins replace the earlier two-button proposal.
+
 v1 shipped `Manage models` as a hand-typed record editor: the user types a backend model
 id, optionally asks models.dev to fill metadata, saves, then opens the Route dialog and
 picks the same upstream model again. The product already owns that fact twice — every
@@ -117,7 +120,7 @@ surface and are never edited inside the picker.
 
 Worked example. Codex is in Gateway mode with two API-key Sources, `aihub` (24 models,
 including `deepseek-v3.2`) and `openrouter` (also `deepseek-v3.2`), `aihub` first in
-Codex's Source order. `Manage models` → `Add from providers` → type `deepseek` → the row
+Codex's Source order. `Manage models` → `Add models` → type `deepseek` → under `From your providers` the row
 `deepseek-v3.2 · aihub, openrouter` → check → `Add 1 model`. Result: Codex's menu gains
 `deepseek-v3.2` with display name and reasoning efforts taken from the supplying Source
 models and context/output/modalities filled from models.dev when one exact match exists;
@@ -159,16 +162,42 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    Route dialog, where the mapping is visible on the row. Codex accepts any canonical id.
    OpenCode requires `vendor/model`, which the picker produces; the manual editor keeps
    its existing validation.
-7. **Interaction without route controls.** `Manage models` keeps the list with edit,
-   reorder, and remove. Its primary action becomes `Add from providers`, which opens the
-   picker: search over model id, display name, and provider name; one row per candidate
-   with a checkbox; already-added models shown checked and disabled; footer `Add N
-   models`. `Add manually` is the secondary action and opens the existing editor. Duplicate
-   prevention is by id. Removing an entry removes its route too: with a non-empty route the
-   dialog first shows the hops that go with it and asks once (existing guard shape
-   `would_remove_hops`); with an empty route removal is immediate. An empty catalog offers
-   `Add from providers` when any eligible provider has inventory and otherwise says no
-   provider supplies this backend yet and offers `Add manually`.
+7. **One `Add models` action, four origins, one list.** `Manage models` keeps the list with
+   edit, reorder, and remove, and has exactly one add action, `Add models`. It opens a picker
+   whose body is one grouped list filtered by one search box; a candidate id appears in
+   exactly one group, the first that knows it:
+   1. **`Codex built-in`** (`Claude Code built-in`) — the backend's own model list
+      (bundled + remote backend catalog + the local CLI cache the product already merges)
+      minus what is already in the menu. This is where a removed built-in is found again.
+      OpenCode has no built-in list; the group is absent for it.
+   2. **`From your providers`** — every configuration-eligible, non-retired Source model
+      not already in the menu, deduplicated by the identity rule in question 1, with its
+      supplying providers as read-only chips in Source order.
+   3. **`models.dev`** — search-driven: with an empty query the group shows one muted line
+      `Type to search models.dev`; with a query it lists exact and fuzzy matches (name,
+      mono id, models.dev provider chip). A models.dev pick carries its metadata snapshot.
+   4. **`By ID`** — one input row (`Model ID` · `Add`). When the query matches nothing in
+      any group, the row reads `Add "{{query}}" by ID`. A By-ID entry joins the selection
+      like any checked row.
+   Checked rows and By-ID entries commit together through the footer (`{{count}} selected`
+   · `Add {{count}} models`) into the catalog draft; the list's single `Save` still writes
+   everything with one `PUT`. Whatever the origin, adding a row runs the same one-time
+   matching for its initial route (C1); an id no provider supplies simply starts with an
+   empty route and the row shows `No model route configured`.
+8. **A removed built-in must be recoverable.** Removing a built-in row hides it rather than
+   forgetting it: the backend catalog records the hidden built-in id, the row leaves the
+   menu and its route follows the removal rule (C3), and the id reappears in the
+   `Codex built-in` group of the picker. Picking it again clears the hidden mark. Removing
+   any other row deletes it; a provider model reappears in `From your providers`, a
+   models.dev or By-ID model is found again through search.
+9. **New built-ins join the menu by themselves; removed ones stay removed.** When the
+   backend's built-in list gains a model (a Codex update, a refreshed remote catalog), the
+   product adds it to the menu unless its id carries the hidden mark, inserting it where the
+   built-in list orders it among the built-ins still present (after the last one when none
+   follows; at the end when none remains) and seeding its route by C1. Nothing is ever
+   removed automatically: a built-in the backend withdraws stays in the menu because a
+   provider may still serve it. The menu is therefore always "the backend's list, minus what
+   you removed, plus what you added" — with no mode switch to explain.
 
 ### Contract deltas (normative once approved; lanes cite these by number)
 
@@ -186,7 +215,8 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
   (union of efforts across matched Sources, Source order), then fills remaining empty
   metadata from models.dev only when exactly one exact match exists, recording
   `models_dev_id` and `origin: "models_dev"`. A models.dev cache miss is silent; the row is
-  still written.
+  still written. `origin` gains the value `"provider"` for rows picked from
+  `From your providers`; `"builtin"`, `"models_dev"`, and `"manual"` keep their meaning.
 - **C3 — Removal cascades through the guard.** `PUT /api/models/agents/<backend>/models`
   accepts the guarded-mutation fields beside `baseline` and `models`:
   `{baseline, models, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}`.
@@ -198,11 +228,22 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
   returns `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`.
   Removing rows whose routes are empty needs no confirmation and returns `{agent}` as
   today. The v1 hard refusal is retired.
-- **C4 — Candidates are derived, not served.** The picker derives candidates from
-  `GET /api/models/sources` and `AgentSupply.sources` eligibility already loaded on the
-  page (the same derivation the Route dialog's candidate popover uses), deduplicated by
-  the identity rule in question 1 and minus ids already in the catalog. No new read
-  endpoint.
+- **C4 — Candidates come from reads that already exist.** The picker derives its groups from
+  reads the page already has or the product already serves: the built-in group from the
+  backend model catalog snapshot (`agent_model_options` / `fetchBackendModels`, the same
+  merged remote + bundled + local-CLI snapshot every model picker uses) minus menu ids and
+  including hidden built-ins; the provider group from `GET /api/models/sources` and
+  `AgentSupply.sources` eligibility (the Route dialog's candidate derivation, promoted to a
+  shared helper); the models.dev group from `GET /api/models/catalog/models-dev?query=`.
+  No new read endpoint.
+- **C6 — Hidden built-ins and built-in reconcile.** The backend catalog persists the set of
+  hidden built-in ids (`agents.<backend>.hidden_builtin_ids: string[]`, absent on older
+  files = empty). `PUT .../models` marks a removed row hidden when its id is in the current
+  built-in snapshot and clears the mark when such an id is added. On every built-in snapshot
+  change (startup, remote catalog refresh, CLI cache change) the service adds each built-in
+  id that is neither in the menu nor hidden, at the position question 9 defines, running C1
+  and C2 for it, and invalidates the backend's runtime projection. It never removes a row.
+  Claude Code's locked `default` row is not a built-in candidate and cannot be hidden.
 - **C5 — Unchanged.** Source inventories, Source-side manual add, Route dialog, Source
   order, direct/gateway modes, and every runtime projection are byte-for-byte unchanged
   except through C1–C3.
@@ -211,16 +252,15 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 
 | Where | String |
 | --- | --- |
-| Catalog dialog primary action | `Add from providers` |
-| Catalog dialog secondary action | `Add manually` |
+| Catalog dialog add action (the only one) | `Add models` |
 | Picker title | `Add {{backend}} models` |
-| Picker search placeholder | `Search models or providers` |
-| Picker columns | `Model` · `Providers` |
-| Already-added row state | `Added` |
+| Picker search placeholder | `Search models, providers, or models.dev` |
+| Group headers | `{{backend}} built-in` · `From your providers` · `models.dev` · `By ID` |
+| models.dev group, empty query | `Type to search models.dev` |
+| By-ID row | input placeholder `Model ID` · button `Add`; with an unmatched query the row reads `Add "{{query}}" by ID` |
+| Group with nothing to offer | the group is omitted, never an empty header |
 | Picker footer count | `{{count}} selected` |
 | Picker confirm | `Add {{count}} models` |
-| Picker empty (no eligible inventory) | `No provider supplies models for {{backend}} yet.` |
-| Picker no match | `No model matches.` |
 | Remove with route | `Also removes its route: {{hops}}` · button `Remove` |
 
 Every other existing string in `settings.models.gateway.catalog.*` and
@@ -242,6 +282,11 @@ Every other existing string in `settings.models.gateway.catalog.*` and
   (Codex `codex debug models`, OpenCode overlay, Claude discovery), and the Codex card
   reveals a seventh-plus row (the #1829 behaviour is retained).
 - Direct mode still hides the editor and preserves the catalog unchanged.
+- Removing a built-in row and reopening the picker shows that id under the built-in group;
+  picking it restores the row. A built-in id that appears in the backend snapshot after the
+  menu was saved is present in the menu on the next read unless it was removed before, and
+  a previously removed id never returns on its own.
+- The picker lists each candidate id exactly once across all groups.
 
 ### Delivery notes
 
