@@ -3659,6 +3659,51 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("collaborationMode", calls[2].args[1])
         self.assertFalse(transport.supports_turn_collaboration_mode)
 
+    async def test_start_turn_uses_injection_after_collaboration_probe_fails(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual(calls[0].args[0], "thread/inject_items")
+        self.assertEqual(
+            calls[0].args[1]["items"][0]["content"][0]["text"],
+            "stable prompt",
+        )
+        self.assertNotIn("collaborationMode", calls[1].args[1])
+
     async def test_start_turn_uses_sandbox_policy_object(self):
         from core.native_dispatch_phase import (
             DISPATCH_PHASE_PREWRITE,
@@ -4012,9 +4057,17 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         class _FakeStdin:
             def __init__(self):
                 self._closing = False
+                self._request_events = {
+                    1: asyncio.Event(),
+                    2: asyncio.Event(),
+                }
 
             def write(self, data):
                 writes.append(data.decode())
+                message = json.loads(data)
+                request_id = message.get("id")
+                if request_id in self._request_events:
+                    self._request_events[request_id].set()
 
             async def drain(self):
                 return None
@@ -4026,12 +4079,22 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
                 self._closing = True
 
         class _FakeStdout:
-            def __init__(self):
-                self._lines = [b'{"jsonrpc":"2.0","id":1,"result":{}}\n']
+            def __init__(self, stdin):
+                self._stdin = stdin
+                self._next_response_id = 1
 
             async def readline(self):
-                if self._lines:
-                    return self._lines.pop(0)
+                if self._next_response_id <= 2:
+                    response_id = self._next_response_id
+                    await self._stdin._request_events[response_id].wait()
+                    self._next_response_id += 1
+                    return json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": response_id,
+                            "result": {"data": []} if response_id == 2 else {},
+                        }
+                    ).encode() + b"\n"
                 await asyncio.Event().wait()
                 return b""
 
@@ -4042,7 +4105,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         class _FakeProcess:
             def __init__(self):
                 self.stdin = _FakeStdin()
-                self.stdout = _FakeStdout()
+                self.stdout = _FakeStdout(self.stdin)
                 self.stderr = _FakeStderr()
                 self.pid = 123
                 self.returncode = None
@@ -4150,6 +4213,24 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"approved": True})
         self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
         self.assertEqual(agent._session_last_activity, {})
+
+    async def test_request_user_input_returns_valid_empty_answers(self):
+        agent = self._agent()
+
+        result = await agent._on_server_request(
+            "/tmp/work",
+            8,
+            "item/tool/requestUserInput",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "isBlocking": True,
+                "questions": [],
+            },
+        )
+
+        self.assertEqual(result, {"answers": {}})
 
     def test_turn_start_refreshes_the_cwd_transport_clock(self):
         agent = self._agent()

@@ -2862,13 +2862,23 @@ class CodexAgent(BaseAgent):
         method: str,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Handle server requests — auto-approve all."""
+        """Handle server requests that Avibe opts into or auto-approves."""
         if method in (
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
         ):
             logger.info("Auto-approving Codex %s (item=%s)", method, params.get("itemId"))
             return {"approved": True}
+
+        if method == "item/tool/requestUserInput":
+            # Avibe conversations collect user input through the next normal
+            # message. An empty answer map is the app-server's valid
+            # unsupported/cancelled response for this experimental request.
+            logger.info(
+                "Declining unsupported Codex requestUserInput (item=%s)",
+                params.get("itemId"),
+            )
+            return {"answers": {}}
 
         logger.warning("Unknown Codex server request: %s", method)
         return {"approved": True}
