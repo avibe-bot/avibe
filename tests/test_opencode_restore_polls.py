@@ -59,6 +59,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             self.status = {"type": "busy"}
             self.status_error = None
             self.mark_run_active_error = None
+            self.mark_run_inactive_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
@@ -73,6 +74,8 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return None
 
         async def mark_run_inactive(self, session_id):
+            if self.mark_run_inactive_error is not None:
+                raise self.mark_run_inactive_error
             inactive_runs.append(session_id)
             return None
 
@@ -712,6 +715,21 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert removed == ["oc-1"]
     assert agent._test_inactive_runs == ["oc-1"]
+
+
+def test_restore_preserves_poll_when_inactive_marker_cannot_be_persisted() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    active_polls = {"oc-1": poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+    agent._test_server.messages = []
+    agent._test_server.status = {"type": "idle"}
+    agent._test_server.mark_run_inactive_error = OSError("read-only pid file")
+
+    with pytest.raises(OSError, match="read-only pid file"):
+        asyncio.run(agent.restore_active_polls())
+
+    assert removed == []
+    assert active_polls == {"oc-1": poll}
 
 
 def test_restore_excludes_baseline_assistant_from_steer_evidence() -> None:

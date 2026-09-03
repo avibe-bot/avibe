@@ -624,6 +624,26 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["active_run_sessions"], [])
 
+    async def test_mark_run_inactive_preserves_active_state_when_pid_write_fails(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            await manager.mark_run_active("ses-active")
+
+            with patch.object(
+                Path,
+                "write_text",
+                side_effect=OSError("read-only pid file"),
+            ):
+                with self.assertRaisesRegex(OSError, "read-only pid file"):
+                    await manager.mark_run_inactive("ses-active")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-active"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], ["ses-active"])
+
     async def test_cleanup_stale_managed_pid_does_not_inherit_caller_context_for_new_pid(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         pid_info = {"pid": 111, "port": 4096, "caller_context_path": manager._caller_context_path()}

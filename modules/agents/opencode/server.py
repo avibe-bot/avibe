@@ -788,8 +788,14 @@ class OpenCodeServerManager:
 
     async def mark_run_inactive(self, session_id: str) -> None:
         async with self._get_lock():
+            run_was_active = session_id in self._active_run_sessions
             self._active_run_sessions.discard(session_id)
-            self._write_active_run_sessions_to_pid_file()
+            try:
+                self._write_active_run_sessions_to_pid_file()
+            except Exception:
+                if run_was_active:
+                    self._active_run_sessions.add(session_id)
+                raise
 
     @asynccontextmanager
     async def _request_scope(self):
@@ -866,10 +872,7 @@ class OpenCodeServerManager:
             return
         assert isinstance(info, dict)
         info["active_run_sessions"] = sorted(self._active_run_sessions)
-        try:
-            self._pid_file.write_text(json.dumps(info))
-        except Exception as e:
-            logger.debug(f"Failed to update OpenCode pid active sessions: {e}")
+        self._pid_file.write_text(json.dumps(info))
 
     def _clear_pid_file(self) -> None:
         try:
