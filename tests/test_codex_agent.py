@@ -143,7 +143,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 CodexAgent = _MODULE.CodexAgent
-CODEX_FALLBACK_PROMPT_METADATA_KEY = _MODULE.CODEX_FALLBACK_PROMPT_METADATA_KEY
+CODEX_PROMPT_STRATEGY_METADATA_KEY = _MODULE.CODEX_PROMPT_STRATEGY_METADATA_KEY
 CodexConnectionProbeRuntimeMismatchError = (
     _MODULE.CodexConnectionProbeRuntimeMismatchError
 )
@@ -2230,7 +2230,11 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         agent.codex_config = SimpleNamespace(default_model=None)
         marker_getter = Mock(
-            return_value={"thread_id": "thread-source", "sha256": "a" * 64}
+            return_value={
+                "thread_id": "thread-source",
+                "strategy": "fallback",
+                "sha256": "a" * 64,
+            }
         )
         agent.sessions = SimpleNamespace(
             get_agent_session_id=Mock(return_value=None),
@@ -2283,7 +2287,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "ses-source",
             backend="codex",
             native_session_id="thread-source",
-            key=CODEX_FALLBACK_PROMPT_METADATA_KEY,
+            key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
         )
 
     async def test_start_or_resume_thread_does_not_bind_failed_fork_correction(self):
@@ -3488,7 +3492,11 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent._thread_model_settings = {
             "session-1": ("thread-1", "gpt-5.4", "high"),
         }
-        agent.ensure_agent_session_id = Mock()
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
         agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
         agent._write_caller_env_script = Mock()
         agent._turn_registry = SimpleNamespace(
@@ -3535,6 +3543,17 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(first["collaborationMode"], expected_mode)
         self.assertEqual(second["collaborationMode"], expected_mode)
+        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+            "ses-runtime",
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_prompt_strategy",
+            value={
+                "thread_id": "thread-1",
+                "strategy": "collaboration",
+                "sha256": agent._prompt_fingerprint("stable prompt"),
+            },
+        )
         self.assertEqual(
             agent._thread_developer_instructions["session-1"],
             ("thread-1", "stable prompt"),
@@ -3589,6 +3608,58 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("collaborationMode", params)
         self.assertNotIn("session-1", agent._thread_model_settings)
 
+    async def test_start_turn_uses_fallback_when_collaboration_strategy_cannot_persist(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(return_value=False),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            ["thread/inject_items", "turn/start"],
+        )
+        self.assertNotIn("collaborationMode", calls[1].args[1])
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+
     async def test_start_turn_reuses_persisted_fallback_prompt_after_process_restart(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
@@ -3597,7 +3668,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.codex_config = SimpleNamespace(default_model=None)
         marker = {
             "thread_id": "thread-1",
-            "sha256": agent._fallback_prompt_fingerprint("stable prompt"),
+            "strategy": "fallback",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
         }
         agent.sessions = SimpleNamespace(
             get_agent_session_runtime_marker=Mock(return_value=marker),
@@ -3641,7 +3713,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "ses-runtime",
             backend="codex",
             native_session_id="thread-1",
-            key="codex_fallback_prompt",
+            key="codex_prompt_strategy",
         )
         agent.sessions.set_agent_session_runtime_marker.assert_not_called()
         self.assertEqual(
@@ -3651,6 +3723,66 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             agent._thread_prompt_strategies["session-1"],
             ("thread-1", "fallback"),
+        )
+
+    async def test_start_turn_reuses_persisted_collaboration_after_inconclusive_probe(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+            set_agent_session_runtime_marker=Mock(),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["turn/start"],
+        )
+        params = transport.send_request.await_args.args[1]
+        self.assertEqual(
+            params["collaborationMode"]["settings"]["developer_instructions"],
+            "stable prompt",
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_not_called()
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "collaboration"),
         )
 
     async def test_start_turn_clears_sticky_collaboration_mode_with_explicit_null_model(self):
@@ -3717,6 +3849,63 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ("thread-1", "fallback"),
         )
 
+    async def test_start_turn_clears_persisted_collaboration_before_model_less_fallback(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            ["thread/inject_items", "turn/start"],
+        )
+        self.assertIsNone(calls[1].args[1]["collaborationMode"])
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+
     async def test_start_turn_persists_changed_fallback_prompt(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
@@ -3727,7 +3916,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             get_agent_session_runtime_marker=Mock(
                 return_value={
                     "thread_id": "thread-1",
-                    "sha256": agent._fallback_prompt_fingerprint("old prompt"),
+                    "strategy": "fallback",
+                    "sha256": agent._prompt_fingerprint("old prompt"),
                 }
             ),
             set_agent_session_runtime_marker=Mock(return_value=True),
@@ -3770,10 +3960,11 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "ses-runtime",
             backend="codex",
             native_session_id="thread-1",
-            key="codex_fallback_prompt",
+            key="codex_prompt_strategy",
             value={
                 "thread_id": "thread-1",
-                "sha256": agent._fallback_prompt_fingerprint("changed prompt"),
+                "strategy": "fallback",
+                "sha256": agent._prompt_fingerprint("changed prompt"),
             },
         )
 
