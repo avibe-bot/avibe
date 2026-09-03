@@ -106,6 +106,13 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_oauth_api_key_relay_round_trip_scenario
+  - id: AUTH-SETUP-111
+    name: Catalog API-key observe and confirm-create repeat the pinned probe, and auth failure persists nothing
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

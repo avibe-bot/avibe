@@ -132,7 +132,8 @@ invariants change.
   when observation is authenticated and either (a) `vendor` has a catalog
   pin for that protocol, or (b) the client declared that protocol on
   `custom`, or (c) a matching protocol-shaped response proves it.
-  Omission still auto-detects and still requires shape proof.
+  Omission on `custom` still auto-detects and still requires shape proof;
+  shipped catalog vendor omission selects the pin.
 - `POST /api/models/sources/observe` in `api.md`: same three-way rule.
   Catalog pin and declaration still require reachability and
   authentication; they never bypass ③.
