@@ -307,6 +307,7 @@ export const fillApiKeyForm = async (
     await dialog.getByLabel(hub('addKey.field.name'), { exact: true }).fill(values.name);
   }
   if (values.protocol) {
+    await dialog.getByRole('button', { name: hub('addKey.protocol.manual'), exact: true }).click();
     await dialog.getByRole('button', { name: values.protocol, exact: true }).click();
   }
   await dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true }).fill(values.baseUrl);

@@ -285,7 +285,8 @@ describe('SettingsModelsPage surface branches', () => {
     await user.click(trigger);
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
     await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(screen.getByRole('button', { name: /^Detect$|^检测$/ }));
+    await user.click(await screen.findByRole('button', { name: /Confirm & add|确认添加/ }));
 
     const detail = await screen.findByRole('dialog', { name: 'Created API key' });
     await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));

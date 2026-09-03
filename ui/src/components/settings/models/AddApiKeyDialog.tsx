@@ -2,12 +2,12 @@ import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
   CheckCircle2,
+  ChevronDown,
   CircleX,
   Eye,
   EyeOff,
   Info,
   LoaderCircle,
-  PlugZap,
   TriangleAlert,
   X,
 } from 'lucide-react';
@@ -49,6 +49,7 @@ import {
   type SourceProtocol,
   type SupplyGap,
 } from './types';
+import { ProtocolGlyph } from './protocolGlyph';
 import { optionalTrimmedTextWithin } from './validation';
 
 type Phase =
@@ -71,6 +72,56 @@ type Phase =
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
 type ProtocolSelection = 'auto' | SourceProtocol;
+
+// A phase whose primary commits WITHOUT observing again is carrying evidence
+// that only this endpoint, this credential and this probe constraint produced:
+// ①″'s report, ⑤'s waived inventory, and the protocol a refused or unanswered
+// create already proved. That is the property, not a list of the states that
+// happen to be reachable today — a phase added later inherits the rule from how
+// its own exit behaves. Phases whose primary re-observes (③ / ④ / ⑤'s 重试, ⑥)
+// are deliberately absent: their retry reads the fields as they now stand, and
+// §0.8 keeps the form intact across it.
+const persistsWithoutObserving = (phase: Phase): boolean =>
+  (phase.kind === 'form' && phase.report !== null)
+  || phase.kind === 'inventory'
+  || phase.kind === 'persist_failure'
+  || phase.kind === 'save_unconfirmed';
+
+const ProtocolSegments: React.FC<{
+  id?: string;
+  disabled: boolean;
+  selection: ProtocolSelection;
+  onSelect: (value: ProtocolSelection) => void;
+}> = ({ id, disabled, selection, onSelect }) => {
+  const { t } = useTranslation();
+  return (
+    <div
+      id={id}
+      role="group"
+      aria-label={t('settings.models.addKey.field.protocol')}
+      className="model-hub-add-key-segments flex max-w-full flex-wrap"
+    >
+      {(['auto', ...SOURCE_PROTOCOLS] as const).map((item) => (
+        <button
+          key={item}
+          type="button"
+          disabled={disabled}
+          aria-pressed={selection === item}
+          className={cn(
+            'model-hub-add-key-segment',
+            selection === item && 'is-selected',
+          )}
+          onClick={() => onSelect(item)}
+        >
+          {item !== 'auto' && <ProtocolGlyph protocol={item} />}
+          {t(item === 'auto'
+            ? 'settings.models.addKey.protocol.auto'
+            : PROTOCOL_COPY_KEYS[item])}
+        </button>
+      ))}
+    </div>
+  );
+};
 
 type ReplaceOutcome =
   | { kind: 'repaired' }
@@ -207,6 +258,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const [apiKey, setApiKey] = React.useState('');
   const [protocolSelection, setProtocolSelection] = React.useState<ProtocolSelection>('auto');
   const [revealed, setRevealed] = React.useState(false);
+  const [manualOpen, setManualOpen] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
   const [replacePhase, setReplacePhase] = React.useState<ReplacePhase>({ kind: 'edit' });
   const [continuation] = React.useState(createContinuationSettlement);
@@ -233,6 +285,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       setApiKey('');
       setProtocolSelection('auto');
       setRevealed(false);
+      setManualOpen(false);
       setPhase(INITIAL_PHASE);
       setReplacePhase({ kind: 'edit' });
     }
@@ -341,12 +394,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         ...(protocol ? { protocol } : {}),
       }, controller.signal);
       const verdict = classifyObservation(observation);
-      let persistNext = false;
-      const landed = continuation.settle(seq, () => {
+      continuation.settle(seq, () => {
         observationAbort.current = null;
         if (verdict.kind === 'ready') {
-          if (origin === 'pull') setPhase({ kind: 'form', report: observation });
-          else persistNext = true;
+          setPhase({ kind: 'form', report: observation });
         } else if (verdict.kind === 'undetermined') {
           setPhase({ kind: 'undetermined', origin, observation });
         } else if (verdict.kind === 'inventory') {
@@ -355,7 +406,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           setPhase({ kind: 'failure', origin, cause: verdict.cause });
         }
       });
-      if (landed === 'landed' && persistNext) await persist(seq, protocol);
     } catch (error) {
       if (isAbortError(error)) return;
       continuation.settle(seq, () => {
@@ -367,7 +417,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         });
       });
     }
-  }, [apiKey, baseUrl, continuation, persist]);
+  }, [apiKey, baseUrl, continuation]);
 
   const submitReplacement = React.useCallback(async (force: boolean) => {
     if (props.mode !== 'replace' || !apiKey.trim() || replacePhase.kind === 'submitting') return;
@@ -461,7 +511,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     continuation.invalidate();
     observationAbort.current?.abort();
     observationAbort.current = null;
-    if ('origin' in phase && phase.origin === 'pull') {
+    if (phase.kind === 'working' && phase.stage === 'observe') {
       setPhase(INITIAL_PHASE);
       return;
     }
@@ -517,27 +567,39 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   };
 
   const addAnyway = async () => {
-    if (phase.kind !== 'inventory' || phase.origin !== 'add' || !phase.observation.protocol) return;
+    if (phase.kind !== 'inventory' || !phase.observation.protocol) return;
     const seq = continuation.begin();
     await persist(seq, phase.observation.protocol, true);
   };
 
+  // §0.8 ①″: editing Base URL, the API key, or the protocol selection returns
+  // the dialog to ① Ready with the report dropped. The same three inputs are
+  // what every persisting exit's evidence was proved against, so one retirement
+  // covers the whole class instead of each handler picking its own phase.
+  const retireProvedEvidence = () => {
+    setPhase((current) => (persistsWithoutObserving(current) ? INITIAL_PHASE : current));
+  };
+
   const editEndpoint = (value: string) => {
     setBaseUrl(value);
-    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+    retireProvedEvidence();
   };
   const editKey = (value: string) => {
     setApiKey(value);
     if (replaceMode && replacePhase.kind === 'failure') setReplacePhase({ kind: 'edit' });
-    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+    retireProvedEvidence();
   };
+  // The display name is in no observation, so it proves and unproves nothing —
+  // ①″ keeps its report across a rename. It IS in the create request, so a
+  // server-named refusal of that request stops describing the request the user
+  // now holds.
   const editDisplayName = (value: string) => {
     setDisplayName(value);
     if (phase.kind === 'persist_failure') setPhase(INITIAL_PHASE);
   };
   const editProtocol = (value: ProtocolSelection) => {
     setProtocolSelection(value);
-    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+    retireProvedEvidence();
   };
 
   const isWorking = phase.kind === 'working';
@@ -549,6 +611,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
   const canSubmit = canObserve && displayNameValid;
   const selectedProtocol = protocolSelection === 'auto' ? undefined : protocolSelection;
+  const protocolIdle = !baseUrl.trim() || !apiKey.trim();
+  const detecting = isWorking && phase.kind === 'working' && phase.stage === 'observe';
+  const identified = phase.kind === 'form' && phase.report !== null && Boolean(phase.report.protocol);
+  const identifiedProtocol = identified && phase.kind === 'form' ? phase.report?.protocol ?? null : null;
+  // The segments and the summary row are two renderings of one selection, so
+  // only one of them is on screen at a time: expanded, the pressed segment IS
+  // the statement; collapsed, the row carries it.
+  const segmentsOpen = phase.kind === 'undetermined' || (manualOpen && !isWorking);
   const showForm = phase.kind !== 'inventory';
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
@@ -655,40 +725,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
               {(id) => <Input id={id} value={displayName} disabled={formLocked} aria-invalid={!displayNameValid} onChange={(event) => editDisplayName(event.target.value)} className="model-hub-add-key-input" />}
             </Field>
-            <Field
-              className="model-hub-add-key-field"
-              labelClassName="model-hub-add-key-label"
-              hintClassName="model-hub-add-key-hint"
-              label={t('settings.models.addKey.field.protocol')}
-              hint={t('settings.models.addKey.field.protocol.hint')}
-            >
-              {(id) => (
-                <div
-                  id={id}
-                  role="group"
-                  aria-label={t('settings.models.addKey.field.protocol')}
-                  className="model-hub-add-key-segments flex max-w-full flex-wrap"
-                >
-                  {(['auto', ...SOURCE_PROTOCOLS] as const).map((selection) => (
-                    <button
-                      key={selection}
-                      type="button"
-                      disabled={formLocked}
-                      aria-pressed={protocolSelection === selection}
-                      className={cn(
-                        'model-hub-add-key-segment',
-                        protocolSelection === selection && 'is-selected',
-                      )}
-                      onClick={() => editProtocol(selection)}
-                    >
-                      {t(selection === 'auto'
-                        ? 'settings.models.addKey.protocol.auto'
-                        : PROTOCOL_COPY_KEYS[selection])}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
               {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
             </Field>
@@ -701,46 +737,88 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               onToggleReveal={() => setRevealed((value) => !value)}
             />
 
-            {phase.kind === 'undetermined' && (
-              <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
-                <Info className="model-hub-ink-gold size-3.5 shrink-0" />
-                <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
-                  <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
+            <div className={cn(
+              'model-hub-add-key-protocol-area',
+              protocolIdle && !isWorking && phase.kind !== 'undetermined' && 'is-idle',
+            )}>
+              <span className="model-hub-add-key-label">{t('settings.models.addKey.field.protocol')}</span>
+              {phase.kind === 'undetermined' && (
+                <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
+                  <Info className="model-hub-ink-gold size-3.5 shrink-0" />
+                  <div className="flex min-w-0 flex-col gap-[3px]">
+                    <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
+                    <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {!isWorking && (
-              <div className="model-hub-add-key-test-row flex items-center justify-between gap-4">
-                <Button
+              )}
+              {detecting && (
+                <div className="model-hub-add-key-protocol-detecting">
+                  <LoaderCircle className="model-hub-ink-mint size-3.5 shrink-0 animate-spin" />
+                  <span>{t('settings.models.addKey.protocol.detecting')}</span>
+                </div>
+              )}
+              {identified && identifiedProtocol && (
+                <div className="model-hub-add-key-strip model-hub-add-key-strip--success">
+                  <CheckCircle2 className="model-hub-ink-mint size-3.5 shrink-0" />
+                  <ProtocolGlyph protocol={identifiedProtocol} />
+                  <span>
+                    {t(PROTOCOL_COPY_KEYS[identifiedProtocol])}
+                    {' · '}
+                    {phase.kind === 'form' && phase.report && phase.report.models.length === 0
+                      ? t('settings.models.addKey.pull.empty')
+                      : t('settings.models.addKey.pull.result', {
+                          count: phase.kind === 'form' && phase.report ? phase.report.models.length : 0,
+                        })}
+                  </span>
+                </div>
+              )}
+              {phase.kind === 'form' && !phase.report && !segmentsOpen && (
+                <div className="model-hub-add-key-protocol-idle-row">
+                  {/* Whatever 检测 is about to send, and nothing else: a concrete
+                      choice is the active constraint even while the disclosure
+                      that made it is closed. */}
+                  <span className="model-hub-add-key-protocol-active">
+                    {selectedProtocol && <ProtocolGlyph protocol={selectedProtocol} />}
+                    {t(selectedProtocol
+                      ? PROTOCOL_COPY_KEYS[selectedProtocol]
+                      : 'settings.models.addKey.protocol.auto')}
+                  </span>
+                  {/* The hint promises automatic identification, which is only
+                      what Auto does. A named interface has already answered it. */}
+                  {!selectedProtocol && (
+                    <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.idleHint')}</span>
+                  )}
+                </div>
+              )}
+              {segmentsOpen && (
+                <div className="model-hub-add-key-protocol-manual">
+                  <ProtocolSegments
+                    disabled={formLocked}
+                    selection={protocolSelection}
+                    onSelect={editProtocol}
+                  />
+                  <p className="model-hub-add-key-hint">{t('settings.models.addKey.field.protocol.hint')}</p>
+                </div>
+              )}
+              {!isWorking && phase.kind !== 'undetermined' && (
+                <button
                   type="button"
-                  variant="outline"
-                  className="model-hub-add-key-secondary"
-                  disabled={!canObserve}
-                  onClick={() => void observe('pull', selectedProtocol)}
+                  className="model-hub-add-key-protocol-disclosure"
+                  aria-expanded={manualOpen}
+                  onClick={() => setManualOpen((open) => !open)}
                 >
-                  <PlugZap className="size-3" />
-                  {t('settings.models.addKey.test')}
-                </Button>
-                <span className="model-hub-add-key-hint">{t('settings.models.addKey.test.hint')}</span>
-              </div>
-            )}
+                  <ChevronDown className={cn('size-3.5 shrink-0', manualOpen && 'rotate-180')} />
+                  {t('settings.models.addKey.protocol.manual')}
+                </button>
+              )}
+            </div>
 
-            {phase.kind === 'form' && phase.report && (
-              <div className="model-hub-add-key-strip model-hub-add-key-strip--success">
-                <CheckCircle2 className="model-hub-ink-mint size-3.5 shrink-0" />
-                <span>{phase.report.models.length === 0
-                  ? t('settings.models.addKey.pull.empty')
-                  : t('settings.models.addKey.pull.result', { count: phase.report.models.length })}</span>
-              </div>
-            )}
-            {phase.kind === 'working' && (
+            {phase.kind === 'working' && phase.stage === 'persist' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
                 <LoaderCircle className="model-hub-ink-mint size-3.5 shrink-0 animate-spin" />
                 <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-strip-title text-foreground">{t('settings.models.addKey.adding')}</span>
-                  <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.adding.detail')}</span>
+                  <span className="model-hub-add-key-strip-title text-foreground">{t('settings.models.addKey.saving')}</span>
+                  <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.saving.detail')}</span>
                 </div>
               </div>
             )}
@@ -827,12 +905,12 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               >
                 {t('settings.models.addKey.cancel')}
               </Button>
-              {phase.kind === 'inventory' && phase.origin === 'add' && (
+              {phase.kind === 'inventory' && (
                 <Button type="button" variant="outline" className="model-hub-add-key-action" onClick={() => void addAnyway()}>
                   {t('settings.models.addKey.addAnyway')}
                 </Button>
               )}
-              {phase.kind === 'form' && (
+              {phase.kind === 'form' && !phase.report && (
                 <Button
                   type="button"
                   variant="brand"
@@ -840,13 +918,26 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   disabled={!canSubmit}
                   onClick={() => void observe('add', selectedProtocol)}
                 >
-                  {t('settings.models.addKey.submit')}
+                  {t('settings.models.addKey.detect')}
+                </Button>
+              )}
+              {phase.kind === 'form' && phase.report?.protocol && (
+                <Button
+                  type="button"
+                  variant="brand"
+                  className="model-hub-add-key-action"
+                  disabled={!canSubmit}
+                  onClick={() => void persist(continuation.begin(), phase.report?.protocol ?? undefined)}
+                >
+                  {t('settings.models.addKey.confirm')}
                 </Button>
               )}
               {phase.kind === 'working' && (
                 <Button type="button" variant="brand" className="model-hub-add-key-action" disabled>
                   <LoaderCircle className="size-3 animate-spin" />
-                  {t('settings.models.addKey.adding')}
+                  {t(phase.stage === 'persist'
+                    ? 'settings.models.addKey.saving'
+                    : 'settings.models.addKey.protocol.detecting')}
                 </Button>
               )}
               {(phase.kind === 'failure' || phase.kind === 'persist_failure' || phase.kind === 'save_unconfirmed' || phase.kind === 'inventory' || phase.kind === 'undetermined') && (

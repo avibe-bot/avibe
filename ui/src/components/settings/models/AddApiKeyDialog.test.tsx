@@ -2,7 +2,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
@@ -133,12 +133,32 @@ const renderReplacement = (
   return { onClose, settlement };
 };
 
+const DETECT = /^Detect$|^检测$/;
+const CONFIRM = /Confirm & add|确认添加/;
+const RETRY = /^Retry$|^重试$/i;
+
 const fillCredentials = async () => {
   const user = userEvent.setup();
   await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
   await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
   return user;
 };
+
+const openManualProtocol = async (user: ReturnType<typeof userEvent.setup>) => {
+  await user.click(screen.getByRole('button', { name: /Manually specify interface type|手动指定接口类型/i }));
+};
+
+const clickDetect = async (user: ReturnType<typeof userEvent.setup>) => {
+  await user.click(screen.getByRole('button', { name: DETECT }));
+};
+
+const clickConfirm = async (user: ReturnType<typeof userEvent.setup>) => {
+  await user.click(await screen.findByRole('button', { name: CONFIRM }));
+};
+
+beforeEach(async () => {
+  await i18n.changeLanguage('en');
+});
 
 afterEach(() => {
   cleanup();
@@ -147,18 +167,44 @@ afterEach(() => {
 });
 
 describe('AddApiKeyDialog', () => {
-  it('pulls models without persisting and drops the report when credentials change', async () => {
+  it('detects without persisting, names the protocol, and drops the report when credentials change', async () => {
     vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
     const create = vi.spyOn(modelsApi, 'createApiKeySource');
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /Fetch models|拉取模型/i }));
-    expect(await screen.findByText(/Fetched 2 models|拉到 2 个模型/i)).toBeTruthy();
+    await clickDetect(user);
+    expect(await screen.findByText(/OpenAI Chat Completions/)).toBeTruthy();
+    expect(screen.getByText(/Fetched 2 models|拉到 2 个模型/i)).toBeTruthy();
+    expect(screen.queryByText('model-a')).toBeNull();
+    expect(screen.getByRole('button', { name: CONFIRM })).toBeTruthy();
     expect(create).not.toHaveBeenCalled();
 
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/changed');
     expect(screen.queryByText(/Fetched 2 models|拉到 2 个模型/i)).toBeNull();
+    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
+  });
+
+  it('puts protocol-family glyphs on concrete interface names and never on Auto detect', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(
+      observed({ protocol: 'anthropic' }),
+    );
+    renderDialog();
+    expect(screen.getByText(/Identified automatically once Base URL and API key are filled|填好 Base URL 和 API Key 后自动识别/)).toBeTruthy();
+    const user = await fillCredentials();
+    await openManualProtocol(user);
+
+    expect(screen.getByRole('button', { name: /Auto detect|自动探测/i }).querySelector('svg')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Anthropic Messages' }).querySelector('svg')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'OpenAI Responses' }).querySelector('svg')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'OpenAI Chat Completions' }).querySelector('svg')).toBeTruthy();
+
+    await clickDetect(user);
+    await waitFor(() => {
+      const identified = document.querySelector('.model-hub-add-key-strip--success');
+      expect(identified?.textContent).toMatch(/Anthropic Messages/);
+      expect(identified?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
+    });
   });
 
   it('sends one manually selected interface on the first observation and create', async () => {
@@ -172,16 +218,18 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
+    await openManualProtocol(user);
     expect(screen.getByRole('button', { name: /Auto detect|自动探测/i }).getAttribute('aria-pressed')).toBe('true');
     await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
 
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     expect(observe.mock.calls[0][0].protocol).toBe('openai_responses');
     expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
   });
 
-  it('turns an ambiguous auto-detection into one exact manual retry', async () => {
+  it('turns an ambiguous auto-detection into one exact manual retry, then confirms', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
       .mockResolvedValueOnce(observed({
         outcome: 'ambiguous',
@@ -199,11 +247,15 @@ describe('AddApiKeyDialog', () => {
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
     const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
     expect((retry as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
     await user.click(retry);
+
+    expect(await screen.findByRole('button', { name: CONFIRM })).toBeTruthy();
+    expect(create).not.toHaveBeenCalled();
+    await clickConfirm(user);
 
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     const secondObservation = observe.mock.calls[1][0];
@@ -223,7 +275,7 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
     await screen.findByRole('button', { name: /Add anyway|仍要添加/i });
     await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
     await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
@@ -251,7 +303,7 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
     await screen.findByRole('button', { name: /Add anyway|仍要添加/i });
     await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
 
@@ -271,7 +323,7 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
     await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
@@ -283,7 +335,7 @@ describe('AddApiKeyDialog', () => {
     expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
   });
 
-  it('aborts an in-flight pull and returns to the form without dismissing', async () => {
+  it('aborts an in-flight detect and returns to the form without dismissing', async () => {
     let wasAborted = false;
     vi.spyOn(modelsApi, 'observeApiKeySource').mockImplementation((_draft, signal) => new Promise((_resolve, reject) => {
       signal?.addEventListener('abort', () => {
@@ -294,12 +346,12 @@ describe('AddApiKeyDialog', () => {
     const { onClose } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /Fetch models|拉取模型/i }));
+    await clickDetect(user);
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
 
     expect(wasAborted).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /Fetch models|拉取模型/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
   });
 
   it('reconciles a lost source-create response by nonce without posting twice', async () => {
@@ -317,7 +369,8 @@ describe('AddApiKeyDialog', () => {
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
@@ -335,7 +388,8 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
@@ -351,7 +405,8 @@ describe('AddApiKeyDialog', () => {
     const { onAdded, onClose } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
     pendingInventory.resolve([]);
@@ -374,7 +429,8 @@ describe('AddApiKeyDialog', () => {
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
     pendingInventory.resolve([{ ...source, client_nonce: nonce }]);
@@ -388,14 +444,14 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
     const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
-    const add = screen.getByRole('button', { name: /^Add$|^添加$/i }) as HTMLButtonElement;
+    const detect = screen.getByRole('button', { name: DETECT }) as HTMLButtonElement;
 
     await user.type(name, '   ');
-    expect(add.disabled).toBe(true);
+    expect(detect.disabled).toBe(true);
     await user.clear(name);
     await user.type(name, 'x'.repeat(SOURCE_DISPLAY_NAME_MAX_LENGTH + 1));
-    expect(add.disabled).toBe(true);
-    await user.click(add);
+    expect(detect.disabled).toBe(true);
+    await user.click(detect);
     expect(observe).not.toHaveBeenCalled();
   });
 
@@ -403,12 +459,12 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
     const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
-    const add = screen.getByRole('button', { name: /^Add$|^添加$/i }) as HTMLButtonElement;
+    const detect = screen.getByRole('button', { name: DETECT }) as HTMLButtonElement;
 
     await user.type(name, '😀'.repeat(SOURCE_DISPLAY_NAME_MAX_LENGTH));
-    expect(add.disabled).toBe(false);
+    expect(detect.disabled).toBe(false);
     await user.type(name, '😀');
-    expect(add.disabled).toBe(true);
+    expect(detect.disabled).toBe(true);
   });
 
   it('keeps a server-named create validation failure editable and out of save reconciliation', async () => {
@@ -430,7 +486,8 @@ describe('AddApiKeyDialog', () => {
     const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
     await user.type(name, 'Relay');
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
 
     expect(await screen.findByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeTruthy();
     expect(screen.queryByText('modelHub.errors.discovery_failed')).toBeNull();
@@ -439,8 +496,106 @@ describe('AddApiKeyDialog', () => {
     expect(list).not.toHaveBeenCalled();
     await user.clear(name);
     await user.type(name, 'Fixed relay');
-    expect(screen.getByRole('button', { name: /^Add$|^添加$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
     expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('retires the evidence of every exit that would persist without observing again', async () => {
+    // One rule, stated over how a state exits rather than over which states exist:
+    // ①″'s report and the protocol a server-named refusal still holds were each
+    // proved against this endpoint, this credential and this probe constraint, so
+    // changing any of those three ends both. Every combination is driven through
+    // the UI so neither arm can quietly become its own special case.
+    type Act = (user: ReturnType<typeof userEvent.setup>) => Promise<void>;
+    const exits: Act[] = [
+      async (user) => {
+        await clickDetect(user);
+        await screen.findByRole('button', { name: CONFIRM });
+      },
+      async (user) => {
+        await clickDetect(user);
+        await clickConfirm(user);
+        await screen.findByRole('button', { name: RETRY });
+      },
+    ];
+    const connectionEdits: Act[] = [
+      async (user) => { await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/v2'); },
+      async (user) => { await user.type(screen.getByLabelText(/^API key$/i), 'x'); },
+      async (user) => {
+        await openManualProtocol(user);
+        await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
+      },
+    ];
+
+    for (const reachExit of exits) {
+      for (const edit of connectionEdits) {
+        vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+        const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(
+          new ApiCallError('invalid_source', 'modelHub.errors.discovery_failed', true, [], [], [], 422),
+        );
+        renderDialog();
+        const user = await fillCredentials();
+        await reachExit(user);
+        const persistedBefore = create.mock.calls.length;
+
+        await edit(user);
+
+        expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
+        expect(screen.queryByRole('button', { name: CONFIRM })).toBeNull();
+        expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+        expect(create.mock.calls.length).toBe(persistedBefore);
+
+        cleanup();
+        vi.restoreAllMocks();
+      }
+    }
+  });
+
+  it('keeps a state whose own primary re-observes across the same edit', async () => {
+    // The counterpart of the rule above, and the reason it is written over exits:
+    // ④'s 重试 reads the fields as they now stand, so naming an interface there is
+    // how the user answers it — not evidence to retire.
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed({
+      outcome: 'ambiguous',
+      authenticated: 'unknown',
+      protocol: null,
+      discovery: 'not_attempted',
+      models: [],
+    }));
+    renderDialog();
+    const user = await fillCredentials();
+
+    await clickDetect(user);
+    await user.click(await screen.findByRole('button', { name: 'Anthropic Messages' }));
+
+    expect(screen.getByRole('button', { name: RETRY })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: DETECT })).toBeNull();
+  });
+
+  it('names the interface Detect will send while the disclosure is closed', async () => {
+    // The collapsed row and the expanded selector are one selection rendered two
+    // ways, so the row states the active constraint rather than the default it
+    // replaced, and the promise of automatic identification goes with it.
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    renderDialog();
+    const user = await fillCredentials();
+    const autoRow = document.querySelector('.model-hub-add-key-protocol-active');
+    expect(autoRow?.textContent).toMatch(/Auto detect|自动探测/);
+    expect(autoRow?.querySelector('.model-hub-add-key-protocol-glyph')).toBeNull();
+
+    await openManualProtocol(user);
+    expect(document.querySelector('.model-hub-add-key-protocol-active')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
+    await openManualProtocol(user);
+
+    const chosenRow = document.querySelector('.model-hub-add-key-protocol-active');
+    expect(chosenRow?.textContent).toMatch(/Anthropic Messages/);
+    expect(chosenRow?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.protocol.idleHint'))).toBeNull();
+
+    await clickDetect(user);
+    await screen.findByRole('button', { name: CONFIRM });
+    expect(observe.mock.calls[0][0].protocol).toBe('anthropic');
   });
 
   it('renders the safe observation cause when create rejects after probing', async () => {
@@ -465,7 +620,8 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
 
     expect(await screen.findByText(i18n.t('settings.models.addKey.fail.auth'))).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
@@ -487,7 +643,8 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
 
     expect(await screen.findByText(/model list did not come back|没拿到它的模型清单/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Add anyway|仍要添加/i })).toBeTruthy();
@@ -517,7 +674,8 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await clickDetect(user);
+    await clickConfirm(user);
 
     expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();

@@ -101,7 +101,8 @@ test.describe('B · add an API-key source', () => {
       // No protocol is chosen: "Auto detect" is the default, and the response
       // shape is the only evidence the product is allowed to use.
       await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-add' });
-      await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+      await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
+      await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click({ timeout: 30_000 });
 
       // Success is defined by where the user lands, not by a toast: the dialog
       // closes and the new source's detail panel opens.
@@ -128,7 +129,7 @@ test.describe('B · add an API-key source', () => {
       baseUrl: mockBaseUrl(),
       apiKey: 'e2e-bad-key',
     });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
 
     // The three lines are one message: what went wrong, where to look, and that
     // Add cannot proceed until it is fixed. A test that asserted only the first
@@ -154,7 +155,7 @@ test.describe('B · add an API-key source', () => {
       apiKey: 'e2e-mismatch',
       protocol: copy('addKey.protocol.anthropicMessages'),
     });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
 
     // "Connected and authenticated, but we cannot tell which interface" — the
     // distinction from a credential failure is the whole point of the copy.
@@ -167,7 +168,7 @@ test.describe('B · add an API-key source', () => {
     ).toBeEnabled();
   });
 
-  test('B3 · Fetch models reports the count, and only ids survive the save', async ({ hub, mock, api }) => {
+  test('B3 · Detect reports the count, and only ids survive the save', async ({ hub, mock, api }) => {
     // The mock returns rich rows on purpose: `display_name`, `context_length`
     // and `pricing` all come back and all are dropped. §3 marks B3
     // `assert-current` — this documents the drop, it does not bless it.
@@ -184,15 +185,15 @@ test.describe('B · add an API-key source', () => {
     await hub.addApiKeyButton.click();
     await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-pull' });
 
-    // "Fetch models" is the optional pre-flight: it reports, it does not save.
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.test'), exact: true }).click();
+    // Detect is the mandatory pre-flight: it reports, it does not save.
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
     await expect(hub.addKeyDialog).toContainText(
       copy('addKey.pull.result', { count: inventory.length }),
       { timeout: 30_000 },
     );
     expect(await api.sources()).not.toContainEqual(expect.objectContaining({ display_name: name }));
 
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click({ timeout: 30_000 });
     await expect(hub.sourceDetailDialog).toBeVisible({ timeout: 30_000 });
 
     const created = (await api.sources()).find((source) => source.display_name === name);
@@ -221,7 +222,7 @@ test.describe('B · add an API-key source', () => {
     await hub.goto();
     await hub.addApiKeyButton.click();
     await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-empty' });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
 
     await expect(hub.addKeyDialog).toContainText(copy('addKey.inventory.title'), { timeout: 30_000 });
     const addAnyway = hub.addKeyDialog.getByRole('button', {

@@ -135,7 +135,7 @@ test.describe('G · supply guards and failure copy', () => {
       baseUrl: mockBaseUrl(),
       apiKey: 'e2e-copy-probe',
     });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.submit'), exact: true }).click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
     await expect(hub.addKeyDialog).toContainText(/modelHub\.errors\.|settings\.models\./);
     // The defect: the raw key is what reaches the user.
     await expectVisibleWithout(hub.addKeyDialog, /modelHub\.errors\./);

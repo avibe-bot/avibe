@@ -755,13 +755,14 @@ success row; a classified pre-commit answer takes the matching observation row; 
 Source-create transport/no-answer result or a response with no terminal observation
 classifier enters ⑦.
 
-| O1 evidence | Explicit observe, Add origin | Explicit observe, Pull origin | Source-create repeated observation |
-| --- | --- | --- | --- |
-| `authentication_failed`, `unreachable`, `timeout` or `adapter_error` | ③ | ③′ | ③; no Source committed |
-| `ambiguous` | ④ | ④′ | ④; no Source committed |
-| `observed`, protocol non-null, `discovery: failed` | ⑤ | ⑤′ | ⑤ when `SourceCreate.accept_unavailable_inventory` is false / omitted; only ⑤ resends it as true `[contract]` |
-| accepted producer result: explicit `observed` + `discovery: succeeded`, or a Source-create committed success envelope | Send the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]` | ①′ | Close into 06 with the returned Source and placement evidence |
-| no terminal observation classifier | The explicit observe failure remains F1 and sends no create | The explicit observe failure remains F1 and sends no create | ⑦; commit status is genuinely unconfirmed |
+| O1 evidence | Explicit observe (`检测`) | Source-create repeated observation |
+| --- | --- | --- |
+| `authentication_failed`, `unreachable`, `timeout` or `adapter_error` | ③ | ③; no Source committed |
+| `ambiguous` | ④ | ④; no Source committed |
+| `observed`, protocol non-null, `discovery: failed` | ⑤ | ⑤ when `SourceCreate.accept_unavailable_inventory` is false / omitted; only ⑤ resends it as true `[contract]` |
+| accepted producer result: explicit `observed` + `discovery: succeeded` | ①″ Identified — persist nothing | — |
+| accepted producer result: a Source-create committed success envelope | — | Close into 06 with the returned Source and placement evidence |
+| no terminal observation classifier | The explicit observe failure remains F1 and sends no create | ⑦; commit status is genuinely unconfirmed |
 
 **Held-install status-read owner** `[derived]`. The existing `BackendOAuthPanel`
 establishes the product's 2s polling cadence; installation borrows that cadence, not its
@@ -862,19 +863,16 @@ state exit; held intent never bypasses the evidence column.
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown`, `addSub.retry` | 重试 re-sends, and that press **is** the recovery observation — nothing here watches for one — so its answer decides: whichever of *Awaiting sign-in* / *Already bound* / *Start failed* the start call then names, or still down → back here; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Already bound | 去登录 was refused by the start call because that backend already holds its one `native_cli` Source — 「the API rejects duplicate creation with the existing Source id」 `[spec §4.1]`. **This is the race the dialog cannot see**: it disables the native row from the sources it read on open, and the singleton can appear after that | F1, in place — nothing was sent to the provider, so there is no flow to cancel | `addSub.error.alreadyBound`, `addSub.retry` | 重试 → Second pass: the dialog re-reads the sources, the native row is now the inert one, and the hub row is what 去登录 sends; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow in this dialog's hands, for any reason that is not the singleton refusal above — a refusal, or no answer at all. The exact generated `(client_nonce, vendor, channel)` tuple remains held `[contract]` | F1, in place — there is no `flow_id` to poll or cancel, so D-36 reconciliation repeats only the held tuple. The server coalesces an in-flight claim, returns its one committed flow, or releases the tuple for one fresh provider start | `addSub.error.startFailed`, `addSub.retry` | 重试 sends the same tuple and classifies the answer as Default does: accepted/coalesced flow → RR-1/RR-2, singleton refusal → Already bound, still no flow → back here. It never opens a second provider start beside the first. 取消 dismisses; a claim released before flow creation has no Source binding `[derived]` |
-| §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit`; `addKey.field.protocol`, `addKey.field.protocol.hint`, and all four `addKey.protocol.*` options | Auto detect is selected initially. Choosing a concrete interface constrains both 拉取型号 and 添加 to exactly that protocol. 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
-| §1.5 | ①′ Pull result, **Pull origin** `[derived]` | ②′ came back with an inventory — including after a hint in ④′, and after 重试 reran the entire observation from ⑤′ | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, and ①'s own keys, which all still render | Editing Base URL or API Key → ①, the report dropped; 拉取型号 again → ②′; 添加 → ②, which runs its own observation and reuses nothing from here; 取消 → dismiss |
-| §1.5 | ② Adding | 添加 pressed — `POST /api/models/sources/observe` runs first, and `POST /api/models/sources` with one generated `client_nonce` goes out only on the outcome that has consent `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.adding`, `addKey.adding.detail` | O1 classifies both producers. An accepted explicit observation sends the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]`; its committed success envelope closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
-| §1.5 | ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | → ③′ / ④′ / ⑤′ | `addKey.adding`, `addKey.adding.detail` | Success → ①′, persisting nothing |
-| §1.5 | ③ Failure, **Add origin** | O1 received one of four closed unsuccessful outcomes from the explicit 添加 observation or Source create's repeated observation: `authentication_failed`, `unreachable`, `timeout` or `adapter_error` `[contract]` | F1 | `addKey.fail.subtitle`; exactly one outcome line: `authentication_failed` → `addKey.fail.auth` + `addKey.fail.auth.detail`, `unreachable` → `addKey.fail.address`, `timeout` → `addKey.fail.network`, `adapter_error` → `addKey.fail.unclassified`; `addKey.retry` | 重试 → ②, whichever producer returned the line — the retry re-runs the explicit observation before any create and does not depend on what the last one concluded |
-| §1.5 | ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | F1 | as ③ | 重试 → **another 拉取型号, not ②** |
-| §1.5 | ④ Interface undetermined, **Add origin** | O1 received `SourceObservation.outcome: ambiguous` from the explicit 添加 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | ①'s still-visible form and selector plus `addKey.undetermined.title`, `addKey.undetermined.detail`, and `addKey.retry` | Choose one concrete interface + 重试 → run the entire explicit observation against exactly that protocol; identified with discovery succeeded → send the complete `SourceCreate` with the same `protocol` constraint and `accept_unavailable_inventory` false / omitted `[contract]`, whose result re-enters O1; identified with discovery failed → ⑤; still ambiguous → back to ④ |
-| §1.5 | ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ④ | Choose one concrete interface + 重试, still as a pull → identified: → ①′, persisting nothing; still undetermined: back to ④′ |
-| §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 添加 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → run **the entire explicit observation** again. 仍要添加 → send `SourceCreate` with **`accept_unavailable_inventory: true`** `[contract]`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-proved / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06 |
-| §1.5 | ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ⑤ without `addKey.addAnyway` | 重试 → run the entire observation again as a pull |
-| §1.5 | ⑥ Engine unavailable, **Add origin** `[derived]` | The gateway is not running when 添加 is pressed | F1 | `addKey.fail.engineDown`, `addKey.retry` | F1 in full: the form keeps every value it holds and the primary becomes 重试. Pressing it **is** the recovery observation — nothing here watches for one — and re-attempts 添加 → ②, whose own outcomes then apply; the engine still down → back here; 取消 → dismiss |
-| §1.5 | ⑥′ Engine unavailable, **Pull origin** `[derived]` | The gateway is not running when 拉取型号 is pressed | F1 | as ⑥ | The same, one control over: 重试 re-attempts 拉取型号 → ②′. Nothing was going to be persisted either way, so the two rows differ only in which request the press re-sends |
-| §1.5 | ⑦ Save unconfirmed, **Add origin** `[derived]` | The observation 添加 owed has already come back with consent — clean in ②, identified by a hint in ④, or waived in ⑤ — and the complete `SourceCreate` then returned no terminal observation classifier or never answered. Every classified pre-commit observation instead leaves through O1 to ③ / ④ / ⑤. The generated `client_nonce` and every request field remain held `[contract]` | F1 | `addKey.fail.save`; after `source_create_in_progress`, `addKey.fail.inProgress`; `addKey.retry` | Each user press of 重试 first reads `GET /api/models/sources` for the exact nonce. Match → claim the committed Source and enter 06 through the ordinary projection read. Miss → resend the same request/nonce. A response-backed observation enters O1; nonce conflicts follow the exact branches here. `source_create_in_progress` returns to this actionable state with `addKey.fail.inProgress`; there is no timer, automatic list read or automatic mutation retry. A later user press alone repeats the list-read + same-nonce resend algorithm. `source_nonce_conflict` rereads the list and claims the committed Source; a classified pre-commit observation → ③ / ④ / ⑤; a released slot starts one fresh create. Committed never replays the original response, and no branch matches by URL/name or creates a second Source (D-36). 取消 dismisses; after a committed boundary it ends only the caller's wait and the next Source/Agent read owns the result. There is no ⑦′ because Pull origin persists nothing |
+| §1.5 | ① Default | Dialog opened; Base URL or API key empty | F5 | `addKey.title`, `addKey.subtitle`, `addKey.field.name`, `addKey.field.baseUrl`, `addKey.field.baseUrl.hint`, `addKey.field.apiKey`, `addKey.field.apiKey.reveal`, `addKey.field.apiKey.conceal`, `addKey.field.protocol`, `addKey.protocol.auto`, `addKey.protocol.idleHint`, `addKey.protocol.manual`, `addKey.detect`, `addKey.cancel` | Interface type is a dimmed result area, not a required input. The collapsed disclosure `addKey.protocol.manual` holds Auto plus the three concrete interfaces as a probe constraint, never proof. Auto carries no glyph; a concrete option carries its protocol-family glyph. The collapsed row names whatever 检测 will send: Auto plus `addKey.protocol.idleHint`, or the chosen interface with its glyph and no hint, since only Auto identifies automatically. Expanding the disclosure replaces that row with the selector, which states the same selection as its pressed segment. 检测 is disabled. 取消 → dismiss |
+| §1.5 | ① Ready `[derived]` | Base URL and API key filled; no fresh observation | F5 | ①'s keys, undimmed | 检测 → ②. A concrete disclosure selection constrains that observe. 取消 → dismiss |
+| §1.5 | ①″ Identified `[derived]` | ② came back `observed`, protocol non-null, `discovery: succeeded` | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.confirm`, `addKey.protocol.manual`, and ①'s still-visible form | Mint strip: protocol-family glyph + proved protocol label + count (or `addKey.pull.empty`). No model names. Editing Base URL, API key, or the protocol selection → ① Ready, the report dropped — §1.5's retirement property, of which this is the plainest case. A rename is not one of those three inputs and keeps the report. 确认添加 → ②″ with the proved protocol and `accept_unavailable_inventory` false / omitted `[contract]`. 取消 → dismiss |
+| §1.5 | ② Detecting | 检测 pressed, or 重试 pressed from ③ / ④ / ⑤ / ⑥ — `POST /api/models/sources/observe` `[contract]` | → ③ / ④ / ⑤ / ⑥ through O1 | `addKey.protocol.detecting` | O1 classifies the explicit observation. Ready → ①″, persisting nothing. 取消 aborts the in-flight probe and returns to ① Ready with the form intact. A second detect cannot start while one is in flight |
+| §1.5 | ②″ Saving `[derived]` | 确认添加 pressed from ①″, or 仍要添加 pressed from ⑤ — `POST /api/models/sources` with one generated `client_nonce` `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.saving`, `addKey.saving.detail` | Cancel is blocked. An accepted create closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
+| §1.5 | ③ Failure | O1 received one of four closed unsuccessful outcomes from the explicit 检测 observation or Source create's repeated observation: `authentication_failed`, `unreachable`, `timeout` or `adapter_error` `[contract]` | F1 | `addKey.fail.subtitle`; exactly one outcome line: `authentication_failed` → `addKey.fail.auth` + `addKey.fail.auth.detail`, `unreachable` → `addKey.fail.address`, `timeout` → `addKey.fail.network`, `adapter_error` → `addKey.fail.unclassified`; `addKey.retry` | 重试 → ②, whichever producer returned the line — the retry re-runs the explicit observation before any create and does not depend on what the last one concluded. 取消 → dismiss |
+| §1.5 | ④ Interface undetermined | O1 received `SourceObservation.outcome: ambiguous` from the explicit 检测 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | ①'s still-visible form plus `addKey.undetermined.title`, `addKey.undetermined.detail`, the four-segment selector expanded in place (concrete options carry protocol-family glyphs), `addKey.field.protocol.hint`, and `addKey.retry` | Choose one concrete interface + 重试 → ② against exactly that protocol; identified with discovery succeeded → ①″, persisting nothing; identified with discovery failed → ⑤; still ambiguous → back to ④. Retry stays disabled while Auto remains selected. 取消 → dismiss |
+| §1.5 | ⑤ Identified, inventory unavailable `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 检测 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → ② (the entire explicit observation). 仍要添加 is offered whenever this inventory cell carries a proved protocol — it is not origin-scoped. 仍要添加 → ②″ with **`accept_unavailable_inventory: true`** `[contract]`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-proved / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06. This state renders no form, so it offers no edit to retire its waived cell; §1.5's retirement property binds it regardless and needs no exception. 取消 → dismiss |
+| §1.5 | ⑥ Engine unavailable `[derived]` | The gateway is not running when 检测 is pressed | F1 | `addKey.fail.engineDown`, `addKey.retry` | F1 in full: the form keeps every value it holds and the primary becomes 重试. Pressing it **is** the recovery observation — nothing here watches for one — and re-attempts 检测 → ②, whose own outcomes then apply; the engine still down → back here; 取消 → dismiss |
+| §1.5 | ⑦ Save unconfirmed `[derived]` | The observation 确认添加 / 仍要添加 owed has already come back with consent — clean in ①″, identified after a hint in ④, or waived in ⑤ — and the complete `SourceCreate` then returned no terminal observation classifier or never answered. Every classified pre-commit observation instead leaves through O1 to ③ / ④ / ⑤. The generated `client_nonce` and every request field remain held `[contract]` | F1 | `addKey.fail.save`; after `source_create_in_progress`, `addKey.fail.inProgress`; `addKey.retry` | Each user press of 重试 first reads `GET /api/models/sources` for the exact nonce. Match → claim the committed Source and enter 06 through the ordinary projection read. Miss → resend the same request/nonce. A response-backed observation enters O1; nonce conflicts follow the exact branches here. `source_create_in_progress` returns to this actionable state with `addKey.fail.inProgress`; there is no timer, automatic list read or automatic mutation retry. A later user press alone repeats the list-read + same-nonce resend algorithm. `source_nonce_conflict` rereads the list and claims the committed Source; a classified pre-commit observation → ③ / ④ / ⑤; a released slot starts one fresh create. Committed never replays the original response, and no branch matches by URL/name or creates a second Source (D-36). 重试 resends the held request rather than the form, so F1 here keeps the form's values while locking every field: the request may not outlive the fields it was built from, and this state resolves that by making them uneditable rather than by retiring on an edit that cannot happen. §1.5's retirement property still binds it. 取消 dismisses; after a committed boundary it ends only the caller's wait and the next Source/Agent read owns the result |
 | §1.6 | Ready | Source detail loaded and the table holds at least one model — discovered, added by hand, or both. When `last_discovered_at` is null the inventory has no age, `{{time}}` is absent by §0.9's rule, and the status line drops that segment `[contract]` | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; a rendered 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry. The §1.6 action-capability row decides whether 重新拉取 exists |
 | §1.6 | Retired discovered row | A model row carries `origin: discovered` and `retired: true` `[contract]` | F5 — a durable projection, not a request | `sourceDetail.entry.retired` | Keep the ordinary row chrome, switch its ink to muted and append the existing tag component with 已退役 / Retired. The row stays readable and never supplies. It renders no discovered-row delete action; refetch preserves the tombstone and cannot revive it. No new component or reactivation exit exists |
 | §1.6 | Empty (no models) | The table is empty **and** a discovery has completed — `last_discovered_at` is non-null `[contract]` | F5 | `sourceDetail.empty` | Manual add, or a successful refetch |
@@ -3309,29 +3307,72 @@ endpoint — a relay, an aggregator, something I host — with the smallest numb
 things I have to know?* Answer: a URL and a key. **Everything else the product
 works out for itself, and says so when it cannot.**
 
-Five states are drawn: the left column is the happy path (① default → ② adding →
-success destination), the right column is the three failures (③ unreachable /
-unauthenticated / wrong address, ④ connected but the interface is undetermined, ⑤
-identified but the inventory did not come back). The right column is ordered by how far
-the attempt got before it stopped, which is also the order in which the product stops
-refusing: ③ and ④ cannot save at all, ⑤ can.
+Five states are drawn: the left column is the happy path (① default / ready → ②
+detecting → ①″ identified → ②″ saving → success destination), the right column is
+the three failures (③ unreachable / unauthenticated / wrong address, ④ connected but
+the interface is undetermined, ⑤ identified but the inventory did not come back). The
+right column is ordered by how far the attempt got before it stopped, which is also the
+order in which the product stops refusing: ③ and ④ cannot save at all, ⑤ can.
+
+**2026-09-03 owner ruling — detect-then-confirm** `[derived]`. This dated block
+supersedes the origin-axis / 拉取型号 / one-shot 添加 material later in this section.
+The dialog is now a single add flow:
+
+- Field order is 名称(可选) → Base URL → API Key → 接口类型. Interface type is a
+  **detection-result area**, not a required input. Idle is a dimmed row naming
+  whatever 检测 is about to send — 自动探测 with `addKey.protocol.idleHint`, or the
+  chosen interface with its glyph and no hint, because only Auto identifies
+  automatically; Ready is the same row undimmed; Detecting is a spinner with
+  `addKey.protocol.detecting`; Identified is a mint strip naming the proved protocol
+  (protocol-family glyph before the label) and the model count — never the model
+  names.
+- Primary is two-step: **检测 / Detect** runs the non-persisting observe; **确认添加 /
+  Confirm & add** persists with the proved protocol. There is no optional 拉取型号
+  button, so the pull/add origin axis has no remaining work and its primed twins are
+  retired. ⑤'s 仍要添加 stays, gated on an inventory outcome with a proved protocol
+  rather than on origin.
+- Manual override is a collapsed disclosure `addKey.protocol.manual`. A concrete
+  selection remains a probe constraint, never proof. In ④ the selector is expanded
+  in place; retry stays disabled while Auto is selected. The collapsed row and the
+  expanded selector are one selection rendered two ways, so exactly one of them is on
+  screen: expanding replaces the row, and the pressed segment is then the statement.
+- Cancel while detecting aborts the probe and returns to the form with values intact.
+  Cancel during persist stays blocked.
+- Every surface that names a **concrete** interface type carries that protocol
+  family's brand glyph (Anthropic mark for `anthropic`; OpenAI mark for both
+  `openai_responses` and `openai_chat`). Auto detect has no glyph. Glyphs live in
+  `protocolGlyph.tsx` and do not touch `vendorMeta.ts`.
+- The persisting invariant is unchanged: every persisting exit requires a protocol
+  proved by an observed response. ③/④ never persist.
+- Evidence retires with the inputs it was proved against. Editing Base URL, the API
+  key or the protocol selection returns **any** state whose primary would persist
+  without observing again to ① Ready — ①″'s report, ⑤'s waived inventory, and the
+  protocol a refused or unanswered create still holds. That is the property, stated
+  over how a state exits rather than over the list of states that exist today. A
+  state whose primary re-observes (③, ④, ⑤'s 重试, ⑥) keeps its line instead: that
+  retry reads the fields as they now stand. The display name is in no observation, so
+  ①″ survives a rename; it is in the create request, so a server-named refusal of
+  that request does not survive one. Two of the covered states offer no edit to fire
+  the rule — ⑤ renders no form and ⑦ locks every field — and that is why the rule is
+  written over exits: whether a state happens to expose an editable field today
+  decides only whether it fires, never whether it applies.
 
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| head sub-line | that Add performs one real connection | static | no | — |
+| head sub-line | that Add detects the connection and interface first, then confirms | static | no | — |
 | `f7Ao1U` 名称(可选) | free text | user | yes | — |
-| Interface type | Auto detect plus Anthropic Messages, OpenAI Responses and OpenAI Chat Completions; Auto detect is selected by default | user | yes | Select the exact probe constraint used by both actions |
 | `cXsiv` Base URL + hint | free text; the hint names an API root, and says a bare host uses the standard `/v1` path | user | yes | — |
 | `mZBBw` API Key | masked value, reveal icon | user | yes | Toggle reveal |
-| `zVU7c` / `V6CtoF` 拉取型号 + hint | an optional early pull, which Add performs anyway | — | yes | Enter ②′; render its result in place |
-| `S0pOY2` 添加 | — | form validity | yes | Run the add action (connect + identify + fetch) |
-| `OT0Xf` state ② | spinner, 连接中…, what is happening, 通常 1–3 秒 — **and state ②′ unchanged** | in-flight | 取消 only | Abort; from ②′, back to ① with the form intact |
+| Interface type | result area last: idle/ready row naming the interface 检测 will send, detecting spinner, identified mint strip, or ④'s gold strip; protocol-family glyphs on every concrete protocol name | observation result; disclosure selection is a probe constraint | disclosure yes; ④ selector yes | Open `addKey.protocol.manual`, which replaces the row with the selector; a concrete choice constrains the next 检测 / ④ 重试 |
+| `S0pOY2` 检测 / 确认添加 | 检测 while there is no fresh result; 确认添加 after ①″ | form validity | yes | 检测 → ②; 确认添加 → ②″ with the proved protocol |
+| `OT0Xf` state ② | spinner, 识别接口中… | in-flight observe | 取消 only | Abort; return to ① Ready with the form intact |
+| persist strip state ②″ | spinner, 保存中…, 正在保存这个供应商 | in-flight persist | none — cancel blocked | — |
 | `C72yS` state ③ strip | classified outcome copy | observation result | no | — |
-| `EJrDH` ③ foot | 取消 / 重试 | — | yes | Dismiss / re-run whatever failed |
+| `EJrDH` ③ foot | 取消 / 重试 | — | yes | Dismiss / re-run the explicit observation |
 | `vKiIo` state ④ strip | connected, interface undetermined | observation result | no | — |
-| `WZyA8` selector | the same four interface choices from the form | selection | yes, Auto detect remains selected until changed | Select one concrete interface; enables 重试 |
+| `WZyA8` selector | the same four interface choices, expanded in place, glyphs on concrete options | selection | yes, Auto detect remains selected until changed | Select one concrete interface; enables 重试 |
 | `Nak7y` ④ foot | 取消 / 重试 (dimmed until a concrete interface is picked) | selection | yes | — |
 | `d6bFlX` state ⑤ strip | the interface *was* identified, and the model list did not come back | observation result | no | — |
 | `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — **three** buttons, the only foot in the product with three | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
@@ -3340,8 +3381,8 @@ refusing: ③ and ④ cannot save at all, ⑤ can.
 **Metrics** `[frame]`: dialog 560 wide, height auto in all five states — the frame
 sets no fixed height, so a build that pins one is deviating, not matching. Head
 `padding [16,20]` `gap 4`; body `padding 20` `gap 14`; field `gap 6`; input 520×36
-`radius 8` fill `#FFFFFF08`; field hint 10.5 JetBrains Mono `#9BA3B8B3`. 拉取型号
-`padding [8,14]` `gap 6`, neutral. Result strip 520 wide `padding [11,13]` `gap 10`
+`radius 8` fill `#FFFFFF08`; field hint 10.5 JetBrains Mono `#9BA3B8B3`. Protocol-family
+glyphs are ~14px `currentColor`. Result strip 520 wide `padding [11,13]` `gap 10`
 `radius 9`: red `#FF6B6B14`/`#FF6B6B40` for ③, gold `#FFC85714`/`#FFC85759` for ④
 **and for ⑤** (`AFl3g`), mint `#5BFFA014`/`#5BFFA040` for the success note. The
 form-level selector uses `padding 3` `gap 3` on `#FFFFFF0A`/`$--border`; unselected
@@ -3372,129 +3413,72 @@ outcome, reachability, authentication, protocol, discovery and models facts. It 
 reconstruct the removed request/status/reason evidence slots from adapter logs or HTTP
 details.
 
-**添加 observes before it persists, and that ordering is what makes ③, ④ and ⑤ offers
+**Detect observes before Confirm persists, and that ordering is what makes ③, ④ and ⑤ offers
 rather than notifications** `[contract]`. Each of them asks the user for a
 decision — retry, pick a concrete protocol, add anyway — and a decision offered after the row is
 already stored is not a decision; ⑤ is the clearest case, because 仍要添加 is only an
-offer if nothing was added when the inventory came back unusable. So 添加 runs the same
-non-persisting observation 拉取型号 runs, and `POST /api/models/sources` goes out on one
-of three paths, all of them past a consent: a clean observation, ④'s retry once a concrete selection
-identified the protocol, and ⑤'s 仍要添加. An earlier version had the creation call go
-first and the diagnosis come back from it, which needed the persisting route to answer
-non-terminally — a response no contract gives it — and left every 重试 in this dialog
-re-adding a source that already existed. The seam this draws is the one G-19 registers:
-before the POST the transient credential is revoked on every settlement AC-26 names,
-and after it the source exists and its questions belong to 06.
+offer if nothing was added when the inventory came back unusable. So 检测 is the mandatory
+non-persisting observation, and `POST /api/models/sources` goes out on one of three paths,
+all of them past a consent: 确认添加 from ①″, ④'s retry once a concrete selection identified
+the protocol and the user then confirmed, and ⑤'s 仍要添加. An earlier version had the
+creation call go first and the diagnosis come back from it, which needed the persisting
+route to answer non-terminally — a response no contract gives it — and left every 重试 in
+this dialog re-adding a source that already existed. The seam this draws is the one G-19
+registers: before the POST the transient credential is revoked on every settlement AC-26
+names, and after it the source exists and its questions belong to 06.
 
-**Origin is an axis, not a state, and it is the whole reason this table has primed
-twins** `[derived]`. 添加 and 拉取型号 run the *same* probe, so every outcome the probe
-can produce is reachable from either button, and the diagnosis it renders — the
-classification, its wording, its layout — is identical across a twin. What origin
-changes is what the outcome is allowed to *do*, and that is the same three things every
-time:
+**The origin axis is retired** `[derived]`. Until 2026-09-03 this dialog had two producers
+of the same probe — 添加 and optional 拉取型号 — and every outcome was primed as an
+add/pull twin so that a pull could never persist. Detect is now mandatory and Confirm is
+the only persisting primary, so there is no optional pull branch and no remaining work for
+those twins. ①′ / ②′ / ③′ / ④′ / ⑤′ / ⑥′ are tombstones. ⑤'s 仍要添加 is gated on a proved
+protocol with unavailable inventory, not on origin.
 
-- **重试 repeats the operation that failed, not a different one.** From a pull, every
-  retry is another pull.
-- **取消 returns to where the operation started, and this is the only place that says
-  so.** A pull is an optional operation *inside* the dialog, so its 取消 returns to ① with
-  the form's values intact; an add is what the dialog is for, so its 取消 dismisses. This
-  holds for the in-flight states exactly as it does for the outcome states: ② dismisses,
-  ②′ returns to ①. A cancelled in-flight add has its transient credential revoked
-  server-side **for as long as the operation is still the non-persisting submission**
-  (`[contract]` AC-26, which requires that revocation on every way the submission can
-  settle, cancellation included); what a cancel yields once the add has crossed into
-  persistence has one contracted boundary: before durable commit, cleanup completes
-  before cancellation settles; after commit, cancellation ends only this caller's wait
-  and the next Source/Agent read claims the committed result. **A cancelled pull revokes too**
-  `[contract]` AC-26, which names unsaved discovery separately from the connectivity test
-  and gives it its own independently provisioned transient ref, the same revocation on
-  success, failure, adapter error, timeout and cancellation, and the same durable
-  pending-revocation record when the revoke itself fails. The pull is the simpler half of
-  that rule rather than an exception to it: it can never persist (below), so it has no
-  commit boundary, so the pull's cleanup covers every way it can settle.
-- **A pull-origin state can never persist.** Where a state's Add-origin form offers a
-  persisting exit, the pull-origin form does not offer it at all: ④′ reports its result
-  inline instead of saving, and ⑤′ drops 仍要添加 and keeps the ordinary two-button foot.
+Cancel is no longer an origin-dependent fork. ②'s 取消 aborts the in-flight observe and
+returns to ① Ready with the form intact — a real abort, not a dismissal — and a second
+detect cannot start while one is in flight. ②″ blocks cancel for the G-19 persist
+boundary. Outcome-state 取消 dismisses. A cancelled in-flight observe revokes the
+independently provisioned transient ref on every way AC-26 names (success, failure,
+adapter error, timeout, cancellation), including the durable pending-revocation record
+when the revoke itself fails. What a cancel yields once Confirm has crossed into
+persistence is the contracted boundary: before durable commit, cleanup completes before
+cancellation would have settled, except this dialog does not offer that cancel; after
+commit, cancellation ends only this caller's wait and the next Source/Agent read claims
+the committed result.
 
-Stating it as an axis rather than as a list of special cases is the point, and it is why
-the table's Exit column carries no 取消 clause per row: a fact restated once per row is a
-fact with eight owners, and the eighth is the one that drifts — which is exactly what had
-happened to ②, whose row said 取消 returned to ① while the axis said an add dismisses. An
-earlier version primed ③ alone, which left ④ and ⑤ silently shared between the two
-origins —
-and both of their success paths persist a source and close the dialog. A user who
-pressed the optional button, picked a concrete interface, and pressed 重试 would then have created a
-source they never asked for, or lost the form to 取消; the same hole existed twice
-because the fix had been written as a row rather than as a rule. 拉取型号 is labelled
-可选 (D-4), and the promise that word makes is *nothing you do here commits anything* —
-which is a property of the whole pull branch, not of one failure.
+**② occupies the protocol result area rather than replacing the form** `[derived]`. The
+period while Detect is pending renders `addKey.protocol.detecting` with a spinner in that
+area, and the primary is the same detecting label, disabled. Every word of the older
+`addKey.adding` / `addKey.adding.detail` pair described a one-shot add that observed and
+persisted in one press; those keys remain in the locale files and are not this state's
+copy.
 
-**②′ is the twin the earlier table was missing, and it needs no new pixels and no new
-copy** `[derived]`. The probe a pull runs *is* the probe Add runs, so the period while it
-is pending is the same period, and it renders the same `OT0Xf` body: spinner, 连接中…,
-连上 + 认出接口 + 首次拉取型号列表 · 通常 1–3 秒, 取消 only. Every word of that sentence
-is true of a pull, which is why the twin reuses `addKey.adding` and `addKey.adding.detail`
-rather than earning keys of its own. The axis applies here as everywhere — 取消 lands on
-① instead of dismissing, **and it revokes on the way out** `[contract]` AC-26. Nothing is
-persisted, and that is a fact about the *source*, not about the credential: the pull ran
-against an independently provisioned transient ref, so a cancel here is one of the five
-ways AC-26 names and carries the same revocation and the same durable pending-revocation
-record when the revoke itself fails. 可选 promises that nothing you do here commits
-anything; it does not promise that nothing was provisioned. The third property has
-nothing to bind to: an in-flight state offers no 重试.
-
-Two consequences follow from ②′ occupying the body rather than sitting inside the form.
-**A second pull cannot be started while one is in flight**, because 拉取型号 is not on
-screen to press — the mechanism is absence, not a disabled button, which is why an
-enumeration of this dialog's interactive elements does not and should not list it. And **取消 during ②′ is a real abort**, not
-a dismissal: it stops the in-flight probe and returns the user to a form still holding
-everything they typed. A build that leaves ① fully interactive during a pull has to
-invent an answer for what a second press means and for which of two responses wins —
-questions this dialog never has to ask.
-
-*Postmortem.* The origin axis was stated for outcomes and quietly not for the in-flight
-period, so 拉取型号 appeared to move from ① straight to a result. The rule that catches
-this class: **an axis has to be applied to every state on the other side of it, including
-the ones that are pure duration.** A state that only exists while something is pending is
-the easiest one to forget, because nobody screenshots it and no static frame draws it
-twice.
-
-**The distinction has no visual carrier**, and that is what makes it worth stating so
-precisely: the only way to get it right is to keep the origin in state, and the only way
-to get it wrong is to reconstruct it from what is on screen. The property is not about
-one pair: **no Pull-origin state persists anything**, and that quantifies over every
-primed twin, ②′ included.
-
-**A pull that succeeds lands in a state, not back in ①** `[derived]`. ②′ named ③′ / ④′ /
-⑤′ for its three failures and, for the one outcome the user pressed 拉取型号 to get, said
-only 「the inline model count in ①」 — a result reported by the state the register
-describes as 「Dialog opened」. ①′ is that state written down: the form exactly as ①
-renders it, plus `addKey.pull.result` reporting what came back, or `addKey.pull.empty`
-when the source answered and listed nothing — the reachable zero this key has, and the
-reason it takes a string rather than 「拉到 0 个型号」. It is also where ④′ lands when
-  the manual selection identifies the interface, and where ⑤′'s 重试 lands when the repeated observation
-comes back usable: the same result by a longer road, which is the point of naming it once. Three
-properties hold here because it is a Pull-origin state and for no other reason. Nothing
-was persisted, so 添加 from here still runs its own observation and reuses none of
-this. Editing Base URL or API Key drops the report, because a count is a fact about the
-address it was fetched from. And 取消 dismisses with nothing to abort — the in-flight
-abort belongs to ②′, which is where the request still is. A build without this row has to
-decide all three from what is on screen, which is the reconstruction the paragraph above
-names as the only way to get the origin wrong.
+**A successful Detect lands in ①″, not back in ① and not in a persist** `[derived]`. ①″ is
+the form exactly as ① Ready renders it, plus the mint identified strip: protocol-family
+glyph, proved protocol label, and `addKey.pull.result` or `addKey.pull.empty`. It is also
+where ④ lands when the manual selection identifies the interface with discovery succeeded,
+and where ⑤'s 重试 lands when the repeated observation comes back usable. Nothing was
+persisted, so 确认添加 from here still runs Source-create's repeated observation and reuses
+none of the client report as proof. Editing Base URL, API Key, or the protocol selection
+drops the report, because a count is a fact about the address it was fetched from. And 取消
+dismisses with nothing to abort — the in-flight abort belongs to ②, which is where the
+request still is.
 
 **The form-level protocol selector is a probe constraint, not response proof**
 `[frame]` `[contract]`. The 2026-08-26 owner ruling supersedes the former
-ambiguity-only probe-order hint: the selector is visible before the first request, with
-Auto detect selected by default. Auto detect probes the supported interfaces in the
-adapter's authoritative order. A concrete choice probes exactly that interface for both
-拉取型号 and 添加. In either branch, persistence still requires a matching
-protocol-shaped upstream response; the user choice cannot manufacture proof.
+ambiguity-only probe-order hint; the 2026-09-03 ruling then moved the selector behind a
+collapsed disclosure and made the visible row a detection-result area. Auto detect remains
+the default. Auto detect probes the supported interfaces in the adapter's authoritative
+order. A concrete choice probes exactly that interface on the next 检测 or ④ 重试.
+Persistence still requires a matching protocol-shaped upstream response; the user choice
+cannot manufacture proof.
 
-State ④ keeps the same selector visible and requires a concrete choice before 重试. The
-primary is still a retry, not a save, and the strip always describes the latest attempt.
-The stored Source records the proved protocol but no manual/automatic provenance marker:
-the distinction matters during preflight, not during later invocation. Saved protocol
-changes still require a new Source.
+State ④ keeps the same selector visible — expanded in place, not behind the disclosure —
+and requires a concrete choice before 重试. The primary is still a retry, not a save, and
+the strip always describes the latest attempt. A successful retry with discovery succeeded
+lands ①″ and still persists nothing. The stored Source records the proved protocol but no
+manual/automatic provenance marker: the distinction matters during preflight, not during
+later invocation. Saved protocol changes still require a new Source.
 
 **State ⑤ is the one place in the product that saves something it could not fully
 verify, and the rule that makes it safe is a property, not a permission** `[frame]`
@@ -3571,7 +3555,7 @@ is revealed; the button carries the verb.
 | Key | 中文 | English |
 | --- | --- | --- |
 | `title` | 添加 API Key | Add API key |
-| `subtitle` | 「添加」时自动连一次:认出接口 + 拉取型号列表 | Add connects once: it identifies the interface and fetches the model list |
+| `subtitle` | 先检测连接与接口，确认后添加 | Detect the connection and interface first, then confirm to add |
 | `field.name` | 名称(可选) | Name (optional) |
 | `field.protocol` | 接口类型 | Interface type |
 | `field.protocol.hint` | 不确定时用自动探测；已知类型时只验证所选接口 | Use Auto detect when unsure; choose a type to validate only that interface |
@@ -3580,14 +3564,13 @@ is revealed; the button carries the verb.
 | `field.apiKey` | API Key | API key |
 | `field.apiKey.reveal` | 显示 API Key | Show API key |
 | `field.apiKey.conceal` | 隐藏 API Key | Hide API key |
-| `test` | 拉取型号 | Fetch models |
-| `test.hint` | 可选 ·「添加」时会自动拉一次 | Optional · Add fetches once anyway |
-| `pull.result_one` | 拉到 {{count}} 个型号 | Fetched {{count}} model |
-| `pull.result_other` | 拉到 {{count}} 个型号 | Fetched {{count}} models |
-| `pull.empty` | 连上了,但这个来源没有可用型号 | Connected, but this source lists no models |
-| `submit` | 添加 | Add |
-| `adding` | 连接中… | Connecting… |
-| `adding.detail` | 连上 + 验证接口 + 首次拉取型号列表 · 通常 1–3 秒 | Connect, validate the interface, fetch the model list · usually 1–3s |
+| `pull.result_one` | 拉到 {{count}} 个模型 | Fetched {{count}} model |
+| `pull.result_other` | 拉到 {{count}} 个模型 | Fetched {{count}} models |
+| `pull.empty` | 已经连接，但这个供应商没有可用模型 | Connected, but this source lists no models |
+| `detect` | 检测 | Detect |
+| `confirm` | 确认添加 | Confirm & add |
+| `saving` | 保存中… | Saving… |
+| `saving.detail` | 正在保存这个供应商 | Saving this source |
 | `fail.subtitle` | 认出接口是「添加」的前置条件 · 先按下面这条修,再重试 | Identifying the interface is a precondition of Add · fix what the line below names, then retry |
 | `fail.auth` | 上游拒绝了这个凭据 | The upstream rejected this credential |
 | `fail.auth.detail` | 检查 API Key、接口类型和 Base URL 的 API 根路径 | Check the API key, interface type, and the Base URL's API root path |
@@ -3604,6 +3587,9 @@ is revealed; the button carries the verb.
 | `protocol.anthropicMessages` | Anthropic Messages | Anthropic Messages |
 | `protocol.openaiResponses` | OpenAI Responses | OpenAI Responses |
 | `protocol.openaiChatCompletions` | OpenAI Chat Completions | OpenAI Chat Completions |
+| `protocol.idleHint` | 填好 Base URL 和 API Key 后自动识别 | Identified automatically once Base URL and API key are filled |
+| `protocol.detecting` | 识别接口中… | Identifying the interface… |
+| `protocol.manual` | 手动指定接口类型 | Manually specify interface type |
 | `inventory.title` | 接口已经认出来了 —— 但这次没拿到它的型号清单 | The interface is identified — but its model list did not come back this time |
 | `inventory.detail` | 接口已经确认;这次型号清单读取失败 | The interface is confirmed; the model list could not be read this time |
 | `addAnyway` | 仍要添加 | Add anyway |
@@ -3674,7 +3660,7 @@ normalized to `https://` before the probe and the normalized form is what the
 field shows afterwards (so the user can see what was actually tried).
 
 **An omitted 名称 is filled at submit time, not at render time** `[derived]`. If the
-field is blank when 添加 is pressed, the client sets `display_name` to the URL host
+field is blank when 确认添加 is pressed, the client sets `display_name` to the URL host
 before the request goes out, so the persisted value *is* the host. The rejected
 alternative was a render-time fallback, and it is worth naming why it is wrong:
 `display_name` is a required non-null string `[contract]` FC-03 and creation fills an

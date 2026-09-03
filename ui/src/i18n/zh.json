@@ -1353,7 +1353,7 @@
       },
       "addKey": {
         "title": "添加 API Key",
-        "subtitle": "添加时自动连接一次：识别接口并拉取模型列表",
+        "subtitle": "先检测连接与接口，确认后添加",
         "field": {
           "name": "名称(可选)",
           "protocol": "接口类型",
@@ -1364,16 +1364,17 @@
           "apiKey.reveal": "显示 API Key",
           "apiKey.conceal": "隐藏 API Key"
         },
-        "test": "拉取模型",
-        "test.hint": "可选 ·「添加」时会自动拉一次",
         "pull": {
           "result_one": "拉到 {{count}} 个模型",
           "result_other": "拉到 {{count}} 个模型",
           "empty": "已经连接，但这个供应商没有可用模型"
         },
-        "submit": "添加",
+        "detect": "检测",
+        "confirm": "确认添加",
         "adding": "连接中…",
         "adding.detail": "连接 + 验证接口 + 首次拉取模型列表 · 通常 1–3 秒",
+        "saving": "保存中…",
+        "saving.detail": "正在保存这个供应商",
         "fail": {
           "subtitle": "认出接口是「添加」的前置条件 · 先按下面这条修,再重试",
           "auth": "供应商拒绝了这个凭据",
@@ -1395,7 +1396,10 @@
           "auto": "自动探测",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
-          "openaiChatCompletions": "OpenAI Chat Completions"
+          "openaiChatCompletions": "OpenAI Chat Completions",
+          "idleHint": "填好 Base URL 和 API Key 后自动识别",
+          "detecting": "识别接口中…",
+          "manual": "手动指定接口类型"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"
