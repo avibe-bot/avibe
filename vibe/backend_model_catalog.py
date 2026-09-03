@@ -31,6 +31,7 @@ REMOTE_CATALOG_REVALIDATE_SECONDS = 5 * 60
 REMOTE_CATALOG_FAILURE_TTL_SECONDS = 10 * 60
 REMOTE_CATALOG_TIMEOUT_SECONDS = 3.0
 REMOTE_CATALOG_USER_AGENT = "avibe/backend-model-catalog"
+REMOTE_CATALOG_CACHE_VERSION = 2
 CODEX_HUB_CATALOG_TIMEOUT_SECONDS = 15.0
 CODEX_HUB_CATALOG_MAX_BYTES = 8 * 1024 * 1024
 
@@ -102,7 +103,7 @@ _CODEX_CUSTOM_SCAFFOLD_KEYS = (
 
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
-_REMOTE_MEMORY_CACHE: dict[str, Any] = {}
+_REMOTE_MEMORY_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def get_bundled_catalog_path(repo_root: Path | None = None) -> Path:
@@ -350,16 +351,29 @@ def bundled_catalog_reasoning_efforts_for_model(
     return bundled_catalog_reasoning_efforts_by_model().get(model_id)
 
 
-def load_cached_remote_catalog(*, schedule_refresh: bool = True) -> dict[str, Any]:
-    cached = _cached_remote_payload()
-    if schedule_refresh and _remote_cache_stale(cached):
+def load_cached_remote_catalog(
+    *,
+    schedule_refresh: bool = True,
+    source_key: str | None = None,
+) -> dict[str, Any]:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
+    cached = _cached_remote_payload(source_key=current_source_key)
+    if schedule_refresh and _remote_cache_stale(
+        cached,
+        source_key=current_source_key,
+    ):
         schedule_remote_catalog_refresh()
     catalog = cached.get("catalog")
     return catalog if isinstance(catalog, dict) else {}
 
 
-def remote_catalog_token() -> tuple[float | None, float | None]:
-    payload = _cached_remote_payload()
+def remote_catalog_token(
+    *,
+    source_key: str | None = None,
+) -> tuple[float | None, float | None]:
+    payload = _cached_remote_payload(source_key=source_key)
     fetched_at = payload.get("fetched_at")
     failed_at = payload.get("failed_at")
     return (
@@ -368,10 +382,14 @@ def remote_catalog_token() -> tuple[float | None, float | None]:
     )
 
 
-def remote_catalog_refresh_pending(since: tuple[float | None, float | None]) -> bool:
+def remote_catalog_refresh_pending(
+    since: tuple[float | None, float | None],
+    *,
+    source_key: str | None = None,
+) -> bool:
     with _REMOTE_LOCK:
         refresh_in_flight = _REMOTE_REFRESH_IN_FLIGHT
-    return refresh_in_flight or remote_catalog_token() != since
+    return refresh_in_flight or remote_catalog_token(source_key=source_key) != since
 
 
 def schedule_remote_catalog_refresh() -> bool:
@@ -392,14 +410,13 @@ def schedule_remote_catalog_refresh() -> bool:
 
 
 def refresh_remote_catalog_now(url: str | None = None) -> dict[str, Any]:
-    previous = _cached_remote_payload()
     request_url = _remote_catalog_url(url)
     source_key = _remote_catalog_source_key(request_url)
-    same_source = previous.get("source_key") == source_key
+    previous = _cached_remote_payload(source_key=source_key)
     catalog, validators = _fetch_remote_catalog_response(
         url=request_url,
-        etag=previous.get("etag") if same_source else None,
-        last_modified=previous.get("last_modified") if same_source else None,
+        etag=previous.get("etag"),
+        last_modified=previous.get("last_modified"),
     )
     now = time.time()
     not_modified = catalog is None
@@ -424,7 +441,7 @@ def refresh_remote_catalog_now(url: str | None = None) -> dict[str, Any]:
             value = previous.get(key)
         if isinstance(value, str) and value:
             payload[key] = value
-    _write_cached_remote_payload(payload)
+    _write_cached_remote_payload(payload, source_key=source_key)
     return catalog
 
 
@@ -503,8 +520,12 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
     if backend_key not in _SUPPORTED_BACKENDS:
         return {"ok": False, "backend": backend_key, "error": f"unsupported backend '{backend}'"}
 
-    refresh_token = remote_catalog_token()
-    remote_catalog = load_cached_remote_catalog(schedule_refresh=schedule_refresh)
+    remote_source_key = _remote_catalog_source_key(_remote_catalog_url())
+    refresh_token = remote_catalog_token(source_key=remote_source_key)
+    remote_catalog = load_cached_remote_catalog(
+        schedule_refresh=schedule_refresh,
+        source_key=remote_source_key,
+    )
     bundled_catalog = load_bundled_catalog()
 
     if backend_key == "claude":
@@ -533,7 +554,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         efforts = entry.get("reasoning_efforts") or default_efforts
         reasoning_options[entry["id"]] = _reasoning_option_items(efforts)
 
-    cached_payload = _cached_remote_payload()
+    cached_payload = _cached_remote_payload(source_key=remote_source_key)
     notes = []
     error = cached_payload.get("error")
     if isinstance(error, str) and error:
@@ -549,7 +570,10 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         "source": " + ".join(name for name, entries in sources if entries),
         "live": False,
         "notes": notes or None,
-        "catalog_refresh_pending": remote_catalog_refresh_pending(refresh_token),
+        "catalog_refresh_pending": remote_catalog_refresh_pending(
+            refresh_token,
+            source_key=remote_source_key,
+        ),
     }
 
 
@@ -580,8 +604,11 @@ def backend_builtin_snapshot(
     if backend_key not in _SUPPORTED_BACKENDS:
         return _versioned_builtin_snapshot(complete=False, models=[])
 
-    cached_remote = _read_cached_remote_payload(get_cached_catalog_path())
     remote_source_key = _remote_catalog_source_key(_remote_catalog_url())
+    cached_remote = _read_cached_remote_payload(
+        get_cached_catalog_path(),
+        source_key=remote_source_key,
+    )
     if schedule_refresh and _remote_cache_stale(
         cached_remote,
         source_key=remote_source_key,
@@ -882,15 +909,21 @@ def _ordered_entries(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [entry for _, _, entry in sorted(indexed, key=lambda value: (value[0], value[1]))]
 
 
-def _cached_remote_payload() -> dict[str, Any]:
+def _cached_remote_payload(*, source_key: str | None = None) -> dict[str, Any]:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
     with _REMOTE_LOCK:
-        if _REMOTE_MEMORY_CACHE:
-            return dict(_REMOTE_MEMORY_CACHE)
+        cached = _REMOTE_MEMORY_CACHE.get(current_source_key)
+        if isinstance(cached, dict):
+            return dict(cached)
 
-    payload = _read_cached_remote_payload(get_cached_catalog_path())
+    payload = _read_cached_remote_payload(
+        get_cached_catalog_path(),
+        source_key=current_source_key,
+    )
     with _REMOTE_LOCK:
-        _REMOTE_MEMORY_CACHE.clear()
-        _REMOTE_MEMORY_CACHE.update(payload)
+        _REMOTE_MEMORY_CACHE[current_source_key] = dict(payload)
     return payload
 
 
@@ -902,6 +935,8 @@ def _remote_cache_stale(
     current_source_key = source_key or _remote_catalog_source_key(
         _remote_catalog_url()
     )
+    if payload.get("source_key") != current_source_key:
+        return True
     fetched_at = payload.get("fetched_at")
     checked_at = payload.get("checked_at")
     last_success_at = checked_at if isinstance(checked_at, (int, float)) else fetched_at
@@ -910,8 +945,6 @@ def _remote_cache_stale(
         not isinstance(last_success_at, (int, float)) or float(failed_at) >= float(last_success_at)
     ):
         return time.time() - float(failed_at) >= REMOTE_CATALOG_FAILURE_TTL_SECONDS
-    if payload.get("source_key") != current_source_key:
-        return True
     if not isinstance(last_success_at, (int, float)):
         return True
     return time.time() - float(last_success_at) >= REMOTE_CATALOG_REVALIDATE_SECONDS
@@ -919,14 +952,17 @@ def _remote_cache_stale(
 
 def _refresh_remote_catalog_worker() -> None:
     global _REMOTE_REFRESH_IN_FLIGHT
+    request_url = _remote_catalog_url()
+    source_key = _remote_catalog_source_key(request_url)
     try:
-        refresh_remote_catalog_now()
+        refresh_remote_catalog_now(request_url)
     except Exception as exc:
-        previous = _cached_remote_payload()
+        previous = _cached_remote_payload(source_key=source_key)
         payload = {
             "failed_at": time.time(),
             "catalog": previous.get("catalog"),
             "error": str(exc),
+            "source_key": source_key,
         }
         if isinstance(previous.get("fetched_at"), (int, float)):
             payload["fetched_at"] = previous["fetched_at"]
@@ -936,10 +972,7 @@ def _refresh_remote_catalog_worker() -> None:
             value = previous.get(key)
             if isinstance(value, str) and value:
                 payload[key] = value
-        source_key = previous.get("source_key")
-        if isinstance(source_key, str) and source_key:
-            payload["source_key"] = source_key
-        _write_cached_remote_payload(payload)
+        _write_cached_remote_payload(payload, source_key=source_key)
     finally:
         with _REMOTE_LOCK:
             _REMOTE_REFRESH_IN_FLIGHT = False
@@ -967,15 +1000,15 @@ def _read_complete_catalog(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return {}
+def _normalize_remote_cache_record(
+    payload: object,
+    *,
+    source_key: str,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"source_key": source_key}
     catalog_valid = False
     raw_catalog = payload.get("catalog")
     if isinstance(raw_catalog, dict):
@@ -989,7 +1022,7 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
         if isinstance(value, (int, float)) and (key not in {"fetched_at", "checked_at"} or catalog_valid):
             normalized[key] = value
     if catalog_valid:
-        for key in ("etag", "last_modified", "source_key"):
+        for key in ("etag", "last_modified"):
             value = payload.get(key)
             if isinstance(value, str) and value:
                 normalized[key] = value
@@ -999,11 +1032,75 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
     return normalized
 
 
-def _write_cached_remote_payload(payload: dict[str, Any]) -> None:
-    write_atomic(get_cached_catalog_path(), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+def _read_remote_cache_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_cached_remote_payload(
+    path: Path,
+    *,
+    source_key: str | None = None,
+) -> dict[str, Any]:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
+    payload = _read_remote_cache_file(path)
+    raw_sources = payload.get("sources")
+    if isinstance(raw_sources, dict):
+        raw_record = raw_sources.get(current_source_key)
+    elif payload.get("source_key") == current_source_key:
+        raw_record = payload
+    else:
+        return {}
+    return _normalize_remote_cache_record(
+        raw_record,
+        source_key=current_source_key,
+    )
+
+
+def _write_cached_remote_payload(
+    payload: dict[str, Any],
+    *,
+    source_key: str | None = None,
+) -> None:
+    current_source_key = source_key or (
+        payload.get("source_key")
+        if isinstance(payload.get("source_key"), str) and payload["source_key"]
+        else _remote_catalog_source_key(_remote_catalog_url())
+    )
+    record = _normalize_remote_cache_record(
+        payload,
+        source_key=current_source_key,
+    )
+    stored_record = {
+        key: value for key, value in record.items() if key != "source_key"
+    }
     with _REMOTE_LOCK:
-        _REMOTE_MEMORY_CACHE.clear()
-        _REMOTE_MEMORY_CACHE.update(payload)
+        path = get_cached_catalog_path()
+        previous = _read_remote_cache_file(path)
+        raw_sources = previous.get("sources")
+        if isinstance(raw_sources, dict):
+            stored_sources = dict(raw_sources)
+        else:
+            legacy_source_key = previous.get("source_key")
+            stored_sources = {}
+            if isinstance(legacy_source_key, str) and legacy_source_key:
+                stored_sources[legacy_source_key] = {
+                    key: value
+                    for key, value in previous.items()
+                    if key != "source_key"
+                }
+        stored_sources[current_source_key] = stored_record
+        stored = {
+            "cache_version": REMOTE_CATALOG_CACHE_VERSION,
+            "sources": stored_sources,
+        }
+        write_atomic(path, json.dumps(stored, indent=2, sort_keys=True) + "\n")
+        _REMOTE_MEMORY_CACHE[current_source_key] = record
 
 
 def _normalize_catalog(payload: object, *, strict: bool = False) -> dict[str, Any]:

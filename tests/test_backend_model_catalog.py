@@ -34,6 +34,19 @@ def _reset_remote_cache(monkeypatch):
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
 
 
+def _persisted_remote_records(tmp_path: Path) -> dict[str, dict]:
+    payload = json.loads(
+        (tmp_path / "backend_model_catalog.json").read_text(encoding="utf-8")
+    )
+    assert payload["cache_version"] == 2
+    return payload["sources"]
+
+
+def _persisted_remote_record(tmp_path: Path, url: str) -> dict:
+    source_key = backend_model_catalog._remote_catalog_source_key(url)
+    return _persisted_remote_records(tmp_path)[source_key]
+
+
 def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
     assert backend_model_catalog.REASONING_EFFORT_VOCABULARY == (
         "minimal",
@@ -819,15 +832,15 @@ def test_refresh_remote_catalog_persists_validated_cache(monkeypatch, tmp_path):
     catalog = backend_model_catalog.refresh_remote_catalog_now("https://example.test/catalog.json")
 
     assert backend_model_catalog.backend_model_entries("claude", catalog)[0]["id"] == "claude-fable-6"
-    persisted = json.loads((tmp_path / "backend_model_catalog.json").read_text(encoding="utf-8"))
+    persisted = _persisted_remote_record(
+        tmp_path,
+        "https://example.test/catalog.json",
+    )
     assert persisted["catalog"] == catalog
     assert persisted["fetched_at"] == 200.0
     assert persisted["checked_at"] == 200.0
     assert persisted["etag"] == '"catalog-v2"'
     assert persisted["last_modified"] == "Fri, 24 Jul 2026 18:28:54 GMT"
-    assert persisted["source_key"] == backend_model_catalog._remote_catalog_source_key(
-        "https://example.test/catalog.json"
-    )
     assert persisted["error"] is None
 
 
@@ -865,14 +878,14 @@ def test_refresh_remote_catalog_uses_etag_and_preserves_cache_on_304(monkeypatch
     catalog = backend_model_catalog.refresh_remote_catalog_now("https://example.test/catalog.json")
 
     assert catalog == previous_catalog
-    persisted = json.loads((tmp_path / "backend_model_catalog.json").read_text(encoding="utf-8"))
+    persisted = _persisted_remote_record(
+        tmp_path,
+        "https://example.test/catalog.json",
+    )
     assert persisted["catalog"] == previous_catalog
     assert persisted["fetched_at"] == 100.0
     assert persisted["checked_at"] == 200.0
     assert persisted["etag"] == '"catalog-v1"'
-    assert persisted["source_key"] == backend_model_catalog._remote_catalog_source_key(
-        "https://example.test/catalog.json"
-    )
     assert persisted["error"] is None
 
 
@@ -907,19 +920,26 @@ def test_refresh_remote_catalog_does_not_reuse_validator_for_another_url(monkeyp
     catalog = backend_model_catalog.refresh_remote_catalog_now("https://new.example.test/catalog.json")
 
     assert catalog == next_catalog
-    persisted = json.loads((tmp_path / "backend_model_catalog.json").read_text(encoding="utf-8"))
-    assert "etag" not in persisted
-    assert persisted["source_key"] == backend_model_catalog._remote_catalog_source_key(
+    records = _persisted_remote_records(tmp_path)
+    old_key = backend_model_catalog._remote_catalog_source_key(
+        "https://old.example.test/catalog.json"
+    )
+    new_key = backend_model_catalog._remote_catalog_source_key(
         "https://new.example.test/catalog.json"
     )
+    assert records[old_key]["etag"] == '"old-source"'
+    assert "etag" not in records[new_key]
+    assert records[new_key]["catalog"] == next_catalog
 
 
 def test_malformed_refresh_preserves_last_good_catalog(monkeypatch, tmp_path):
+    source_url = "https://example.test/catalog.json"
     previous_catalog = {
         "schema_version": 1,
         "backends": {"claude": {"models": [{"id": "claude-fable-6"}]}},
     }
     monkeypatch.setattr(backend_model_catalog.paths, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, source_url)
     monkeypatch.setattr(
         backend_model_catalog.urllib.request,
         "urlopen",
@@ -932,7 +952,7 @@ def test_malformed_refresh_preserves_last_good_catalog(monkeypatch, tmp_path):
             "catalog": previous_catalog,
             "etag": '"catalog-v1"',
             "error": None,
-            "source_key": backend_model_catalog._remote_catalog_source_key("https://example.test/catalog.json"),
+            "source_key": backend_model_catalog._remote_catalog_source_key(source_url),
         }
     )
     monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 200.0)
@@ -940,16 +960,22 @@ def test_malformed_refresh_preserves_last_good_catalog(monkeypatch, tmp_path):
 
     backend_model_catalog._refresh_remote_catalog_worker()
 
-    persisted = json.loads((tmp_path / "backend_model_catalog.json").read_text(encoding="utf-8"))
+    persisted = _persisted_remote_record(tmp_path, source_url)
     assert persisted["catalog"] == previous_catalog
     assert persisted["fetched_at"] == 100.0
     assert persisted["checked_at"] == 150.0
     assert persisted["etag"] == '"catalog-v1"'
-    assert persisted["source_key"] == backend_model_catalog._remote_catalog_source_key(
-        "https://example.test/catalog.json"
-    )
     assert persisted["failed_at"] == 200.0
     assert "Unsupported backend model catalog schema version" in persisted["error"]
+    source_key = backend_model_catalog._remote_catalog_source_key(source_url)
+    current = backend_model_catalog._read_cached_remote_payload(
+        backend_model_catalog.get_cached_catalog_path(),
+        source_key=source_key,
+    )
+    assert backend_model_catalog._remote_cache_stale(
+        current,
+        source_key=source_key,
+    ) is False
 
 
 def test_fetch_remote_catalog_rejects_invalid_model_entries(monkeypatch):
@@ -1083,7 +1109,7 @@ def test_builtin_snapshot_requires_each_catalog_once_when_cli_is_installed(
 ):
     reads = {"remote": 0, "bundled": 0, "local": 0}
 
-    def remote(_path):
+    def remote(_path, **_kwargs):
         reads["remote"] += 1
         return {
             "catalog": {},
@@ -1122,7 +1148,7 @@ def test_builtin_snapshot_does_not_require_cli_cache_when_cli_is_absent(monkeypa
     monkeypatch.setattr(
         backend_model_catalog,
         "_read_cached_remote_payload",
-        lambda _path: {
+        lambda _path, **_kwargs: {
             "catalog": {},
             "source_key": backend_model_catalog._remote_catalog_source_key(
                 backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
@@ -1145,24 +1171,29 @@ def test_builtin_snapshot_does_not_require_cli_cache_when_cli_is_absent(monkeypa
     assert snapshot["complete"] is True
 
 
-def test_builtin_snapshot_rejects_remote_cache_from_previous_url(monkeypatch):
+def test_builtin_snapshot_rejects_remote_cache_from_previous_url(
+    monkeypatch,
+    tmp_path,
+):
     old_url = "https://old.example.test/catalog.json"
     new_url = "https://new.example.test/catalog.json"
     refreshes = []
-    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, new_url)
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_cached_remote_payload",
-        lambda _path: {
+    monkeypatch.setattr(backend_model_catalog.paths, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, old_url)
+    backend_model_catalog._write_cached_remote_payload(
+        {
             "catalog": {
                 "schema_version": 1,
                 "backends": {
                     "codex": {"models": [{"id": "gpt-from-old-source"}]}
                 },
             },
-            "source_key": backend_model_catalog._remote_catalog_source_key(old_url),
-        },
+            "checked_at": 100.0,
+            "error": None,
+        }
     )
+    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, new_url)
+    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 101.0)
     monkeypatch.setattr(
         backend_model_catalog,
         "schedule_remote_catalog_refresh",
@@ -1189,6 +1220,67 @@ def test_builtin_snapshot_rejects_remote_cache_from_previous_url(monkeypatch):
         item["id"] for item in snapshot["models"]
     }
     assert refreshes == [True]
+    assert set(_persisted_remote_records(tmp_path)) == {
+        backend_model_catalog._remote_catalog_source_key(old_url)
+    }
+
+
+def test_source_switch_is_not_suppressed_by_previous_source_failure(
+    monkeypatch,
+    tmp_path,
+):
+    old_url = "https://old.example.test/catalog.json"
+    new_url = "https://new.example.test/catalog.json"
+    refreshes = []
+    monkeypatch.setattr(backend_model_catalog.paths, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, old_url)
+    backend_model_catalog._write_cached_remote_payload(
+        {
+            "catalog": {
+                "schema_version": 1,
+                "backends": {
+                    "codex": {"models": [{"id": "gpt-from-old-source"}]}
+                },
+            },
+            "fetched_at": 100.0,
+            "checked_at": 150.0,
+            "failed_at": 200.0,
+            "error": "old source failed",
+        }
+    )
+    monkeypatch.setenv(backend_model_catalog.REMOTE_CATALOG_URL_ENV, new_url)
+    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 201.0)
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "schedule_remote_catalog_refresh",
+        lambda: refreshes.append(True) or True,
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_read_complete_catalog",
+        lambda _path: {},
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_read_codex_models_cache_with_status",
+        lambda: ([], False),
+    )
+
+    snapshot = backend_model_catalog.backend_builtin_snapshot(
+        "codex",
+        cli_installed=False,
+    )
+
+    assert snapshot["complete"] is False
+    assert "gpt-from-old-source" not in {
+        item["id"] for item in snapshot["models"]
+    }
+    assert refreshes == [True]
+    current_key = backend_model_catalog._remote_catalog_source_key(new_url)
+    assert backend_model_catalog._read_cached_remote_payload(
+        backend_model_catalog.get_cached_catalog_path(),
+        source_key=current_key,
+    ) == {}
 
 
 def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
@@ -1226,9 +1318,16 @@ def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
 
     write_remote("gpt-file-generation-one")
     first = backend_model_catalog.backend_builtin_snapshot("codex", schedule_refresh=False)
-    backend_model_catalog._REMOTE_MEMORY_CACHE.update(
-        {"catalog": {"schema_version": 1, "backends": {"codex": {"models": [{"id": "gpt-stale"}]}}}}
+    source_key = backend_model_catalog._remote_catalog_source_key(
+        backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
     )
+    backend_model_catalog._REMOTE_MEMORY_CACHE[source_key] = {
+        "source_key": source_key,
+        "catalog": {
+            "schema_version": 1,
+            "backends": {"codex": {"models": [{"id": "gpt-stale"}]}},
+        },
+    }
     write_remote("gpt-file-generation-two")
     second = backend_model_catalog.backend_builtin_snapshot("codex", schedule_refresh=False)
 
