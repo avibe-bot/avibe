@@ -935,6 +935,7 @@
       "backend_model_locked": "Claude Code Default and built-in model origins cannot be changed.",
       "backend_model_in_route": "Clear this model's route before removing it from the backend model list.",
       "backend_model_conflict": "This backend model changed elsewhere. Reload the list and retry.",
+      "candidate_suppliers_changed": "The available suppliers changed. Reload the model choices and confirm again.",
       "models_dev_unavailable": "models.dev is unavailable. Enter the model metadata manually or retry later.",
       "codex_catalog_unavailable": "Codex could not prepare the local Model Hub catalog. Retry this turn.",
       "engine_down": "The local model gateway is unavailable.",

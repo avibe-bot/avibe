@@ -324,6 +324,21 @@
           }
         }
       ]
+    },
+    {
+      "id": "M9",
+      "vocabulary": "backend model creation origins",
+      "rule": "equality",
+      "sets": [
+        {
+          "schema": "backend-model.schema.json",
+          "paths": ["/properties/origin"]
+        },
+        {
+          "schema": "api-response.schema.json",
+          "paths": ["/definitions/ModelCandidate/properties/origin"]
+        }
+      ]
     }
   ],
   "decision_tables": [
@@ -795,6 +810,48 @@
           "kind": "marker",
           "file": "docs/plans/model-hub-contracts/api.md",
           "prefix": "oauth_terminal."
+        }
+      ]
+    },
+    {
+      "id": "D23",
+      "domain": "stale candidate error code",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "api-response.schema.json",
+        "paths": ["/definitions/CandidateSuppliersChangedResponse/properties/error"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: candidate.error "
+        },
+        {
+          "kind": "marker_tail",
+          "file": "ui/src/components/settings/models/serverCopy.ts",
+          "marker": "authority-consumer: candidate.error "
+        }
+      ]
+    },
+    {
+      "id": "D24",
+      "domain": "backend model route guard UI copy",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "guard-refusal.schema.json",
+        "paths": ["/properties/error"],
+        "exclude": [
+          "source_last_supplier",
+          "source_in_route_chain",
+          "source_model_in_route_chain"
+        ]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "ui/src/components/settings/models/serverCopy.ts",
+          "marker": "authority-consumer: catalog.guard.error "
         }
       ]
     }

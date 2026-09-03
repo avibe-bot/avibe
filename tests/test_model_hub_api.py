@@ -65,9 +65,7 @@ from vibe.ui_server import app
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
 SOURCE_EDIT_VALIDATION_CASES = json.loads(
-    Path("tests/fixtures/model_hub_source_edit_validation.json").read_text(
-        encoding="utf-8"
-    )
+    Path("tests/fixtures/model_hub_source_edit_validation.json").read_text(encoding="utf-8")
 )
 
 
@@ -82,6 +80,9 @@ def _schema(name: str) -> dict:
 
 API_RESPONSE_CONTRACT = _schema("api-response.schema.json")
 API_RESPONSE_ROUTES = API_RESPONSE_CONTRACT["x-model-hub-routes"]
+API_RESPONSE_EXERCISES = [
+    (route, exercise) for route in API_RESPONSE_ROUTES for exercise in route.get("exercises", [route.get("exercise")])
+]
 
 
 def _assert_valid(name: str, payload: dict) -> None:
@@ -217,9 +218,7 @@ class FakeAdapter:
     ):
         self.credential_count += 1
         replacement_ref = f"cred_test{self.credential_count:03d}"
-        self.retargeted_credentials.append(
-            (credential_ref, vendor, protocol, base_url, replacement_ref)
-        )
+        self.retargeted_credentials.append((credential_ref, vendor, protocol, base_url, replacement_ref))
         return replacement_ref
 
     async def credential_supports_refresh(self, credential_ref):
@@ -375,18 +374,13 @@ def _refresh_fixture_routes(config: ModelHubConfig) -> None:
     by_id = {source.id: source for source in config.sources}
     for backend, agent in config.agents.items():
         agent.sources.order = config.recommended_source_order(backend)
-        agent.routes = {
-            model_id: ModelHubRouteConfig()
-            for model_id in agent.routes
-        }
+        agent.routes = {model_id: ModelHubRouteConfig() for model_id in agent.routes}
         for source_id in agent.sources.order:
             source = by_id[source_id]
             for model in source.models:
                 if agent.menu_kind == "fixed" and model.id not in agent.routes:
                     continue
-                if agent.menu_kind == "open" and (
-                    agent.menu is None or model.id not in agent.menu.checked
-                ):
+                if agent.menu_kind == "open" and (agent.menu is None or model.id not in agent.menu.checked):
                     continue
                 route = agent.routes.setdefault(model.id, ModelHubRouteConfig())
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, model.id))
@@ -606,22 +600,18 @@ def test_api_response_registry_exactly_covers_contract_and_server_routes():
             re.MULTILINE,
         )
     }
-    registered = {
-        (entry["method"], entry["path"])
-        for entry in API_RESPONSE_ROUTES
-    }
+    registered = {(entry["method"], entry["path"]) for entry in API_RESPONSE_ROUTES}
     assert registered == documented, (
         "api-response.schema.json must enumerate exactly the api.md route table; "
         f"missing={sorted(documented - registered)}, extra={sorted(registered - documented)}"
     )
-    assert len(registered) == len(API_RESPONSE_ROUTES), (
-        "api-response.schema.json contains duplicate endpoint entries"
-    )
+    assert len(registered) == len(API_RESPONSE_ROUTES), "api-response.schema.json contains duplicate endpoint entries"
 
     response_schemas = API_RESPONSE_CONTRACT["definitions"]
     for entry in API_RESPONSE_ROUTES:
         endpoint = f"{entry['method']} {entry['path']}"
-        assert "exercise" in entry, f"{endpoint}: response exercise is missing"
+        exercises = entry.get("exercises", [entry.get("exercise")])
+        assert all(exercises), f"{endpoint}: response exercise is missing"
         assert entry["response_schema"] in response_schemas, (
             f"{endpoint}: response schema {entry['response_schema']!r} is missing"
         )
@@ -632,10 +622,7 @@ def test_api_response_registry_exactly_covers_contract_and_server_routes():
         if route.path.startswith("/api/models/")
         for method in route.methods or ()
     }
-    expected = {
-        (method, _canonical_contract_route(path))
-        for method, path in documented
-    }
+    expected = {(method, _canonical_contract_route(path)) for method, path in documented}
     assert actual == expected, (
         "Model Hub server routes must match api.md; "
         f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
@@ -651,31 +638,19 @@ def test_api_response_conformance_diagnostic_names_the_offending_field(tmp_path)
     }
     body["agents"][0]["model_supply"][0].pop("has_runnable_hop")
     validator = Draft7Validator(
-        {
-            "$ref": (
-                "model-hub/api-response.schema.json#/definitions/"
-                "AgentListResponse"
-            )
-        },
+        {"$ref": ("model-hub/api-response.schema.json#/definitions/AgentListResponse")},
         registry=_api_response_registry(),
         format_checker=FormatChecker(),
     )
 
     error = _response_validation_error(list(validator.iter_errors(body)))
 
-    assert _response_error_path(error) == (
-        "$.agents[0].model_supply[0].has_runnable_hop"
-    )
+    assert _response_error_path(error) == ("$.agents[0].model_supply[0].has_runnable_hop")
 
 
 def test_oauth_result_response_discriminates_terminal_intent_and_tail():
     validator = Draft7Validator(
-        {
-            "$ref": (
-                "model-hub/api-response.schema.json#/definitions/"
-                "OAuthResultResponse"
-            )
-        },
+        {"$ref": ("model-hub/api-response.schema.json#/definitions/OAuthResultResponse")},
         registry=_api_response_registry(),
         format_checker=FormatChecker(),
     )
@@ -683,9 +658,7 @@ def test_oauth_result_response_discriminates_terminal_intent_and_tail():
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     for model in source["models"]:
         model["retired"] = False
-    source["adopted_by"] = [
-        {"backend": "claude", "menu_model": "claude-opus-4-6"}
-    ]
+    source["adopted_by"] = [{"backend": "claude", "menu_model": "claude-opus-4-6"}]
     envelope = {"ok": True, "contract_version": CONTRACT_VERSION}
 
     assert not list(validator.iter_errors({**envelope, "flow": flow}))
@@ -710,31 +683,22 @@ def test_oauth_result_response_discriminates_terminal_intent_and_tail():
         "interrupted_pairs": [],
     }
     assert not list(validator.iter_errors(reauth_result))
-    assert list(
-        validator.iter_errors(
-            {**create_result, "flow": {**success_flow, "intent": "reauth"}}
-        )
-    )
-    assert list(
-        validator.iter_errors(
-            {**reauth_result, "flow": {**success_flow, "intent": "create"}}
-        )
-    )
+    assert list(validator.iter_errors({**create_result, "flow": {**success_flow, "intent": "reauth"}}))
+    assert list(validator.iter_errors({**reauth_result, "flow": {**success_flow, "intent": "create"}}))
 
 
 @pytest.mark.parametrize(
-    "route_contract",
-    API_RESPONSE_ROUTES,
-    ids=lambda entry: f"{entry['method']} {entry['path']}",
+    ("route_contract", "exercise"),
+    API_RESPONSE_EXERCISES,
+    ids=lambda value: (f"{value['method']} {value['path']}" if "method" in value else value.get("setup", "plain")),
 )
 def test_every_model_hub_endpoint_returns_its_contract_response(
     monkeypatch,
     tmp_path,
     route_contract,
+    exercise,
 ):
     endpoint = f"{route_contract['method']} {route_contract['path']}"
-    exercise = route_contract.get("exercise")
-    assert exercise is not None, f"{endpoint}: response exercise is missing"
 
     isolated_home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(isolated_home))
@@ -752,7 +716,56 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
         "headers": csrf_headers(client, base_url),
         "base_url": base_url,
     }
-    if "json" in exercise:
+    setup = exercise.get("setup")
+    if setup in {"backend_model_guard", "backend_model_forced_removal"}:
+        baseline = service.backend_catalog_models("claude")
+        model_id = "claude-opus-4-6"
+        request_kwargs["json"] = {
+            "baseline": baseline,
+            "models": [model for model in baseline if model["id"] != model_id],
+        }
+        if setup == "backend_model_forced_removal":
+            request_kwargs["json"].update(
+                {
+                    "force": True,
+                    "would_remove_hops": [
+                        {
+                            "backend": "claude",
+                            "menu_model": model_id,
+                            "source_id": "src_conform001",
+                            "model_id": model_id,
+                            "position": 1,
+                        }
+                    ],
+                    "would_interrupt": [{"backend": "claude", "model_id": model_id, "agents": []}],
+                }
+            )
+    elif setup == "candidate_suppliers_guard":
+        baseline = service.backend_catalog_models("claude")
+        model_id = "claude-provider-candidate"
+        request_kwargs["json"] = {
+            "baseline": baseline,
+            "models": [
+                *baseline,
+                {
+                    "id": model_id,
+                    "display_name": None,
+                    "origin": "provider",
+                    "models_dev_id": None,
+                    "context_window": None,
+                    "max_output_tokens": None,
+                    "input_modalities": [],
+                    "output_modalities": [],
+                    "supports_tools": None,
+                    "supports_reasoning": None,
+                    "reasoning_efforts": [],
+                    "locked": False,
+                    "routeable": True,
+                },
+            ],
+            "expected_suppliers": {model_id: [{"source_id": "src_conform001", "model_id": model_id}]},
+        }
+    elif "json" in exercise:
         request_kwargs["json"] = exercise["json"]
 
     response = getattr(client, route_contract["method"].lower())(
@@ -765,22 +778,22 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
     )
 
     validator = Draft7Validator(
-        {
-            "$ref": (
-                "model-hub/api-response.schema.json#/definitions/"
-                f"{route_contract['response_schema']}"
-            )
-        },
+        {"$ref": (f"model-hub/api-response.schema.json#/definitions/{route_contract['response_schema']}")},
         registry=_api_response_registry(),
         format_checker=FormatChecker(),
     )
     errors = list(validator.iter_errors(body))
     if errors:
         error = _response_validation_error(errors)
-        pytest.fail(
-            f"{endpoint}: response field {_response_error_path(error)}: "
-            f"{error.message}"
-        )
+        pytest.fail(f"{endpoint}: response field {_response_error_path(error)}: {error.message}")
+    agent_payloads = []
+    if isinstance(body.get("agent"), dict):
+        agent_payloads.append(body["agent"])
+    if isinstance(body.get("agents"), list):
+        agent_payloads.extend(item for item in body["agents"] if isinstance(item, dict))
+    for agent_payload in agent_payloads:
+        assert "removed_model_ids" not in agent_payload
+        assert "builtin_baseline_initialized" not in agent_payload
 
 
 def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
@@ -1439,9 +1452,7 @@ def test_api_key_create_route_persists_client_nonce_for_list_reconciliation(
     assert request_body["key"] not in json.dumps(body)
 
     listed = client.get("/api/models/sources", base_url=base_url).get_json()
-    assert [source["client_nonce"] for source in listed["sources"]] == [
-        request_body["client_nonce"]
-    ]
+    assert [source["client_nonce"] for source in listed["sources"]] == [request_body["client_nonce"]]
 
 
 @pytest.mark.parametrize(
@@ -1755,9 +1766,7 @@ def test_source_create_nonce_retains_unsettled_cleanup_until_restart(tmp_path):
             adapter=restarted_adapter,
             events=BoundedEventLog(tmp_path / "restarted-events.json"),
             oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
-            revocations=CredentialRevocationJournal(
-                tmp_path / "restarted-revocations.json"
-            ),
+            revocations=CredentialRevocationJournal(tmp_path / "restarted-revocations.json"),
         )
         created = await restarted.create_source(payload)
         assert created["source"]["client_nonce"] == payload["client_nonce"]
@@ -1938,11 +1947,7 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         refreshed.append(changed_backend)
 
     service.backend_catalog_changed = refresh
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == backend
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == backend)
     added = {
         "id": model_id,
         "display_name": "DeepSeek V4",
@@ -1959,11 +1964,9 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         "routeable": True,
     }
 
-    response = asyncio.run(
-        service.set_agent_models(backend, baseline, [*baseline, added])
-    )
+    response = asyncio.run(service.set_agent_models(backend, baseline, [*baseline, added]))
 
-    assert response["catalog_models"][-1] == added
+    assert response["agent"]["catalog_models"][-1] == added
     assert store.config.agents[backend].routes[model_id].hops == ()
     assert refreshed == [backend]
     if backend == "opencode":
@@ -1971,35 +1974,626 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
 
     edited = {**added, "display_name": "DeepSeek V4 edited", "context_window": 262_144}
     desired_catalog = (
-        [response["catalog_models"][0], edited, *response["catalog_models"][1:-1]]
+        [response["agent"]["catalog_models"][0], edited, *response["agent"]["catalog_models"][1:-1]]
         if backend == "claude"
-        else [edited, *response["catalog_models"][:-1]]
+        else [edited, *response["agent"]["catalog_models"][:-1]]
     )
     edited_response = asyncio.run(
         service.set_agent_models(
             backend,
-            response["catalog_models"],
+            response["agent"]["catalog_models"],
             desired_catalog,
         )
     )
-    assert next(
-        model
-        for model in edited_response["catalog_models"]
-        if model["id"] == model_id
-    ) == edited
+    assert next(model for model in edited_response["agent"]["catalog_models"] if model["id"] == model_id) == edited
     if backend != "claude":
-        assert edited_response["catalog_models"][0] == edited
+        assert edited_response["agent"]["catalog_models"][0] == edited
     assert refreshed == [backend, backend]
+
+
+def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    overlong_effort = "x" * 65
+    first = ModelHubSourceConfig(
+        id="src_first0001",
+        kind="api_key",
+        vendor="openai",
+        display_name="First provider",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="shared-provider-model",
+                provenance="discovered",
+                display_name="First label",
+                reasoning_efforts=["low"],
+            ),
+            ModelHubModelConfig(
+                id="new-provider-model",
+                provenance="discovered",
+                display_name="First proposal",
+                reasoning_efforts=["low"],
+            ),
+        ],
+        credential_ref="cred_first0001",
+    )
+    second = ModelHubSourceConfig(
+        id="src_second001",
+        kind="api_key",
+        vendor="custom",
+        display_name="Second provider",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="shared-provider-model",
+                provenance="manual",
+                display_name="Second label",
+                reasoning_efforts=["high", overlong_effort],
+            ),
+            ModelHubModelConfig(
+                id="new-provider-model",
+                provenance="manual",
+                display_name="Second proposal",
+                reasoning_efforts=["high", overlong_effort],
+            ),
+        ],
+        credential_ref="cred_second001",
+    )
+    store.config.sources = [first, second]
+    agent = store.config.agents["codex"]
+    agent.sources.order = [second.id, first.id]
+    agent.models.append(
+        ModelHubBackendModelConfig(
+            id="shared-provider-model",
+            origin="provider",
+            display_name="Saved label",
+        )
+    )
+    legacy_overlong_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    agent.models.append(
+        ModelHubBackendModelConfig(
+            id=legacy_overlong_id,
+            origin="manual",
+        )
+    )
+    agent.routes["shared-provider-model"] = ModelHubRouteConfig()
+    agent.routes[legacy_overlong_id] = ModelHubRouteConfig()
+    agent.removed_model_ids.extend(["gpt-restorable", "gpt-withdrawn"])
+    existing_builtin_id = agent.models[0].id
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.backend_builtin_models",
+        lambda backend, **_kwargs: (
+            [
+                {"id": existing_builtin_id},
+                {
+                    "id": "gpt-restorable",
+                    "display_name": "GPT Restorable",
+                    "reasoning_efforts": ["low", overlong_effort],
+                },
+            ]
+            if backend == "codex"
+            else []
+        ),
+    )
+
+    candidates = service.agent_model_candidates("codex")
+
+    assert candidates["builtin"] == [
+        {
+            "id": "gpt-restorable",
+            "display_name": "GPT Restorable",
+            "reasoning_efforts": ["low"],
+            "suppliers": [],
+            "origin": "builtin",
+        }
+    ]
+    current = next(item for item in candidates["in_list"] if item["id"] == "shared-provider-model")
+    assert current == {
+        "id": "shared-provider-model",
+        "display_name": "Saved label",
+        "reasoning_efforts": [],
+        "suppliers": [
+            {
+                "source_id": second.id,
+                "source_name": second.display_name,
+                "model_id": "shared-provider-model",
+            },
+            {
+                "source_id": first.id,
+                "source_name": first.display_name,
+                "model_id": "shared-provider-model",
+            },
+        ],
+        "origin": "provider",
+    }
+    assert candidates["providers"] == [
+        {
+            "id": "new-provider-model",
+            "display_name": "Second proposal",
+            "reasoning_efforts": ["high", "low"],
+            "suppliers": [
+                {
+                    "source_id": second.id,
+                    "source_name": second.display_name,
+                    "model_id": "new-provider-model",
+                },
+                {
+                    "source_id": first.id,
+                    "source_name": first.display_name,
+                    "model_id": "new-provider-model",
+                },
+            ],
+            "origin": "provider",
+        }
+    ]
+    assert len(candidates["in_list"]) == len(service.backend_catalog_models("codex"))
+    assert legacy_overlong_id in {item["id"] for item in candidates["in_list"]}
+    assert "gpt-withdrawn" not in {item["id"] for group in candidates.values() for item in group}
+    validator = Draft7Validator(
+        {"$ref": ("model-hub/api-response.schema.json#/definitions/AgentModelCandidatesResponse")},
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    )
+    assert not list(
+        validator.iter_errors(
+            {
+                "ok": True,
+                "contract_version": CONTRACT_VERSION,
+                "candidates": candidates,
+            }
+        )
+    )
+
+
+def test_opencode_candidates_collapse_custom_vendors_into_one_identity(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    sources = [
+        ModelHubSourceConfig(
+            id=f"src_custom00{index}",
+            kind="api_key",
+            vendor=vendor,
+            display_name=f"Relay {index}",
+            protocol="openai_chat",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="shared-model", provenance="discovered")],
+            credential_ref=f"cred_custom00{index}",
+        )
+        for index, vendor in enumerate(("relay-a", "relay-b"), start=1)
+    ]
+    store.config.sources = sources
+    store.config.agents["opencode"].sources.order = [source.id for source in sources]
+
+    candidates = service.agent_model_candidates("opencode")
+
+    assert candidates["builtin"] == []
+    assert [item["id"] for item in candidates["providers"]] == ["custom/shared-model"]
+    assert [supplier["source_id"] for supplier in candidates["providers"][0]["suppliers"]] == [
+        source.id for source in sources
+    ]
+
+
+def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    invalid_claude_id = "not-a-claude-family"
+    too_long = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    source = ModelHubSourceConfig(
+        id="src_invalid001",
+        kind="api_key",
+        vendor="custom",
+        display_name="Invalid inventory",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id=invalid_claude_id, provenance="manual"),
+            ModelHubModelConfig(id=too_long, provenance="discovered"),
+        ],
+        credential_ref="cred_invalid001",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].sources.order = [source.id]
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.backend_builtin_models",
+        lambda _backend, **_kwargs: [
+            {"id": invalid_claude_id},
+            {"id": too_long},
+        ],
+    )
+
+    candidates = service.agent_model_candidates("claude")
+
+    ids = {item["id"] for group in candidates.values() for item in group}
+    assert invalid_claude_id not in ids
+    assert too_long not in ids
+
+
+def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "provider-model"
+    sources = [
+        ModelHubSourceConfig(
+            id=f"src_supply00{index}",
+            kind="api_key",
+            vendor="openai",
+            display_name=f"Supplier {index}",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id=model_id,
+                    provenance="manual" if index == 2 else "discovered",
+                    display_name=f"Proposed {index}",
+                    reasoning_efforts=["high"],
+                )
+            ],
+            credential_ref=f"cred_supply00{index}",
+        )
+        for index in (1, 2)
+    ]
+    store.config.sources = sources
+    agent = store.config.agents["codex"]
+    agent.sources.order = [source.id for source in reversed(sources)]
+    baseline = service.backend_catalog_models("codex")
+    added = {
+        "id": model_id,
+        "display_name": None,
+        "origin": "provider",
+        "models_dev_id": None,
+        "context_window": None,
+        "max_output_tokens": None,
+        "input_modalities": [],
+        "output_modalities": [],
+        "supports_tools": None,
+        "supports_reasoning": None,
+        "reasoning_efforts": [],
+        "locked": False,
+        "routeable": True,
+    }
+    before = store.config.to_payload()
+
+    result = asyncio.run(
+        service.set_agent_models(
+            "codex",
+            baseline,
+            [*baseline, added],
+            expected_suppliers={
+                model_id: [{"source_id": source.id, "model_id": model_id} for source in reversed(sources)]
+            },
+        )
+    )
+
+    assert result["agent"]["catalog_models"][-1] == added
+    assert [(hop.source_id, hop.model_id) for hop in store.config.agents["codex"].routes[model_id].hops] == [
+        (source.id, model_id) for source in reversed(sources)
+    ]
+    after = store.config.to_payload()
+    assert after["sources"] == before["sources"]
+    assert after["agents"]["claude"] == before["agents"]["claude"]
+    assert after["agents"]["opencode"] == before["agents"]["opencode"]
+    assert {key: value for key, value in after["agents"]["codex"]["routes"].items() if key != model_id} == before[
+        "agents"
+    ]["codex"]["routes"]
+
+
+def test_backend_catalog_supplier_change_refuses_without_committing(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    model_id = "provider-stale-model"
+    source = ModelHubSourceConfig(
+        id="src_stale0001",
+        kind="api_key",
+        vendor="openai",
+        display_name="Current supplier",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_stale0001",
+    )
+    store.config.sources = [source]
+    store.config.agents["codex"].sources.order = [source.id]
+    baseline = service.backend_catalog_models("codex")
+    added = {**baseline[0], "id": model_id, "origin": "provider"}
+    before = store.config.to_payload()
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.set_agent_models(
+                "codex",
+                baseline,
+                [*baseline, added],
+                expected_suppliers={model_id: []},
+            )
+        )
+
+    assert raised.value.code == "candidate_suppliers_changed"
+    assert raised.value.status == 409
+    assert raised.value.data == {"changed": {model_id: [{"source_id": source.id, "model_id": model_id}]}}
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
+
+
+def test_concurrent_same_id_add_keeps_the_route_matched_by_the_first_writer(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "provider-concurrent-model"
+    source = ModelHubSourceConfig(
+        id="src_concur001",
+        kind="api_key",
+        vendor="openai",
+        display_name="Concurrent supplier",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id=model_id, provenance="discovered"),
+            ModelHubModelConfig(id="first-writer-target", provenance="manual"),
+        ],
+        credential_ref="cred_concur001",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["codex"]
+    agent.sources.order = [source.id]
+    baseline = service.backend_catalog_models("codex")
+    added = {**baseline[0], "id": model_id, "origin": "provider"}
+    agent.models.append(ModelHubBackendModelConfig.from_payload(added))
+    agent.routes[model_id] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "first-writer-target"),))
+
+    result = asyncio.run(
+        service.set_agent_models(
+            "codex",
+            baseline,
+            [*baseline, added],
+            expected_suppliers={model_id: [{"source_id": source.id, "model_id": model_id}]},
+        )
+    )
+
+    assert [model["id"] for model in result["agent"]["catalog_models"]].count(model_id) == 1
+    assert [(hop.source_id, hop.model_id) for hop in store.config.agents["codex"].routes[model_id].hops] == [
+        (source.id, "first-writer-target")
+    ]
+
+
+def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_row(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    refreshed = []
+
+    async def refresh(backend):
+        refreshed.append(backend)
+
+    service.backend_catalog_changed = refresh
+    agent = store.config.agents["codex"]
+    agent.models = [
+        ModelHubBackendModelConfig(id="gpt-alpha", origin="builtin"),
+        ModelHubBackendModelConfig(id="provider-row", origin="provider"),
+        ModelHubBackendModelConfig(id="models-dev-row", origin="models_dev"),
+        ModelHubBackendModelConfig(id="manual-row", origin="manual"),
+        ModelHubBackendModelConfig(id="gpt-omega", origin="builtin"),
+        ModelHubBackendModelConfig(id="gpt-withdrawn", origin="builtin"),
+    ]
+    agent.routes = {model.id: ModelHubRouteConfig() for model in agent.models}
+    agent.removed_model_ids = ["gpt-hidden"]
+    source = ModelHubSourceConfig(
+        id="src_builtin001",
+        kind="api_key",
+        vendor="openai",
+        display_name="Built-in supplier",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="gpt-new", provenance="manual")],
+        credential_ref="cred_builtin001",
+    )
+    store.config.sources = [source]
+    agent.sources.order = [source.id]
+    snapshot = [
+        {"id": "gpt-alpha"},
+        {
+            "id": "gpt-new",
+            "display_name": "GPT New",
+            "reasoning_efforts": ["low", "x" * 65, "high"],
+        },
+        {"id": "gpt-omega"},
+        {"id": "gpt-hidden"},
+        {"id": "x" * (MODEL_ID_MAX_LENGTH + 1)},
+    ]
+    unchanged = {model.id: model.to_payload() for model in agent.models}
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"codex": {"complete": True, "models": snapshot}},
+    )
+
+    changed = asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    agent = store.config.agents["codex"]
+    assert changed == ["codex"]
+    assert [model.id for model in agent.models] == [
+        "gpt-alpha",
+        "provider-row",
+        "models-dev-row",
+        "manual-row",
+        "gpt-new",
+        "gpt-omega",
+        "gpt-withdrawn",
+    ]
+    created = next(model for model in agent.models if model.id == "gpt-new")
+    assert created.display_name == "GPT New"
+    assert created.reasoning_efforts == ["low", "high"]
+    assert [(hop.source_id, hop.model_id) for hop in agent.routes["gpt-new"].hops] == [(source.id, "gpt-new")]
+    assert "gpt-hidden" not in {model.id for model in agent.models}
+    assert "x" * (MODEL_ID_MAX_LENGTH + 1) not in {model.id for model in agent.models}
+    assert {model.id: model.to_payload() for model in agent.models if model.id in unchanged} == unchanged
+    assert refreshed == ["codex"]
+
+
+def test_builtin_reconcile_waits_for_baseline_initialization(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["codex"]
+    agent.builtin_baseline_initialized = False
+    original = copy.deepcopy(agent.to_payload())
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {
+            "codex": {
+                "complete": True,
+                "models": [{"id": "gpt-new"}],
+            }
+        },
+    )
+
+    changed = asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    assert changed == []
+    assert store.config.agents["codex"].to_payload() == original
+
+
+def test_claude_reconcile_excludes_non_claude_cli_override(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {
+            "claude": {
+                "complete": True,
+                "models": [
+                    {"id": "deepseek-v3.2"},
+                    {"id": "claude-sonnet-9"},
+                ],
+            }
+        },
+    )
+
+    asyncio.run(service.reconcile_builtin_models(("claude",)))
+
+    model_ids = {model.id for model in store.config.agents["claude"].models}
+    assert "deepseek-v3.2" not in model_ids
+    assert "claude-sonnet-9" in model_ids
+
+
+def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, store, _adapter = _service(tmp_path)
+    existing = store.config.agents["codex"].models[0].id
+    snapshot = {
+        "codex": {
+            "complete": True,
+            "generation": "generation-one",
+            "models": [{"id": existing}],
+        }
+    }
+    applies = []
+    original_apply = service._apply_builtin_reconcile
+
+    def apply(config, snapshots):
+        applies.append(tuple(snapshots))
+        return original_apply(config, snapshots)
+
+    monkeypatch.setattr(service, "_builtin_snapshots", lambda _backends: snapshot)
+    monkeypatch.setattr(service, "_apply_builtin_reconcile", apply)
+
+    assert asyncio.run(service.reconcile_builtin_models(("codex",))) == []
+    assert asyncio.run(service.reconcile_builtin_models(("codex",))) == []
+    assert applies == [("codex",)]
+
+    snapshot["codex"] = {
+        "complete": True,
+        "generation": "generation-two",
+        "models": [{"id": existing}, {"id": "gpt-pulled-on-read"}],
+    }
+    payload = asyncio.run(dispatch_model_hub_rpc(service, "get_agent_sources", {"backend": "codex"}))
+
+    assert "gpt-pulled-on-read" in payload["builtin_models"]
+    assert applies == [("codex",), ("codex",)]
+
+
+def test_backend_catalog_mutations_leave_every_unrelated_model_shape_byte_identical(
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["codex"]
+    seeded = [
+        ModelHubBackendModelConfig(id=f"shape-{origin}", origin=origin)
+        for origin in ("builtin", "provider", "models_dev", "manual")
+    ]
+    agent.models = seeded
+    agent.routes = {model.id: ModelHubRouteConfig() for model in seeded}
+
+    def untouched_state():
+        return json.dumps(
+            {
+                "models": [
+                    model.to_payload() for model in store.config.agents["codex"].models if model.id.startswith("shape-")
+                ],
+                "routes": {model.id: store.config.agents["codex"].routes[model.id].to_payload() for model in seeded},
+                "sources": [source.to_payload() for source in store.config.sources],
+                "source_order": store.config.agents["codex"].sources.to_payload(),
+                "other_agents": {
+                    backend: candidate.to_payload()
+                    for backend, candidate in store.config.agents.items()
+                    if backend != "codex"
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+    expected_untouched = untouched_state()
+    baseline = service.backend_catalog_models("codex")
+    added = {**baseline[-1], "id": "mutation-row", "origin": "manual"}
+    created = asyncio.run(service.set_agent_models("codex", baseline, [*baseline, added]))
+    assert untouched_state() == expected_untouched
+
+    edited = copy.deepcopy(created["agent"]["catalog_models"])
+    next(model for model in edited if model["id"] == "mutation-row")["display_name"] = "Edited"
+    updated = asyncio.run(
+        service.set_agent_models(
+            "codex",
+            created["agent"]["catalog_models"],
+            edited,
+        )
+    )
+    assert untouched_state() == expected_untouched
+
+    removed = [model for model in updated["agent"]["catalog_models"] if model["id"] != "mutation-row"]
+    asyncio.run(
+        service.set_agent_models(
+            "codex",
+            updated["agent"]["catalog_models"],
+            removed,
+        )
+    )
+    assert untouched_state() == expected_untouched
 
 
 def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_path):
     service, store, _adapter = _service(tmp_path)
     backend = "codex"
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == backend
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == backend)
     model_id = baseline[0]["id"]
     source = ModelHubSourceConfig(
         id="src_catalog01",
@@ -2018,6 +2612,10 @@ def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_pat
     store.config.agents[backend].routes[model_id] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
     )
+    before_sources = copy.deepcopy(store.config.to_payload()["sources"])
+    before_other_agents = {
+        name: copy.deepcopy(agent.to_payload()) for name, agent in store.config.agents.items() if name != backend
+    }
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(
@@ -2030,35 +2628,55 @@ def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_pat
 
     assert raised.value.code == "backend_model_in_route"
     assert raised.value.status == 409
+    assert raised.value.data["would_remove_hops"] == [
+        {
+            "backend": backend,
+            "menu_model": model_id,
+            "source_id": source.id,
+            "model_id": "upstream-model",
+            "position": 1,
+        }
+    ]
     assert store.config.agents[backend].models[0].id == model_id
+
+    result = asyncio.run(
+        service.set_agent_models(
+            backend,
+            baseline,
+            baseline[1:],
+            force=True,
+            confirmed_remove_hops=raised.value.data["would_remove_hops"],
+            confirmed_interruptions=raised.value.data["would_interrupt"],
+        )
+    )
+
+    assert result["removed_hops"] == raised.value.data["would_remove_hops"]
+    assert result["interrupted"] == raised.value.data["would_interrupt"]
+    assert model_id not in store.config.agents[backend].routes
+    assert model_id in store.config.agents[backend].removed_model_ids
+    assert store.config.to_payload()["sources"] == before_sources
+    assert {
+        name: agent.to_payload() for name, agent in store.config.agents.items() if name != backend
+    } == before_other_agents
 
 
 def test_backend_catalog_removes_model_with_empty_route(tmp_path):
     service, store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    store.config.agents["codex"].builtin_baseline_initialized = False
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     removed_id = baseline[0]["id"]
 
-    response = asyncio.run(
-        service.set_agent_models("codex", baseline, baseline[1:])
-    )
+    response = asyncio.run(service.set_agent_models("codex", baseline, baseline[1:]))
 
-    assert removed_id not in {
-        model["id"] for model in response["catalog_models"]
-    }
+    assert removed_id not in {model["id"] for model in response["agent"]["catalog_models"]}
     assert removed_id not in store.config.agents["codex"].routes
+    assert removed_id in store.config.agents["codex"].removed_model_ids
+    assert store.config.agents["codex"].builtin_baseline_initialized is False
 
 
 def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     added = {
         "id": "inserted-model",
         "display_name": None,
@@ -2083,9 +2701,10 @@ def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(
         )
     )
 
-    assert [model["id"] for model in response["catalog_models"]][
-        : len(baseline) + 1
-    ] == ["inserted-model", *(model["id"] for model in baseline)]
+    assert [model["id"] for model in response["agent"]["catalog_models"]][: len(baseline) + 1] == [
+        "inserted-model",
+        *(model["id"] for model in baseline),
+    ]
 
 
 def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path):
@@ -2095,21 +2714,18 @@ def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path):
     agent.models.append(ModelHubBackendModelConfig(id=legacy_id, origin="manual"))
     agent.routes[legacy_id] = ModelHubRouteConfig()
     baseline = next(
-        projected["catalog_models"]
-        for projected in service.list_agents()
-        if projected["backend"] == "codex"
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "codex"
     )
     desired = copy.deepcopy(baseline)
-    next(model for model in desired if model["id"] == legacy_id)[
-        "display_name"
-    ] = "Persisted legacy model"
+    next(model for model in desired if model["id"] == legacy_id)["display_name"] = "Persisted legacy model"
 
     response = asyncio.run(service.set_agent_models("codex", baseline, desired))
 
-    assert next(
-        model for model in response["catalog_models"] if model["id"] == legacy_id
-    )["display_name"] == "Persisted legacy model"
-    _assert_valid("agent-supply.schema.json", response)
+    assert (
+        next(model for model in response["agent"]["catalog_models"] if model["id"] == legacy_id)["display_name"]
+        == "Persisted legacy model"
+    )
+    _assert_valid("agent-supply.schema.json", response["agent"])
 
 
 def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
@@ -2121,26 +2737,20 @@ def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
     agent.models.append(ModelHubBackendModelConfig(id=legacy_id, origin="manual"))
     agent.routes[legacy_id] = ModelHubRouteConfig()
     baseline = next(
-        projected["catalog_models"]
-        for projected in service.list_agents()
-        if projected["backend"] == "claude"
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "claude"
     )
     desired = copy.deepcopy(baseline)
     desired[1]["display_name"] = "Unrelated edit"
 
     response = asyncio.run(service.set_agent_models("claude", baseline, desired))
 
-    assert any(model["id"] == legacy_id for model in response["catalog_models"])
-    assert response["catalog_models"][1]["display_name"] == "Unrelated edit"
+    assert any(model["id"] == legacy_id for model in response["agent"]["catalog_models"])
+    assert response["agent"]["catalog_models"][1]["display_name"] == "Unrelated edit"
 
 
 def test_backend_catalog_rejects_a_new_id_past_the_admission_bound(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     added = {
         **baseline[0],
         "id": "x" * (MODEL_ID_MAX_LENGTH + 1),
@@ -2155,11 +2765,7 @@ def test_backend_catalog_rejects_a_new_id_past_the_admission_bound(tmp_path):
 
 def test_backend_catalog_accepts_a_new_id_at_the_contract_bound(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     model_id = "x" * MODEL_ID_MAX_LENGTH
     added = {
         **baseline[0],
@@ -2167,40 +2773,28 @@ def test_backend_catalog_accepts_a_new_id_at_the_contract_bound(tmp_path):
         "origin": "manual",
     }
 
-    response = asyncio.run(
-        service.set_agent_models("codex", baseline, [*baseline, added])
-    )
+    response = asyncio.run(service.set_agent_models("codex", baseline, [*baseline, added]))
 
-    assert response["catalog_models"][-1]["id"] == model_id
+    assert response["agent"]["catalog_models"][-1]["id"] == model_id
 
 
 def test_backend_catalog_merges_an_unrelated_concurrent_edit(tmp_path):
     service, store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     assert len(baseline) >= 2
     desired = copy.deepcopy(baseline)
     desired[0]["display_name"] = "Caller edit"
     store.config.agents["codex"].models[1].display_name = "Concurrent edit"
 
-    response = asyncio.run(
-        service.set_agent_models("codex", baseline, desired)
-    )
+    response = asyncio.run(service.set_agent_models("codex", baseline, desired))
 
-    assert response["catalog_models"][0]["display_name"] == "Caller edit"
-    assert response["catalog_models"][1]["display_name"] == "Concurrent edit"
+    assert response["agent"]["catalog_models"][0]["display_name"] == "Caller edit"
+    assert response["agent"]["catalog_models"][1]["display_name"] == "Concurrent edit"
 
 
 def test_backend_catalog_rejects_a_concurrent_edit_to_the_same_row(tmp_path):
     service, store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     desired = copy.deepcopy(baseline)
     desired[0]["display_name"] = "Caller edit"
     store.config.agents["codex"].models[0].display_name = "Concurrent edit"
@@ -2216,30 +2810,20 @@ def test_backend_catalog_rejects_a_concurrent_edit_to_the_same_row(tmp_path):
 def test_backend_catalog_is_editable_in_direct_mode(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.config.agents["codex"].mode = "direct"
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     desired = copy.deepcopy(baseline)
     desired[0]["display_name"] = "Direct-mode edit"
 
-    response = asyncio.run(
-        service.set_agent_models("codex", baseline, desired)
-    )
+    response = asyncio.run(service.set_agent_models("codex", baseline, desired))
 
-    assert response["mode"] == "direct"
-    assert response["routes"] is None
-    assert response["catalog_models"][0]["display_name"] == "Direct-mode edit"
+    assert response["agent"]["mode"] == "direct"
+    assert response["agent"]["routes"] is None
+    assert response["agent"]["catalog_models"][0]["display_name"] == "Direct-mode edit"
 
 
 def test_backend_catalog_reports_duplicate_ids(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(
@@ -2255,11 +2839,7 @@ def test_backend_catalog_reports_duplicate_ids(tmp_path):
 
 def test_codex_catalog_treats_default_as_an_ordinary_model_id(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "codex"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
     added = {
         **baseline[0],
         "id": "default",
@@ -2267,29 +2847,20 @@ def test_codex_catalog_treats_default_as_an_ordinary_model_id(tmp_path):
         "origin": "manual",
     }
 
-    created = asyncio.run(
-        service.set_agent_models("codex", baseline, [*baseline, added])
-    )
-    desired = copy.deepcopy(created["catalog_models"])
-    next(model for model in desired if model["id"] == "default")[
-        "display_name"
-    ] = "Edited default"
-    edited = asyncio.run(
-        service.set_agent_models("codex", created["catalog_models"], desired)
-    )
+    created = asyncio.run(service.set_agent_models("codex", baseline, [*baseline, added]))
+    desired = copy.deepcopy(created["agent"]["catalog_models"])
+    next(model for model in desired if model["id"] == "default")["display_name"] = "Edited default"
+    edited = asyncio.run(service.set_agent_models("codex", created["agent"]["catalog_models"], desired))
 
-    assert next(
-        model for model in edited["catalog_models"] if model["id"] == "default"
-    )["display_name"] == "Edited default"
+    assert (
+        next(model for model in edited["agent"]["catalog_models"] if model["id"] == "default")["display_name"]
+        == "Edited default"
+    )
 
 
 def test_backend_catalog_rejects_client_claimed_builtin_origin(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     forged = {
         **baseline[1],
         "id": "unprefixed-third-party-model",
@@ -2304,14 +2875,12 @@ def test_backend_catalog_rejects_client_claimed_builtin_origin(tmp_path):
 
 @pytest.mark.parametrize(
     ("origin", "replacement"),
-    (
-        ("manual", "models_dev"),
-        ("manual", "builtin"),
-        ("models_dev", "manual"),
-        ("models_dev", "builtin"),
-        ("builtin", "manual"),
-        ("builtin", "models_dev"),
-    ),
+    [
+        (origin, replacement)
+        for origin in ("builtin", "provider", "models_dev", "manual")
+        for replacement in ("builtin", "provider", "models_dev", "manual")
+        if origin != replacement
+    ],
 )
 def test_backend_catalog_keeps_every_existing_origin_immutable(
     tmp_path,
@@ -2324,14 +2893,10 @@ def test_backend_catalog_keeps_every_existing_origin_immutable(
     agent.models.append(ModelHubBackendModelConfig(id=model_id, origin=origin))
     agent.routes[model_id] = ModelHubRouteConfig()
     baseline = next(
-        projected["catalog_models"]
-        for projected in service.list_agents()
-        if projected["backend"] == "codex"
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "codex"
     )
     desired = copy.deepcopy(baseline)
-    next(model for model in desired if model["id"] == model_id)[
-        "origin"
-    ] = replacement
+    next(model for model in desired if model["id"] == model_id)["origin"] = replacement
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("codex", baseline, desired))
@@ -2347,21 +2912,15 @@ def test_backend_catalog_rejects_an_origin_forged_into_the_baseline(tmp_path):
     agent.models.append(ModelHubBackendModelConfig(id=model_id, origin="manual"))
     agent.routes[model_id] = ModelHubRouteConfig()
     observed = next(
-        projected["catalog_models"]
-        for projected in service.list_agents()
-        if projected["backend"] == "codex"
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "codex"
     )
     forged_baseline = copy.deepcopy(observed)
     forged_desired = copy.deepcopy(observed)
     for catalog in (forged_baseline, forged_desired):
-        next(model for model in catalog if model["id"] == model_id)[
-            "origin"
-        ] = "models_dev"
+        next(model for model in catalog if model["id"] == model_id)["origin"] = "models_dev"
 
     with pytest.raises(ModelHubError) as raised:
-        asyncio.run(
-            service.set_agent_models("codex", forged_baseline, forged_desired)
-        )
+        asyncio.run(service.set_agent_models("codex", forged_baseline, forged_desired))
 
     assert raised.value.code == "backend_model_locked"
     assert next(model for model in agent.models if model.id == model_id).origin == "manual"
@@ -2372,16 +2931,10 @@ def test_backend_catalog_restores_a_removed_claude_builtin_alias(
     tmp_path,
     model_id,
 ):
-    service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    service, store, _adapter = _service(tmp_path)
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     without_alias = [model for model in baseline if model["id"] != model_id]
-    removed = asyncio.run(
-        service.set_agent_models("claude", baseline, without_alias)
-    )
+    removed = asyncio.run(service.set_agent_models("claude", baseline, without_alias))
     restored = {
         **next(model for model in baseline if model["id"] == model_id),
         "origin": "manual",
@@ -2390,21 +2943,18 @@ def test_backend_catalog_restores_a_removed_claude_builtin_alias(
     response = asyncio.run(
         service.set_agent_models(
             "claude",
-            removed["catalog_models"],
-            [*removed["catalog_models"], restored],
+            removed["agent"]["catalog_models"],
+            [*removed["agent"]["catalog_models"], restored],
         )
     )
 
-    assert response["catalog_models"][-1] == restored
+    assert response["agent"]["catalog_models"][-1] == restored
+    assert model_id not in store.config.agents["claude"].removed_model_ids
 
 
 def test_backend_catalog_still_rejects_an_unknown_unprefixed_claude_id(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     unknown = {
         **baseline[1],
         "id": "deepseek-v4",
@@ -2421,11 +2971,7 @@ def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline
     tmp_path,
 ):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     forged = {
         **baseline[1],
         "id": "deepseek-v4",
@@ -2446,11 +2992,7 @@ def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline
 
 def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("claude", baseline, baseline[1:]))
@@ -2465,11 +3007,7 @@ def test_backend_catalog_rejects_any_claude_locked_default_mutation(
     mutation,
 ):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     desired = copy.deepcopy(baseline)
     if mutation == "edit":
         desired[0]["display_name"] = "Not the server sentinel"
@@ -2487,11 +3025,7 @@ def test_backend_catalog_rejects_any_claude_locked_default_mutation(
 
 def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(
-        agent["catalog_models"]
-        for agent in service.list_agents()
-        if agent["backend"] == "claude"
-    )
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     invalid = {
         **baseline[1],
         "id": "deepseek-v4",
@@ -2520,9 +3054,7 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
 def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda include_npm_global, backends: calls.append(
-        (include_npm_global, backends)
-    )
+    service.cli_presence_refresh = lambda include_npm_global, backends: calls.append((include_npm_global, backends))
     service.cli_present_override = lambda backend: backend == "codex"
 
     agents = {agent["backend"]: agent for agent in service.list_agents()}
@@ -2551,29 +3083,21 @@ def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
         hops=(ModelHubRouteHopConfig(source.id, model_id),)
     )
 
-    supplied = {
-        row["model_id"]: row
-        for row in service.get_agent_sources("claude")["model_supply"]
-    }
+    supplied = {row["model_id"]: row for row in service.get_agent_sources("claude")["model_supply"]}
 
     assert supplied[model_id] == {
         "model_id": model_id,
         "chain_length": 1,
         "has_runnable_hop": True,
     }
-    empty_model = next(
-        model for model, row in supplied.items() if row["chain_length"] == 0
-    )
+    empty_model = next(model for model, row in supplied.items() if row["chain_length"] == 0)
     assert supplied[empty_model]["has_runnable_hop"] is False
 
     source.state = ModelHubSourceStateConfig(
         status="needs_action",
         detail_key="models.source.needs_action.oauth_expired",
     )
-    blocked = {
-        row["model_id"]: row
-        for row in service.get_agent_sources("claude")["model_supply"]
-    }
+    blocked = {row["model_id"]: row for row in service.get_agent_sources("claude")["model_supply"]}
     assert blocked[model_id]["chain_length"] == 1
     assert blocked[model_id]["has_runnable_hop"] is False
 
@@ -2633,9 +3157,7 @@ def test_agent_supply_mutation_rpc_refreshes_cli_presence_before_writing(tmp_pat
 
     service, store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda include_npm_global, backends: calls.append(
-        (include_npm_global, backends)
-    )
+    service.cli_presence_refresh = lambda include_npm_global, backends: calls.append((include_npm_global, backends))
     service.cli_present_override = lambda backend: backend == "claude"
 
     payload = asyncio.run(
@@ -2719,24 +3241,10 @@ def test_agent_supply_rpc_publishes_explicit_deep_discovery_after_fast_reads(
         deep_release.set()
 
     first, second, refreshed, joined = payloads
-    assert (
-        next(agent for agent in first if agent["backend"] == "codex")["cli_present"]
-        is False
-    )
-    assert (
-        next(agent for agent in second if agent["backend"] == "codex")["cli_present"]
-        is False
-    )
-    assert (
-        next(agent for agent in refreshed if agent["backend"] == "codex")[
-            "cli_present"
-        ]
-        is True
-    )
-    assert (
-        next(agent for agent in joined if agent["backend"] == "codex")["cli_present"]
-        is True
-    )
+    assert next(agent for agent in first if agent["backend"] == "codex")["cli_present"] is False
+    assert next(agent for agent in second if agent["backend"] == "codex")["cli_present"] is False
+    assert next(agent for agent in refreshed if agent["backend"] == "codex")["cli_present"] is True
+    assert next(agent for agent in joined if agent["backend"] == "codex")["cli_present"] is True
     assert calls == [(True, None)]
 
 
@@ -2760,9 +3268,7 @@ def test_targeted_cli_refresh_does_not_wait_for_unrelated_full_inventory(tmp_pat
     service.cli_presence_refresh = refresh
 
     async def exercise() -> None:
-        full = asyncio.create_task(
-            model_hub_rpc._refresh_agent_presence(service)
-        )
+        full = asyncio.create_task(model_hub_rpc._refresh_agent_presence(service))
         assert await asyncio.to_thread(full_started.wait, 0.5)
         await asyncio.wait_for(
             model_hub_rpc._refresh_agent_presence(service, ("opencode",)),
@@ -2825,10 +3331,7 @@ def test_agents_route_requests_deep_presence_only_when_explicit(monkeypatch):
     client = app.test_client()
 
     assert client.get("/api/models/agents").status_code == 200
-    assert (
-        client.get("/api/models/agents?refresh_cli_presence=1").status_code
-        == 200
-    )
+    assert client.get("/api/models/agents?refresh_cli_presence=1").status_code == 200
     assert calls == [False, True]
 
 
@@ -2961,9 +3464,7 @@ def test_direct_to_hub_atomically_adopts_recognized_native_login(tmp_path):
     assert native.vendor == "anthropic"
     assert store.config.agents["claude"].sources.order[0] == native.id
     assert any(
-        hop.source_id == native.id
-        for route in store.config.agents["claude"].routes.values()
-        for hop in route.hops
+        hop.source_id == native.id for route in store.config.agents["claude"].routes.values() for hop in route.hops
     )
 
     repeated = asyncio.run(service.set_agent_mode("claude", "hub"))
@@ -3004,15 +3505,11 @@ def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
 def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
     service_node = next(
         node
-        for node in ast.parse(
-            Path("core/handlers/model_hub/service.py").read_text(encoding="utf-8")
-        ).body
+        for node in ast.parse(Path("core/handlers/model_hub/service.py").read_text(encoding="utf-8")).body
         if isinstance(node, ast.ClassDef) and node.name == "ModelHubService"
     )
     methods = {
-        node.name: node
-        for node in service_node.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name: node for node in service_node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
     def called_service_methods(method: ast.AST) -> set[str]:
@@ -3032,9 +3529,7 @@ def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
                 calls.add("_save_config")
         return calls
 
-    call_graph = {
-        name: called_service_methods(method) for name, method in methods.items()
-    }
+    call_graph = {name: called_service_methods(method) for name, method in methods.items()}
 
     def reachable(start: str) -> set[str]:
         visited: set[str] = set()
@@ -3048,11 +3543,7 @@ def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
         return visited
 
     owners = {"_commit_synced", "_save_projection_neutral"}
-    public_mutations = {
-        name
-        for name in methods
-        if not name.startswith("_") and "_save_config" in reachable(name)
-    }
+    public_mutations = {name for name in methods if not name.startswith("_") and "_save_config" in reachable(name)}
     assert public_mutations
     assert all(reachable(name) & owners for name in public_mutations), sorted(
         name for name in public_mutations if not reachable(name) & owners
@@ -3061,11 +3552,7 @@ def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
     for name, method in methods.items():
         if name in owners:
             continue
-        parents = {
-            child: parent
-            for parent in ast.walk(method)
-            for child in ast.iter_child_nodes(parent)
-        }
+        parents = {child: parent for parent in ast.walk(method) for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(method):
             if (
                 not isinstance(node, ast.Call)
@@ -3102,9 +3589,7 @@ def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
 
     previous = store.config
     changed = service._clone_config(previous)
-    changed.sources[0].models.append(
-        ModelHubModelConfig(id="claude-sonnet-4-6", provenance="manual")
-    )
+    changed.sources[0].models.append(ModelHubModelConfig(id="claude-sonnet-4-6", provenance="manual"))
 
     asyncio.run(service._commit_synced(previous, changed))
 
@@ -3123,16 +3608,12 @@ def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path
         supply_channel="hub",
         billing="metered",
         state=ModelHubSourceStateConfig(status="standby"),
-        models=[
-            ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")
-        ],
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
         credential_ref="cred_adopted001",
     )
     store.config.sources = [source]
     store.config.agents["claude"].routes = {
-        model_id: ModelHubRouteConfig(
-            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
-        )
+        model_id: ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),))
         for model_id in ("z-model", "a-model")
     }
 
@@ -3160,9 +3641,7 @@ def test_source_adoption_projection_ignores_routes_for_direct_backends(tmp_path)
     )
     store.config.sources = [source]
     store.config.agents["claude"].routes = {
-        "claude-opus-4-6": ModelHubRouteConfig(
-            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
-        )
+        "claude-opus-4-6": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),))
     }
     store.config.agents["claude"].mode = "direct"
 
@@ -3535,7 +4014,10 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
 @pytest.mark.parametrize(
     ("method", "path"),
     [
-        (entry["method"], entry["exercise"]["path"])
+        (
+            entry["method"],
+            entry.get("exercises", [entry.get("exercise")])[0]["path"],
+        )
         for entry in API_RESPONSE_ROUTES
     ],
 )
@@ -3587,9 +4069,7 @@ def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtim
 
 @pytest.mark.parametrize("method", ["get", "post"])
 @pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("0", False), ("1", True)])
-def test_config_capability_exactly_projects_backend_model_hub_gate(
-    monkeypatch, tmp_path, method, env_value, expected
-):
+def test_config_capability_exactly_projects_backend_model_hub_gate(monkeypatch, tmp_path, method, env_value, expected):
     from config.v2_config import is_model_hub_enabled
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3621,13 +4101,9 @@ def test_final_model_hub_route_surface_has_observe_refresh_and_no_saved_test_rou
 
 
 def test_models_live_api_calls_only_registered_server_routes():
-    source = Path("ui/src/components/settings/models/modelsApi.ts").read_text(
-        encoding="utf-8"
-    )
+    source = Path("ui/src/components/settings/models/modelsApi.ts").read_text(encoding="utf-8")
     live_api = source.split("export const modelsApi: ModelsApi = {", 1)[1]
-    path_pattern = re.compile(
-        r"'(?P<single>/api/models/[^']*)'|`(?P<template>/api/models/[^`]*)`"
-    )
+    path_pattern = re.compile(r"'(?P<single>/api/models/[^']*)'|`(?P<template>/api/models/[^`]*)`")
 
     path_matches = list(path_pattern.finditer(live_api))
     assert len(path_matches) == len(re.findall(r"\bcall(?:<|\()", live_api))
@@ -3643,11 +4119,7 @@ def test_models_live_api_calls_only_registered_server_routes():
             live_api[match.end() :],
             re.MULTILINE,
         )
-        entry_tail = (
-            live_api[match.end() : match.end() + next_entry.start()]
-            if next_entry
-            else live_api[match.end() :]
-        )
+        entry_tail = live_api[match.end() : match.end() + next_entry.start()] if next_entry else live_api[match.end() :]
         method_match = re.search(r"jsonInit\('(POST|PUT|PATCH|DELETE)'", entry_tail)
         client_routes.add((method_match.group(1) if method_match else "GET", path))
 
@@ -3892,11 +4364,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     assert adapter.revoked == ["cred_test001"]
     assert catalog_index_loads == 0
 
-    created = asyncio.run(
-        service.create_source(
-            {**payload, "accept_unavailable_inventory": True}
-        )
-    )["source"]
+    created = asyncio.run(service.create_source({**payload, "accept_unavailable_inventory": True}))["source"]
 
     assert created["protocol"] == "anthropic"
     assert [
@@ -4019,16 +4487,12 @@ def test_native_oauth_malformed_start_keeps_flow_id_when_cleanup_fails(tmp_path)
 
     async def malformed_start(source_id, vendor):
         flow = await original_start(source_id, vendor)
-        return OAuthFlowState(
-            **{**flow.__dict__, "source_id": "src_provider_mismatch"}
-        )
+        return OAuthFlowState(**{**flow.__dict__, "source_id": "src_provider_mismatch"})
 
     adapter.start_oauth = malformed_start
     adapter.fail_cancel = True
     with pytest.raises(ModelHubError) as failed:
-        asyncio.run(
-            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
-        )
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
 
     assert failed.value.code == "engine_down"
     # The flow id the provider was started under stays the cleanup handle even
@@ -4039,9 +4503,7 @@ def test_native_oauth_malformed_start_keeps_flow_id_when_cleanup_fails(tmp_path)
 def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
     service, _store, adapter = _service(tmp_path)
 
-    flow = asyncio.run(
-        service.oauth_start({"vendor": " Anthropic ", "channel": "hub"})
-    )["flow"]
+    flow = asyncio.run(service.oauth_start({"vendor": " Anthropic ", "channel": "hub"}))["flow"]
 
     assert flow["vendor"] == "anthropic"
     assert adapter.oauth_start_calls == [(flow["source_id"], "anthropic")]
@@ -4077,9 +4539,7 @@ def test_oauth_start_rejects_invalid_nonce_payload_before_provider(tmp_path, pay
 
 def test_model_hub_oauth_blocks_recovery_before_external_auth(tmp_path):
     service, store, adapter = _service(tmp_path)
-    flow = asyncio.run(
-        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
-    )["flow"]
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))["flow"]
     store.recovery = True
 
     with pytest.raises(ModelHubError) as start_error:
@@ -4088,16 +4548,12 @@ def test_model_hub_oauth_blocks_recovery_before_external_auth(tmp_path):
     assert len(adapter.oauth_start_calls) == 1
 
     with pytest.raises(ModelHubError) as submit_error:
-        asyncio.run(
-            service.oauth_submit({"flow_id": flow["flow_id"], "value": "auth-code"})
-        )
+        asyncio.run(service.oauth_submit({"flow_id": flow["flow_id"], "value": "auth-code"}))
     assert submit_error.value.code == "config_recovery"
     assert adapter.secret_lengths == []
 
 
-def test_chain_route_preserves_submitted_hops_against_opposite_source_order(
-    monkeypatch, tmp_path
-):
+def test_chain_route_preserves_submitted_hops_against_opposite_source_order(monkeypatch, tmp_path):
     service, store, _ = _service(tmp_path)
     first = asyncio.run(
         _create_source(
@@ -4127,9 +4583,7 @@ def test_chain_route_preserves_submitted_hops_against_opposite_source_order(
         {"source_id": second["id"], "model_id": model_id},
         {"source_id": first["id"], "model_id": model_id},
     ]
-    assert store.config.agents["claude"].sources.order == [
-        hop["source_id"] for hop in reversed(hops)
-    ]
+    assert store.config.agents["claude"].sources.order == [hop["source_id"] for hop in reversed(hops)]
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -4149,15 +4603,12 @@ def test_chain_route_preserves_submitted_hops_against_opposite_source_order(
         (hop["source_id"], hop["model_id"]) for hop in hops
     ]
     assert body["chain"]["current"] == {"source_id": second["id"], "model_id": model_id}
-    assert [
-        (hop.source_id, hop.model_id)
-        for hop in store.config.agents["claude"].routes[model_id].hops
-    ] == [(hop["source_id"], hop["model_id"]) for hop in hops]
+    assert [(hop.source_id, hop.model_id) for hop in store.config.agents["claude"].routes[model_id].hops] == [
+        (hop["source_id"], hop["model_id"]) for hop in hops
+    ]
 
 
-def test_chain_route_guard_requires_and_replays_the_exact_current_plan(
-    monkeypatch, tmp_path
-):
+def test_chain_route_guard_requires_and_replays_the_exact_current_plan(monkeypatch, tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "claude-opus-4-6"
     first_id, second_id = "src_chain0101", "src_chain0102"
@@ -4199,9 +4650,7 @@ def test_chain_route_guard_requires_and_replays_the_exact_current_plan(
             "position": 2,
         },
     ]
-    assert refusal["would_interrupt"] == [
-        {"backend": "claude", "model_id": model_id, "agents": []}
-    ]
+    assert refusal["would_interrupt"] == [{"backend": "claude", "model_id": model_id, "agents": []}]
 
     unconfirmed = client.put(
         endpoint,
@@ -4220,10 +4669,9 @@ def test_chain_route_guard_requires_and_replays_the_exact_current_plan(
 
     assert unconfirmed.status_code == 409
     assert unconfirmed.get_json()["would_remove_hops"] == refusal["would_remove_hops"]
-    assert [
-        (hop.source_id, hop.model_id)
-        for hop in store.config.agents["claude"].routes[model_id].hops
-    ] == [(hop.source_id, hop.model_id) for hop in old_hops]
+    assert [(hop.source_id, hop.model_id) for hop in store.config.agents["claude"].routes[model_id].hops] == [
+        (hop.source_id, hop.model_id) for hop in old_hops
+    ]
 
     committed = client.put(
         endpoint,
@@ -4259,9 +4707,7 @@ def test_chain_route_noninterrupting_success_is_force_invariant(monkeypatch, tmp
         model_id,
     )
     forced_service, forced_store, _ = _service(tmp_path / "forced")
-    forced_store.config = ModelHubConfig.from_payload(
-        unforced_store.config.to_payload()
-    )
+    forced_store.config = ModelHubConfig.from_payload(unforced_store.config.to_payload())
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
     headers = csrf_headers(client, base_url)
@@ -4319,10 +4765,7 @@ def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):
     claude = store.config.agents["claude"]
     claude.sources.order = [source.id]
     claude.routes = {
-        **{
-            model_id: ModelHubRouteConfig()
-            for model_id in claude.routes
-        },
+        **{model_id: ModelHubRouteConfig() for model_id in claude.routes},
         "claude-opus-4-6": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)),
         "claude-sonnet-4-6": ModelHubRouteConfig(),
     }
@@ -4373,7 +4816,6 @@ def test_disabled_gate_preserves_existing_model_hub_config_bytes(monkeypatch):
         ),
         ("/api/models/agents/claude/sources", "put", "invalid_source_order"),
         ("/api/models/agents/claude/mode", "patch", "mode_switch_blocked"),
-        ("/api/models/agents/opencode/menu", "put", "mapping_target_unavailable"),
         (
             "/api/models/sources/src_test0001/models",
             "post",
@@ -4478,10 +4920,7 @@ def test_discovered_source_model_delete_persists_retirement_tombstone(
     )
 
     assert refreshed.status_code == 200
-    refreshed_models = {
-        model["id"]: model
-        for model in refreshed.get_json()["source"]["models"]
-    }
+    refreshed_models = {model["id"]: model for model in refreshed.get_json()["source"]["models"]}
     assert refreshed_models["gpt-5"]["retired"] is True
     assert refreshed_models["gpt-5.1"]["retired"] is False
 
@@ -6259,17 +6698,12 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
 
     assert refused.status_code == 409
     refusal = refused.get_json()
-    route_hop_schema = _schema("guard-refusal.schema.json")["definitions"][
-        "RouteHopRef"
-    ]
+    route_hop_schema = _schema("guard-refusal.schema.json")["definitions"]["RouteHopRef"]
     for hop in refusal["would_remove_hops"]:
         Draft7Validator(route_hop_schema).validate(hop)
     assert refusal["error"] == "source_model_in_route_chain"
     assert refusal["would_remove_hops"]
-    assert all(
-        hop["source_id"] == created["id"]
-        for hop in refusal["would_remove_hops"]
-    )
+    assert all(hop["source_id"] == created["id"] for hop in refusal["would_remove_hops"])
     assert refusal["would_interrupt"] == [
         {
             "backend": "claude",
@@ -6305,12 +6739,8 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
     )
     assert stale_confirmation.status_code == 409
     assert stale_confirmation.get_json()["error"] == refusal["error"]
-    assert stale_confirmation.get_json()["would_remove_hops"] == refusal[
-        "would_remove_hops"
-    ]
-    assert stale_confirmation.get_json()["would_interrupt"] == refusal[
-        "would_interrupt"
-    ]
+    assert stale_confirmation.get_json()["would_remove_hops"] == refusal["would_remove_hops"]
+    assert stale_confirmation.get_json()["would_interrupt"] == refusal["would_interrupt"]
 
     committed = client.put(
         f"/api/models/sources/{created['id']}/credential",
@@ -6328,8 +6758,7 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
     assert committed["interrupted"] == refusal["would_interrupt"]
     assert committed["source"]["credential_ref"] == "cred_route_5"
     removed_identities = {
-        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"])
-        for hop in committed["removed_hops"]
+        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"]) for hop in committed["removed_hops"]
     }
     assert all(
         (backend, menu_model, hop.source_id, hop.model_id) not in removed_identities
@@ -6381,9 +6810,7 @@ def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
 
 def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
     service, store, adapter = _service(tmp_path)
-    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))[
-        "flow"
-    ]
+    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -6423,9 +6850,7 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
 
 def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_path):
     service, store, adapter = _service(tmp_path)
-    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))[
-        "flow"
-    ]
+    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -6570,9 +6995,7 @@ def test_nonce_oauth_start_replays_cancelled_flow_until_expiry(tmp_path):
         },
     }
     assert retained["expires_at"] == first["expires_at"]
-    assert adapter.oauth_start_calls == [
-        (first["source_id"], "anthropic")
-    ]
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
 
     current[0] = datetime(2026, 7, 23, 4, 15, tzinfo=timezone.utc)
     fresh = asyncio.run(service.oauth_start(request))["flow"]
@@ -6680,12 +7103,9 @@ def test_oauth_start_keeps_every_owner_await_inside_the_installed_task(tmp_path)
     tree = ast.parse(textwrap.dedent(inspect.getsource(ModelHubService.oauth_start)))
     body = tree.body[0].body
     claim = next(i for i, stmt in enumerate(body) if "claim_nonce" in ast.unparse(stmt))
-    install = next(
-        i for i, stmt in enumerate(body)
-        if "_oauth_start_tasks[nonce_key] = task" in ast.unparse(stmt)
-    )
+    install = next(i for i, stmt in enumerate(body) if "_oauth_start_tasks[nonce_key] = task" in ast.unparse(stmt))
 
-    for stmt in body[claim + 1:install]:
+    for stmt in body[claim + 1 : install]:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # The task's own awaits are the safe ones: it is installed before it
             # is awaited, and it owns the release.
@@ -6694,10 +7114,7 @@ def test_oauth_start_keeps_every_owner_await_inside_the_installed_task(tmp_path)
             # No nonce, no claim — nothing for a retry to await or for a
             # cancellation to leak.
             continue
-        waits = [
-            node for node in ast.walk(stmt)
-            if isinstance(node, (ast.Await, ast.AsyncWith, ast.AsyncFor))
-        ]
+        waits = [node for node in ast.walk(stmt) if isinstance(node, (ast.Await, ast.AsyncWith, ast.AsyncFor))]
         assert not waits, f"owner awaits before its task is installed: {ast.unparse(stmt)}"
 
 
@@ -6756,9 +7173,7 @@ def test_native_oauth_start_recovers_the_vendor_after_failure_and_cancel(tmp_pat
             return await original_start(source_id, vendor)
 
         adapter.start_oauth = blocked_start
-        pending = asyncio.create_task(
-            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
-        )
+        pending = asyncio.create_task(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
         await provider_started.wait()
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -6766,9 +7181,7 @@ def test_native_oauth_start_recovers_the_vendor_after_failure_and_cancel(tmp_pat
         release_provider.set()
         await asyncio.sleep(0)
         adapter.start_oauth = original_start
-        recovered = await service.oauth_start(
-            {"vendor": "anthropic", "channel": "native_cli"}
-        )
+        recovered = await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
         return recovered, adapter
 
     recovered, adapter = asyncio.run(run_recovery())
@@ -7316,11 +7729,7 @@ def test_source_patch_rejects_credential_bearing_base_url(tmp_path):
 
 @pytest.mark.parametrize(
     ("field", "case"),
-    [
-        (field, case)
-        for field in ("display_names", "base_urls")
-        for case in SOURCE_EDIT_VALIDATION_CASES[field]
-    ],
+    [(field, case) for field in ("display_names", "base_urls") for case in SOURCE_EDIT_VALIDATION_CASES[field]],
     ids=lambda value: value.get("id", value) if isinstance(value, dict) else value,
 )
 def test_source_edit_validation_contract_fixture(tmp_path, field, case):
@@ -7341,15 +7750,11 @@ def test_source_edit_validation_contract_fixture(tmp_path, field, case):
 
     if not case["valid"]:
         with pytest.raises(ModelHubError) as exc_info:
-            asyncio.run(
-                service.patch_source(source["id"], {payload_field: case["value"]})
-            )
+            asyncio.run(service.patch_source(source["id"], {payload_field: case["value"]}))
         assert exc_info.value.code == "discovery_failed"
         return
 
-    updated = asyncio.run(
-        service.patch_source(source["id"], {payload_field: case["value"]})
-    )
+    updated = asyncio.run(service.patch_source(source["id"], {payload_field: case["value"]}))
     expected = case.get("normalized", case["value"])
     assert updated["source"][payload_field] == expected
     assert getattr(store.config.sources[0], payload_field) == expected
@@ -7758,8 +8163,7 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
     assert committed["interrupted"] == refusal["would_interrupt"]
     assert store.config.sources[0].base_url == replacement_url
     removed_identities = {
-        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"])
-        for hop in committed["removed_hops"]
+        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"]) for hop in committed["removed_hops"]
     }
     assert all(
         (backend, menu_model, hop.source_id, hop.model_id) not in removed_identities

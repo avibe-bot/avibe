@@ -935,6 +935,7 @@
       "backend_model_locked": "不能修改 Claude Code 的 Default 项或内置模型的来源类型。",
       "backend_model_in_route": "请先清空该模型的路由，再从 Backend 模型列表中移除。",
       "backend_model_conflict": "该 Backend 模型已在其他位置发生变更，请重新加载后再试。",
+      "candidate_suppliers_changed": "可用供应商已发生变化，请刷新模型选项后重新确认。",
       "models_dev_unavailable": "models.dev 当前不可用，请手动填写模型参数或稍后重试。",
       "codex_catalog_unavailable": "Codex 无法准备本地模型网关目录，请重试本回合。",
       "engine_down": "本地模型网关不可用。",

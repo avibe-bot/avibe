@@ -112,7 +112,7 @@ from .resolver import (
     allowed_origins,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
-    opencode_inventory_menu_ids,
+    opencode_source_model_identity,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -751,6 +751,8 @@ class ModelHubService:
         self._runtime_install_reconcile_lock = asyncio.Lock()
         self._runtime_install_reconciled = False
         self._runtime_lifecycle_lock = asyncio.Lock()
+        self._builtin_snapshot_generations: dict[BackendName, str] = {}
+        self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -1757,6 +1759,47 @@ class ModelHubService:
                 if matched_model is None or any(hop.source_id == source.id for hop in route.hops):
                     continue
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, matched_model))
+
+    def _matching_menu_model_hops(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        menu_model: str,
+    ) -> tuple[ModelHubRouteHopConfig, ...]:
+        """Project matching-v1 in placement-v1 order for one menu model."""
+
+        agent = config.agents[backend]
+        source_by_id = {source.id: source for source in config.sources}
+        hops: list[ModelHubRouteHopConfig] = []
+        checked_models = self._agent_menu_model_ids(agent)
+        if menu_model not in checked_models:
+            checked_models = (*checked_models, menu_model)
+        for source_id in agent.sources.order:
+            source = source_by_id.get(source_id)
+            if source is None or not self._eligible_for_agent(source, backend):
+                continue
+            matched_model = _matching_v1_model_id(
+                backend=backend,
+                requested_model=menu_model,
+                source=source,
+                checked_models=checked_models,
+                include_manual=True,
+            )
+            if matched_model is not None:
+                hops.append(ModelHubRouteHopConfig(source.id, matched_model))
+        return tuple(hops)
+
+    def _seed_menu_model_route(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        menu_model: str,
+    ) -> None:
+        """Apply matching-v1 and placement-v1 once for a newly added menu row."""
+
+        config.agents[backend].routes[menu_model] = ModelHubRouteConfig(
+            hops=self._matching_menu_model_hops(config, backend, menu_model)
+        )
 
     @staticmethod
     def _agent_menu_model_ids(agent: ModelHubAgentSupplyConfig) -> tuple[str, ...]:
@@ -3687,8 +3730,7 @@ class ModelHubService:
                         ),
                     }
                 )
-        agent_payload = agent.to_payload()
-        agent_payload.pop("models", None)
+        agent_payload = agent.to_agent_supply_payload()
         agent_payload["routes"] = (
             agent_payload["routes"] if agent.mode == "hub" else None
         )
@@ -3712,6 +3754,139 @@ class ModelHubService:
             "builtin_models": builtin_models,
             "standard_vendors": standard_vendors,
         }
+
+    def _candidate_suppliers(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        candidate_id: str,
+    ) -> tuple[list[dict], Optional[str], list[str]]:
+        source_by_id = {source.id: source for source in config.sources}
+        suppliers: list[dict] = []
+        display_name: Optional[str] = None
+        reasoning_efforts: list[str] = []
+        for hop in self._matching_menu_model_hops(config, backend, candidate_id):
+            source = source_by_id[hop.source_id]
+            model = next(
+                (
+                    item
+                    for item in source.models
+                    if item.id == hop.model_id and not item.retired
+                ),
+                None,
+            )
+            if model is None:
+                continue
+            suppliers.append(
+                {
+                    "source_id": source.id,
+                    "source_name": source.display_name,
+                    "model_id": hop.model_id,
+                }
+            )
+            if display_name is None and model.display_name:
+                display_name = model.display_name
+            for effort in model.reasoning_efforts:
+                if len(effort) <= 64 and effort not in reasoning_efforts:
+                    reasoning_efforts.append(effort)
+        return suppliers, display_name, reasoning_efforts
+
+    def agent_model_candidates(self, backend: str) -> dict:
+        agent_backend = cast(BackendName, backend)
+        config = self.store.load()
+        agent = self._agent(config, backend)
+        menu_models = self._catalog_models_payload(agent)
+        menu_ids = {model["id"] for model in menu_models}
+        snapshot = self._current_builtin_models(agent_backend)
+        builtin_ids = {item["id"] for item in snapshot}
+        builtin = []
+        for item in snapshot:
+            model_id = item["id"]
+            if (
+                model_id in menu_ids
+                or self._backend_model_admission_error(agent_backend, model_id)
+                is not None
+            ):
+                continue
+            suppliers, _source_label, _source_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                model_id,
+            )
+            builtin.append(
+                {
+                    "id": model_id,
+                    "display_name": item.get("display_name"),
+                    "reasoning_efforts": [
+                        effort
+                        for effort in item.get("reasoning_efforts") or ()
+                        if isinstance(effort, str) and 0 < len(effort) <= 64
+                    ],
+                    "suppliers": suppliers,
+                    "origin": "builtin",
+                }
+            )
+
+        provider_ids: list[str] = []
+        source_by_id = {source.id: source for source in config.sources}
+        for source_id in agent.sources.order:
+            source = source_by_id.get(source_id)
+            if source is None or not self._eligible_for_agent(source, backend):
+                continue
+            for model in source.models:
+                if model.retired:
+                    continue
+                candidate_id = (
+                    opencode_source_model_identity(source, model.id)
+                    if backend == "opencode"
+                    else model.id
+                )
+                if (
+                    candidate_id in menu_ids
+                    or candidate_id in builtin_ids
+                    or candidate_id in provider_ids
+                    or self._backend_model_admission_error(
+                        agent_backend,
+                        candidate_id,
+                    )
+                    is not None
+                ):
+                    continue
+                provider_ids.append(candidate_id)
+
+        providers = []
+        for model_id in provider_ids:
+            suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                model_id,
+            )
+            providers.append(
+                {
+                    "id": model_id,
+                    "display_name": display_name,
+                    "reasoning_efforts": reasoning_efforts,
+                    "suppliers": suppliers,
+                    "origin": "provider",
+                }
+            )
+        in_list = []
+        for model in menu_models:
+            suppliers, _source_label, _source_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                model["id"],
+            )
+            in_list.append(
+                {
+                    "id": model["id"],
+                    "display_name": model["display_name"],
+                    "reasoning_efforts": model["reasoning_efforts"],
+                    "suppliers": suppliers,
+                    "origin": model["origin"],
+                }
+            )
+        return {"builtin": builtin, "providers": providers, "in_list": in_list}
 
     def list_agents(self) -> list[dict]:
         config = self.store.load()
@@ -3815,78 +3990,6 @@ class ModelHubService:
             await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
-    async def set_opencode_menu(self, baseline: object, menu: object) -> dict:
-        async with self._mutation_lock:
-            previous = self.store.load()
-            config = self._clone_config(previous)
-            agent = config.agents["opencode"]
-            try:
-                parsed_baseline = ModelHubMenuConfig.from_payload(cast(dict, baseline))
-                parsed_menu = ModelHubMenuConfig.from_payload(cast(dict, menu))
-                current_menu = agent.menu or ModelHubMenuConfig()
-                baseline_checked = set(parsed_baseline.checked)
-                requested_checked = set(parsed_menu.checked)
-                removed = baseline_checked - requested_checked
-                added = [
-                    identifier
-                    for identifier in parsed_menu.checked
-                    if identifier not in baseline_checked
-                ]
-                merged_checked = [
-                    identifier
-                    for identifier in current_menu.checked
-                    if identifier not in removed
-                ]
-                present = set(merged_checked)
-                for identifier in added:
-                    if identifier not in present:
-                        merged_checked.append(identifier)
-                        present.add(identifier)
-                merged_menu = ModelHubMenuConfig(
-                    view=(
-                        parsed_menu.view
-                        if parsed_menu.view != parsed_baseline.view
-                        else current_menu.view
-                    ),
-                    checked=merged_checked,
-                )
-                current_models = {model.id: model for model in agent.models}
-                candidate = agent.to_payload()
-                candidate["menu"] = merged_menu.to_payload()
-                candidate["models"] = [
-                    (
-                        current_models.get(identifier)
-                        or ModelHubBackendModelConfig(
-                            id=identifier,
-                            origin="manual",
-                        )
-                    ).to_payload()
-                    for identifier in merged_menu.checked
-                ]
-                merged_routes = dict(agent.routes)
-                for identifier in merged_menu.checked:
-                    merged_routes.setdefault(identifier, ModelHubRouteConfig())
-                candidate["routes"] = {
-                    identifier: route.to_payload()
-                    for identifier, route in merged_routes.items()
-                }
-                parsed = ModelHubAgentSupplyConfig.from_payload(
-                    candidate,
-                    expected_backend="opencode",
-                )
-            except (TypeError, ValueError) as exc:
-                raise ModelHubError("mapping_target_unavailable") from exc
-            added_to_current = set(merged_menu.checked) - set(current_menu.checked)
-            if not added_to_current.issubset(opencode_inventory_menu_ids(config)):
-                raise ModelHubError("mapping_target_unavailable", status=409)
-            agent.menu = parsed.menu
-            agent.routes = parsed.routes
-            agent.models = parsed.models
-            await self._commit_synced(previous, config)
-            if self.backend_catalog_changed is not None:
-                await self._refresh_backend_catalog("opencode")
-            return self._agent_payload(config, agent)
-
     @classmethod
     def _parse_backend_catalog_models(
         cls,
@@ -3930,6 +4033,86 @@ class ModelHubService:
             raise ModelHubError("backend_model_duplicate")
         return rows
 
+    @staticmethod
+    def _backend_model_admission_error(
+        backend: BackendName,
+        model_id: str,
+    ) -> str | None:
+        if canonical_model_id(model_id) != model_id:
+            return "backend_model_id_invalid"
+        if backend == "opencode":
+            try:
+                canonical_opencode_menu_identity(model_id)
+            except ValueError:
+                return "backend_model_id_invalid"
+        if (
+            backend == "claude"
+            and model_id not in _builtin_model_ids("claude")
+            and not model_id.startswith(("claude-", "anthropic-"))
+        ):
+            return "backend_model_id_prefix"
+        return None
+
+    @staticmethod
+    def _parse_expected_suppliers(
+        payload: object,
+        caller_added_model_ids: Iterable[str],
+    ) -> dict[str, list[dict[str, str]]]:
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise ModelHubError("backend_model_catalog_invalid")
+        caller_added = set(caller_added_model_ids)
+        parsed: dict[str, list[dict[str, str]]] = {}
+        for model_id, suppliers in payload.items():
+            if (
+                not isinstance(model_id, str)
+                or model_id not in caller_added
+                or not isinstance(suppliers, list)
+            ):
+                raise ModelHubError("backend_model_catalog_invalid")
+            projected: list[dict[str, str]] = []
+            for supplier in suppliers:
+                if (
+                    not isinstance(supplier, dict)
+                    or set(supplier) != {"source_id", "model_id"}
+                    or not isinstance(supplier.get("source_id"), str)
+                    or not supplier["source_id"]
+                    or not isinstance(supplier.get("model_id"), str)
+                    or not supplier["model_id"]
+                ):
+                    raise ModelHubError("backend_model_catalog_invalid")
+                projected.append(
+                    {
+                        "source_id": supplier["source_id"],
+                        "model_id": supplier["model_id"],
+                    }
+                )
+            if len(
+                {(item["source_id"], item["model_id"]) for item in projected}
+            ) != len(projected):
+                raise ModelHubError("backend_model_catalog_invalid")
+            parsed[model_id] = projected
+        return parsed
+
+    def _project_expected_suppliers(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        model_ids: Iterable[str],
+    ) -> dict[str, list[dict[str, str]]]:
+        return {
+            model_id: [
+                {"source_id": hop.source_id, "model_id": hop.model_id}
+                for hop in self._matching_menu_model_hops(
+                    config,
+                    backend,
+                    model_id,
+                )
+            ]
+            for model_id in model_ids
+        }
+
     async def _refresh_backend_catalog(self, backend: BackendName) -> None:
         if self.backend_catalog_changed is None:
             return
@@ -3940,11 +4123,191 @@ class ModelHubService:
         except Exception as exc:
             raise ModelHubError("engine_down", status=503) from exc
 
+    @staticmethod
+    def _insert_builtin_model(
+        agent: ModelHubAgentSupplyConfig,
+        model: ModelHubBackendModelConfig,
+        builtin_order: tuple[str, ...],
+    ) -> None:
+        """Place a new built-in relative to built-ins already in the menu."""
+
+        snapshot_index = builtin_order.index(model.id)
+        positions = {item.id: index for index, item in enumerate(agent.models)}
+        following = next(
+            (
+                positions[model_id]
+                for model_id in builtin_order[snapshot_index + 1 :]
+                if model_id in positions
+            ),
+            None,
+        )
+        if following is not None:
+            agent.models.insert(following, model)
+            return
+        preceding = next(
+            (
+                positions[model_id] + 1
+                for model_id in reversed(builtin_order[:snapshot_index])
+                if model_id in positions
+            ),
+            None,
+        )
+        agent.models.insert(
+            preceding if preceding is not None else len(agent.models),
+            model,
+        )
+
+    def _apply_builtin_reconcile(
+        self,
+        config: ModelHubConfig,
+        snapshots: Mapping[str, Mapping[str, Any]],
+    ) -> list[BackendName]:
+        changed: list[BackendName] = []
+        for backend in ("claude", "codex"):
+            agent = config.agents[backend]
+            if not agent.builtin_baseline_initialized:
+                continue
+            raw_snapshot = snapshots.get(backend, {})
+            snapshot = [
+                item
+                for item in raw_snapshot.get("models", [])
+                if self._backend_model_admission_error(
+                    cast(BackendName, backend),
+                    item["id"],
+                )
+                is None
+            ]
+            builtin_order = tuple(item["id"] for item in snapshot)
+            present = {model.id for model in agent.models}
+            removed = set(agent.removed_model_ids)
+            added = False
+            for item in snapshot:
+                model_id = item["id"]
+                if model_id in present or model_id in removed:
+                    continue
+                self._insert_builtin_model(
+                    agent,
+                    ModelHubBackendModelConfig(
+                        id=model_id,
+                        origin="builtin",
+                        display_name=item.get("display_name"),
+                        reasoning_efforts=[
+                            effort
+                            for effort in item.get("reasoning_efforts") or ()
+                            if isinstance(effort, str) and 0 < len(effort) <= 64
+                        ],
+                    ),
+                    builtin_order,
+                )
+                present.add(model_id)
+                self._seed_menu_model_route(
+                    config,
+                    cast(BackendName, backend),
+                    model_id,
+                )
+                added = True
+            if added:
+                changed.append(cast(BackendName, backend))
+        return changed
+
+    def _builtin_snapshots(
+        self,
+        backends: Iterable[BackendName] = ("claude", "codex"),
+    ) -> dict[str, dict[str, Any]]:
+        from vibe.backend_model_catalog import backend_builtin_snapshot
+
+        return {
+            backend: backend_builtin_snapshot(
+                backend,
+                cli_installed=self._cli_present(backend),
+            )
+            for backend in backends
+            if backend != "opencode"
+        }
+
+    @staticmethod
+    def _builtin_snapshot_generation(snapshot: Mapping[str, Any]) -> str:
+        generation = snapshot.get("generation")
+        if isinstance(generation, str) and generation:
+            return generation
+        content = {
+            "complete": snapshot.get("complete") is True,
+            "models": snapshot.get("models", []),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                content,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    def _current_builtin_models(
+        self,
+        backend: BackendName,
+    ) -> list[dict[str, Any]]:
+        cached = self._builtin_snapshot_cache.get(backend)
+        if cached is not None:
+            return cached
+        if backend == "opencode":
+            return []
+        from vibe.backend_model_catalog import backend_builtin_models
+
+        return backend_builtin_models(backend)
+
+    async def reconcile_builtin_models(
+        self,
+        backends: Iterable[BackendName] = ("claude", "codex"),
+        *,
+        notify: bool = True,
+    ) -> list[BackendName]:
+        async with self._mutation_lock:
+            snapshots = self._builtin_snapshots(backends)
+            changed_snapshots = {
+                backend: snapshot
+                for backend, snapshot in snapshots.items()
+                if self._builtin_snapshot_generations.get(
+                    cast(BackendName, backend)
+                )
+                != self._builtin_snapshot_generation(snapshot)
+            }
+            self._builtin_snapshot_cache.update(
+                {
+                    cast(BackendName, backend): list(snapshot.get("models", []))
+                    for backend, snapshot in snapshots.items()
+                }
+            )
+            if not changed_snapshots:
+                return []
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            changed = self._apply_builtin_reconcile(config, changed_snapshots)
+            if changed:
+                await self._commit_synced(previous, config)
+            self._builtin_snapshot_generations.update(
+                {
+                    cast(BackendName, backend): self._builtin_snapshot_generation(
+                        snapshot
+                    )
+                    for backend, snapshot in changed_snapshots.items()
+                }
+            )
+            if notify:
+                for backend in changed:
+                    await self._refresh_backend_catalog(backend)
+            return changed
+
     async def set_agent_models(
         self,
         backend: str,
         baseline: object,
         models: object,
+        *,
+        expected_suppliers: object = None,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
     ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
@@ -3962,39 +4325,110 @@ class ModelHubService:
             current_by_id = {model.id: model for model in agent.models}
             baseline_by_id = {model.id: model for model in baseline_models}
             desired_by_id = {model.id: model for model in desired_models}
+            caller_added_model_ids = [
+                model.id
+                for model in desired_models
+                if model.id not in baseline_by_id
+            ]
+            parsed_expected_suppliers = self._parse_expected_suppliers(
+                expected_suppliers,
+                caller_added_model_ids,
+            )
+            agent_backend = cast(BackendName, backend)
+            builtin_ids = {
+                item["id"]
+                for item in self._current_builtin_models(agent_backend)
+            }
             for model_id in desired_by_id.keys() - current_by_id.keys():
-                canonical = canonical_model_id(model_id)
-                if canonical is None or canonical != model_id:
-                    raise ModelHubError("backend_model_id_invalid")
+                admission_error = self._backend_model_admission_error(
+                    agent_backend,
+                    model_id,
+                )
+                if admission_error == "backend_model_id_invalid":
+                    raise ModelHubError(admission_error)
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
                 if (
-                    (trusted is None and desired.origin == "builtin")
+                    (
+                        trusted is None
+                        and desired.origin == "builtin"
+                        and model_id not in builtin_ids
+                    )
                     or (trusted is not None and desired.origin != trusted.origin)
                 ):
                     raise ModelHubError("backend_model_locked", status=409)
             for model_id in desired_by_id.keys() - current_by_id.keys():
-                if (
-                    backend == "claude"
-                    and model_id not in _builtin_model_ids("claude")
-                    and not model_id.startswith(("claude-", "anthropic-"))
-                ):
-                    raise ModelHubError("backend_model_id_prefix")
+                admission_error = self._backend_model_admission_error(
+                    agent_backend,
+                    model_id,
+                )
+                if admission_error is not None:
+                    raise ModelHubError(admission_error)
+            projections = self._project_expected_suppliers(
+                config,
+                agent_backend,
+                parsed_expected_suppliers,
+            )
+            changed_suppliers = {
+                model_id: projections[model_id]
+                for model_id, expected in parsed_expected_suppliers.items()
+                if projections[model_id] != expected
+            }
+            if changed_suppliers:
+                raise ModelHubError(
+                    "candidate_suppliers_changed",
+                    status=409,
+                    data={"changed": changed_suppliers},
+                )
             merged_by_id = dict(current_by_id)
 
-            for model_id in baseline_by_id.keys() - desired_by_id.keys():
+            removed_hops: list[dict] = []
+            removed_model_ids = [
+                model.id
+                for model in baseline_models
+                if model.id not in desired_by_id and model.id in current_by_id
+            ]
+            for model_id in removed_model_ids:
                 route = agent.routes.get(model_id)
-                if route is not None and route.hops:
-                    raise ModelHubError(
-                        "backend_model_in_route",
-                        status=409,
-                        data={"model_id": model_id},
-                    )
                 current = current_by_id.get(model_id)
                 if current is not None and current != baseline_by_id[model_id]:
                     raise ModelHubError("backend_model_conflict", status=409)
+                if route is not None:
+                    removed_hops.extend(
+                        {
+                            "backend": backend,
+                            "menu_model": model_id,
+                            "source_id": hop.source_id,
+                            "model_id": hop.model_id,
+                            "position": position,
+                        }
+                        for position, hop in enumerate(route.hops, start=1)
+                    )
+                    route.hops = ()
+
+            newly_empty_routes = frozenset(
+                (backend, item["menu_model"])
+                for item in removed_hops
+            )
+            interrupted = self._introduced_interruptions(
+                previous,
+                config,
+                newly_empty_routes=newly_empty_routes,
+            )
+            self._require_guard_plan(
+                force=force,
+                confirmed_remove_hops=confirmed_remove_hops,
+                confirmed_interruptions=confirmed_interruptions,
+                would_remove_hops=removed_hops,
+                would_interrupt=interrupted,
+                error="backend_model_in_route",
+            )
+
+            for model_id in removed_model_ids:
                 merged_by_id.pop(model_id, None)
                 agent.routes.pop(model_id, None)
+                if model_id not in agent.removed_model_ids:
+                    agent.removed_model_ids.append(model_id)
 
             for model_id, desired in desired_by_id.items():
                 baseline_model = baseline_by_id.get(model_id)
@@ -4059,6 +4493,19 @@ class ModelHubService:
                     if model.id not in ordered_ids and model.id in merged_by_id:
                         ordered_ids.append(model.id)
             agent.models = [merged_by_id[model_id] for model_id in ordered_ids]
+            for model_id in caller_added_model_ids:
+                if model_id in agent.removed_model_ids:
+                    agent.removed_model_ids = [
+                        removed_id
+                        for removed_id in agent.removed_model_ids
+                        if removed_id != model_id
+                    ]
+                if model_id not in current_by_id and model_id in merged_by_id:
+                    self._seed_menu_model_route(
+                        config,
+                        agent_backend,
+                        model_id,
+                    )
             if agent.backend == "opencode":
                 agent.menu = ModelHubMenuConfig(
                     view=agent.menu.view if agent.menu else "featured",
@@ -4067,10 +4514,16 @@ class ModelHubService:
             await self._commit_synced(previous, config)
             await self._refresh_backend_catalog(cast(BackendName, backend))
             committed = self.store.load()
-            return self._agent_payload(
-                committed,
-                self._agent(committed, backend),
-            )
+            result = {
+                "agent": self._agent_payload(
+                    committed,
+                    self._agent(committed, backend),
+                )
+            }
+            if removed_hops:
+                result["removed_hops"] = removed_hops
+                result["interrupted"] = interrupted
+            return result
 
     @staticmethod
     def models_dev_matches(query: object) -> list[dict]:
@@ -6278,7 +6731,7 @@ def create_default_service(
             cwd=_resolve_claude_status_probe_cwd(config),
         ) is True
 
-    return ModelHubService(
+    service = ModelHubService(
         store=V2ModelHubConfigStore(),
         adapter=adapter,
         events=BoundedEventLog(paths.get_state_dir() / "model_hub_resolution_events.json"),
@@ -6294,3 +6747,5 @@ def create_default_service(
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
     )
+    asyncio.run(service.reconcile_builtin_models(notify=False))
+    return service

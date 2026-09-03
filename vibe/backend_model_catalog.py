@@ -15,7 +15,11 @@ from typing import Any, Final, Iterable, Mapping, Sequence
 from config import paths
 from config.atomic_io import write_atomic
 from core.command_runner import run_supervised_command
-from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
+from vibe.claude_model_catalog import (
+    DEFAULT_CLAUDE_MODEL_ALIASES,
+    get_catalog_path as get_claude_catalog_path,
+    load_catalog_models,
+)
 from vibe.codex_config import get_codex_home
 
 
@@ -549,6 +553,106 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
     }
 
 
+def backend_builtin_models(
+    backend: str,
+    *,
+    schedule_refresh: bool = True,
+) -> list[dict[str, Any]]:
+    """Return the backend-owned model snapshot used by Model Hub catalogs."""
+
+    return backend_builtin_snapshot(
+        backend,
+        schedule_refresh=schedule_refresh,
+    )["models"]
+
+
+def backend_builtin_snapshot(
+    backend: str,
+    *,
+    cli_installed: bool = False,
+    schedule_refresh: bool = True,
+) -> dict[str, Any]:
+    """Read every built-in source once and report whether the baseline is complete."""
+
+    backend_key = (backend or "").strip().lower()
+    if backend_key == "opencode":
+        return _versioned_builtin_snapshot(complete=True, models=[])
+    if backend_key not in _SUPPORTED_BACKENDS:
+        return _versioned_builtin_snapshot(complete=False, models=[])
+
+    cached_remote = _read_cached_remote_payload(get_cached_catalog_path())
+    if schedule_refresh and _remote_cache_stale(cached_remote):
+        schedule_remote_catalog_refresh()
+    remote_catalog = cached_remote.get("catalog")
+    remote_complete = isinstance(remote_catalog, dict)
+    if not remote_complete:
+        remote_catalog = {}
+
+    bundled_catalog = _read_complete_catalog(get_bundled_catalog_path())
+    bundled_complete = isinstance(bundled_catalog, dict)
+    if not bundled_complete:
+        bundled_catalog = {}
+    if backend_key == "claude":
+        claude_catalog_present = get_claude_catalog_path().is_file()
+        local_models = load_catalog_models()
+        local_complete = not cli_installed or claude_catalog_present
+        sources = _claude_sources(
+            remote_catalog,
+            bundled_catalog,
+            local_models=local_models,
+        )[:-1]
+        blocked: set[str] = set()
+    else:
+        local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
+        local_complete = not cli_installed or local_catalog_read
+        remote_entries = backend_model_entries("codex", remote_catalog)
+        blocked = {
+            entry["id"]
+            for entry in [*local_catalog, *remote_entries]
+            if _model_hidden(entry)
+        }
+        sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)[:-1]
+
+    merged = merge_model_sources(sources, blocked_model_ids=blocked)
+    return _versioned_builtin_snapshot(
+        complete=bundled_complete and remote_complete and local_complete,
+        models=[
+            {
+                "id": entry["id"],
+                "display_name": (
+                    entry.get("label")
+                    if isinstance(entry.get("label"), str)
+                    and entry["label"] != entry["id"]
+                    else None
+                ),
+                "reasoning_efforts": list(
+                    entry.get("reasoning_efforts")
+                    or _DEFAULT_REASONING_EFFORTS[backend_key]
+                ),
+            }
+            for entry in merged
+            if not (backend_key == "claude" and entry["id"] == "default")
+        ],
+    )
+
+
+def _versioned_builtin_snapshot(
+    *,
+    complete: bool,
+    models: list[dict[str, Any]],
+) -> dict[str, Any]:
+    content = {"complete": complete, "models": models}
+    generation = hashlib.sha256(
+        json.dumps(
+            content,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return {**content, "generation": generation}
+
+
 def catalog_reasoning_efforts_for_model(backend: str, model: str | None) -> list[str] | None:
     if not model:
         return None
@@ -608,11 +712,16 @@ def merge_model_sources(
 def _claude_sources(
     remote_catalog: dict[str, Any],
     bundled_catalog: dict[str, Any],
+    *,
+    local_models: Sequence[str] | None = None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     from modules.agents.opencode.utils import format_claude_model_label
 
     legacy_entries = []
-    for model in [*load_catalog_models(), *DEFAULT_CLAUDE_MODEL_ALIASES]:
+    for model in [
+        *(local_models if local_models is not None else load_catalog_models()),
+        *DEFAULT_CLAUDE_MODEL_ALIASES,
+    ]:
         entry = {
             "id": model,
             "reasoning_efforts": _legacy_claude_reasoning_efforts(model),
@@ -686,16 +795,20 @@ def _read_claude_settings_models() -> list[dict[str, Any]]:
 
 
 def _read_codex_models_cache() -> list[dict[str, Any]]:
+    return _read_codex_models_cache_with_status()[0]
+
+
+def _read_codex_models_cache_with_status() -> tuple[list[dict[str, Any]], bool]:
     cache_path = get_codex_home() / "models_cache.json"
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return []
+        return [], False
     raw_models = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(raw_models, list):
-        return []
+        return [], False
     entries = [_normalize_model_entry(item) for item in raw_models]
-    return [entry for entry in entries if entry]
+    return [entry for entry in entries if entry], True
 
 
 def _read_codex_config_models() -> list[dict[str, Any]]:
@@ -822,6 +935,20 @@ def _read_catalog(path: Path) -> dict[str, Any] | None:
     except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
         return None
     return _normalize_catalog(payload)
+
+
+def _read_complete_catalog(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return _normalize_catalog(payload, strict=True)
+    except (
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
+        return None
 
 
 def _read_cached_remote_payload(path: Path) -> dict[str, Any]:

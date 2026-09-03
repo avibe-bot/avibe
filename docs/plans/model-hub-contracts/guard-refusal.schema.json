@@ -2,17 +2,17 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/guard-refusal.schema.json",
   "title": "GuardRefusal",
-  "$comment": "<!-- authority-consumer: guard.error_plan guard_error.source_in_route_chain guard_error.source_model_in_route_chain guard_error.source_last_supplier -->",
-  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation with a nonempty current guarded-impact plan. A forced retry confirms this plan by echoing would_remove_hops and would_interrupt unchanged; the server recomputes the plan and commits only when both arrays match exactly.",
+  "$comment": "<!-- authority-consumer: guard.error_plan guard_error.backend_model_in_route guard_error.source_in_route_chain guard_error.source_model_in_route_chain guard_error.source_last_supplier -->",
+  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation. Every refusal carries the current nonempty impact plan.",
   "type": "object",
   "required": [
     "ok",
     "contract_version",
     "error",
-    "would_remove_hops",
-    "would_interrupt"
+    "detail"
   ],
   "additionalProperties": false,
+  "required": ["would_remove_hops", "would_interrupt"],
   "anyOf": [
     {
       "properties": {
@@ -32,7 +32,8 @@
           "error": {
             "enum": [
               "source_in_route_chain",
-              "source_model_in_route_chain"
+              "source_model_in_route_chain",
+              "backend_model_in_route"
             ]
           }
         },
@@ -65,10 +66,12 @@
       "enum": [
         "source_last_supplier",
         "source_in_route_chain",
-        "source_model_in_route_chain"
+        "source_model_in_route_chain",
+        "backend_model_in_route"
       ],
-      "description": "Existing lead guard code selected by the Source-mutation matrix. A changed plan returns the same top-level guard error family with the newly recomputed arrays."
+      "description": "A cascade mutation returns its recomputed impact plan."
     },
+    "detail": { "type": "string", "minLength": 1 },
     "would_remove_hops": {
       "type": "array",
       "items": { "$ref": "#/definitions/RouteHopRef" },
@@ -115,6 +118,7 @@
       "ok": false,
       "contract_version": 7,
       "error": "source_model_in_route_chain",
+      "detail": "modelHub.errors.source_model_in_route_chain",
       "would_remove_hops": [
         {
           "backend": "claude",

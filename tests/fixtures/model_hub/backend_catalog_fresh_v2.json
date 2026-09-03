@@ -1,0 +1,34 @@
+{
+  "backend": "codex",
+  "mode": "hub",
+  "menu_kind": "fixed",
+  "sources": {
+    "order": []
+  },
+  "routes": {
+    "gpt-fresh": {
+      "hops": []
+    }
+  },
+  "menu": null,
+  "models": [
+    {
+      "id": "gpt-fresh",
+      "display_name": "GPT Fresh",
+      "origin": "builtin",
+      "models_dev_id": null,
+      "context_window": null,
+      "max_output_tokens": null,
+      "input_modalities": [],
+      "output_modalities": [],
+      "supports_tools": null,
+      "supports_reasoning": null,
+      "reasoning_efforts": [
+        "low",
+        "high"
+      ]
+    }
+  ],
+  "removed_model_ids": [],
+  "builtin_baseline_initialized": true
+}

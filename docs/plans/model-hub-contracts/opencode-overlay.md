@@ -38,8 +38,8 @@ requirements.
 
 ## Add-time matching (`matching-v1`)
 
-OpenCode matching occurs only while adding a Source, after its protocol and inventory
-have been observed. An exact checked identifier wins. Otherwise a bare model id is
+OpenCode matching occurs once while adding a Source, adding a menu model, or reconciling
+a newly available built-in, using the inventory owned by that write. An exact checked identifier wins. Otherwise a bare model id is
 accepted only when exactly one checked identifier ends with `/<bare>`; zero matches and
 ambiguous matches are left unconfigured. The stored Route carries the concrete upstream
 model id and this normalization is never repeated by runtime or refresh.

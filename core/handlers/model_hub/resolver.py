@@ -100,11 +100,18 @@ def source_eligible_for_backend(source: ModelHubSourceConfig, backend: str) -> b
     return ModelHubConfig.source_eligible_for_backend(source, backend)
 
 
+def opencode_source_model_identity(
+    source: ModelHubSourceConfig,
+    model_id: str,
+) -> str:
+    return opencode_model_id(source.vendor, model_id)
+
+
 def opencode_inventory_menu_ids(config: ModelHubConfig) -> frozenset[str]:
     """Return OpenCode identities backed by current eligible inventory."""
 
     identities = {
-        opencode_model_id(source.vendor, model.id)
+        opencode_source_model_identity(source, model.id)
         for source in config.sources
         if source_eligible_for_backend(source, "opencode")
         for model in source.models
@@ -206,13 +213,14 @@ def matching_v1_model_id(
     requested_model: str,
     source: ModelHubSourceConfig,
     checked_models: tuple[str, ...] = (),
+    include_manual: bool = False,
 ) -> str | None:
     """Return one concrete observed model for the frozen add-time matching-v1."""
 
     observed_models = tuple(
         model
         for model in source.models
-        if model.provenance == "discovered" and not model.retired
+        if (include_manual or model.provenance == "discovered") and not model.retired
     )
 
     if backend == "opencode":
@@ -225,7 +233,7 @@ def matching_v1_model_id(
         exact = [
             model.id
             for model in observed_models
-            if opencode_model_id(source.vendor, model.id) == requested_model
+            if opencode_source_model_identity(source, model.id) == requested_model
         ]
         return exact[0] if len(exact) == 1 else None
 

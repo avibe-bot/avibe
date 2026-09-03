@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from config import paths
@@ -20,8 +21,54 @@ DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_TIMEOUT_SECONDS = 8.0
 MODELS_DEV_CACHE_TTL_SECONDS = 24 * 60 * 60
 MODELS_DEV_MAX_BYTES = 16 * 1024 * 1024
-MODELS_DEV_MAX_MATCHES = 20
+MODELS_DEV_MAX_MATCHES = 8
 _CACHE_LOCK = threading.Lock()
+
+
+def _vendor_map_path() -> Path:
+    return Path(__file__).with_name("data") / "model_vendors.json"
+
+
+def load_model_vendor_map() -> dict[str, Any]:
+    payload = json.loads(_vendor_map_path().read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("families"), list)
+        or not isinstance(payload.get("aggregators"), list)
+    ):
+        raise ValueError("model vendor map is invalid")
+    return payload
+
+
+def _first_party_vendor(
+    model_id: str,
+    vendor_map: dict[str, Any],
+) -> str | None:
+    matches = [
+        item
+        for item in vendor_map["families"]
+        if isinstance(item, dict)
+        and isinstance(item.get("prefix"), str)
+        and isinstance(item.get("vendor_id"), str)
+        and model_id.lower().startswith(item["prefix"])
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item["prefix"]))["vendor_id"]
+
+
+def _vendor_rank(
+    vendor_id: str,
+    *,
+    first_party_vendor: str | None,
+    aggregators: list[str],
+) -> tuple[int, int, str]:
+    if vendor_id == first_party_vendor:
+        return (0, 0, vendor_id)
+    if vendor_id in aggregators:
+        return (1, aggregators.index(vendor_id), vendor_id)
+    return (2, 0, vendor_id)
 
 
 def _cache_path():
@@ -185,7 +232,7 @@ def _reasoning_efforts(model: dict[str, Any]) -> list[str]:
                 dict.fromkeys(
                     value
                     for value in values
-                    if isinstance(value, str) and value
+                    if isinstance(value, str) and 0 < len(value) <= 64
                 )
             )
     return []
@@ -213,7 +260,9 @@ def _modalities(model: dict[str, Any], direction: str) -> list[str]:
 def search_models_dev(query: str) -> list[dict[str, Any]]:
     tokens = _search_tokens(query)
     catalog = load_models_dev_catalog()
-    matches: list[tuple[int, str, str, dict[str, Any]]] = []
+    vendor_map = load_model_vendor_map()
+    aggregators = vendor_map["aggregators"]
+    candidates: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
     for provider_key, provider in catalog.items():
         if not isinstance(provider_key, str) or not isinstance(provider, dict):
             continue
@@ -282,6 +331,29 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                 ),
                 "reasoning_efforts": _reasoning_efforts(model),
             }
-            matches.append((score, provider_id, model_id, row))
-    matches.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [row for _score, _provider, _model, row in matches[:MODELS_DEV_MAX_MATCHES]]
+            candidates.setdefault(model_id, []).append((score, provider_id, row))
+
+    matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []
+    for model_id, copies in candidates.items():
+        first_party_vendor = _first_party_vendor(model_id, vendor_map)
+        _score, _vendor_id, row = min(
+            copies,
+            key=lambda item: _vendor_rank(
+                item[1],
+                first_party_vendor=first_party_vendor,
+                aggregators=aggregators,
+            ),
+        )
+        first_party = row["provider_id"] == first_party_vendor
+        row["first_party"] = first_party
+        matches.append(
+            (
+                not first_party,
+                min(item[0] for item in copies),
+                row["display_name"].lower(),
+                model_id,
+                row,
+            )
+        )
+    matches.sort(key=lambda item: item[:-1])
+    return [row for *_, row in matches[:MODELS_DEV_MAX_MATCHES]]

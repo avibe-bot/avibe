@@ -41,9 +41,9 @@ compatibility path.
 | POST `/api/models/agents/<backend>/chains/reorder` | `{order?: string[]}` → `{agent: AgentSupply}` | With `order`, atomically stores the complete Source order and idempotently reorders every stored Route by it; with no body, applies the already stored order. In either form it adds, removes, remaps, matches, and guards nothing. The total order is defined below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | GET `/api/models/agents/<backend>/models` | → `{agent: {backend, mode, catalog_models}}` | Picker-safe catalog read. It exposes no Source order, Route, or credential-bearing supplier data; editors use it as the Gateway model menu and fall back to the backend-native catalog in Direct mode, during a rolling upgrade from a pre-catalog server, or while this read is unavailable. |
-| PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[]}` → `{agent: AgentSupply}` | Applies one full-list backend catalog edit with optimistic merge. The list controls Agent-visible ids, order, and capability metadata only. Removing a model with a non-empty Route is refused; this mutation never changes supplier inventory or Route hops. |
-| GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results normalize models.dev metadata into editable BackendModel fields and never persist automatically. |
-| PUT `/api/models/agents/opencode/menu` | `{baseline: AgentMenu, menu: AgentMenu}` → `{agent: AgentSupply}` | Atomically applies the additions, removals, and optional view change between `baseline` and `menu` to the latest stored OpenCode menu. Concurrent unrelated selections survive. A newly added identifier must still be supplied by current OpenCode-eligible inventory at commit time; this includes a dormant Route alias whose saved Route retains an exact eligible inventory hop. Already checked route aliases may be preserved or removed without same-name inventory. |
+| GET `/api/models/agents/<backend>/models/candidates` | → `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` | Server-owned picker projection. It returns addable built-ins, deduplicated ordered-provider inventory, and every current menu row with the same exact supplier projection; it is independent of backend mode and contains no credentials. |
+| PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[], expected_suppliers?: {<id>: [{source_id, model_id}]}, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, stale-candidate `409`, `{agent: AgentSupply}`, or `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` | Applies one full-list backend catalog edit with optimistic merge. Each caller addition still absent from the latest list is matched once against complete non-retired inventory in stored eligible Source order. A listed supplier-projection mismatch refuses atomically with the separate exact shape `{ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed}`; a concurrently added row keeps its existing Route. A routeful removal uses the exact echoed-plan guard and then atomically removes its Route; empty-route removal is ordinary success. Supplier inventory remains unchanged. |
+| GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, cap results at 8, and never persist automatically. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; the handler never reads `sources.order`, and the submitted `hops` carry no Source-order semantics. It is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
@@ -1136,7 +1136,8 @@ Minimum v5 set:
 `source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
 `invalid_source_order`, `source_create_in_progress`, `source_nonce_conflict`, `source_last_supplier`,
 `source_in_route_chain`,
-`source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
+`source_model_in_route_chain`, `backend_model_in_route`,
+`candidate_suppliers_changed`, `mode_switch_blocked`, `engine_down`,
 `runtime_platform_unsupported`, `reauth_confirmation_required`,
 `native_source_already_exists`, `native_login_in_progress`,
 `migration_item_conflict`, `source_model_tiers_managed`, `turn_not_found`,
@@ -1157,8 +1158,8 @@ Boundary-only action-refusal values cover operations the UI already does not off
 a script or regression can call directly. `reauth_confirmation_required` is API/test-
 only truth: it has no product copy key or rendering slot.
 
-The top-level guard vocabulary remains exactly `source_last_supplier |
-source_in_route_chain | source_model_in_route_chain`; a changed confirmation plan returns
+The top-level cascade-guard vocabulary is `source_last_supplier |
+source_in_route_chain | source_model_in_route_chain | backend_model_in_route`; a changed confirmation plan returns
 the same family with newly recomputed arrays rather than a parallel discriminator.
 
 Removed: `invalid_priority_order`.
@@ -1178,7 +1179,8 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->
 <!-- authority-consumer: runtime.install_error runtime_platform_unsupported -->
 <!-- authority-consumer: source.create_nonce nonce.in_flight nonce.released nonce.committed -->
-<!-- authority-consumer: guard.error source_last_supplier source_in_route_chain source_model_in_route_chain -->
+<!-- authority-consumer: guard.error backend_model_in_route source_last_supplier source_in_route_chain source_model_in_route_chain -->
+<!-- authority-consumer: candidate.error candidate_suppliers_changed -->
 <!-- authority-consumer: guard.decision guard_decision.unforced_no_impact guard_decision.unforced_confirmation guard_decision.forced_no_impact guard_decision.forced_confirmed guard_decision.forced_unconfirmed -->
 <!-- authority-consumer: oauth.start_nonce oauth_nonce.released oauth_nonce.in_flight oauth_nonce.committed -->
 <!-- authority-consumer: oauth.terminal oauth_terminal.flow_only oauth_terminal.create_success oauth_terminal.reauth_success oauth_terminal.materialization_interrupted oauth_terminal.materialization_plain_error -->
