@@ -378,6 +378,12 @@ scenarios:
     kind: compatibility
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_003_started_stream_never_retries
+  - id: MH-RES-LIVE-004
+    name: Live turn walks a hub subscription onto a metered API key before streaming starts
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn
   - id: MH-EVT-002
     name: Causal switch events survive service restart
     status: covered
