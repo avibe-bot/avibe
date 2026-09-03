@@ -124,6 +124,51 @@ export const candidateBackendModel = (candidate: ModelCandidate): BackendModel =
 });
 
 /**
+ * Which row an id already names — the single place that decides it.
+ *
+ * A row the draft or the baseline holds is this user's own description of that
+ * model, carrying the context limits, modalities, capabilities and
+ * `models_dev_id` they stated. Anything that produces a row for an id has to ask
+ * this before building one, because the answer is 「theirs」 far more often than
+ * the producer can see: the draft is what is on screen, but the baseline still
+ * holds a row the user removed a moment ago and may be re-adding right now.
+ * Building over one is how 「remove it, change my mind, re-add it」 came to clear
+ * those fields — the baseline still held the full row, so the PUT's three-way
+ * merge read the fresh blank one as an edit that emptied them and persisted the
+ * emptying.
+ *
+ * `draftWithId` above owns which id a produced row carries; this owns which row
+ * an id names. Both are one function rather than a rule each producer remembers,
+ * for the same reason: the producer that is missing from the list is exactly the
+ * one nobody checked.
+ */
+export const heldRowFor = (
+  id: string,
+  held: readonly BackendModel[],
+  saved: readonly BackendModel[],
+): BackendModel | null => (
+  held.find((model) => model.id === id)
+  ?? saved.find((model) => model.id === id)
+  ?? null
+);
+
+/**
+ * The row a draft write lands for one candidate.
+ *
+ * A candidate is the server's proposal ABOUT a model (C2): a label, and the
+ * efforts its suppliers accept. It is not a description of the row, so it is
+ * only ever what a row is built from when no description exists yet.
+ * `candidateBackendModel` is therefore this function's last branch and is
+ * reached through nothing else outside this module, which the boundary test
+ * beside it is what keeps true.
+ */
+export const draftRowFor = (
+  candidate: ModelCandidate,
+  held: readonly BackendModel[],
+  saved: readonly BackendModel[],
+): BackendModel => heldRowFor(candidate.id, held, saved) ?? candidateBackendModel(candidate);
+
+/**
  * One picked candidate, and the projection it was picked against.
  *
  * This is the agreement `expected_suppliers` states (C1): the id the user chose

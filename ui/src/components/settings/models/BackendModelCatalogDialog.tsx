@@ -23,8 +23,9 @@ import {
   applyBackendCatalogIntent,
   backendCatalogIntent,
   backendCatalogIntentApplied,
-  candidateBackendModel,
   catalogModelIds,
+  draftRowFor,
+  heldRowFor,
   readBackendCatalogBaseline,
   sameCatalog,
   type BackendCatalogBaseline,
@@ -142,11 +143,16 @@ export const BackendModelCatalogDialog: React.FC<{
    *  action that opens it is offered exactly where the page's other
    *  Source-reading surfaces are (C4). */
   canReadSources: boolean;
+  /** Source id → name, for the removal confirmation's hops. The catalog names no
+   *  Source of its own (that stays with the Route), but a removal that takes a
+   *  Route with it has to say whose hop goes away — so the page's own Sources
+   *  answer it, and an id they do not cover simply goes unnamed. */
+  sourceNames: Readonly<Record<string, string>>;
   onClose: () => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   onObserved: (observed: AgentSupply) => void | Promise<void>;
   catalogWrite: PendingWrite;
-}> = ({ open, backend, canReadSources, onClose, onSaved, onObserved, catalogWrite }) => {
+}> = ({ open, backend, canReadSources, sourceNames, onClose, onSaved, onObserved, catalogWrite }) => {
   const { t } = useTranslation();
   const [baseline, setBaseline] = React.useState<BackendCatalogBaseline | null>(null);
   const baselineRef = React.useRef<BackendCatalogBaseline | null>(null);
@@ -184,9 +190,24 @@ export const BackendModelCatalogDialog: React.FC<{
    *  back unasked is a removal the user requested and nobody ever answered. */
   const guardedRef = React.useRef<RemovalQuestion[]>([]);
 
-  /** Ask the next held-back removal, or stop asking. Also how an ordinary
-   *  confirmation closes: with nothing held back, this is `setRemoving(null)`. */
-  const askNextGuarded = () => setRemoving(guardedRef.current.shift() ?? null);
+  /**
+   * Ask the next held-back removal, or stop asking. Also how an ordinary
+   * confirmation closes: with nothing held back, this is `setRemoving(null)`.
+   *
+   * A queued question whose row has since left the draft is discarded rather
+   * than asked. The confirmation renders inside the row it is about, so a
+   * question about a row that no longer exists — a fresh baseline the server no
+   * longer holds it in, an addition withdrawn on the way here — has nothing to
+   * remove and nowhere to appear: asking it would leave the dialog waiting on an
+   * answer the user has no controls to give. Discarding it is not losing the
+   * user's intent either; the row it named is already gone.
+   */
+  const askNextGuarded = () => {
+    const held = new Set(draftRef.current.map((model) => model.id));
+    let next = guardedRef.current.shift();
+    while (next && !held.has(next.modelId)) next = guardedRef.current.shift();
+    setRemoving(next ?? null);
+  };
 
   const applyBaseline = React.useCallback((observed: BackendCatalogBaseline, models: BackendModel[]) => {
     baselineRef.current = observed;
@@ -255,7 +276,21 @@ export const BackendModelCatalogDialog: React.FC<{
       ? t('settings.models.gateway.catalog.systemDefault') as string
       : model.display_name ?? model.id
   );
-  const visible = draft.filter((model) => matchesQuery(model, query.trim(), displayLabel(model)));
+  /**
+   * The rows on screen.
+   *
+   * A pending removal question is always one of them, whatever the query says.
+   * Its confirmation renders inside its own row (the shape every guarded Model
+   * Hub mutation asks in), so a filter that hides that row hides the only
+   * controls that can answer it — and the draft has already restored the row, so
+   * Save stays disabled with nothing on screen to explain why. Deriving
+   * visibility from the queue rather than keeping the two beside each other is
+   * what makes 「a question that is pending is on screen」 a property of this one
+   * line instead of a rule every path that advances the queue has to remember.
+   */
+  const visible = draft.filter((model) => (
+    model.id === removing?.modelId || matchesQuery(model, query.trim(), displayLabel(model))
+  ));
   const movableIds = draft.filter((model) => !model.locked).map((model) => model.id);
   const takenIds = new Set(draft.map((model) => model.id));
   const effortSuggestions = [...new Set(draft.flatMap((model) => model.reasoning_efforts))];
@@ -414,6 +449,17 @@ export const BackendModelCatalogDialog: React.FC<{
    * promise. Never a saved row: a disagreement about suppliers may not delete
    * something the server already holds, and it cannot — a seed only ever names
    * pending additions.
+   *
+   * 「Confirm none of them」 is therefore the same operation as 「dismiss the
+   * re-ask」, and the picker's Cancel is wired to exactly this call with no picks:
+   * a re-ask the user walks away from has answered every seeded id with 「not
+   * this」, and leaving those rows behind is what let a refused projection be
+   * re-sent by the next Save with no way to stop it. An ordinary add has an empty
+   * seed, so the same call still means 「nothing happened」.
+   *
+   * Which ROW an id lands as is not decided here — `draftRowFor` owns that, so a
+   * re-added row comes back as the one the user already has rather than as a
+   * fresh synthesis of the proposal.
    */
   const addCandidates = (picked: ChosenCandidate[]) => {
     const seed = picking?.seed ?? NO_SEED;
@@ -431,7 +477,7 @@ export const BackendModelCatalogDialog: React.FC<{
     const held = new Set(draftRef.current.map((model) => model.id));
     const additions = picked
       .filter((pick) => !held.has(pick.candidate.id))
-      .map((pick) => candidateBackendModel(pick.candidate));
+      .map((pick) => draftRowFor(pick.candidate, draftRef.current, baselineRef.current?.models ?? []));
     mutate([...draftRef.current.filter((model) => !withdrawn.has(model.id)), ...additions]);
   };
 
@@ -505,33 +551,49 @@ export const BackendModelCatalogDialog: React.FC<{
           // agreement the user never gave if they dismiss the picker instead of
           // answering it.
           //
+          // The refusal is reconciled HERE, where the evidence arrives, and
+          // before anything reopens — so no later path has to remember to undo a
+          // projection the server has already refused.
+          //
           // An id the refusal reports with no suppliers left is not a question:
           // there is nothing to offer and so nothing to agree to, and asking
           // about it would only invite a confirmation this dialog could not
-          // send. It is dropped instead — the row that disappears and the count
-          // that falls are the answer — while the ids that still have suppliers
-          // are re-asked with them. Only picks: a supplier disagreement may not
-          // delete a row the server already holds, and one it never named is
-          // no part of this write's agreement either.
+          // send. It loses its agreement and its row together, right now — the
+          // row that disappears and the count that falls are the answer. An id
+          // that still has suppliers keeps its row and takes today's suppliers
+          // as its agreement, so the map this dialog writes from says what the
+          // server just said whatever happens next, and is then re-asked with
+          // them. Only picks: a supplier disagreement may not delete a row the
+          // server already holds, and one it never named is no part of this
+          // write's agreement either.
           const saved = new Set(baselineModels.map((model) => model.id));
           const disputed = Object.entries(failure.changedSuppliers)
             .filter(([modelId]) => chosenRef.current.has(modelId) && !saved.has(modelId));
           const withdrawn = new Set(
             disputed.filter(([, suppliers]) => suppliers.length === 0).map(([modelId]) => modelId),
           );
-          const reask = new Set(
-            disputed.filter(([, suppliers]) => suppliers.length > 0).map(([modelId]) => modelId),
-          );
+          const reask = new Map(disputed.filter(([, suppliers]) => suppliers.length > 0));
           for (const modelId of withdrawn) chosenRef.current.delete(modelId);
+          for (const [modelId, suppliers] of reask) {
+            const pick = chosenRef.current.get(modelId);
+            if (pick) chosenRef.current.set(modelId, { ...pick, expected_suppliers: [...suppliers] });
+          }
           if (withdrawn.size > 0) mutate(draftRef.current.filter((model) => !withdrawn.has(model.id)));
           if (reask.size > 0) {
-            setPicking({ seed: reask });
+            setPicking({ seed: new Set(reask.keys()) });
             return;
           }
-          // A drop is its own answer: the row that leaves and the count that
-          // falls are what happened, and a sentence about it would be this
-          // dialog reporting its own edit back to the user.
-          if (withdrawn.size > 0) return;
+          // Nothing left to ask, and the list already shows what changed: a drop
+          // is its own answer, and a sentence about it would be this dialog
+          // reporting its own edit back to the user. But the save they pressed is
+          // still owed — nothing was committed — so it goes again on the reduced
+          // list rather than costing them a second press for a withdrawal they
+          // did not make. It terminates: every pass either drops at least one
+          // pick from the map that `disputed` is drawn from, or asks instead.
+          if (withdrawn.size > 0) {
+            void save();
+            return;
+          }
           // Nothing to ask and nothing to drop: a refusal about ids this write
           // promised nothing for is not one this dialog can answer, so it keeps
           // the failure sentence below rather than resolving into silence.
@@ -654,6 +716,12 @@ export const BackendModelCatalogDialog: React.FC<{
    * question was raised from: the baseline's route on a first ask, the server's
    * own refusal on a re-ask. Answering it removes the row and its route
    * together, in one transaction, when the list saves (C3).
+   *
+   * The page's Sources travel with it so each hop names its supplier. This
+   * dialog still holds no Source concept — it does not resolve one, order one or
+   * write one — but 「no hidden mappings」 is a rule about what the user is shown
+   * before they agree, and 「a hop at position 2 disappears」 without whose hop it
+   * was is exactly the hidden half.
    */
   const removeConfirmation = (model: BackendModel) => {
     if (removing?.modelId !== model.id) return null;
@@ -661,7 +729,7 @@ export const BackendModelCatalogDialog: React.FC<{
     return (
       <div className="model-hub-catalog-confirm">
         <div className="model-hub-catalog-consequence" role="alert">
-          <GuardImpact hops={plan.hops} gaps={plan.gaps} />
+          <GuardImpact hops={plan.hops} gaps={plan.gaps} sourceNames={sourceNames} />
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -862,9 +930,23 @@ export const BackendModelCatalogDialog: React.FC<{
           backend={backend}
           listedIds={offerable(takenIds, picking.seed)}
           seedPicked={picking.seed}
-          onCancel={() => setPicking(null)}
+          // 「Add none of these」 — the same answer as confirming with nothing
+          // picked, and the same call, because a re-ask the user dismisses has
+          // declined every id it seeded. An ordinary add seeds nothing, so this
+          // still just closes.
+          onCancel={() => addCandidates([])}
           onAdd={addCandidates}
-          onCustom={(seedId) => { setPicking(null); setEditing({ model: null, seedId }); }}
+          // The editor is the other door an id becomes a row through, so it asks
+          // the same question first: an id the draft or the baseline already
+          // holds opens as THAT row rather than as a blank one carrying the same
+          // id. Otherwise typing a removed model's id here is the one path that
+          // rebuilds it from nothing — and it would also dead-end on 「already in
+          // the list」 for an id the user can see on screen.
+          onCustom={(seedId) => {
+            setPicking(null);
+            const existing = heldRowFor(seedId, draftRef.current, baselineRef.current?.models ?? []);
+            setEditing(existing ? { model: existing } : { model: null, seedId });
+          }}
         />
       )}
 

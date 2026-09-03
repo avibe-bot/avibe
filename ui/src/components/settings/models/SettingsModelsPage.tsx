@@ -1090,6 +1090,13 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [chainsRead, routeCommitted, suspendedRouteAttempts]);
   const supplyRelations = React.useMemo(() => buildSupplyRelations(installedAgents, sources, chains, runtime), [chains, installedAgents, runtime, sources]);
+  /** The Sources this page has read, by id — for the surfaces that show a hop and
+   *  have to name whose it is. Only what was read: an id no Source answers for is
+   *  left unnamed rather than rendered raw. */
+  const sourceNames = React.useMemo(
+    () => Object.fromEntries(sources.map((source) => [source.id, source.display_name])),
+    [sources],
+  );
   const takeoverCount = React.useMemo(() => new Set(
     supplyRelations.filter(({ kind }) => kind === 'takeover').map(({ backend }) => backend),
   ).size, [supplyRelations]);
@@ -1393,7 +1400,7 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         sources={sources}

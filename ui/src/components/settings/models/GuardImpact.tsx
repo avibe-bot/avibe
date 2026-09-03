@@ -18,7 +18,20 @@ import type { RouteHopRef, SupplyGap } from './types';
 export type GuardPlan = { hops: RouteHopRef[]; gaps: SupplyGap[] };
 
 /** The shared evidence body for every guarded Model Hub mutation and its result. */
-export const GuardImpact: React.FC<GuardPlan & { committed?: boolean }> = ({ hops, gaps, committed = false }) => {
+export const GuardImpact: React.FC<GuardPlan & {
+  committed?: boolean;
+  /**
+   * Source id → that Source's own name, for the callers that can resolve one.
+   *
+   * A hop goes THROUGH a supplier, and 「no hidden mappings」 means the
+   * confirmation says which — otherwise a user forcing a removal reads which
+   * position disappears without reading whose it was. Only a caller holding the
+   * page's Sources can answer that, so it is asked for rather than looked up
+   * here, and an id it cannot name leaves the row exactly as it was: a raw
+   * `src_…` in front of the model would name nothing while looking like it did.
+   */
+  sourceNames?: Readonly<Record<string, string>>;
+}> = ({ hops, gaps, committed = false, sourceNames }) => {
   const { t } = useTranslation();
   return (
     <>
@@ -29,19 +42,26 @@ export const GuardImpact: React.FC<GuardPlan & { committed?: boolean }> = ({ hop
             <span>{t('settings.models.guard.count', { count: hops.length })}</span>
           </div>
           <div className="model-hub-guard-list">
-            {hops.map((hop) => (
-              <div
-                key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`}
-                className="model-hub-guard-hop"
-              >
-                <span className="min-w-0 flex-1">
-                  <strong>
-                    {t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}
-                  </strong>
-                  <span>{hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span>
-                </span>
-              </div>
-            ))}
+            {hops.map((hop) => {
+              const source = sourceNames?.[hop.source_id];
+              return (
+                <div
+                  key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`}
+                  className="model-hub-guard-hop"
+                >
+                  <span className="min-w-0 flex-1">
+                    <strong>
+                      {t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}
+                    </strong>
+                    {/* The supplier and the model it serves, in the Agent card's
+                        own mapping copy rather than a second string that would
+                        say the same thing: one mapping reads one way wherever
+                        the Model Hub shows it. */}
+                    <span>{source ? t('settings.models.gateway.row.current', { source, model: hop.model_id }) : hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span>
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </>
       )}

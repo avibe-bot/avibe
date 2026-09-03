@@ -77,6 +77,10 @@ const renderDialog = (overrides: Partial<React.ComponentProps<typeof BackendMode
         open
         backend="claude"
         canReadSources
+        // Nothing named by default: what a hop reads as without the page's
+        // Sources is the case every other test here is about, so a test that
+        // wants a name says so.
+        sourceNames={{}}
         onClose={onClose}
         onSaved={onSaved}
         onObserved={onObserved}
@@ -657,7 +661,7 @@ describe('BackendModelCatalogDialog', () => {
       });
     }
 
-    it('drops a withdrawn candidate instead of re-asking, and promises nothing for it again', async () => {
+    it('drops a withdrawn candidate instead of re-asking, and re-sends the save it was already owed', async () => {
       const user = userEvent.setup();
       // The other half of the same refusal: `changed` names the picked id with no
       // suppliers at all. There is nothing left to offer, so there is nothing to
@@ -665,7 +669,7 @@ describe('BackendModelCatalogDialog', () => {
       // out on the next save as though it had been typed by hand, which is the
       // silent re-send the re-ask exists to prevent.
       vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
-      vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ providers: [shown] }));
+      const read = vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ providers: [shown] }));
       const write = vi.spyOn(modelsApi, 'putAgentModels')
         .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [] }))
         .mockResolvedValue(agent([EDITED, model('beta')]));
@@ -678,22 +682,114 @@ describe('BackendModelCatalogDialog', () => {
       await user.click(screen.getByRole('button', { name: 'Save' }));
 
       // The row leaves, and it leaves without a question: nothing re-opens for a
-      // candidate that has nothing left to pick.
+      // candidate that has nothing left to pick, and nothing is re-read for a
+      // refusal that committed nothing.
       await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
       expect(screen.queryByRole('heading', { name: 'Add Claude Code models' })).toBeNull();
-      expect(onSaved).not.toHaveBeenCalled();
-      expect(onClose).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(1);
+      // Nor a sentence about it: the row that disappeared and the count that fell
+      // are the report, and a failure line here would be the dialog telling the
+      // user about its own edit.
+      expect(screen.queryByRole('status')).toBeNull();
 
-      await user.click(screen.getByRole('button', { name: 'Save' }));
-
+      // And the save the user pressed is still owed — nothing was committed — so
+      // it goes again on the reduced list rather than charging them a second
+      // press for a withdrawal they did not make.
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
       // The rest of the draft is still the user's, and the write claims nothing
       // beyond the list itself — an `expected_suppliers` entry would be an
       // agreement about a candidate that no longer exists, and there is no other
       // field this save was granted.
-      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
       const body = write.mock.lastCall?.[1] as Record<string, unknown>;
       expect(body.models).toEqual([EDITED, model('beta')]);
       expect(Object.keys(body)).toEqual(['baseline', 'models']);
+      expect(onSaved).toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it('promises only what the refusal itself still offers, whichever picks it disputes', async () => {
+      const user = userEvent.setup();
+      // One refusal carrying both answers at once: a pick whose suppliers are
+      // gone and a pick whose suppliers moved. The property is that the next
+      // write promises exactly what the server just said is there — so the
+      // withdrawn id may appear in neither the list nor the agreement, and the
+      // re-asked one may appear in both only with today's suppliers.
+      const kimi = candidate('kimi-3', {
+        display_name: 'Kimi 3',
+        suppliers: [{ source_id: 'src_a', source_name: 'Primary relay', model_id: 'kimi-3-turbo' }],
+      });
+      const kimiNow = candidate('kimi-3', {
+        display_name: 'Kimi 3',
+        suppliers: [{ source_id: 'src_b', source_name: 'Backup relay', model_id: 'kimi-3' }],
+      });
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
+      vi.spyOn(modelsApi, 'getAgentModelCandidates')
+        .mockResolvedValueOnce(offered({ providers: [shown, kimi] }))
+        // The refreshed offer no longer holds `glm-5.2` at all, which is what the
+        // refusal reported by naming it with no suppliers.
+        .mockResolvedValue(offered({ providers: [kimiNow] }));
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(staleCandidates({
+          'glm-5.2': [],
+          'kimi-3': [{ source_id: 'src_b', model_id: 'kimi-3' }],
+        }))
+        .mockResolvedValue(agent([...CATALOG, model('kimi-3')]));
+      renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await screen.findByRole('checkbox', { name: /GLM 5\.2/ }));
+      await user.click(screen.getByRole('checkbox', { name: /Kimi 3/ }));
+      await user.click(screen.getByRole('button', { name: 'Add 2 models' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      // Reconciled before anything reopens: the picker comes back seeded with the
+      // one id that is still a question, and the other is already gone from the
+      // draft — so this re-ask cannot be answered with an agreement the dialog
+      // would have no way to discharge.
+      expect(await screen.findByRole('checkbox', { name: /Backup relay/ })).toBeTruthy();
+      expect(screen.queryByText('GLM 5.2')).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+      const body = write.mock.lastCall?.[1] as Record<string, unknown>;
+      expect(body.models).toEqual([...CATALOG, candidateBackendModel(kimi)]);
+      expect(body.expected_suppliers).toEqual({ 'kimi-3': [{ source_id: 'src_b', model_id: 'kimi-3' }] });
+    });
+
+    it('takes a dismissed re-ask as 「add none of these」, so a refused promise cannot be re-sent', async () => {
+      const user = userEvent.setup();
+      // The dead end this closes: one seeded id, unchecked, leaves the primary
+      // with nothing to confirm — so walking away has to be an answer the dialog
+      // acts on, or the refused projection is the only thing the next save can
+      // send and the server refuses it again forever.
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
+      vi.spyOn(modelsApi, 'getAgentModelCandidates')
+        .mockResolvedValueOnce(offered({ providers: [shown] }))
+        .mockResolvedValue(offered({ providers: [current] }));
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(staleCandidates({ 'glm-5.2': [{ source_id: 'src_b', model_id: 'glm-5.2' }] }))
+        .mockResolvedValue(agent(CATALOG));
+      renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
+      await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await screen.findByRole('checkbox', { name: /Backup relay/ });
+      // Either control the picker offers to leave is the same answer, and the
+      // dialog treats it as one: 「add none of these」.
+      const [dismiss] = within(screen.getByRole('dialog', { name: 'Add Claude Code models' }))
+        .getAllByRole('button', { name: 'Cancel' });
+      await user.click(dismiss);
+
+      // The row and its promise go together. What is left is the list the server
+      // already holds, so there is nothing to save — the surest statement that
+      // the refused projection cannot go out again.
+      await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
+      expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+      expect(write).toHaveBeenCalledTimes(1);
     });
 
     it('asks about every removal the guard held back, not just the first', async () => {
@@ -751,6 +847,127 @@ describe('BackendModelCatalogDialog', () => {
         models: [model('alpha')],
         force: true,
         would_remove_hops: hops,
+        would_interrupt: [],
+      })));
+    });
+
+    it('shows the row of whichever question is pending, whatever the search says', async () => {
+      const user = userEvent.setup();
+      // A question pending and a filter that matches none of the rows it is
+      // about. The confirmation renders inside its row, so a filter that hid
+      // that row would leave the draft holding a model the user removed, Save
+      // disabled behind an unanswered question, and nothing on screen to
+      // explain either — a dead end reachable by typing.
+      const catalog = [model('alpha'), model('beta'), model('gamma')];
+      const routed = agent(catalog, {
+        routes: {
+          beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] },
+          gamma: { hops: [{ source_id: 'src_a', model_id: 'gamma-air' }] },
+        },
+      });
+      vi.spyOn(modelsApi, 'getAgentSources')
+        .mockResolvedValueOnce(agent(catalog))
+        .mockResolvedValue(routed);
+      const hops = [
+        { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
+        { backend: 'claude' as const, menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
+      ];
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(new ApiCallError(
+          'backend_model_in_route',
+          'modelHub.errors.backend_model_in_route',
+          true,
+          [],
+          [],
+          hops,
+          409,
+        ))
+        .mockResolvedValue(agent([model('alpha')]));
+      renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+      await user.click(screen.getByRole('button', { name: 'Remove gamma' }));
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+      await screen.findByRole('alert');
+      await user.type(screen.getByLabelText('Search name or model ID'), 'alpha');
+
+      for (const hop of hops) {
+        // Whichever question is pending, its row is on screen with its own hop
+        // and its own controls — and it is the only held-back row the search
+        // lets through, so what put it there was the queue, not the query.
+        const asked = await screen.findByRole('alert');
+        expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
+        expect(screen.getByText(hop.menu_model)).toBeTruthy();
+        for (const other of hops.filter((entry) => entry !== hop)) {
+          expect(screen.queryByText(other.menu_model)).toBeNull();
+        }
+        await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+      }
+
+      // Queue empty, so the search is back in charge of the whole list.
+      expect(screen.queryByRole('alert')).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(write).toHaveBeenLastCalledWith('claude', expect.objectContaining({
+        models: [model('alpha')],
+        force: true,
+        would_remove_hops: hops,
+        would_interrupt: [],
+      })));
+    });
+
+    it('discards a queued question the fresh list left no row for, and asks the next one', async () => {
+      const user = userEvent.setup();
+      // The re-read behind a guard refusal is a new list, and it may no longer
+      // hold a model the queue still has a question about. There is nothing
+      // left to remove and nowhere to ask — the confirmation renders in the row
+      // — so the question goes with the row. Left pending it would be worse
+      // than invisible: it is the head, and the row that could advance the queue
+      // is the one that is gone, so every question behind it goes unasked and
+      // the removal the user did ask for can never be answered.
+      const catalog = [model('alpha'), model('beta'), model('gamma')];
+      vi.spyOn(modelsApi, 'getAgentSources')
+        .mockResolvedValueOnce(agent(catalog))
+        // beta is gone from the list itself, not merely un-routed.
+        .mockResolvedValue(agent([model('alpha'), model('gamma')], {
+          routes: { gamma: { hops: [{ source_id: 'src_a', model_id: 'gamma-air' }] } },
+        }));
+      const hops = [
+        { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 },
+        { backend: 'claude' as const, menu_model: 'gamma', source_id: 'src_a', model_id: 'gamma-air', position: 1 },
+      ];
+      const write = vi.spyOn(modelsApi, 'putAgentModels')
+        .mockRejectedValueOnce(new ApiCallError(
+          'backend_model_in_route',
+          'modelHub.errors.backend_model_in_route',
+          true,
+          [],
+          [],
+          hops,
+          409,
+        ))
+        .mockResolvedValue(agent([model('alpha')]));
+      renderDialog();
+
+      await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+      await user.click(screen.getByRole('button', { name: 'Remove gamma' }));
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The question that is asked is the first one with a row to ask it in.
+      const asked = await screen.findByRole('alert');
+      expect(within(asked).getByText('gamma-air · Order #1')).toBeTruthy();
+      expect(within(asked).queryByText(/beta-air/)).toBeNull();
+      expect(screen.queryByText('beta')).toBeNull();
+      await user.click(confirmation().getByRole('button', { name: 'Remove' }));
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      // And the save forces exactly the plan that was answered — nothing on
+      // behalf of the question nobody could be asked.
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(write).toHaveBeenLastCalledWith('claude', expect.objectContaining({
+        models: [model('alpha')],
+        force: true,
+        would_remove_hops: [hops[1]],
         would_interrupt: [],
       })));
     });

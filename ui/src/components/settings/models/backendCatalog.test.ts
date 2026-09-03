@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -13,7 +13,9 @@ import {
   catalogModelIds,
   catalogModels,
   backendModelId,
+  draftRowFor,
   draftWithId,
+  heldRowFor,
   MODELS_DEV_FIELDS,
   pickerGroups,
   readBackendCatalogBaseline,
@@ -340,22 +342,37 @@ describe('the id chokepoint', () => {
  * producer that reaches for the resolver directly is one that is about to write
  * a draft field without the write that carries the rule.
  */
+const MODELS_DIR = join(process.cwd(), 'src/components/settings/models');
+const OWNER = 'backendCatalog.ts';
+
+/**
+ * Every Model Hub module that ships, by path relative to the tree's root.
+ *
+ * Recursive, and tests excluded. Recursive because a producer one folder down is
+ * exactly the one a flat read would miss, and a boundary test that can be
+ * escaped by moving a file is a boundary in name only.
+ */
+const shippedModules = (): { name: string; source: string }[] => {
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (
+    entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)]
+  ));
+  return walk(MODELS_DIR)
+    .filter((path) => /\.tsx?$/.test(path) && !/\.test\.tsx?$/.test(path))
+    .map((path) => ({ name: relative(MODELS_DIR, path), source: readFileSync(path, 'utf8') }));
+};
+
+/** Whoever calls this, outside the module that owns the rule, is who breaks it. */
+const callersOutsideOwner = (call: RegExp) => shippedModules()
+  .filter((module) => module.name !== OWNER && call.test(module.source))
+  .map((module) => module.name);
+
 describe('the id chokepoint boundary', () => {
-  const OWNER = 'backendCatalog.ts';
   /** `id:` or `id =` fed from the resolver, however the call is spelled or
    *  wrapped — the assignment is the part that matters, not the formatting. */
   const ASSIGNS_FROM_RESOLVER = /\bid\s*[:=]\s*[^;,\n]*\bbackendModelId\s*\(/;
 
   it('lets no module outside the resolver’s own write the id from it', () => {
-    const offenders = readdirSync(join(process.cwd(), 'src/components/settings/models'), { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name))
-      .filter((entry) => entry.name !== OWNER)
-      .filter((entry) => ASSIGNS_FROM_RESOLVER.test(
-        readFileSync(join(process.cwd(), 'src/components/settings/models', entry.name), 'utf8'),
-      ))
-      .map((entry) => entry.name);
-
-    expect(offenders).toEqual([]);
+    expect(callersOutsideOwner(ASSIGNS_FROM_RESOLVER)).toEqual([]);
   });
 });
 
@@ -390,6 +407,95 @@ describe('candidateBackendModel', () => {
     candidateBackendModel(candidate).reasoning_efforts.push('mutated');
 
     expect(candidate.reasoning_efforts).toEqual(['low', 'high']);
+  });
+});
+
+/**
+ * Which row an id names, stated over where a row can be, not over who asks.
+ *
+ * The defect this closes reached the user through two different doors — the
+ * picker re-adding a removed model and the editor being seeded with its id — so
+ * the property is about the stores, and every door inherits it by asking. The
+ * proposal is held constant throughout: what decides the answer is where a row
+ * already exists, never what the server said about it.
+ */
+describe('the row chokepoint', () => {
+  const proposal: ModelCandidate = {
+    id: 'glm-5.2',
+    display_name: 'GLM 5.2',
+    reasoning_efforts: ['low'],
+    suppliers: [{ source_id: 'src_relay0001', source_name: 'relay.example', model_id: 'glm-5.2-air' }],
+    origin: 'provider',
+  };
+
+  /** A row carrying what a proposal cannot restate: the fields the user stated
+   *  themselves, which are exactly the ones the defect cleared. */
+  const stated = (id: string) => model(id, {
+    display_name: 'GLM 5.2 (mine)',
+    context_window: 200_000,
+    max_output_tokens: 64_000,
+    input_modalities: ['text', 'image'],
+    output_modalities: ['text'],
+    supports_tools: true,
+    models_dev_id: 'zhipuai/glm-5.2',
+    origin: 'models_dev',
+  });
+
+  /** Every arrangement of the two stores, so 「wherever it exists」 is covered by
+   *  construction rather than by the cases anyone thought to name. A store that
+   *  holds an unrelated row is what says the answer comes from a match and not
+   *  from a store being non-empty. */
+  const HOLDING = [
+    { where: 'the draft', held: [stated('glm-5.2')], saved: [] as BackendModel[] },
+    { where: 'the baseline', held: [], saved: [stated('glm-5.2')] },
+    { where: 'both', held: [stated('glm-5.2')], saved: [stated('glm-5.2')] },
+    { where: 'the draft, beside other rows', held: [model('alpha'), stated('glm-5.2')], saved: [model('beta')] },
+    { where: 'the baseline, beside other rows', held: [model('alpha')], saved: [model('beta'), stated('glm-5.2')] },
+  ];
+
+  it('answers with the row that already exists, wherever it exists', () => {
+    for (const { where, held, saved } of HOLDING) {
+      expect(heldRowFor(proposal.id, held, saved), where).toEqual(stated('glm-5.2'));
+      expect(draftRowFor(proposal, held, saved), where).toEqual(stated('glm-5.2'));
+    }
+  });
+
+  it('yields the baseline row when a removed saved model is re-added', () => {
+    const saved = stated('glm-5.2');
+    // 「Remove it, change my mind, re-add it」: the draft no longer holds the row,
+    // the baseline still does, and `PUT`'s three-way merge reads any difference
+    // as an edit — so anything short of deep equality persists as a clearing the
+    // user never asked for.
+    expect(draftRowFor(proposal, [], [saved])).toEqual(saved);
+  });
+
+  it('builds from the proposal only when neither store holds the id', () => {
+    expect(heldRowFor(proposal.id, [model('alpha')], [model('beta')])).toBeNull();
+    expect(draftRowFor(proposal, [model('alpha')], [model('beta')])).toEqual(candidateBackendModel(proposal));
+  });
+
+  it('has nothing to hand back for the id a blank draft opens with', () => {
+    // The editor's seed is the query the user typed, and it is empty when they
+    // asked for a custom row without typing one. Nothing may match it, or that
+    // door would open on whatever row the list happens to hold.
+    expect(heldRowFor('', [stated('glm-5.2')], [stated('alpha')])).toBeNull();
+  });
+});
+
+/**
+ * What makes 「every door asks」 true.
+ *
+ * The property above is about the stores; it says nothing about a producer that
+ * builds a row from a candidate itself, which is the defect that shipped three
+ * times. So it is checked mechanically: outside the module that owns the rule,
+ * nothing calls the builder at all — reaching for it is reaching past the only
+ * function that can find the row the user already has.
+ */
+describe('the row chokepoint boundary', () => {
+  const BUILDS_FROM_A_CANDIDATE = /\bcandidateBackendModel\s*\(/;
+
+  it('lets no module outside the chokepoint’s own build a row from a candidate', () => {
+    expect(callersOutsideOwner(BUILDS_FROM_A_CANDIDATE)).toEqual([]);
   });
 });
 
