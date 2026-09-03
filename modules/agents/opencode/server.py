@@ -34,6 +34,7 @@ from vibe import runtime
 from vibe.opencode_config import (
     get_opencode_custom_provider_adapter,
     load_first_opencode_user_config,
+    parse_jsonc_object,
     read_opencode_provider_auth_entries,
 )
 
@@ -61,9 +62,12 @@ def _managed_runtime_config_content(raw: str | bytes | None) -> str:
         payload: Any = {}
     else:
         try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("OpenCode runtime config override is invalid JSON") from exc
+            content = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+            if not isinstance(content, str):
+                raise TypeError("runtime config override must be text")
+            payload = parse_jsonc_object(content)
+        except (TypeError, UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError("OpenCode runtime config override is invalid JSONC") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("OpenCode runtime config override must be a JSON object")
 

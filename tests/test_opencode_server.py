@@ -125,6 +125,23 @@ class _FakeSession:
 
 
 class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
+    def test_managed_runtime_config_accepts_jsonc_and_disables_native_skill(self):
+        content = SERVER_MODULE._managed_runtime_config_content(
+            b'''\xef\xbb\xbf{
+              // OpenCode accepts JSONC in this inherited override.
+              "permission": "ask",
+              "tools": {"bash": true,},
+            }'''
+        )
+
+        self.assertEqual(
+            json.loads(content),
+            {
+                "permission": "ask",
+                "tools": {"bash": True, "skill": False},
+            },
+        )
+
     async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         process = types.SimpleNamespace(pid=4321, returncode=None)
