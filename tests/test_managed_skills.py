@@ -1552,7 +1552,7 @@ def test_authoritative_builtin_source_contains_prompt_modules() -> None:
     expected = {
         "use-avibe-harness": "Avibe Harness turns user intent into durable Agent work",
         "use-avibe-vault": "the child process receives static secrets as environment variables",
-        "use-show-pages": "History is saved automatically around each turn",
+        "use-show-pages": "Every Show Page URL is agent-readable without page-specific code",
     }
     for name, migrated_text in expected.items():
         skill = parse_skill_file(

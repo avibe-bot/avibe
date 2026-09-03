@@ -3476,6 +3476,50 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ("thread-1", "stable prompt"),
         )
 
+    async def test_start_turn_does_not_reuse_cached_effort_for_an_explicit_model_change(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.5", None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        params = transport.send_request.await_args.args[1]
+        self.assertEqual(params["model"], "gpt-5.5")
+        self.assertNotIn("effort", params)
+        self.assertEqual(params["collaborationMode"]["settings"]["model"], "gpt-5.5")
+        self.assertIsNone(params["collaborationMode"]["settings"]["reasoning_effort"])
+
     async def test_start_turn_changes_only_collaboration_instructions_when_prompt_changes(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(

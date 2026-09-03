@@ -379,9 +379,10 @@ stale.
 The first extracted modules are Show Pages, Vault, and Harness, owned by
 `use-show-pages`, `use-avibe-vault`, and `use-avibe-harness` respectively. The
 always-on prompt retains their routing rules plus content that must reflect the
-current runtime: backend-specific safety boundaries, Session identity, the live
-Agent Catalog, and mention semantics. `use-avibe` remains the broader Avibe
-configuration and operations playbook; it is not the Harness module owner.
+current runtime: Show Page Cloud availability and active history mode,
+backend-specific safety boundaries, Session identity, the live Agent Catalog,
+and mention semantics. `use-avibe` remains the broader Avibe configuration and
+operations playbook; it is not the Harness module owner.
 
 ## 13. Ownership
 

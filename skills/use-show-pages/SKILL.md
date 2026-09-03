@@ -2,7 +2,7 @@
 name: use-show-pages
 slug: use-show-pages
 description: Build, inspect, update, or share an Avibe Show Page when a visual explanation, diagram, dashboard, report, or interactive prototype would materially help.
-version: 0.2.0
+version: 0.2.1
 ---
 
 # Use Show Pages
@@ -35,28 +35,10 @@ For more usage details, run `vibe show --help` or a subcommand help such as `vib
 - After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
 - Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`.
 
-### Avibe Cloud availability
-
-Check `vibe show status`. When Avibe Cloud is not connected, apply this guidance:
-
-⚠️ Avibe Cloud is not connected, so this page cannot be accessed from the public internet through your domain. To fully use Show Pages, register an avibe.bot account, claim your dedicated domain and pairing key, then run `vibe remote pair`.
-
-History contract:
-
-When Avibe manages the Show Page workspace:
-1. History is saved automatically around each turn; do not manage versions yourself.
-2. Read freely: `git -C <workspace> status / log / diff / show`.
-3. Restore only via `git restore --source=<ref> -- <path>`; the turn-end checkpoint records it as a forward commit.
-4. Never move HEAD, switch branches, rewrite history, or run gc; if you do, the platform self-heals with the worktree as truth.
-5. Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks.
-
-When the workspace is the user's own repository:
-1. Avibe's shadow history continues automatically in the background; you don't manage it.
-2. `git -C <workspace>` addresses the **user's repo**, not Avibe history: never commit, push, or publish on their behalf, and never use it for Avibe restore.
-3. Never locate or mutate Avibe's shadow gitdir on your own initiative. Only if the user explicitly asks to recover from Avibe history, use standard git with explicit `--git-dir` and `--work-tree` against the session's shadow gitdir for read or restore only; never commit to it.
-
-When automatic Show Page history is unavailable:
-1. Automatic Show Page history is unavailable because Git could not be resolved for this process. Continue editing normally, but do not use history or restore commands for this workspace.
+Avibe injects the current Cloud-availability guidance and the one active history
+contract separately because both depend on live runtime state. Follow that
+contract for the current Session; do not infer another history mode from this
+Skill.
 
 Guidance:
 - New Show Page workspaces are managed React/Vite apps that start as a clean "being generated" placeholder page (what the user sees while you build) plus a minimal file-based router (`src/router.tsx`) and one example page. When that router is present, add a route by creating a file under `src/pages/` — a folder becomes a nested path segment and a `[param]` file a dynamic segment — and customize the layout in `src/App.tsx`, styles in `src/styles.css`, and optional `api/*.ts` handlers. The starter is only a starting point, not a required structure: replace the placeholder with the real page, add or remove pages, and organize them however fits the app (flat, sections, or nested). Built-in UI is available to import, e.g. `@/components/ui/card`, `@/components/ui/button`, `@/components/ui/badge`.

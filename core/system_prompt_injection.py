@@ -11,7 +11,9 @@ from typing import Any, Iterable, Optional
 
 from config import paths
 from core.agent_tool_policy import native_background_tools_allowed
+from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
+from core.show_git import format_agent_contract
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -504,8 +506,14 @@ def _build_harness_prompt(
 
 
 def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: str | None = None) -> str:
-    del context, avibe_cloud_guidance
-    return _SHOW_PAGES_ROUTING_PROMPT
+    default_session_id = _extract_default_session_id(context)
+    prompt = _SHOW_PAGES_ROUTING_PROMPT
+    if avibe_cloud_guidance:
+        prompt += f"\n{avibe_cloud_guidance}\n"
+    prompt += "\nHistory contract:\n"
+    prompt += format_agent_contract(numbered=True, session_id=default_session_id)
+    prompt += "\n"
+    return prompt
 
 
 def _build_vault_prompt(
@@ -582,7 +590,8 @@ def build_system_prompt_injection(
     if include_codex_generated_images:
         prompt += _build_codex_generated_images_prompt()
     if include_show_pages and context is not None:
-        prompt += _build_show_pages_prompt(context)
+        guidance = AVIBE_CLOUD_CONNECT_GUIDANCE if avibe_cloud_connected is False else None
+        prompt += _build_show_pages_prompt(context, avibe_cloud_guidance=guidance)
     if include_quick_replies:
         prompt += _QUICK_REPLIES_PROMPT
     prompt += _build_vault_prompt(context, fallback_platform=fallback_platform)

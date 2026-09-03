@@ -1818,7 +1818,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(forward.index("| alpha |"), forward.index("| beta |"))
         self.assertLess(forward.index("| beta |"), forward.index("| zeta |"))
 
-    def test_show_page_runtime_state_does_not_change_the_system_prompt(self):
+    def test_show_page_runtime_state_selects_one_history_contract(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1828,16 +1828,29 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
             with patch("core.show_git.show_git_checkpointing_active", return_value=False):
-                unmanaged = build_system_prompt_injection(include_quick_replies=True, context=context)
-            with patch("core.show_git.show_git_checkpointing_active", return_value=True):
+                unavailable = build_system_prompt_injection(include_quick_replies=True, context=context)
+            with (
+                patch("core.show_git.show_git_checkpointing_active", return_value=True),
+                patch("core.show_git._workspace_is_self_managed", return_value=False),
+            ):
                 managed = build_system_prompt_injection(include_quick_replies=True, context=context)
+            with (
+                patch("core.show_git.show_git_checkpointing_active", return_value=True),
+                patch("core.show_git._workspace_is_self_managed", return_value=True),
+            ):
+                self_managed = build_system_prompt_injection(include_quick_replies=True, context=context)
 
-        self.assertEqual(unmanaged, managed)
-        self.assertNotIn("History is saved automatically around each turn", managed)
+        self.assertIn("History is saved automatically around each turn", managed)
+        self.assertNotIn("Avibe's shadow history continues automatically", managed)
+        self.assertIn("Avibe's shadow history continues automatically", self_managed)
+        self.assertNotIn("History is saved automatically around each turn", self_managed)
+        self.assertIn("Automatic Show Page history is unavailable", unavailable)
+        self.assertNotIn("History is saved automatically around each turn", unavailable)
         skill = (Path(__file__).resolve().parents[1] / "skills" / "use-show-pages" / "SKILL.md").read_text()
-        self.assertIn("History is saved automatically around each turn", skill)
-        self.assertIn("Avibe's shadow history continues automatically in the background", skill)
-        self.assertIn("Automatic Show Page history is unavailable", skill)
+        self.assertNotIn("History is saved automatically around each turn", skill)
+        self.assertNotIn("Avibe's shadow history continues automatically in the background", skill)
+        self.assertNotIn("Automatic Show Page history is unavailable", skill)
+        self.assertIn("one active history", skill)
 
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
         context = MessageContext(
@@ -1866,7 +1879,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("| (none) |", missing_store_prompt)
         self.assertNotIn("| (none) |", empty_store_prompt)
 
-    def test_show_page_detail_lives_in_skill_and_cloud_state_does_not_change_prompt(self):
+    def test_show_page_detail_lives_in_skill_and_cloud_state_stays_in_prompt(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1886,10 +1899,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
 
-        self.assertEqual(disconnected, connected)
+        self.assertNotEqual(disconnected, connected)
         self.assertIn("load the `use-show-pages` Skill", disconnected)
         self.assertNotIn("`vibe show path`", disconnected)
-        self.assertNotIn("Avibe Cloud is not connected", disconnected)
+        self.assertIn("Avibe Cloud is not connected", disconnected)
+        self.assertNotIn("Avibe Cloud is not connected", connected)
 
         skill = (Path(__file__).resolve().parents[1] / "skills" / "use-show-pages" / "SKILL.md").read_text()
         self.assertIn("`vibe show path`", skill)
@@ -1898,7 +1912,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[show-annotation]", skill)
         self.assertIn("vibe show mark", skill)
         self.assertIn("They include Show Page motion for changed text", skill)
-        self.assertIn("Avibe Cloud is not connected", skill)
+        self.assertNotIn("Avibe Cloud is not connected", skill)
 
     def test_disabled_show_pages_are_not_advertised_through_the_skill_catalog(self):
         context = MessageContext(

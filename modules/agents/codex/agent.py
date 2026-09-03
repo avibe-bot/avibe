@@ -2607,8 +2607,8 @@ class CodexAgent(BaseAgent):
         _, effective_model, effective_effort, _ = self._resolve_codex_agent_settings(request)
         cached_model_settings = getattr(self, "_thread_model_settings", {}).get(request.base_session_id)
         if cached_model_settings and cached_model_settings[0] == thread_id:
-            effective_model = effective_model or cached_model_settings[1]
-            if effective_effort is None:
+            if effective_model is None:
+                effective_model = cached_model_settings[1]
                 effective_effort = cached_model_settings[2]
 
         turn_params: Dict[str, Any] = {
