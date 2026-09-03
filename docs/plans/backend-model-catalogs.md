@@ -283,7 +283,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   origin}`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
   (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, removed ones
   included; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
-  configuration-eligible Sources minus menu ids and minus ids already in `builtin`; `in_list`
+  configuration-eligible Sources minus menu ids and minus ids already in `builtin`, and minus
+  any id the backend's admission rule would reject (length, canonical form, Claude prefix,
+  OpenCode `vendor/model`) — a candidate is by definition addable; `in_list`
   is every current menu row with the same projection, so an already-added model is found by
   its supplier's name too and its disabled row shows authoritative chips.
   `suppliers` is the server's own `matching-v1` projection for that id — so a Claude alias hop
@@ -311,8 +313,7 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   unchanged, so a partial snapshot can never be mistaken for the user's removals. Load and
   mutation fixtures cover the v1 file, the pending window, and the initialized state. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
   the price is that a built-in that entered the snapshot between the v1 save and the first v2
-  load is treated as removed — recoverable from the picker, not auto-added. Reconcile runs only
-  once the field exists. Claude Code's locked `default` row is not a built-in candidate and
+  load is treated as removed — recoverable from the picker, not auto-added. Claude Code's locked `default` row is not a built-in candidate and
   cannot be removed.
 - **C7 — models.dev read serves the editor typeahead, additively.** The existing
   `GET /api/models/catalog/models-dev?query=` keeps its shipped shape — `matches`, `provider_id`,
