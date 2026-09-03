@@ -753,6 +753,7 @@ class ModelHubService:
         self._runtime_lifecycle_lock = asyncio.Lock()
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
+        self._pending_builtin_catalog_refresh: set[BackendName] = set()
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -4263,7 +4264,12 @@ class ModelHubService:
         notify: bool = True,
     ) -> list[BackendName]:
         async with self._mutation_lock:
-            snapshots = self._builtin_snapshots(backends)
+            selected_backends = tuple(backends)
+            # A legacy load may initialize its removed-id baseline from the
+            # snapshot. Settle that migration before taking the reconcile view
+            # so one request cannot apply an older pre-migration generation.
+            previous = self.store.load()
+            snapshots = self._builtin_snapshots(selected_backends)
             changed_snapshots = {
                 backend: snapshot
                 for backend, snapshot in snapshots.items()
@@ -4278,24 +4284,31 @@ class ModelHubService:
                     for backend, snapshot in snapshots.items()
                 }
             )
-            if not changed_snapshots:
-                return []
-            previous = self.store.load()
-            config = self._clone_config(previous)
-            changed = self._apply_builtin_reconcile(config, changed_snapshots)
-            if changed:
-                await self._commit_synced(previous, config)
-            self._builtin_snapshot_generations.update(
-                {
-                    cast(BackendName, backend): self._builtin_snapshot_generation(
-                        snapshot
-                    )
-                    for backend, snapshot in changed_snapshots.items()
-                }
-            )
+            changed: list[BackendName] = []
+            if changed_snapshots:
+                config = self._clone_config(previous)
+                changed = self._apply_builtin_reconcile(config, changed_snapshots)
+                if changed:
+                    await self._commit_synced(previous, config)
+                self._builtin_snapshot_generations.update(
+                    {
+                        cast(BackendName, backend): self._builtin_snapshot_generation(
+                            snapshot
+                        )
+                        for backend, snapshot in changed_snapshots.items()
+                    }
+                )
+                if notify:
+                    self._pending_builtin_catalog_refresh.update(changed)
             if notify:
-                for backend in changed:
+                pending = tuple(
+                    backend
+                    for backend in selected_backends
+                    if backend in self._pending_builtin_catalog_refresh
+                )
+                for backend in pending:
                     await self._refresh_backend_catalog(backend)
+                    self._pending_builtin_catalog_refresh.discard(backend)
             return changed
 
     async def set_agent_models(
@@ -6747,5 +6760,8 @@ def create_default_service(
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
     )
-    asyncio.run(service.reconcile_builtin_models(notify=False))
+    try:
+        asyncio.run(service.reconcile_builtin_models(notify=False))
+    except Exception:
+        logger.warning("Model Hub built-in reconciliation failed during startup", exc_info=True)
     return service

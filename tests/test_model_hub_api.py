@@ -825,6 +825,28 @@ def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
     assert service.native_oauth_adapter._agent_auth_service is agent_auth_service
 
 
+def test_default_service_keeps_startup_reconcile_best_effort(
+    monkeypatch,
+    caplog,
+):
+    async def fail_reconcile(_service, *_args, **_kwargs):
+        raise ModelHubError("config_recovery", status=409)
+
+    monkeypatch.setattr(
+        ModelHubService,
+        "reconcile_builtin_models",
+        fail_reconcile,
+    )
+
+    service = create_default_service(
+        adapter=FakeAdapter(),
+        native_oauth_adapter=FakeAdapter(),
+    )
+
+    assert isinstance(service, ModelHubService)
+    assert "built-in reconciliation failed during startup" in caplog.text
+
+
 def test_runtime_status_observes_engine_without_starting_it(tmp_path):
     class LifecycleAdapter(FakeAdapter):
         def __init__(self):
@@ -2529,6 +2551,66 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
 
     assert "gpt-pulled-on-read" in payload["builtin_models"]
     assert applies == [("codex",), ("codex",)]
+
+
+def test_builtin_reconcile_loads_legacy_baseline_before_reading_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    calls = []
+    original_load = store.load
+
+    def load():
+        calls.append("load")
+        return original_load()
+
+    def snapshots(_backends):
+        calls.append("snapshot")
+        return {"codex": {"complete": True, "models": []}}
+
+    monkeypatch.setattr(store, "load", load)
+    monkeypatch.setattr(service, "_builtin_snapshots", snapshots)
+
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    assert calls[:2] == ["load", "snapshot"]
+
+
+def test_builtin_reconcile_retries_failed_runtime_refresh(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    existing = store.config.agents["codex"].models[0].id
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {
+            "codex": {
+                "complete": True,
+                "generation": "retry-generation",
+                "models": [{"id": existing}, {"id": "gpt-refresh-retry"}],
+            }
+        },
+    )
+    attempts = []
+
+    async def refresh(backend):
+        attempts.append(backend)
+        if len(attempts) == 1:
+            raise ModelHubError("engine_down", status=503)
+
+    service.backend_catalog_changed = refresh
+
+    with pytest.raises(ModelHubError, match="engine_down"):
+        asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    assert "gpt-refresh-retry" in {
+        model.id for model in store.config.agents["codex"].models
+    }
+    assert asyncio.run(service.reconcile_builtin_models(("codex",))) == []
+    assert attempts == ["codex", "codex"]
 
 
 def test_backend_catalog_mutations_leave_every_unrelated_model_shape_byte_identical(
