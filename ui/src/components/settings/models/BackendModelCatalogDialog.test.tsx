@@ -322,9 +322,14 @@ describe('BackendModelCatalogDialog', () => {
       expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
     }
     // Whether anything is stranded is the guard's answer, not this dialog's, so
-    // the preview says what it knows rather than inventing an interruption.
+    // the preview says what it knows and stays silent about the rest. Both
+    // readings are withheld, not just the alarming one: 「still has another
+    // source available」 is the dangerous half here, because it is a promise
+    // about supply this dialog cannot see, made in the confirmation the user
+    // decides on.
     expect(within(asked).queryByText('Models that will be left with no source')).toBeNull();
-    expect(asked.textContent).toContain('These models still have another source available.');
+    expect(asked.textContent).not.toContain('These models still have another source available.');
+    expect(asked.textContent).not.toContain('Some models will be left with no usable source.');
     expect(screen.getByText('2 models')).toBeTruthy();
 
     // Asking is not doing.

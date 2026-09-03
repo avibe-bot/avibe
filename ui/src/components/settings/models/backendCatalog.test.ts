@@ -17,6 +17,7 @@ import {
   draftWithId,
   echoableRefusal,
   heldRowFor,
+  opencodeMenuIdentity,
   MODELS_DEV_FIELDS,
   pickerGroups,
   readBackendCatalogBaseline,
@@ -335,6 +336,51 @@ describe('the id chokepoint', () => {
   });
 });
 
+describe('the OpenCode identity rule', () => {
+  // One clause of `canonical_opencode_menu_identity` (config/v2_config.py) each,
+  // named by what the server checks, so a rule that moves there is findable
+  // here. The server is still the authority; this only decides early enough for
+  // the id field to say what is wrong before the `PUT` rejects the whole list.
+  it.each([
+    // `not separator`: nothing splits the halves.
+    ['glm-5.2', false],
+    // `not model_id`: the hole this closes. A recognized provider prefix is
+    // taken as given by the chokepoint, which hands `openai/` straight back —
+    // and `custom/` is the same hole behind the fallback prefix it adds itself.
+    ['openai/', false],
+    ['custom/', false],
+    // `not provider`: a leading separator names no provider.
+    ['/glm-5.2', false],
+    // The provider segment's own shape: lowercase alphanumeric runs, joined by
+    // single `.`, `_` or `-`.
+    ['OpenAI/glm-5.2', false],
+    ['-openai/glm-5.2', false],
+    ['open_ai/glm-5.2', true],
+    ['relay.example/glm-5.2', true],
+    // `identifier != identifier.strip()`, then `model_id != model_id.strip()`.
+    [' openai/glm-5.2', false],
+    ['openai/glm-5.2 ', false],
+    ['openai/ glm-5.2', false],
+    // Split on the FIRST separator, so a reseller keeps its own: this is
+    // provider `openrouter` serving the model `anthropic/claude-x`.
+    ['openrouter/anthropic/claude-x', true],
+    ['custom/glm-5.2-air', true],
+  ])('mirrors the server rule for %s', (id, admissible) => {
+    expect(opencodeMenuIdentity(id, 'opencode')).toBe(admissible);
+  });
+
+  it('judges nothing for a backend whose ids have no segments to satisfy', () => {
+    // claude and codex ids are flat, and their admission rules stay the
+    // server's alone: a copy here would be a second authority over admission
+    // that drifts silently (Known-by-design 22).
+    for (const backend of ['claude', 'codex'] as const) {
+      for (const id of ['openai/', 'claude-sonnet-4-5', 'anything at all']) {
+        expect(opencodeMenuIdentity(id, backend)).toBe(true);
+      }
+    }
+  });
+});
+
 /**
  * What makes 「the only write」 true.
  *
@@ -388,18 +434,44 @@ describe('candidateBackendModel', () => {
     origin: 'provider',
   };
 
-  it('copies what the server proposed and leaves every other field at the blank floor', () => {
+  it('copies what the server proposed and states nothing else at all', () => {
     const drafted = candidateBackendModel(candidate);
 
     // `PUT` stores the request literally, so a context window nobody stated
     // would persist as if the user had. Whole-row equality is what says so: a
-    // value the proposal grows is either answered here or still the floor.
+    // value the proposal grows is either answered here or still unstated.
+    //
+    // Written out rather than spread from `blankBackendModel()`, because THAT
+    // is the row under test. Spreading the editor's floor here would assert
+    // that a picked row inherits the editor's defaults, which is the defect: a
+    // new manual default would flow into every picked row and this test would
+    // approve it. A literal makes the row's own claims the subject, so a field
+    // added to `BackendModel` has to be decided here before it can ship.
     expect(drafted).toEqual({
-      ...blankBackendModel(),
       id: candidate.id,
       display_name: candidate.display_name,
       origin: candidate.origin,
       reasoning_efforts: candidate.reasoning_efforts,
+      models_dev_id: null,
+      context_window: null,
+      max_output_tokens: null,
+      // No editor opened, so there was nobody to show a default to: the row
+      // asserts no capability and no modality. `null` is not `false` — the
+      // projection omits the capability and the backend's own default stands.
+      input_modalities: [],
+      output_modalities: [],
+      supports_tools: null,
+      supports_reasoning: null,
+      locked: false,
+      routeable: true,
+    });
+    // The editor's floor is a different row and stays that way: these four are
+    // exactly what it adds, and none of them may reach a pick.
+    expect(blankBackendModel()).toMatchObject({
+      input_modalities: ['text'],
+      output_modalities: ['text'],
+      supports_tools: true,
+      supports_reasoning: false,
     });
     // The suppliers the picker displayed travel as the write's
     // `expected_suppliers`; a catalog row names no Source at all.

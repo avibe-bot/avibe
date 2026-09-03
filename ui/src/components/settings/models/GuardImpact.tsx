@@ -17,8 +17,21 @@ import type { RouteHopRef, SupplyGap } from './types';
  */
 export type GuardPlan = { hops: RouteHopRef[]; gaps: SupplyGap[] };
 
+/**
+ * What a caller can show BEFORE the guard has spoken.
+ *
+ * `gaps: null` is 「nobody has said」, and it is not `[]`. Whether a removal
+ * strands an Agent is the guard's answer — it depends on supply this client
+ * cannot see — so a client that answers `[]` on its own has told the user
+ * 「another source is available」 during the one confirmation that matters, on no
+ * authority at all. A picture says which hops it can see and stays silent about
+ * the rest; only a `GuardPlan`, whose halves both come from the server, may
+ * carry a statement about interruption.
+ */
+export type GuardPicture = Omit<GuardPlan, 'gaps'> & { gaps: SupplyGap[] | null };
+
 /** The shared evidence body for every guarded Model Hub mutation and its result. */
-export const GuardImpact: React.FC<GuardPlan & {
+export const GuardImpact: React.FC<GuardPicture & {
   committed?: boolean;
   /**
    * Source id → that Source's own name, for the callers that can resolve one.
@@ -65,14 +78,24 @@ export const GuardImpact: React.FC<GuardPlan & {
           </div>
         </>
       )}
-      <GuardGapList
-        gaps={gaps}
-        labelKey={committed ? 'settings.models.guard.result.gapLabel' : undefined}
-      />
-      <p className={cn('model-hub-guard-hint', gaps.length > 0 && 'text-destructive-ink')}>
-        <Info aria-hidden />
-        {t(`settings.models.guard.${committed ? 'result.' : ''}hint.${gaps.length > 0 ? 'interrupt' : 'safe'}`)}
-      </p>
+      {/* Both of these are statements ABOUT the gaps — the list names them, and
+          the hint below says whether there are any — so an unstated gap list
+          renders neither. Silence is the only honest reading: 「safe」 would be
+          this client vouching for supply it cannot see, and 「interrupt」 would
+          invent a consequence. The hops above are unaffected; they are what the
+          caller does know. */}
+      {gaps !== null && (
+        <>
+          <GuardGapList
+            gaps={gaps}
+            labelKey={committed ? 'settings.models.guard.result.gapLabel' : undefined}
+          />
+          <p className={cn('model-hub-guard-hint', gaps.length > 0 && 'text-destructive-ink')}>
+            <Info aria-hidden />
+            {t(`settings.models.guard.${committed ? 'result.' : ''}hint.${gaps.length > 0 ? 'interrupt' : 'safe'}`)}
+          </p>
+        </>
+      )}
     </>
   );
 };

@@ -1011,7 +1011,8 @@
             "placeholder": "Search models.dev or enter a model ID",
             "required": "Enter a backend model ID.",
             "tooLong": "A model ID may be at most 256 characters.",
-            "duplicate": "This list already has a model with this ID."
+            "invalid": "An OpenCode model ID is provider/model, and needs both halves.",
+          "duplicate": "This list already has a model with this ID."
           },
           "displayName": {
             "label": "Display name",

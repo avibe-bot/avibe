@@ -73,6 +73,33 @@ describe('GuardImpact', () => {
     expect(empty.container.innerHTML).toBe(omitted.container.innerHTML);
   });
 
+  it('distinguishes a stated absence of gaps from nobody having stated one', () => {
+    // Every claim this body can make about interruption, read off the keys
+    // rather than copied, so a reworded claim is caught by the same assertion.
+    const claims = [
+      'settings.models.guard.hint.safe',
+      'settings.models.guard.hint.interrupt',
+      'settings.models.guard.result.hint.safe',
+      'settings.models.guard.result.hint.interrupt',
+      'settings.models.guard.gap.label',
+      'settings.models.guard.result.gapLabel',
+    ].map((key) => i18n.t(key));
+
+    // `[]` is the guard saying so, and it is entitled to: it can see the supply.
+    const stated = renderImpact({ hops: [hop()], gaps: [] });
+    expect(stated.container.textContent).toContain(i18n.t('settings.models.guard.hint.safe'));
+
+    // `null` is a caller that cannot see the supply and does not pretend to.
+    const unstated = renderImpact({ hops: [hop()], gaps: null });
+
+    // The hops survive — they are what such a caller does know — and every
+    // statement about what removing them costs elsewhere is withheld.
+    expect(within(unstated.container).getByText(hopText(hop(), {}))).toBeTruthy();
+    for (const claim of claims) {
+      expect(unstated.container.textContent).not.toContain(claim);
+    }
+  });
+
   it('keeps the mapping copy the rest of the Model Hub uses, in either language', async () => {
     await i18n.changeLanguage('zh');
     const sourceNames = { src_a: '主中继' };

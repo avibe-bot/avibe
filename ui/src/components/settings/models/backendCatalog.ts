@@ -79,42 +79,76 @@ export function catalogModelIds(agent: AgentSupply): string[] {
   return [...new Set(agent.menu?.checked ?? [])].filter(Boolean);
 }
 
-/** A new row's starting point: text in, text out, tools on — the floor for any
- *  model a coding-agent backend can actually drive. Reasoning stays off because
- *  an empty `reasoning_efforts` is a decision (「omit the effort parameter」),
- *  not a gap the UI may pre-fill on the user's behalf. */
-export const blankBackendModel = (): BackendModel => ({
+/**
+ * A row that states nothing — the floor under every other floor here.
+ *
+ * It is the server's own default for a row it is told nothing about: no
+ * modality, and no capability, where `null` is not `false` but 「the projection
+ * omits this, so the backend's own default stands」.
+ *
+ * Every floor below is built from this one so that the direction of the default
+ * is 「unstated unless stated」: a field added to `BackendModel` starts unstated
+ * in every producer, and a value one of them wants has to be written down to
+ * exist. Building the other way round is what put `supports_reasoning: false`
+ * into rows nobody had opened — the runtime projection reads that as 「this model
+ * does not reason」 and drops the very efforts the row was created with.
+ */
+const unstatedBackendModel = (): BackendModel => ({
   id: '',
   display_name: null,
   origin: 'manual',
   models_dev_id: null,
   context_window: null,
   max_output_tokens: null,
+  input_modalities: [],
+  output_modalities: [],
+  supports_tools: null,
+  supports_reasoning: null,
+  reasoning_efforts: [],
+  locked: false,
+  routeable: true,
+});
+
+/** A row the user is about to WRITE BY HAND: text in, text out, tools on — the
+ *  floor for any model a coding-agent backend can actually drive. These four are
+ *  stated rather than unstated because the editor renders them before it saves
+ *  anything, so they are on screen to be changed; a row created without the
+ *  editor ever opening starts from `unstatedBackendModel` instead. Reasoning
+ *  stays off because an empty `reasoning_efforts` is a decision (「omit the
+ *  effort parameter」), not a gap the UI may pre-fill on the user's behalf. */
+export const blankBackendModel = (): BackendModel => ({
+  ...unstatedBackendModel(),
   input_modalities: ['text'],
   output_modalities: ['text'],
   supports_tools: true,
   supports_reasoning: false,
-  reasoning_efforts: [],
-  locked: false,
-  routeable: true,
 });
 
 /**
  * A picked candidate, poured into a draft row.
  *
  * Copies exactly the three values the server proposed (C2) and leaves every
- * other field at the blank floor. That asymmetry is the contract: the proposal
- * covers what the product already knows about the model — its label and the
- * efforts its suppliers accept — and the rest stays empty until the user fills
- * it, because `PUT` stores the request literally and an invented context window
- * would persist as if the user had stated it.
+ * other field unstated. That asymmetry is the contract: the proposal covers what
+ * the product already knows about the model — its label and the efforts its
+ * suppliers accept — and the rest stays empty until the user fills it, because
+ * `PUT` stores the request literally and an invented context window would
+ * persist as if the user had stated it.
+ *
+ * Unstated, NOT the blank floor. The blank floor's `text`/`text`/tools-on/
+ * reasoning-off belong to a row the editor is about to show, where they are on
+ * screen to be corrected. This row is created by clicking a checkbox in the
+ * picker: no editor opens, so anything the floor asserts is a claim the user
+ * never saw and the server never made. `supports_reasoning: false` was the
+ * expensive one — the runtime projection suppresses `reasoning_efforts`
+ * entirely for a row that says it, so a reasoning-capable candidate picked from
+ * the list arrived with its tiers and lost them on the way to the Route editor.
  *
  * `origin` comes from the candidate rather than from the group the row was
  * rendered in: the server names the creation path, and reading it back off the
  * group would be this client re-deriving something it was told.
  */
 export const candidateBackendModel = (candidate: ModelCandidate): BackendModel => ({
-  ...blankBackendModel(),
+  ...unstatedBackendModel(),
   id: candidate.id,
   display_name: candidate.display_name,
   origin: candidate.origin,
@@ -248,6 +282,42 @@ export const pickerGroups = (
   for (const candidate of candidates.builtin) file(candidate, 'builtin');
   for (const candidate of candidates.providers) file(candidate, 'providers');
   return groups;
+};
+
+/** The provider segment `canonical_opencode_menu_identity` accepts, verbatim. */
+const OPENCODE_PROVIDER_SEGMENT = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+
+/**
+ * Whether an id is a whole OpenCode menu identity, or only looks like one.
+ *
+ * `canonical_opencode_menu_identity` is the authority and stays the authority:
+ * this decides nothing the server does not, it just decides it early enough for
+ * the id field to say what is wrong while the user is still typing. Without it
+ * the dialog calls `openai/` valid, saves, and the `PUT` rejects the whole list
+ * for a row the user was told was fine.
+ *
+ * Both halves or neither. A recognized provider prefix proves only that the left
+ * half is admissible — `openai/` has no right half at all, and `custom/` is the
+ * same hole behind the fallback prefix this file adds itself. Splitting on the
+ * FIRST separator is what the backend does, so a reseller id keeps its own
+ * slashes (`openrouter/anthropic/claude-…` is provider `openrouter`, model
+ * `anthropic/claude-…`).
+ *
+ * The credential-material rule is deliberately not mirrored. It is a heuristic
+ * over secret shapes that the server can revise whenever it learns a new one,
+ * and a copy here would be a second opinion about what a secret looks like,
+ * drifting silently in whichever direction it was last edited. A row it catches
+ * is refused by the `PUT` with its own message.
+ */
+export const opencodeMenuIdentity = (id: string, backend: AgentBackend): boolean => {
+  if (backend !== 'opencode') return true;
+  if (id !== id.trim()) return false;
+  const separator = id.indexOf('/');
+  if (separator <= 0) return false;
+  const model = id.slice(separator + 1);
+  return OPENCODE_PROVIDER_SEGMENT.test(id.slice(0, separator))
+    && model !== ''
+    && model === model.trim();
 };
 
 /**

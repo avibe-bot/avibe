@@ -37,7 +37,7 @@ import {
 } from './backendCatalog';
 import { BackendModelEditorDialog } from './BackendModelEditorDialog';
 import { BackendModelPickerDialog } from './BackendModelPickerDialog';
-import { GuardImpact, type GuardPlan } from './GuardImpact';
+import { GuardImpact, type GuardPicture, type GuardPlan } from './GuardImpact';
 import { apiFailure, modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
 import { catalogSaveFailureKey, catalogSaveLeftUnloaded } from './serverCopy';
@@ -82,7 +82,7 @@ const matchesQuery = (model: BackendModel, query: string, renderedLabel: string)
  * agreeing to what the server refused. Only a `guard` answer can settle a
  * refusal, so only a `guard` answer is allowed to discharge what one owes.
  */
-type RemovalQuestion = { modelId: string; plan: GuardPlan; account: 'draft' | 'guard' };
+type RemovalQuestion = { modelId: string; plan: GuardPicture; account: 'draft' | 'guard' };
 
 /** A guard refusal, as received, together with the write it refused. Both
  *  halves are needed to use it: the arrays are what a retry echoes, and the
@@ -232,7 +232,7 @@ export const BackendModelCatalogDialog: React.FC<{
    * already agreed to?」 — and its only effect is whether the same consequence is
    * put to them a second time.
    */
-  const previewRef = React.useRef(new Map<string, GuardPlan>());
+  const previewRef = React.useRef(new Map<string, GuardPicture>());
   /**
    * The last guard refusal, stored exactly as it arrived and bound to the write
    * it refused.
@@ -454,26 +454,29 @@ export const BackendModelCatalogDialog: React.FC<{
    * positions so that the picture matches the statement, and when it does the
    * save goes through without asking the same question twice.
    *
-   * The gaps are empty and honestly so: whether a removal strands an Agent is
-   * the guard's answer, not a client's. `GuardImpact` therefore reads 「still
-   * has another source available」 here, and the save verifies it — the guard
-   * refuses with the real gaps before anything commits, and those are what the
-   * user is then shown.
+   * The gaps are `null`, not empty: whether a removal strands an Agent is the
+   * guard's answer, and this dialog holds no supply to answer it from. Empty
+   * would have made `GuardImpact` read 「these models still have another source
+   * available」 — a promise about the rest of the Hub, made by the one surface
+   * that cannot see it, in the confirmation the user decides on. So the picture
+   * shows its hops and says nothing about interruption; the guard refuses with
+   * the real gaps before anything commits, and those are what the user is then
+   * shown.
    */
-  const removalPreview = (modelId: string): GuardPlan => ({
+  const removalPreview = (modelId: string): GuardPicture => ({
     hops: (baseline?.agent.routes?.[modelId]?.hops ?? []).map((hop, index) => ({
       ...hop,
       backend,
       menu_model: modelId,
       position: index + 1,
     })),
-    gaps: [],
+    gaps: null,
   });
 
   /** The row leaves the draft; its route leaves with it when the list saves. */
-  const dropModel = (modelId: string, plan: GuardPlan) => {
+  const dropModel = (modelId: string, plan: GuardPicture) => {
     chosenRef.current.delete(modelId);
-    if (plan.hops.length > 0 || plan.gaps.length > 0) previewRef.current.set(modelId, plan);
+    if (plan.hops.length > 0 || (plan.gaps?.length ?? 0) > 0) previewRef.current.set(modelId, plan);
     else previewRef.current.delete(modelId);
     mutate(draftRef.current.filter((entry) => entry.id !== modelId));
   };
@@ -713,8 +716,12 @@ export const BackendModelCatalogDialog: React.FC<{
           const shown = [...previewRef.current]
             .filter(([modelId]) => intent.removed.has(modelId))
             .map(([, plan]) => plan);
+          // A picture contributes no gaps, because it never claimed any: so a
+          // server plan that names an interruption is by construction not
+          // covered by what the user has already accepted, and the question is
+          // re-asked with the server's own words.
           const agreed = samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops))
-            && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps));
+            && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps ?? []));
           refusalRef.current = {
             hops: refusal.wouldRemoveHops,
             gaps: refusal.wouldInterrupt,

@@ -19,7 +19,7 @@ import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { isComposingKey } from '@/lib/imeComposition';
 import { cn } from '@/lib/utils';
-import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, opencodeMenuIdentity, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
 import type { StandardVendors } from './menus/identifiers';
@@ -267,9 +267,16 @@ export const BackendModelEditorDialog: React.FC<{
       ? 'required'
       : resolved.id.length > BACKEND_MODEL_ID_MAX_LENGTH
         ? 'tooLong'
-        : takenIds.has(resolved.id)
-          ? 'duplicate'
-          : null;
+        // Asked of the resolved id for the same reason the length and the
+        // collision are: `custom/` is part of what gets stored, so the shape
+        // rule has to judge the value the backend will actually parse. It is
+        // the last rule that can be answered without the list, and the
+        // collision check below is the one that needs it.
+        : !opencodeMenuIdentity(resolved.id, backend)
+          ? 'invalid'
+          : takenIds.has(resolved.id)
+            ? 'duplicate'
+            : null;
   const valid = idError === null && context.ok && output.ok;
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
