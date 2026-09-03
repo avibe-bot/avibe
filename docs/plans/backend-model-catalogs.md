@@ -97,8 +97,10 @@ menu, so showing this editor there would falsely imply that these rows change Di
 
 ### Why v1 is wrong as a product
 
-Revision 2026-09-03 (owner review): one add action with four origins, recoverable built-ins,
-and automatic arrival of new built-ins replace the earlier two-button proposal.
+Revision 2026-09-03 (owner review, approved): one `Add models` action that selects what already
+exists (the backend's built-in list, your providers' inventories) and hands everything else to a
+custom-model editor where models.dev is the lookup; built-ins are recoverable after removal and
+new built-ins arrive by themselves.
 
 v1 shipped `Manage models` as a hand-typed record editor: the user types a backend model
 id, optionally asks models.dev to fill metadata, saves, then opens the Route dialog and
@@ -111,9 +113,9 @@ added after its provider can only be routed by hand.
 
 ### Outcome
 
-A backend's model menu is composed primarily by **selecting models that providers already
-supply**. Typing a model id by hand remains available as the fallback for a model no
-provider lists. Selecting a model creates one menu entry and its initial route — every
+A backend's model menu is composed primarily by **selecting models that already exist** — the
+backend's own built-in list and the models your providers supply. A custom model, looked up
+on models.dev or typed by hand in the editor, remains the fallback for anything neither lists. Selecting a model creates one menu entry and its initial route — every
 provider that supplies that id, in the backend's Source order — so the user immediately
 sees what the Agent menu will show and where requests will go. Routes remain a separate
 surface and are never edited inside the picker.
@@ -147,9 +149,9 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    reorders, or cross-maps hops.
 4. **models.dev** proposes, never rules. At add time the server fills empty metadata only
    when exactly one exact match exists (`provider/model` or model-id equality) and records
-   `models_dev_id`. The editor's existing `Fill from models.dev` re-proposes on demand.
-   No refresh ever overwrites a field the user has set; a proposal is reversible by
-   editing the field.
+   `models_dev_id`. In the editor the `Model` typeahead proposes models.dev matches while the
+   user types and fills the form on selection. No refresh ever overwrites a field the user
+   has set; a proposal is reversible by editing the field.
 5. **A supplying model disappears, is retired, or its Source is disabled or deleted.**
    Routes are configuration and are not rewritten by health (existing rule). The menu
    entry stays; its row shows the existing states (`Supply paused`, `No model route
@@ -162,10 +164,10 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    Route dialog, where the mapping is visible on the row. Codex accepts any canonical id.
    OpenCode requires `vendor/model`, which the picker produces; the manual editor keeps
    its existing validation.
-7. **One `Add models` action, four origins, one list.** `Manage models` keeps the list with
-   edit, reorder, and remove, and has exactly one add action, `Add models`. It opens a picker
-   whose body is one grouped list filtered by one search box; a candidate id appears in
-   exactly one group, the first that knows it:
+7. **One `Add models` action: select what exists, define the rest.** `Manage models` keeps the
+   list with edit, reorder, and remove, and has exactly one add action, `Add models`. It opens
+   a picker whose body is one grouped list filtered by one search box; a candidate id appears
+   in exactly one group, the first that knows it:
    1. **`Codex built-in`** (`Claude Code built-in`) — the backend's own model list
       (bundled + remote backend catalog + the local CLI cache the product already merges)
       minus what is already in the menu. This is where a removed built-in is found again.
@@ -202,8 +204,8 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    forgetting it: the backend catalog records the hidden built-in id, the row leaves the
    menu and its route follows the removal rule (C3), and the id reappears in the
    `Codex built-in` group of the picker. Picking it again clears the hidden mark. Removing
-   any other row deletes it; a provider model reappears in `From your providers`, a
-   models.dev or By-ID model is found again through search.
+   any other row deletes it; a provider model reappears in `From your providers`, and a
+   custom model is defined again through `Add custom model…`.
 9. **New built-ins join the menu by themselves; removed ones stay removed.** When the
    backend's built-in list gains a model (a Codex update, a refreshed remote catalog), the
    product adds it to the menu unless its id carries the hidden mark, inserting it where the
@@ -248,7 +250,7 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
   merged remote + bundled + local-CLI snapshot every model picker uses) minus menu ids and
   including hidden built-ins; the provider group from `GET /api/models/sources` and
   `AgentSupply.sources` eligibility (the Route dialog's candidate derivation, promoted to a
-  shared helper); the models.dev group from `GET /api/models/catalog/models-dev?query=`.
+  shared helper); the editor typeahead from `GET /api/models/catalog/models-dev?query=` (C7).
   No new read endpoint.
 - **C6 — Hidden built-ins and built-in reconcile.** The backend catalog persists the set of
   hidden built-in ids (`agents.<backend>.hidden_builtin_ids: string[]`, absent on older
@@ -316,10 +318,9 @@ No string explains mechanism.
 
 ### Delivery notes
 
-- PR #1829 (`fix(model-hub): reveal newly saved models`) stays valid independently of
-  this redesign: the picker saves through the same `PUT` and the card still collapses at
-  six rows. Decision: **keep and merge on its own gates**; the v2 UI lane bases on master
-  after it lands.
+- PR #1829 (`fix(model-hub): reveal newly saved models`) stayed valid independently of this
+  redesign — the picker saves through the same `PUT` and the card still collapses at six
+  rows — and was merged on its own gates (`aa6d4d99e`). The v2 lanes base on master after it.
 - Design PR avibe-docs #34 carries the earlier "Batch Add / Agent Model Picker" proposal
   frames; v2 frames are drawn on that branch with sparse copy and the proposal frames are
   renamed `Superseded —` rather than deleted.
