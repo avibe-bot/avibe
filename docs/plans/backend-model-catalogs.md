@@ -272,8 +272,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   one transaction and returns `{agent, removed_hops, interrupted}`; rows with empty routes are
   removed without confirmation and return `{agent}`. Property: every response this route
   emits — the plain success, the forced success with `removed_hops` and `interrupted`, and
-  the refusal — validates against the response registry and `guard-refusal.schema.json` after
-  the artifact changes below, and the response guard exercises each of them. The v1 hard
+  the refusal — validates against the response registry after the artifact changes below,
+  the 409 refusal alone also validates against `guard-refusal.schema.json`, and the response
+  guard exercises each of them. The v1 hard
   refusal is retired.
 - **C4 — The server serves the picker's candidates; the client only renders.** One read,
   `GET /api/models/agents/<backend>/models/candidates`, returns
@@ -287,7 +288,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   its supplier's name too and its disabled row shows authoritative chips.
   `suppliers` is the server's own `matching-v1` projection for that id — so a Claude alias hop
   appears here exactly as C1 would seed it — in Source order, possibly empty. No client
-  re-implements matching, aliasing, eligibility, or snapshot merging. The picker filters both
+  re-implements matching, aliasing, eligibility, or snapshot merging. The read is member-tier
+  (it names Sources); `Add models` is offered only to roles that may read Sources, exactly as
+  the page already gates its Source surfaces. The picker filters both
   arrays by the query on id, display name, and supplier name, rendering `in_list` matches as
   the disabled `Already in the list` group.
 - **C6 — Removed ids never return on their own.** The backend catalog persists
@@ -297,12 +300,16 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   refresh, or CLI cache change — adds each built-in snapshot id that is neither in the menu nor
   in the set, at the position question 9 defines, seeds it per C1 and C2, and invalidates the
   backend's runtime projection; it never removes a row. The picker's `builtin` group lists
-  removed built-ins so they are one click away. Legacy initialization: a persisted catalog
-  without the field is initialized once to `built-in snapshot ids − menu ids` and persisted —
-  but only when the snapshot is complete: the bundled catalog, a last-known-good remote
-  catalog, and the local CLI cache (when that CLI is installed) have each been read at least
-  once. Until then the field stays absent, reconcile does not run, and the menu is served
-  unchanged, so a partial snapshot can never be mistaken for the user's removals. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
+  removed built-ins so they are one click away. Legacy initialization is a separate persisted
+  marker, `agents.<backend>.builtin_baseline_initialized: boolean` (absent on v1 files =
+  false): reconcile runs only while it is true. It becomes true once — when the snapshot is
+  complete (the bundled catalog, a last-known-good remote catalog, and the local CLI cache
+  when that CLI is installed have each been read at least once) — and at that moment
+  `removed_model_ids` is set to its current contents ∪ (`built-in snapshot ids − menu ids`).
+  Removals made while the marker is false are recorded in `removed_model_ids` immediately, like
+  any other removal, and survive initialization. Until the marker is true the menu is served
+  unchanged, so a partial snapshot can never be mistaken for the user's removals. Load and
+  mutation fixtures cover the v1 file, the pending window, and the initialized state. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
   the price is that a built-in that entered the snapshot between the v1 save and the first v2
   load is treated as removed — recoverable from the picker, not auto-added. Reconcile runs only
   once the field exists. Claude Code's locked `default` row is not a built-in candidate and
@@ -338,11 +345,11 @@ the v2 shapes on the same head.
 | `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route` |
 | `docs/plans/model-hub-contracts/api-response.schema.json` (stale-candidate refusal) | new registered shape for `409 candidate_suppliers_changed` — `{ok, contract_version, error, changed}` — outside the guard-refusal `anyOf` |
 | `contract_version` closure (every registered location listed in `docs/plans/model-hub-contracts/README.md` "Version closure", server and UI mirrors alike) | 6 → 7, because v1 shipped closed shapes (`additionalProperties: false`) that v2 extends |
-| `vibe/authorization.py` role table and its coverage test (`tests/test_instance_authorization.py`) | `GET /api/models/agents/<backend>/models/candidates` is admitted for every role that may `GET /api/models/agents/<backend>/models` |
+| `vibe/authorization.py` role table and its coverage test (`tests/test_instance_authorization.py`) | `GET /api/models/agents/<backend>/models/candidates` is **member-tier**, the same boundary as Source inventory reads, because it carries supplier ids and names; the editor-tier catalog read stays supplier-free |
 | `docs/plans/model-hub-contracts/README.md` (product model) and `docs/plans/model-hub-contracts/opencode-overlay.md` | Add Source is no longer the sole matching/placement point: a menu-model add (C1) and a reconcile add (C6) are the other one-time points; runtime still never re-matches |
 | `docs/plans/model-hub-contracts/mirror-registry.json` | registers the two new error codes, the new `origin` value, and the new response shapes with their consumers |
 | `vibe/i18n/*.json` and `ui/src/components/settings/models/serverCopy.ts` | `detail` keys for the two new error codes |
-| `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` with legacy initialization (C6) and a load fixture for the v1 file shape |
+| `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` and `agents.<backend>.builtin_baseline_initialized` (C6), with load and mutation fixtures for the v1 file, the pending window, and the initialized state |
 | `vibe/data/model_vendors.json` (new, versioned) | the vendor map and aggregator order C7 defines, covered by a test |
 | `docs/plans/model-hub.md` §4.2 / §4.6 | matching-point wording (C1); removed-id and reconcile rules (C6) |
 
