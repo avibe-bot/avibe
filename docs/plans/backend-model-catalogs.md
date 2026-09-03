@@ -179,8 +179,20 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    4. **`By ID`** — one input row (`Model ID` · `Add`). When the query matches nothing in
       any group, the row reads `Add "{{query}}" by ID`. A By-ID entry joins the selection
       like any checked row.
+   Rules that hold across all groups: a provider chip on any row — built-in included — means
+   exactly "one of your providers supplies this id", in Source order, and nothing else ever
+   renders as a chip; a models.dev row shows its models.dev identity as the mono id
+   (`google/gemini-2.5-pro`) and no chip. With an empty query the list shows only what can
+   be added; with a query, models already in the list also appear in their group as
+   disabled rows tagged `In list`, so a search never dead-ends on something that exists.
+   The By-ID row always offers the current query and its `Add` is enabled only when that
+   text is a valid id for the backend. The models.dev group shows `Type to search
+   models.dev` on an empty query, a loading state while a query is in flight, and
+   `models.dev unavailable` when the catalog cannot be reached; it is omitted when a query
+   matches nothing there.
    Checked rows and By-ID entries commit together through the footer (`{{count}} selected`
-   · `Add {{count}} models`) into the catalog draft; the list's single `Save` still writes
+   · `Add {{count}} models`; with nothing selected the primary button reads `Add models`
+   and is disabled, so the footer never moves) into the catalog draft; the list's single `Save` still writes
    everything with one `PUT`. Whatever the origin, adding a row runs the same one-time
    matching for its initial route (C1); an id no provider supplies simply starts with an
    empty route and the row shows `No model route configured`.
@@ -260,7 +272,9 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
 | By-ID row | input placeholder `Model ID` · button `Add`; with an unmatched query the row reads `Add "{{query}}" by ID` |
 | Group with nothing to offer | the group is omitted, never an empty header |
 | Picker footer count | `{{count}} selected` |
-| Picker confirm | `Add {{count}} models` |
+| Picker confirm | `Add {{count}} models`; disabled `Add models` when nothing is selected |
+| Already-in-list row (search only) | `In list` |
+| models.dev group states | `Type to search models.dev` · loading · `models.dev unavailable` |
 | Remove with route | `Also removes its route: {{hops}}` · button `Remove` |
 
 Every other existing string in `settings.models.gateway.catalog.*` and
