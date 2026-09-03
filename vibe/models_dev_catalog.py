@@ -15,9 +15,9 @@ from typing import Any
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import (
-    ModelHubBackendModelConfig,
     normalize_storable_backend_model_text,
 )
+from core.handlers.model_hub.catalog_admission import admissible_backend_model
 
 
 MODELS_DEV_URL_ENV = "AVIBE_MODELS_DEV_URL"
@@ -348,25 +348,39 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                 ),
                 "reasoning_efforts": reasoning_efforts,
             }
-            try:
-                ModelHubBackendModelConfig.from_payload(
-                    {
-                        "id": row["model_id"],
-                        "origin": "models_dev",
-                        "models_dev_id": row["models_dev_id"],
-                        "display_name": row["display_name"],
-                        "context_window": row["context_window"],
-                        "max_output_tokens": row["max_output_tokens"],
-                        "input_modalities": row["input_modalities"],
-                        "output_modalities": row["output_modalities"],
-                        "supports_tools": row["supports_tools"],
-                        "supports_reasoning": row["supports_reasoning"],
-                        "reasoning_efforts": row["reasoning_efforts"],
-                    }
-                )
-            except (TypeError, ValueError):
+            admitted = admissible_backend_model(
+                None,
+                row["model_id"],
+                {
+                    "origin": "models_dev",
+                    "models_dev_id": row["models_dev_id"],
+                    "display_name": row["display_name"],
+                    "context_window": row["context_window"],
+                    "max_output_tokens": row["max_output_tokens"],
+                    "input_modalities": row["input_modalities"],
+                    "output_modalities": row["output_modalities"],
+                    "supports_tools": row["supports_tools"],
+                    "supports_reasoning": row["supports_reasoning"],
+                    "reasoning_efforts": row["reasoning_efforts"],
+                },
+            )
+            if admitted is None:
                 continue
-            candidates.setdefault(model_id, []).append((score, provider_id, row))
+            row.update(
+                {
+                    "model_id": admitted.id,
+                    "models_dev_id": admitted.models_dev_id,
+                    "display_name": admitted.display_name,
+                    "context_window": admitted.context_window,
+                    "max_output_tokens": admitted.max_output_tokens,
+                    "input_modalities": admitted.input_modalities,
+                    "output_modalities": admitted.output_modalities,
+                    "supports_tools": admitted.supports_tools,
+                    "supports_reasoning": admitted.supports_reasoning,
+                    "reasoning_efforts": admitted.reasoning_efforts,
+                }
+            )
+            candidates.setdefault(admitted.id, []).append((score, provider_id, row))
 
     matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []
     for model_id, copies in candidates.items():

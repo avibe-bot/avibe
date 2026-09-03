@@ -104,6 +104,7 @@ _CODEX_CUSTOM_SCAFFOLD_KEYS = (
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
 _REMOTE_MEMORY_CACHE: dict[str, dict[str, Any]] = {}
+_REMOTE_REFRESH_GENERATIONS: dict[str, int] = {}
 
 
 def get_bundled_catalog_path(repo_root: Path | None = None) -> Path:
@@ -392,6 +393,14 @@ def remote_catalog_refresh_pending(
     return refresh_in_flight or remote_catalog_token(source_key=source_key) != since
 
 
+def remote_catalog_refresh_generation() -> tuple[str, int]:
+    """Identify completed refreshes for the currently configured source."""
+
+    source_key = _remote_catalog_source_key(_remote_catalog_url())
+    with _REMOTE_LOCK:
+        return source_key, _REMOTE_REFRESH_GENERATIONS.get(source_key, 0)
+
+
 def schedule_remote_catalog_refresh() -> bool:
     global _REMOTE_REFRESH_IN_FLIGHT
 
@@ -400,8 +409,11 @@ def schedule_remote_catalog_refresh() -> bool:
             return False
         _REMOTE_REFRESH_IN_FLIGHT = True
 
+    request_url = _remote_catalog_url()
+    source_key = _remote_catalog_source_key(request_url)
     thread = threading.Thread(
         target=_refresh_remote_catalog_worker,
+        args=(request_url, source_key),
         name="avibe-model-catalog-refresh",
         daemon=True,
     )
@@ -950,10 +962,13 @@ def _remote_cache_stale(
     return time.time() - float(last_success_at) >= REMOTE_CATALOG_REVALIDATE_SECONDS
 
 
-def _refresh_remote_catalog_worker() -> None:
+def _refresh_remote_catalog_worker(
+    request_url: str | None = None,
+    source_key: str | None = None,
+) -> None:
     global _REMOTE_REFRESH_IN_FLIGHT
-    request_url = _remote_catalog_url()
-    source_key = _remote_catalog_source_key(request_url)
+    request_url = request_url or _remote_catalog_url()
+    source_key = source_key or _remote_catalog_source_key(request_url)
     try:
         refresh_remote_catalog_now(request_url)
     except Exception as exc:
@@ -975,6 +990,9 @@ def _refresh_remote_catalog_worker() -> None:
         _write_cached_remote_payload(payload, source_key=source_key)
     finally:
         with _REMOTE_LOCK:
+            _REMOTE_REFRESH_GENERATIONS[source_key] = (
+                _REMOTE_REFRESH_GENERATIONS.get(source_key, 0) + 1
+            )
             _REMOTE_REFRESH_IN_FLIGHT = False
 
 

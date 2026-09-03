@@ -40,6 +40,7 @@ from core.handlers.model_hub.adapter import (
     SOURCE_PROTOCOLS,
     SourceObservation,
 )
+from core.handlers.model_hub.catalog_admission import admissible_backend_model
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
@@ -2090,19 +2091,21 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     agent.removed_model_ids.extend(["gpt-restorable", "gpt-withdrawn"])
     existing_builtin_id = agent.models[0].id
     monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_models",
-        lambda backend, **_kwargs: (
-            [
-                {"id": existing_builtin_id},
-                {
-                    "id": "gpt-restorable",
-                    "display_name": " GPT Restorable ",
-                    "reasoning_efforts": [" low ", "   ", overlong_effort],
-                },
-            ]
-            if backend == "codex"
-            else []
-        ),
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {
+            "codex": {
+                "generation": "candidate-snapshot",
+                "models": [
+                    {"id": existing_builtin_id},
+                    {
+                        "id": "gpt-restorable",
+                        "display_name": " GPT Restorable ",
+                        "reasoning_efforts": [" low ", "   ", overlong_effort],
+                    },
+                ],
+            }
+        },
     )
 
     candidates = service.agent_model_candidates("codex")
@@ -2225,11 +2228,17 @@ def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_
     store.config.sources = [source]
     store.config.agents["claude"].sources.order = [source.id]
     monkeypatch.setattr(
-        "vibe.backend_model_catalog.backend_builtin_models",
-        lambda _backend, **_kwargs: [
-            {"id": invalid_claude_id},
-            {"id": too_long},
-        ],
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {
+            "claude": {
+                "generation": "invalid-candidate-snapshot",
+                "models": [
+                    {"id": invalid_claude_id},
+                    {"id": too_long},
+                ],
+            }
+        },
     )
 
     candidates = service.agent_model_candidates("claude")
@@ -2515,12 +2524,14 @@ def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp
     "producer",
     ("candidates_read", "reconcile_seed", "models_dev_typeahead"),
 )
-def test_model_metadata_producers_emit_storable_backend_payloads(
+def test_model_producers_emit_admissible_backend_payloads(
     monkeypatch,
     tmp_path,
     producer,
 ):
+    rejected_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
     if producer == "candidates_read":
+        producer_backend = "codex"
         service, store, _adapter = _service(tmp_path)
         source = ModelHubSourceConfig(
             id="src_metadata01",
@@ -2537,17 +2548,31 @@ def test_model_metadata_producers_emit_storable_backend_payloads(
                     provenance="manual",
                     display_name="   ",
                     reasoning_efforts=["   ", " high "],
-                )
+                ),
+                ModelHubModelConfig(
+                    id=rejected_id,
+                    provenance="manual",
+                    display_name="Rejected candidate",
+                ),
             ],
             credential_ref="cred_metadata01",
         )
         store.config.sources = [source]
         store.config.agents["codex"].sources.order = [source.id]
         monkeypatch.setattr(
-            "vibe.backend_model_catalog.backend_builtin_models",
-            lambda *_args, **_kwargs: [],
+            service,
+            "_builtin_snapshots",
+            lambda _backends: {
+                "codex": {"generation": "empty-candidate-snapshot", "models": []}
+            },
         )
-        candidate = service.agent_model_candidates("codex")["providers"][0]
+        candidates = service.agent_model_candidates("codex")["providers"]
+        assert rejected_id not in {candidate["id"] for candidate in candidates}
+        candidate = next(
+            candidate
+            for candidate in candidates
+            if candidate["id"] == "gpt-metadata-candidate"
+        )
         payload = {
             "id": candidate["id"],
             "origin": candidate["origin"],
@@ -2555,6 +2580,7 @@ def test_model_metadata_producers_emit_storable_backend_payloads(
             "reasoning_efforts": candidate["reasoning_efforts"],
         }
     elif producer == "reconcile_seed":
+        producer_backend = "codex"
         service, store, _adapter = _service(tmp_path)
         monkeypatch.setattr(
             service,
@@ -2567,7 +2593,8 @@ def test_model_metadata_producers_emit_storable_backend_payloads(
                             "id": "gpt-metadata-reconcile",
                             "display_name": "   ",
                             "reasoning_efforts": ["   ", " high "],
-                        }
+                        },
+                        {"id": rejected_id, "display_name": "Rejected seed"},
                     ],
                 }
             },
@@ -2578,7 +2605,11 @@ def test_model_metadata_producers_emit_storable_backend_payloads(
             for model in store.config.agents["codex"].models
             if model.id == "gpt-metadata-reconcile"
         )
+        assert rejected_id not in {
+            model.id for model in store.config.agents["codex"].models
+        }
     else:
+        producer_backend = None
         from vibe import models_dev_catalog
 
         monkeypatch.setattr(
@@ -2593,12 +2624,19 @@ def test_model_metadata_producers_emit_storable_backend_payloads(
                             "reasoning_options": [
                                 {"type": "effort", "values": [" high "]}
                             ],
-                        }
+                        },
+                        rejected_id: {"name": "Metadata rejected typeahead"},
                     },
                 }
             },
         )
-        match = models_dev_catalog.search_models_dev("gpt-metadata-typeahead")[0]
+        matches = models_dev_catalog.search_models_dev("metadata")
+        assert rejected_id not in {match["model_id"] for match in matches}
+        match = next(
+            match
+            for match in matches
+            if match["model_id"] == "gpt-metadata-typeahead"
+        )
         payload = {
             "id": match["model_id"],
             "origin": "models_dev",
@@ -2614,6 +2652,14 @@ def test_model_metadata_producers_emit_storable_backend_payloads(
         }
 
     parsed = ModelHubBackendModelConfig.from_payload(payload)
+    assert (
+        admissible_backend_model(
+            producer_backend,
+            parsed.id,
+            {key: value for key, value in payload.items() if key != "id"},
+        )
+        is not None
+    )
     proposed_values = [
         value
         for value in [parsed.display_name, *parsed.reasoning_efforts]
