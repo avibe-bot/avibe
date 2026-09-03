@@ -190,7 +190,8 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
       model (aggregator copies collapsed), each showing name, mono id, vendor, and context;
       choosing one fills id, display name, context, output, modalities, tools, reasoning,
       and efforts, all still editable; the last suggestion is always `Use "{{query}}" as the
-      model ID` for an id models.dev does not know. The old `Fill from models.dev` button is
+      model ID` for an id models.dev does not know (for OpenCode it offers `custom/<query>`
+      unless the query is already an admissible `vendor/model` id). The old `Fill from models.dev` button is
       retired — the typeahead is the same capability, offered before typing instead of after.
       For OpenCode the filled id follows C7's provider rule.
    Rules that hold across all groups: a provider chip on any row — built-in included — means
@@ -282,7 +283,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   `{id, display_name, reasoning_efforts, suppliers: [{source_id, source_name, model_id}],
   origin}`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
   (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, removed ones
-  included; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
+  included, and filtered by the backend's admission rule — configured or cache-only values the
+  backend would not accept as menu ids (an `ANTHROPIC_MODEL` override, an over-long Codex id)
+  are neither candidates nor reconcile input; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
   configuration-eligible Sources minus menu ids and minus ids already in `builtin`, and minus
   any id the backend's admission rule would reject (length, canonical form, Claude prefix,
   OpenCode `vendor/model`) — a candidate is by definition addable; `in_list`
@@ -351,7 +354,8 @@ the v2 shapes on the same head.
 
 | Artifact | Change |
 | --- | --- |
-| `docs/plans/model-hub-contracts/backend-model.schema.json` and its TypeScript mirror (`ui/src/components/settings/models/types.ts`) | `origin` enum gains `provider` |
+| `docs/plans/model-hub-contracts/backend-model.schema.json` and its TypeScript mirror (`ui/src/components/settings/models/types.ts`) | `origin` enum gains `provider`; the mirror also gains the `Candidate` type, `first_party` on the models.dev match, and the guarded / `expected_suppliers` fields on the models `PUT`, with the API client's response and error projections (`modelsApi.ts`) |
+| `PUT /api/models/agents/opencode/menu` (route, `api.md` row, response-registry entry, `set_opencode_menu`, tests) | retired — no UI consumer since #1814; the models `PUT` is the single catalog mutation, so C1/C3/C6 cannot be bypassed |
 | `docs/plans/model-hub-contracts/api.md` route table | `PUT /api/models/agents/<backend>/models` row: optional `force`, `would_remove_hops`, `would_interrupt`, `expected_suppliers`; refusals `backend_model_in_route`, `candidate_suppliers_changed`; success `{agent}` or `{agent, removed_hops, interrupted}`. New row `GET /api/models/agents/<backend>/models/candidates`. `GET /api/models/catalog/models-dev` row: additive `first_party`, dedupe, ranking, cap 8 |
 | `docs/plans/model-hub-contracts/api-response.schema.json` | the models `PUT` accepts the forced-success shape beside `AgentResponse`; new candidates response (`Candidate` shape from C4); models-dev response gains `first_party` |
 | `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route` |
