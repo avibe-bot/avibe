@@ -1054,6 +1054,43 @@ def test_reasoning_effort_telemetry_preserves_short_values_exactly():
     assert result.declared_efforts == ("low", "high")
 
 
+@pytest.mark.parametrize(
+    ("request_payload", "expected_request", "expected_stripped"),
+    [
+        ({"reasoning_effort": ""}, {}, ("",)),
+        ({"reasoning_effort": 7}, {}, ("<int>",)),
+        (
+            {"reasoning": {"effort": ["high"], "summary": "auto"}},
+            {"reasoning": {"summary": "auto"}},
+            ("<list>",),
+        ),
+        (
+            {"reasoning": {"effort": None}},
+            {},
+            ("<null>",),
+        ),
+    ],
+    ids=("direct-empty", "direct-int", "nested-list", "nested-null"),
+)
+def test_reasoning_effort_telemetry_records_every_stripped_value(
+    request_payload,
+    expected_request,
+    expected_stripped,
+):
+    source = _source("src_efforttype", ("upstream-model",))
+    source.models[0].reasoning_efforts = ["high"]
+
+    result = ModelHubService._request_for_exact_reasoning_effort(
+        request_payload,
+        source,
+        "upstream-model",
+    )
+
+    assert result.request == expected_request
+    assert result.stripped_efforts == expected_stripped
+    assert result.declared_efforts == ("high",)
+
+
 def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
     source = _source("src_effort004", ("upstream-model",))
     source.models[0].reasoning_efforts = ["high"]

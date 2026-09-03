@@ -41,7 +41,10 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
     validate_source_observation,
 )
-from scripts.check_model_hub_authorities import check as check_model_hub_authorities
+from scripts.check_model_hub_authorities import (
+    AuthorityInput,
+    check as check_model_hub_authorities,
+)
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -797,11 +800,14 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
     # a released build persisted, so it accepts the released values and ends at
     # the terminal one. The `== [terminal]` branch is what keeps that from
     # spreading to objects that never outlive their request.
-    terminal = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))[
-        "contract_version"
-    ]
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    terminal = registry["contract_version"]
     assert CONTRACT_VERSION == terminal
-    persisted = {"turn-provenance.schema.json"}
+    persisted = registry["contract_version_closure"][
+        "persisted_schema_version_floors"
+    ]
     checked = set()
     for path in sorted(CONTRACTS.glob("*.schema.json")):
         for node in _versioned_nodes(json.loads(path.read_text(encoding="utf-8"))):
@@ -810,10 +816,12 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
             assert accepted == sorted(set(accepted)), path.name
             assert accepted[-1] == terminal, path.name
             if path.name in persisted:
-                assert accepted[0] < terminal, path.name
+                assert accepted == list(
+                    range(persisted[path.name], terminal + 1)
+                ), path.name
             else:
                 assert accepted == [terminal], path.name
-    assert persisted <= checked
+    assert set(persisted) <= checked
     assert "api-response.schema.json" in checked
 
     # The schemas above are structured, so their versions are read from the shape.
@@ -967,6 +975,38 @@ def test_model_hub_authority_closure_is_generated_from_live_files():
     assert result["input_mode"] == "same_run_live_files"
     assert result["input_fingerprint"]
     assert result["ok"], result["findings"]
+
+
+def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeypatch):
+    original_json = AuthorityInput.json
+
+    def without_first_released_version(self, relative):
+        payload = original_json(self, relative)
+        if relative == "docs/plans/model-hub-contracts/turn-provenance.schema.json":
+            payload = copy.deepcopy(payload)
+            payload["properties"]["contract_version"]["enum"].remove(5)
+        return payload
+
+    monkeypatch.setattr(AuthorityInput, "json", without_first_released_version)
+
+    result = check_model_hub_authorities(Path.cwd())
+
+    assert not result["ok"]
+    assert {
+        "kind": "contract_version_schema_drift",
+        "domain": "V1",
+        "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
+        "values": [6, 7],
+        "expected": [5, 6, 7],
+    } in result["findings"]
+
+
+def test_turn_provenance_contract_preserves_an_empty_stripped_effort():
+    payload = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
+    payload["served"]["stripped_reasoning_efforts"] = [""]
+    payload["served"]["declared_reasoning_efforts"] = []
+
+    _assert_valid("turn-provenance.schema.json", payload)
 
 
 def test_permission_denial_contract_has_no_fallback_member():
@@ -2360,6 +2400,42 @@ def test_config_reload_recovers_non_scalar_model_hub_enums(monkeypatch, tmp_path
     assert loaded.show_duration is True
     assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+
+
+@pytest.mark.parametrize("malformed_source", ([], {}), ids=("array", "object"))
+def test_config_reload_recovers_malformed_reasoning_tier_provenance_only(
+    monkeypatch,
+    tmp_path,
+    malformed_source,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(
+        default_config(),
+        include_secrets=True,
+        include_internal=True,
+    )
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["models"][0]["reasoning_efforts_source"] = malformed_source
+    payload["model_hub"]["sources"] = [source]
+    payload["show_duration"] = True
+    payload["platform"] = "slack"
+    payload["platforms"] = {"enabled": ["slack"], "primary": "slack"}
+    payload["agents"]["codex"]["enabled"] = True
+    payload["agents"]["codex"]["cli_path"] = "/preserved/codex"
+    config_path = tmp_path / f"malformed-tier-source-{type(malformed_source).__name__}.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platform == "slack"
+    assert loaded.platforms.enabled == ["slack"]
+    assert loaded.agents.codex.enabled is True
+    assert loaded.agents.codex.cli_path == "/preserved/codex"
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.recovered_sections == ("model_hub",)
+    assert loaded.whole_config_recovery is False
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
 
 
 def test_client_config_recovery_projection_redacts_validator_details(monkeypatch, tmp_path):

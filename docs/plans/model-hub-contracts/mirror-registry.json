@@ -5,9 +5,9 @@
     "external_snapshot": "content_fingerprint_required"
   },
   "contract_version_closure": {
-    "persisted_schemas": [
-      "turn-provenance.schema.json"
-    ],
+    "persisted_schema_version_floors": {
+      "turn-provenance.schema.json": 5
+    },
     "literal_globs": [
       "core/handlers/model_hub/service.py",
       "core/handlers/model_hub/provenance.py",

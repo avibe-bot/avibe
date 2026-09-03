@@ -2756,7 +2756,10 @@ class ModelHubModelConfig:
             raise ValueError(
                 "Config 'model_hub.sources.models.reasoning_efforts' must be a unique credential-free array of strings"
             )
-        if reasoning_efforts_source not in {None, "upstream", "catalog", "user"}:
+        if reasoning_efforts_source is not None and (
+            not isinstance(reasoning_efforts_source, str)
+            or reasoning_efforts_source not in {"upstream", "catalog", "user"}
+        ):
             raise ValueError(
                 "Config 'model_hub.sources.models.reasoning_efforts_source' is invalid"
             )

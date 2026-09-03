@@ -9,8 +9,8 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "type": "string", "minLength": 1 },
-      "description": "Effort values removed from this exact attempt because they were absent from the hop's declared tiers. Present only when a strip occurred."
+      "items": { "type": "string" },
+      "description": "Effort values removed from this exact attempt because they were absent from the hop's declared tiers. String values are preserved exactly, including an empty string; invalid non-string values use fixed type markers. Present only when a strip occurred."
     },
     "declaredReasoningEfforts": {
       "type": "array",

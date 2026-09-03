@@ -360,8 +360,23 @@ class ExactReasoningEffortRequest:
     declared_efforts: tuple[str, ...] = ()
 
 
-def _bounded_reasoning_effort_telemetry(value: str) -> str:
+def _bounded_reasoning_effort_telemetry(value: object) -> str:
     """Redact and fold an untrusted effort value into bounded telemetry."""
+
+    if not isinstance(value, str):
+        if value is None:
+            return "<null>"
+        if isinstance(value, bool):
+            return "<bool>"
+        if isinstance(value, int):
+            return "<int>"
+        if isinstance(value, float):
+            return "<float>"
+        if isinstance(value, list):
+            return "<list>"
+        if isinstance(value, Mapping):
+            return "<dict>"
+        return "<non-string>"
 
     redacted = redact_credential_material(value)
     encoded = redacted.encode("utf-8")
@@ -1568,6 +1583,7 @@ class ModelHubService:
         discovered: list[DiscoveredModel],
         *,
         allow_empty: bool = False,
+        catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
     ) -> list[tuple[str, Literal["upstream", "catalog"]]]:
         # Admit the canonical form, not the text upstream happened to send: what
         # is stored here is what resolution compares and what usage meters, and a
@@ -1602,7 +1618,8 @@ class ModelHubService:
         retired_model_ids = {model.id for model in retired_models}
         discovered_by_id = {model.id: model for model in canonical_models}
         overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
-        catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+        if catalog_efforts_by_model is None:
+            catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
 
         def apply_tiers(
             model: ModelHubModelConfig,
@@ -1966,12 +1983,16 @@ class ModelHubService:
                         allow_empty=channel == "hub",
                     )
                 else:
+                    catalog_efforts_by_model = (
+                        bundled_catalog_reasoning_efforts_by_model()
+                    )
                     for model in source.models:
                         resolution = resolve_reasoning_tiers(
                             protocol=source.protocol,
                             model_id=model.id,
                             existing_efforts=model.reasoning_efforts,
                             existing_source=model.reasoning_efforts_source,
+                            catalog_efforts_by_model=catalog_efforts_by_model,
                         )
                         model.reasoning_efforts = list(resolution.efforts)
                         model.reasoning_efforts_source = resolution.source
@@ -2728,12 +2749,14 @@ class ModelHubService:
                     allow_empty=True,
                 )
             elif observation.discovery is ObservationDiscovery.FAILED:
+                catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
                 for model in source.models:
                     resolution = resolve_reasoning_tiers(
                         protocol=source.protocol,
                         model_id=model.id,
                         existing_efforts=model.reasoning_efforts,
                         existing_source=model.reasoning_efforts_source,
+                        catalog_efforts_by_model=catalog_efforts_by_model,
                     )
                     model.reasoning_efforts = list(resolution.efforts)
                     model.reasoning_efforts_source = resolution.source
@@ -5852,10 +5875,9 @@ class ModelHubService:
         stripped: list[str] = []
 
         def note_stripped(value: object) -> None:
-            if isinstance(value, str) and value:
-                safe_value = _bounded_reasoning_effort_telemetry(value)
-                if safe_value not in stripped:
-                    stripped.append(safe_value)
+            safe_value = _bounded_reasoning_effort_telemetry(value)
+            if safe_value not in stripped:
+                stripped.append(safe_value)
 
         direct = payload.get("reasoning_effort")
         if "reasoning_effort" in payload and not (

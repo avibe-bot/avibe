@@ -483,7 +483,32 @@ def check(root: Path = ROOT) -> dict[str, Any]:
     if not isinstance(terminal_version, int):
         findings.append({"kind": "invalid_contract_version", "domain": "V1"})
     else:
-        persisted_schemas = set(version_closure.get("persisted_schemas", ()))
+        raw_persisted_schema_floors = version_closure.get(
+            "persisted_schema_version_floors", {}
+        )
+        if not isinstance(raw_persisted_schema_floors, dict) or any(
+            not isinstance(name, str)
+            or not name
+            or isinstance(floor, bool)
+            or not isinstance(floor, int)
+            or floor < 1
+            or floor > terminal_version
+            for name, floor in (
+                raw_persisted_schema_floors.items()
+                if isinstance(raw_persisted_schema_floors, dict)
+                else ()
+            )
+        ):
+            findings.append(
+                {
+                    "kind": "invalid_persisted_schema_version_floors",
+                    "domain": "V1",
+                }
+            )
+            persisted_schema_floors: dict[str, int] = {}
+        else:
+            persisted_schema_floors = raw_persisted_schema_floors
+        persisted_schemas = set(persisted_schema_floors)
         checked_schemas: set[str] = set()
         contracts_dir = root / "docs/plans/model-hub-contracts"
         for path in sorted(contracts_dir.glob("*.schema.json")):
@@ -502,7 +527,12 @@ def check(root: Path = ROOT) -> dict[str, Any]:
                     )
                     continue
                 expected = (
-                    list(range(accepted[0], terminal_version + 1))
+                    list(
+                        range(
+                            persisted_schema_floors[path.name],
+                            terminal_version + 1,
+                        )
+                    )
                     if path.name in persisted_schemas
                     else [terminal_version]
                 )

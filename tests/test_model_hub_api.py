@@ -3832,8 +3832,20 @@ def test_discovery_batch_loads_the_bundled_reasoning_index_once(
 
 
 def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
+    monkeypatch,
     tmp_path,
 ):
+    catalog_index_loads = 0
+
+    def load_catalog_index():
+        nonlocal catalog_index_loads
+        catalog_index_loads += 1
+        return {"catalog-manual": ("low", "ultra")}
+
+    monkeypatch.setattr(
+        "core.handlers.model_hub.service.bundled_catalog_reasoning_efforts_by_model",
+        load_catalog_index,
+    )
     store = MemoryStore()
     adapter = FakeAdapter()
     adapter.observation = SourceObservation(
@@ -3857,6 +3869,18 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
         "base_url": "https://relay.example/v1",
         "key": "sk-test-inventory-consent",
         "protocol": "anthropic",
+        "models": [
+            {
+                "id": "catalog-manual",
+                "origin": "manual",
+                "reasoning_efforts": [],
+            },
+            {
+                "id": "relay-manual",
+                "origin": "manual",
+                "reasoning_efforts": ["careful"],
+            },
+        ],
     }
 
     with pytest.raises(ModelHubError) as rejected:
@@ -3866,6 +3890,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     assert rejected.value.data["observation"]["discovery"] == "failed"
     assert store.config.sources == []
     assert adapter.revoked == ["cred_test001"]
+    assert catalog_index_loads == 0
 
     created = asyncio.run(
         service.create_source(
@@ -3874,7 +3899,17 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     )["source"]
 
     assert created["protocol"] == "anthropic"
-    assert created["models"] == []
+    assert [
+        (
+            model["id"],
+            model["reasoning_efforts"],
+            model["reasoning_efforts_source"],
+        )
+        for model in created["models"]
+    ] == [
+        ("catalog-manual", ["low", "ultra"], "catalog"),
+        ("relay-manual", ["careful"], "user"),
+    ]
     assert created["state"] == {
         "status": "error",
         "retry_at": None,
@@ -3882,6 +3917,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
     }
     assert len(store.config.sources) == 1
     assert adapter.revoked == ["cred_test001", "cred_test002"]
+    assert catalog_index_loads == 1
 
 
 def test_source_order_route_rejects_retired_policy_payload(monkeypatch, tmp_path):
