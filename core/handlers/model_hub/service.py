@@ -4468,6 +4468,7 @@ class ModelHubService:
                 for model in baseline_models
                 if model.id not in desired_by_id and model.id in current_by_id
             ]
+            removed_model_id_set = set(removed_model_ids)
             for model_id in removed_model_ids:
                 route = agent.routes.get(model_id)
                 current = current_by_id.get(model_id)
@@ -4485,6 +4486,16 @@ class ModelHubService:
                         for position, hop in enumerate(route.hops, start=1)
                     )
                     route.hops = ()
+                merged_by_id.pop(model_id, None)
+                agent.routes.pop(model_id, None)
+                if model_id not in agent.removed_model_ids:
+                    agent.removed_model_ids.append(model_id)
+
+            agent.models = [
+                model
+                for model in agent.models
+                if model.id not in removed_model_id_set
+            ]
 
             newly_empty_routes = frozenset(
                 (backend, item["menu_model"])
@@ -4503,12 +4514,6 @@ class ModelHubService:
                 would_interrupt=interrupted,
                 error="backend_model_in_route",
             )
-
-            for model_id in removed_model_ids:
-                merged_by_id.pop(model_id, None)
-                agent.routes.pop(model_id, None)
-                if model_id not in agent.removed_model_ids:
-                    agent.removed_model_ids.append(model_id)
 
             for model_id, desired in desired_by_id.items():
                 baseline_model = baseline_by_id.get(model_id)

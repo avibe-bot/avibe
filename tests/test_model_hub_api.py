@@ -738,7 +738,7 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
                             "position": 1,
                         }
                     ],
-                    "would_interrupt": [{"backend": "claude", "model_id": model_id, "agents": []}],
+                    "would_interrupt": [],
                 }
             )
     elif setup == "candidate_suppliers_guard":
@@ -2921,7 +2921,10 @@ def test_backend_catalog_mutations_leave_every_unrelated_model_shape_byte_identi
     assert untouched_state() == expected_untouched
 
 
-def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_path):
+def test_backend_catalog_guarded_removal_excludes_removed_model_and_accepts_echo(
+    monkeypatch,
+    tmp_path,
+):
     service, store, _adapter = _service(tmp_path)
     backend = "codex"
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == backend)
@@ -2947,19 +2950,27 @@ def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_pat
     before_other_agents = {
         name: copy.deepcopy(agent.to_payload()) for name, agent in store.config.agents.items() if name != backend
     }
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    endpoint = f"/api/models/agents/{backend}/models"
+    request_body = {
+        "baseline": baseline,
+        "models": baseline[1:],
+    }
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(
-            service.set_agent_models(
-                backend,
-                baseline,
-                baseline[1:],
-            )
-        )
+    refused = client.put(
+        endpoint,
+        json=request_body,
+        headers=headers,
+        base_url=base_url,
+    )
 
-    assert raised.value.code == "backend_model_in_route"
-    assert raised.value.status == 409
-    assert raised.value.data["would_remove_hops"] == [
+    assert refused.status_code == 409
+    refusal = refused.get_json()
+    assert refusal["error"] == "backend_model_in_route"
+    assert refusal["would_remove_hops"] == [
         {
             "backend": backend,
             "menu_model": model_id,
@@ -2968,21 +2979,31 @@ def test_backend_catalog_refuses_model_removal_while_route_is_configured(tmp_pat
             "position": 1,
         }
     ]
+    assert refusal["would_interrupt"] == []
+    _assert_valid("guard-refusal.schema.json", refusal)
     assert store.config.agents[backend].models[0].id == model_id
 
-    result = asyncio.run(
-        service.set_agent_models(
-            backend,
-            baseline,
-            baseline[1:],
-            force=True,
-            confirmed_remove_hops=raised.value.data["would_remove_hops"],
-            confirmed_interruptions=raised.value.data["would_interrupt"],
-        )
+    committed = client.put(
+        endpoint,
+        json={
+            **request_body,
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+        headers=headers,
+        base_url=base_url,
     )
 
-    assert result["removed_hops"] == raised.value.data["would_remove_hops"]
-    assert result["interrupted"] == raised.value.data["would_interrupt"]
+    assert committed.status_code == 200
+    result = committed.get_json()
+    Draft7Validator(
+        {"$ref": "model-hub/api-response.schema.json#/definitions/AgentModelsResponse"},
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    ).validate(result)
+    assert result["removed_hops"] == refusal["would_remove_hops"]
+    assert result["interrupted"] == []
     assert model_id not in store.config.agents[backend].routes
     assert model_id in store.config.agents[backend].removed_model_ids
     assert store.config.to_payload()["sources"] == before_sources
