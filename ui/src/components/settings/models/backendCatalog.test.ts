@@ -9,11 +9,14 @@ import {
   candidateBackendModel,
   catalogModelIds,
   catalogModels,
+  backendModelId,
   pickerGroups,
   readBackendCatalogBaseline,
   sameBackendModel,
 } from './backendCatalog';
+import { inferProvider, type StandardVendors } from './menus/identifiers';
 import type {
+  AgentBackend,
   AgentSupply,
   BackendModel,
   BackendModelCandidates,
@@ -86,10 +89,14 @@ describe('catalogModelIds', () => {
 });
 
 describe('applyModelsDevMatch', () => {
+  /** These cases are about the fields a match fills, so they use a backend
+   *  whose ids carry no provider segment; the id rule has its own describe. */
+  const NO_VENDORS: ReadonlySet<string> = new Set();
+
   it('names the row after the model that was picked and fills the rest from it', () => {
     const draft = model('half-typed-anthro', { locked: true, routeable: false });
 
-    const filled = applyModelsDevMatch(draft, match, 'models_dev');
+    const filled = applyModelsDevMatch(draft, match, 'models_dev', 'codex', NO_VENDORS);
 
     // Choosing a suggestion is choosing a model, not decorating one, so the row
     // carries that model's own id — the one a backend accepts, not the
@@ -119,15 +126,93 @@ describe('applyModelsDevMatch', () => {
   });
 
   it('takes the origin from the caller so a re-fill never rewrites how the row was created', () => {
-    expect(applyModelsDevMatch(model('m', { origin: 'manual' }), match, 'manual').origin).toBe('manual');
-    expect(applyModelsDevMatch(blankBackendModel(), match, 'models_dev').origin).toBe('models_dev');
+    expect(applyModelsDevMatch(model('m', { origin: 'manual' }), match, 'manual', 'codex', NO_VENDORS).origin).toBe('manual');
+    expect(applyModelsDevMatch(blankBackendModel(), match, 'models_dev', 'codex', NO_VENDORS).origin).toBe('models_dev');
   });
 
   it('copies the match lists instead of aliasing them', () => {
-    const filled = applyModelsDevMatch(model('m'), match, 'models_dev');
+    const filled = applyModelsDevMatch(model('m'), match, 'models_dev', 'codex', NO_VENDORS);
     filled.reasoning_efforts.push('mutated');
 
     expect(match.reasoning_efforts).toEqual(['low', 'high']);
+  });
+});
+
+/**
+ * The id rule, asserted over every path that produces one.
+ *
+ * Stated this way on purpose. The rule was first written for the 「use what I
+ * typed」 escape, and a second producer — choosing a models.dev suggestion —
+ * then shipped with a bare id OpenCode rejects, because nothing said the rule
+ * belonged to all of them. So the producers are the fixture: a third one is
+ * added to this list and inherits the whole property, or it is not added and
+ * this file is where that shows.
+ */
+describe('the id every producer mints', () => {
+  const PRODUCERS: readonly { what: string; mint: (typed: string, backend: AgentBackend, vendors: StandardVendors) => string }[] = [
+    {
+      what: 'the 「use what I typed」 escape',
+      mint: (typed, backend, vendors) => backendModelId(typed, backend, vendors),
+    },
+    {
+      what: 'a chosen models.dev suggestion',
+      mint: (typed, backend, vendors) => applyModelsDevMatch(
+        blankBackendModel(),
+        { ...match, model_id: typed, provider_id: 'zhipuai' },
+        'models_dev',
+        backend,
+        vendors,
+      ).id,
+    },
+  ];
+
+  const VENDORS: StandardVendors = new Set(['anthropic', 'zhipuai']);
+  const TYPED = ['glm-5.2', 'zhipuai/glm-5.2', 'anthropic/claude', 'nosuchvendor/glm-5.2', 'custom/glm-5.2', 'a/b/c'];
+
+  for (const { what, mint } of PRODUCERS) {
+    it(`gives OpenCode an admissible provider segment from ${what}`, () => {
+      for (const typed of TYPED) {
+        const id = mint(typed, 'opencode', VENDORS);
+        // Parsed as the backend parses it: an id with no slash has no provider
+        // segment at all, which fails the check below for the same reason a
+        // wrong one does.
+        const slash = id.indexOf('/');
+        const provider = slash > 0 ? id.slice(0, slash) : '';
+        // The property, not a table of expected strings: whatever the segment
+        // is, the backend's own normalization has to agree it is already that
+        // segment — which is exactly the check `set_opencode_menu` applies.
+        expect(inferProvider(provider, VENDORS), `${what} produced ${id} from ${typed}`).toBe(provider);
+      }
+    });
+
+    it(`leaves a backend without provider segments alone, from ${what}`, () => {
+      for (const typed of TYPED) {
+        expect(mint(typed, 'codex', VENDORS)).toBe(typed);
+      }
+    });
+  }
+
+  it('takes the offering provider when it is standard and falls back to custom when it is not', () => {
+    const from = (providerId: string, vendors: StandardVendors) => applyModelsDevMatch(
+      blankBackendModel(),
+      { ...match, model_id: 'glm-5.2', provider_id: providerId },
+      'models_dev',
+      'opencode',
+      vendors,
+    ).id;
+
+    expect(from('zhipuai', VENDORS)).toBe('zhipuai/glm-5.2');
+    // Not `zhipuai/…`: an unrecognized vendor is one provider called `custom`
+    // there, so naming it would produce an id the menu rejects.
+    expect(from('zhipuai', new Set())).toBe('custom/glm-5.2');
+  });
+
+  it('has nothing to prefix an empty id with', () => {
+    expect(backendModelId('', 'opencode', VENDORS)).toBe('');
+  });
+
+  it('gives the escape a custom provider, because a query names no vendor', () => {
+    expect(backendModelId('glm-5.2', 'opencode', VENDORS)).toBe('custom/glm-5.2');
   });
 });
 

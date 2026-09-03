@@ -18,10 +18,10 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
-import { applyModelsDevMatch, blankBackendModel } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
-import { inferProvider, type StandardVendors } from './menus/identifiers';
+import type { StandardVendors } from './menus/identifiers';
 import { apiFailure, modelsApi } from './modelsApi';
 import { modelsDevFillFailureKey } from './serverCopy';
 import {
@@ -41,28 +41,6 @@ type FillState = 'idle' | 'loading' | 'error';
 /** Long enough that a typed word is one read rather than one per keystroke,
  *  short enough that the list is there when the typing stops. */
 const LOOKUP_DEBOUNCE_MS = 250;
-
-/**
- * The id the 「use what I typed」 escape actually creates.
- *
- * OpenCode identifiers are `provider/model`, and the provider segment has to be
- * one the backend recognizes: an unrecognized vendor is `custom` there, never
- * the vendor's own name (`menus/identifiers`). So a query that already carries
- * an admissible provider is taken as typed, and anything else becomes a
- * `custom/` model — the escape then always yields an id OpenCode accepts,
- * instead of one its menu rejects after the row is saved. Every other backend
- * takes the query verbatim, because its ids have no segment to satisfy.
- *
- * Admissibility is asked of `inferProvider` rather than of the vendor list
- * directly, so a query that already says `custom/…` passes for exactly the same
- * reason the backend accepts it.
- */
-const literalId = (query: string, backend: AgentBackend, standardVendors: StandardVendors): string => {
-  if (backend !== 'opencode' || query === '') return query;
-  const slash = query.indexOf('/');
-  const provider = slash > 0 ? query.slice(0, slash) : '';
-  return provider !== '' && inferProvider(provider, standardVendors) === provider ? query : `custom/${query}`;
-};
 
 /** Digits only. A pasted 「163,840」 is the same number as 「163840」, and the
  *  field renders the grouped form itself, so refusing the separator would refuse
@@ -149,9 +127,9 @@ export const BackendModelEditorDialog: React.FC<{
    *  vocabulary — every effort is sent verbatim and any string is equally valid. */
   effortSuggestions: readonly string[];
   /** OpenCode's standard vendor ids, as the server projects them — the input to
-   *  the one id rule this dialog owns (`literalId`). Empty for every other
-   *  backend, and for a server too old to project them: `custom/` is then the
-   *  answer for every query, which OpenCode still accepts. */
+   *  the shared id rule both typeahead rows resolve through (`backendModelId`).
+   *  Empty for every other backend, and for a server too old to project them:
+   *  `custom/` is then the answer for every query, which OpenCode still accepts. */
   standardVendors: StandardVendors;
   onCancel: () => void;
   onCommit: (model: BackendModel) => void;
@@ -290,7 +268,7 @@ export const BackendModelEditorDialog: React.FC<{
     // its provider publishes it as. `origin` is `models_dev` unconditionally
     // because the typeahead is add mode's field: a saved row's own creation path
     // is never re-decided here.
-    setDraft((current) => applyModelsDevMatch(current, match, 'models_dev'));
+    setDraft((current) => applyModelsDevMatch(current, match, 'models_dev', backend, standardVendors));
     setNameText(match.display_name ?? '');
     setContextText(groupTokens(match.context_window));
     setOutputText(groupTokens(match.max_output_tokens));
@@ -301,7 +279,7 @@ export const BackendModelEditorDialog: React.FC<{
    *  draft's other fields are the user's own by construction: any earlier fill
    *  was cleared by `changeId` the moment they typed again. */
   const takeLookupAsId = () => {
-    patch({ id: literalId(lookup.trim(), backend, standardVendors) });
+    patch({ id: backendModelId(lookup.trim(), backend, standardVendors) });
     setLookup('');
   };
 
@@ -496,7 +474,7 @@ export const BackendModelEditorDialog: React.FC<{
                               other one would be describing a different model. */}
                           <span className="model-hub-model-match-literal min-w-0 truncate">
                             {t('settings.models.gateway.modelEditor.useAsId', {
-                              query: literalId(lookup.trim(), backend, standardVendors),
+                              query: backendModelId(lookup.trim(), backend, standardVendors),
                             })}
                           </span>
                         </button>

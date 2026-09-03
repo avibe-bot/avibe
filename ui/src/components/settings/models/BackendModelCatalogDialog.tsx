@@ -77,6 +77,23 @@ const sourceName = (sources: readonly Source[], sourceId: string): string =>
  *  answered by asking again with today's suppliers, not by a failure sentence. */
 const CANDIDATES_CHANGED = 'candidate_suppliers_changed';
 
+/** The route guard (C3). Like the refusal above it commits nothing, so it is
+ *  answered by asking again with the plan the server actually has — not by a
+ *  sentence about a save that never happened. */
+const MODEL_IN_ROUTE = 'backend_model_in_route';
+
+/** The ids a picker may not offer: everything the draft holds, less the ones it
+ *  was reopened to ask about. A re-ask is about a row the draft still holds (the
+ *  addition was refused, not applied), so counting it as 「already in the list」
+ *  would show the user their own pending addition as an unpickable row and leave
+ *  the question it was reopened to ask unanswerable. */
+const offerable = (taken: ReadonlySet<string>, seed: ReadonlySet<string>): ReadonlySet<string> => {
+  if (seed.size === 0) return taken;
+  const listed = new Set(taken);
+  for (const id of seed) listed.delete(id);
+  return listed;
+};
+
 /** Nothing pre-picked, held once so opening the picker is not a new object each
  *  render — the picker applies its seed when it opens. */
 const NO_SEED: ReadonlySet<string> = new Set();
@@ -120,6 +137,15 @@ export const BackendModelCatalogDialog: React.FC<{
    *  guard reports it — so the save echoes the consequence that was shown rather
    *  than one recomputed after the fact. */
   const forcedRef = React.useRef(new Map<string, RouteHopRef[]>());
+  /** Removals the guard held back, still owed an answer. The confirmation lives
+   *  inside the row it is about, so they are asked one at a time — and all of
+   *  them, because a row that came back unasked is a removal the user requested
+   *  and nobody ever answered. */
+  const guardedRef = React.useRef<string[]>([]);
+
+  /** Ask the next held-back removal, or stop asking. Also how an ordinary
+   *  confirmation closes: with nothing held back, this is `setRemoving(null)`. */
+  const askNextGuarded = () => setRemoving(guardedRef.current.shift() ?? null);
 
   const applyBaseline = React.useCallback((observed: BackendCatalogBaseline, models: BackendModel[]) => {
     baselineRef.current = observed;
@@ -154,6 +180,7 @@ export const BackendModelCatalogDialog: React.FC<{
     // is reading a new one starts with none of them.
     expectedRef.current = new Map();
     forcedRef.current = new Map();
+    guardedRef.current = [];
     setPicking(null);
     setRemoving(null);
     loadBaseline(false);
@@ -330,10 +357,13 @@ export const BackendModelCatalogDialog: React.FC<{
    */
   const addCandidates = (chosen: ModelCandidate[]) => {
     setPicking(null);
+    if (chosen.length === 0) return;
     const held = new Set(draftRef.current.map((model) => model.id));
-    const additions = chosen.filter((candidate) => !held.has(candidate.id));
-    if (additions.length === 0) return;
-    for (const candidate of additions) {
+    // Every chosen id records the projection it was just shown with, held or
+    // not. The held case is exactly a re-ask (C1): the refused save left the row
+    // alone and left only this agreement undone, so confirming supplies it
+    // without rebuilding a row the user may have edited since.
+    for (const candidate of chosen) {
       expectedRef.current.set(
         candidate.id,
         candidate.suppliers.map((supplier) => ({ source_id: supplier.source_id, model_id: supplier.model_id })),
@@ -341,6 +371,7 @@ export const BackendModelCatalogDialog: React.FC<{
       // Re-adding a row voids the removal that was confirmed for it.
       forcedRef.current.delete(candidate.id);
     }
+    const additions = chosen.filter((candidate) => !held.has(candidate.id));
     mutate([...draftRef.current, ...additions.map(candidateBackendModel)]);
   };
 
@@ -399,13 +430,51 @@ export const BackendModelCatalogDialog: React.FC<{
         const failure = apiFailure(error);
         if (failure?.code === CANDIDATES_CHANGED) {
           // Nothing was committed, so there is nothing to re-read and nothing to
-          // report: the answer is the same question again. The stale rows leave
-          // the draft so the picker offers them from their own groups, already
-          // picked, showing the suppliers the server matched this time.
-          const stale = new Set(Object.keys(failure.changedSuppliers));
-          for (const modelId of stale) expectedRef.current.delete(modelId);
-          mutate(draftRef.current.filter((model) => !stale.has(model.id)));
-          setPicking({ seed: stale });
+          // report: the answer is the same question again, and the draft is
+          // still the user's. The rows stay exactly as they built them — a
+          // context window they widened or a name they wrote is theirs, and
+          // rebuilding the row from its candidate would spend those edits to
+          // answer a question about suppliers. Only the projection is in doubt,
+          // so only the projection waits: it stays as displayed until the re-ask
+          // replaces it, which leaves the guard armed rather than granting an
+          // agreement the user never gave if they dismiss the picker instead of
+          // answering it.
+          setPicking({ seed: new Set(Object.keys(failure.changedSuppliers)) });
+          return;
+        }
+        // The route guard, answering with a plan this dialog never showed: a
+        // route was created after the baseline was read, so the hops the user
+        // confirmed — if they were asked at all — are not the hops the server
+        // has. Nothing was committed here either, so those removals are held
+        // back and asked again against the fresh baseline, through the same
+        // confirmation that records what a save may force. Rebasing the removal
+        // into the draft with nothing recorded is what would refuse every later
+        // save on the same unanswered question.
+        //
+        // Only when the refusal names no interruption: this dialog never shows
+        // an interruption plan, so it cannot claim to have re-asked one, and
+        // that refusal keeps its sentence below.
+        const guarded = failure?.code === MODEL_IN_ROUTE && failure.wouldInterrupt.length === 0
+          ? new Set(failure.wouldRemoveHops.map((hop) => hop.menu_model).filter((id) => intent.removed.has(id)))
+          : new Set<string>();
+        if (guarded.size > 0) {
+          try {
+            const observed = await readBackendCatalogBaseline(modelsApi, backend);
+            const current = observed.models;
+            const held: BackendCatalogIntent = {
+              ...intent,
+              removed: new Set([...intent.removed].filter((id) => !guarded.has(id))),
+            };
+            applyBaseline(observed, current ? applyBackendCatalogIntent(current, held) : []);
+            await Promise.resolve(onObserved(observed.agent)).catch(() => {});
+            // A confirmation recorded against the stale plan is void: the next
+            // save may only force what this baseline's plan states.
+            for (const modelId of guarded) forcedRef.current.delete(modelId);
+            guardedRef.current = [...guarded];
+            askNextGuarded();
+          } catch {
+            setReadState('error');
+          }
           return;
         }
         // A route that named its failure has decided what it did, and for this
@@ -507,7 +576,7 @@ export const BackendModelCatalogDialog: React.FC<{
             variant="outline"
             className="model-hub-catalog-confirm-action rounded-md text-[12.5px] font-semibold"
             disabled={busy}
-            onClick={() => setRemoving(null)}
+            onClick={askNextGuarded}
           >
             {t('settings.models.gateway.catalog.cancel')}
           </Button>
@@ -516,7 +585,7 @@ export const BackendModelCatalogDialog: React.FC<{
             variant="destructive"
             className="model-hub-catalog-confirm-action rounded-md text-[12.5px] font-bold"
             disabled={busy}
-            onClick={() => dropModel(model.id, plan)}
+            onClick={() => { dropModel(model.id, plan); askNextGuarded(); }}
           >
             {t('settings.models.gateway.catalog.removeConfirm')}
           </Button>
@@ -698,7 +767,7 @@ export const BackendModelCatalogDialog: React.FC<{
         <BackendModelPickerDialog
           open
           backend={backend}
-          listedIds={takenIds}
+          listedIds={offerable(takenIds, picking.seed)}
           seedPicked={picking.seed}
           onCancel={() => setPicking(null)}
           onAdd={addCandidates}

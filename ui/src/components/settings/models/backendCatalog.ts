@@ -11,6 +11,7 @@
 // model the Agent may select; which supplier serves it stays with the Route, and
 // mixing the two here is what the contract's 「no Source id, no upstream model
 // id, no priority, no fallback」 rule exists to prevent.
+import { buildIdentifier, inferProvider, type StandardVendors } from './menus/identifiers';
 import type { ModelsApi } from './modelsApi';
 import type {
   AgentBackend,
@@ -172,14 +173,51 @@ export const pickerGroups = (
 };
 
 /**
+ * An id the backend will accept, whoever proposed it.
+ *
+ * Every id this UI *produces* comes through here — the models.dev suggestion the
+ * user chose and the 「use what I typed」 escape alike. That is the whole point of
+ * one function: an id the backend rejects is discovered at save time, long after
+ * the row was built, so the two places that mint one cannot each carry their own
+ * rule. An id the user types character by character is not produced here; it is
+ * theirs, and the id field validates it rather than rewriting it underneath them.
+ *
+ * OpenCode identifiers are `provider/model`, and the provider segment has to be
+ * one the backend recognizes: an unrecognized vendor is `custom` there, never
+ * the vendor's own name (`menus/identifiers`). So an id that already carries an
+ * admissible provider is taken as given, and anything else is prefixed with the
+ * normalization of `vendor` — the proposing provider when there is one, and
+ * nothing when there is not, which `inferProvider` answers with `custom` for the
+ * same reason the backend does. Every other backend takes the id verbatim,
+ * because its ids have no segment to satisfy.
+ *
+ * Admissibility is asked of `inferProvider` rather than of the vendor list
+ * directly, so an id that already says `custom/…` passes for exactly the reason
+ * the backend accepts it.
+ */
+export const backendModelId = (
+  id: string,
+  backend: AgentBackend,
+  standardVendors: StandardVendors,
+  vendor = '',
+): string => {
+  if (backend !== 'opencode' || id === '') return id;
+  const slash = id.indexOf('/');
+  const provider = slash > 0 ? id.slice(0, slash) : '';
+  if (provider !== '' && inferProvider(provider, standardVendors) === provider) return id;
+  return buildIdentifier(vendor, id, standardVendors);
+};
+
+/**
  * A models.dev match, poured into a draft — the id included.
  *
  * Choosing a suggestion is choosing a model, not decorating one: the row it
  * creates is the model that was picked, so it carries that model's own id
- * (`model_id`, the id a backend accepts — not the catalog key `models_dev_id`).
- * The user typed a search, and every filled field including the id stays
- * editable afterwards. Keeping what was typed is the 「use what I typed」 escape,
- * which never reaches this function.
+ * (`model_id`, the id a backend accepts — not the catalog key `models_dev_id`),
+ * resolved through `backendModelId` against the provider that offered it. The
+ * user typed a search, and every filled field including the id stays editable
+ * afterwards. Keeping what was typed is the 「use what I typed」 escape, which
+ * never reaches this function — but reaches the same resolver.
  *
  * `origin` is passed in rather than derived because the schema defines it as how
  * the row was FIRST created — an existing row keeps its own answer no matter how
@@ -189,9 +227,11 @@ export const applyModelsDevMatch = (
   draft: BackendModel,
   match: ModelsDevMatch,
   origin: BackendModelOrigin,
+  backend: AgentBackend,
+  standardVendors: StandardVendors,
 ): BackendModel => ({
   ...draft,
-  id: match.model_id,
+  id: backendModelId(match.model_id, backend, standardVendors, match.provider_id),
   display_name: match.display_name,
   origin,
   models_dev_id: match.models_dev_id,
