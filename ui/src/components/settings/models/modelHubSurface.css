@@ -2237,6 +2237,10 @@
   --model-hub-picker-name-size: 12.5px;
   --model-hub-picker-id-size: 11px;
   --model-hub-picker-suppliers-row-height: 52px;
+  /* What a stacked row measures (frame B‴): the strip sits 4px under the name
+   * it belongs to. The indent is not a length — the strip starts where the
+   * entry does, which is already past the checkbox. */
+  --model-hub-picker-stack-gap: 4px;
 }
 
 .model-hub-picker-list {
@@ -2277,6 +2281,16 @@
 /* An already-listed row is shown, not offered: it stays legible so the search
  * answers 「it exists」, and greys its name so it never looks pickable. */
 .model-hub-picker-row--listed .model-hub-picker-name { color: var(--muted); }
+
+/* Everything the row says about one model, beside its checkbox: the label, and
+ * the strip naming its suppliers when it has any. */
+.model-hub-picker-entry {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: var(--model-hub-picker-row-gap);
+}
 
 .model-hub-picker-line {
   display: flex;
@@ -2326,9 +2340,16 @@
     min-height: var(--model-hub-picker-suppliers-row-height);
     padding: 6px var(--model-hub-picker-row-pad-x);
   }
-  .model-hub-picker-row--suppliers .model-hub-picker-line {
+  /* The strip moves under the label, and the entry is what stacks it — so the
+   * checkbox stays centred on both. Stacking the label's own contents instead
+   * put a name above its id — two lines for one reading, which frame B‴ keeps
+   * together — and left the strip still sharing the line it was supposed to
+   * leave. It also broke the label's `truncate`: a column sizes its children
+   * to their own text, so a long name overran the chips rather than being cut
+   * at the row's edge. `stretch`, not `flex-start`, for the same reason. */
+  .model-hub-picker-row--suppliers .model-hub-picker-entry {
     flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
+    align-items: stretch;
+    gap: var(--model-hub-picker-stack-gap);
   }
 }

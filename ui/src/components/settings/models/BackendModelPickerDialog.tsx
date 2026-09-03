@@ -303,29 +303,41 @@ const PickerRow: React.FC<{
       )}
     >
       <Checkbox presentational checked={checked} disabled={listed} />
-      <span className="model-hub-picker-line flex-1">
-        {candidate.display_name ? (
-          <>
-            <span className="model-hub-picker-name truncate">{candidate.display_name}</span>
-            <span className="model-hub-picker-id truncate font-mono">{candidate.id}</span>
-          </>
-        ) : (
-          // No display name, so the id IS the label and sits where one would.
-          <span className="model-hub-picker-name model-hub-picker-name--id truncate font-mono">{candidate.id}</span>
+      {/* The label and the strip share a box so the checkbox stays centred on
+        * the pair however the pair is arranged, and so the narrow layout can
+        * stack them without the row itself having to wrap. */}
+      <span className="model-hub-picker-entry">
+        {/* `flex-auto`, not `flex-1`: both grow into the space the strip
+          * leaves, but `flex-1` bases the label at 0, and a flex base of 0 is
+          * also a shrink weight of 0 — the strip would claim its full width
+          * first and the label would be left with whatever remained, down to
+          * nothing. From `auto` the two yield in proportion to what they are
+          * actually showing, so a wide strip costs the label some of its name
+          * rather than all of it, and neither is what overflows. */}
+        <span className="model-hub-picker-line flex-auto">
+          {candidate.display_name ? (
+            <>
+              <span className="model-hub-picker-name truncate">{candidate.display_name}</span>
+              <span className="model-hub-picker-id truncate font-mono">{candidate.id}</span>
+            </>
+          ) : (
+            // No display name, so the id IS the label and sits where one would.
+            <span className="model-hub-picker-name model-hub-picker-name--id truncate font-mono">{candidate.id}</span>
+          )}
+        </span>
+        {supplied && (
+          <span className="model-hub-picker-chips">
+            {candidate.suppliers.map((supplier) => (
+              <span
+                key={`${supplier.source_id}\0${supplier.model_id}`}
+                className="model-hub-pill model-hub-fill-0a border border-border text-muted"
+              >
+                {supplier.source_name}
+              </span>
+            ))}
+          </span>
         )}
       </span>
-      {supplied && (
-        <span className="model-hub-picker-chips shrink-0">
-          {candidate.suppliers.map((supplier) => (
-            <span
-              key={`${supplier.source_id}\0${supplier.model_id}`}
-              className="model-hub-pill model-hub-fill-0a border border-border text-muted"
-            >
-              {supplier.source_name}
-            </span>
-          ))}
-        </span>
-      )}
     </button>
   );
 };

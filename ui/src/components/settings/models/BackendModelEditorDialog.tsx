@@ -494,7 +494,15 @@ export const BackendModelEditorDialog: React.FC<{
                               className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', activeRow === index && 'is-selected')}
                             >
                               <span className="flex min-w-0 flex-1 items-center gap-2">
-                                <span className="model-hub-model-match-name shrink-0 truncate">{match.display_name ?? match.model_id}</span>
+                                {/* No `shrink-0`: pinning the name at its full
+                                  * width is what its own `truncate` is there
+                                  * to prevent, and a name long enough to need
+                                  * cutting would instead squeeze the id and
+                                  * the provider out of the row before running
+                                  * past its edge. Left to shrink, the three
+                                  * yield in proportion to what they show, so
+                                  * the longest gives up the most. */}
+                                <span className="model-hub-model-match-name truncate">{match.display_name ?? match.model_id}</span>
                                 <span className="model-hub-model-match-id truncate font-mono">{match.model_id}</span>
                                 <span className="model-hub-model-match-meta truncate">{match.provider_name}</span>
                               </span>
