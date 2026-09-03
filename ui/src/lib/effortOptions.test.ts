@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { isEffortSupported, resolveEffortOptions } from './effortOptions';
+import {
+  EFFORT_BY_BACKEND,
+  isEffortSupported,
+  REASONING_EFFORTS,
+  resolveEffortOptions,
+  sortEffortsByVocabulary,
+} from './effortOptions';
 
 describe('effort options', () => {
   it('uses the backend fallback for an unknown model', () => {
@@ -92,5 +98,21 @@ describe('effort options', () => {
       'high',
       'xhigh',
     ]);
+  });
+
+  it('orders selected efforts by the unified vocabulary, unknowns last', () => {
+    expect(sortEffortsByVocabulary(['ultra', 'low', 'custom-b', 'max', 'custom-a'])).toEqual([
+      'low',
+      'max',
+      'ultra',
+      'custom-a',
+      'custom-b',
+    ]);
+  });
+
+  it('keeps the OpenCode family fallback inside the vocabulary without ultra', () => {
+    // Same set the OpenCode provider form offers and the save path accepts
+    // (`vibe/opencode_config.py:_VALID_REASONING_VARIANTS` minus `none`).
+    expect(EFFORT_BY_BACKEND.opencode).toEqual([...REASONING_EFFORTS].filter((effort) => effort !== 'ultra'));
   });
 });

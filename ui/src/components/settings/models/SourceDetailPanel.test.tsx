@@ -22,6 +22,7 @@ import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceMutationReport } from './SourceMutationReport';
+import { MANAGED_TIER_SOURCES, type ManagedTierSource } from './tierMutation';
 import { TIER_SUGGESTIONS } from './tierSuggestions';
 import {
   COOLDOWN_DETAIL_KEYS,
@@ -177,6 +178,19 @@ const renderProtocol = (protocol: SourceProtocol, models: Source['models'] = sou
 /** Read by the class the stylesheet owns: the ghost chip has no other identity. */
 const suggestedTiers = () => Array.from(document.querySelectorAll('.model-hub-source-tier-suggest'))
   .map((chip) => chip.textContent?.trim() ?? '');
+/** The tiers the row actually carries, in either branch that draws them. */
+const chipTiers = () => Array.from(document.querySelectorAll('.model-hub-source-tier-chip'))
+  .map((chip) => chip.textContent?.trim() ?? '');
+/**
+ * What the badge on a locked row says, per rung. Spelled out rather than read
+ * back through `i18n.t`: a bundle missing the entry returns the key from both
+ * sides of that comparison, so it would pass while the user reads
+ * 「settings.models.sourceDetail.tiers.managed.upstream」.
+ */
+const MANAGED_BADGE: Readonly<Record<ManagedTierSource, RegExp>> = {
+  upstream: /^From provider$|^供应商声明$/,
+  catalog: /^Built-in catalog$|^内置目录$/,
+};
 
 const EchoPanel: React.FC<{
   reconcile?: () => Promise<SourceMutationLanding['verdict'] | void> | SourceMutationLanding['verdict'] | void;
@@ -1068,6 +1082,145 @@ describe('SourceDetailPanel', () => {
     }
   });
 
+  // Rungs 1 and 2 of the provenance ladder are the server's own declaration,
+  // re-applied on every refresh. There is nothing to add and nothing to delete,
+  // so the cell stops being a way in rather than becoming a disabled one — and
+  // it says which rung, because a row that just refused to open would leave
+  // "why" as the user's problem.
+  it.each(MANAGED_TIER_SOURCES)('locks a %s-declared row down to what it already carries', async (provenance) => {
+    renderProtocol('anthropic', [{ ...source.models[0], reasoning_efforts_source: provenance }]);
+
+    const cell = document.querySelector(`[data-tier-provenance="${provenance}"]`) as HTMLElement | null;
+    expect(cell).toBeTruthy();
+    expect(chipTiers()).toEqual(['high']);
+    expect(within(cell as HTMLElement).getByText(MANAGED_BADGE[provenance])).toBeTruthy();
+
+    // No door in, and none of the affordances the editor would have brought.
+    await userEvent.click(cell as HTMLElement);
+    expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
+    expect(document.querySelector('.model-hub-source-tier-add')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Remove high$|^移除 high$/ })).toBeNull();
+    expect(suggestedTiers()).toEqual([]);
+  });
+
+  it('keeps a locked row legible when the server declared no tiers at all', () => {
+    renderProtocol('anthropic', [{ ...source.models[0], reasoning_efforts: [], reasoning_efforts_source: 'upstream' }]);
+
+    const cell = document.querySelector('[data-tier-provenance="upstream"]') as HTMLElement | null;
+    expect(within(cell as HTMLElement).getByText(/No tiers set|未设置档位/i)).toBeTruthy();
+    expect(within(cell as HTMLElement).getByText(MANAGED_BADGE.upstream)).toBeTruthy();
+  });
+
+  // The pencil is a second door into the same editor, so a locked row has to
+  // close it too — a manual entry whose id matches a catalog model is locked
+  // exactly like a discovered one. Removing the model is a different question.
+  it('closes the pencil on a locked manual model while removal stays offered', () => {
+    renderProtocol('anthropic', [{ ...source.models[0], origin: 'manual', reasoning_efforts_source: 'catalog' }]);
+
+    expect(screen.queryByRole('button', { name: /reasoning tiers for model-a|model-a 的推理强度/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i })).toBeTruthy();
+  });
+
+  it.each([
+    ['a user-declared list', 'user' as const],
+    ['an explicitly unclaimed list', null],
+    ['a server that predates the field', undefined],
+  ])('leaves %s editable, suggestions and all', async (_case, provenance) => {
+    renderProtocol('anthropic', [{
+      ...source.models[0],
+      ...(provenance === undefined ? {} : { reasoning_efforts_source: provenance }),
+    }]);
+
+    expect(document.querySelector('[data-tier-provenance]')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    expect(suggestedTiers()).toEqual(TIER_SUGGESTIONS.anthropic.filter((tier) => tier !== 'high'));
+  });
+
+  // Defensive, and reachable: a refresh can apply a rung while the editor is
+  // open, another surface can change the source, and the call can come from
+  // outside this page. The generic "The tier was not saved" would offer a retry
+  // that cannot succeed, which is the one thing this user must not be invited to do.
+  it('explains a refusal that says the server owns the list, and offers no retry', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(
+      new ApiCallError('bad_request', 'modelHub.errors.source_model_tiers_managed', true, [], [], [], 409),
+    );
+    renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(await screen.findByText(/tiers are set automatically|档位是自动确定的/i)).toBeTruthy();
+    expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+    expect(chipTiers()).toEqual(['high']);
+  });
+
+  // The same conclusion by the other road: the write failed for its own reasons
+  // and the row was managed by the time the rollback's re-read came back. "Try
+  // again" would replay a write `tierMutationPayload` now declines, so the notice
+  // that survives is the one that explains the lock — and it goes back to being a
+  // retry if the server ever hands the list back, which is why the branch reads
+  // provenance instead of freezing a verdict when the write failed.
+  it('turns a pending retry into the locked explanation when provenance arrives after the failure', async () => {
+    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
+    const panel = (models: Source['models']) => (
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <ReportOwnedPanel source={{ ...source, models }} trackMutation={immediateTrack} onReauth={noReauth} />
+        </I18nextProvider>
+      </ToastProvider>
+    );
+    const { rerender } = render(panel(source.models));
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+
+    rerender(panel([{ ...source.models[0], reasoning_efforts_source: 'upstream' }]));
+
+    expect(document.querySelector('[data-tier-provenance="upstream"]')).toBeTruthy();
+    expect(await screen.findByText(/tiers are set automatically|档位是自动确定的/i)).toBeTruthy();
+    expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+
+    rerender(panel([{ ...source.models[0], reasoning_efforts_source: 'user' }]));
+
+    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+  });
+
+  // The copy obligation checked where the copy is actually read. A bundle
+  // missing an entry reaches the user as the key itself, and these four strings
+  // are the only thing on the surface that says why an edit is unavailable.
+  it.each(['en', 'zh'] as const)('renders provenance and refusal copy as sentences in %s', async (lng) => {
+    const spoken = i18n.language;
+    await i18n.changeLanguage(lng);
+    try {
+      vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(
+        new ApiCallError('bad_request', 'modelHub.errors.source_model_tiers_managed', true, [], [], [], 409),
+      );
+      renderProtocol('anthropic', [
+        source.models[0],
+        { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: ['high'], reasoning_efforts_source: 'upstream' },
+        { id: 'model-c', display_name: null, origin: 'discovered', reasoning_efforts: ['high'], reasoning_efforts_source: 'catalog' },
+      ]);
+
+      expect(screen.getByText(lng === 'en' ? 'From provider' : '供应商声明')).toBeTruthy();
+      expect(screen.getByText(lng === 'en' ? 'Built-in catalog' : '内置目录')).toBeTruthy();
+
+      await userEvent.click(screen.getByRole('button', { name: /high/i }));
+      await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+      const refusal = await screen.findByText(
+        lng === 'en'
+          ? "This model's tiers are set automatically, so the change was not saved"
+          : '这个模型的档位是自动确定的，这次改动没有保存',
+      );
+      expect(refusal).toBeTruthy();
+    } finally {
+      cleanup();
+      await i18n.changeLanguage(spoken);
+    }
+  });
+
   it('adds a suggested tier through the same write typing it would take', async () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
       ...source,
@@ -1121,18 +1274,22 @@ describe('SourceDetailPanel', () => {
   // to the input's own blur, the collapse made every control inside it
   // pointer-only: Tab left the field and took the editor with it.
   it('lets the keyboard reach a suggestion and stays open around the write', async () => {
+    // Whichever tier the protocol happens to offer first: what is under test is
+    // that Tab lands on a suggestion at all, so naming one would make this fail
+    // for a vocabulary change that never touched the focus rule.
+    const [first] = TIER_SUGGESTIONS.openai_responses.filter((tier) => tier !== 'high');
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
       ...source,
-      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
+      models: [{ ...source.models[0], reasoning_efforts: ['high', first] }],
     });
     renderProtocol('openai_responses');
     await userEvent.click(screen.getByRole('button', { name: /high/i }));
     await userEvent.tab();
-    const suggestion = screen.getByRole('button', { name: /^Add low$|^添加 low$/ });
+    const suggestion = screen.getByRole('button', { name: new RegExp(`^Add ${first}$|^添加 ${first}$`) });
     expect(document.activeElement).toBe(suggestion);
 
     await userEvent.keyboard('{Enter}');
-    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', 'low']));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', first]));
     // The chip it was standing on is gone; focus is back on the one control the
     // edit state cannot lose, not on the body with the editor closed behind it.
     const input = screen.getByPlaceholderText(/Enter to add|回车添加/i);
@@ -1147,8 +1304,8 @@ describe('SourceDetailPanel', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /high/i }));
   });
 
-  // A write that was rolled back is the row's unfinished business, and 重试 is
-  // the only answer to it — so moving the editor elsewhere, which answers
+  // A write that was rolled back is the row's unfinished business, and "Try again"
+  // is the only answer to it — so moving the editor elsewhere, which answers
   // nothing, cannot be what takes the answer away.
   it('keeps a failed write answerable after the editor moves to another row', async () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));

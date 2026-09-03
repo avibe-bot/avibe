@@ -2378,7 +2378,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       <Field label={t('agents.detail.effort')}>
         <div
           className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
-          style={{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
         >
           {effortOptions.map((opt) => {
             const active = effort === opt;

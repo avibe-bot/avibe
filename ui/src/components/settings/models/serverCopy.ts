@@ -138,6 +138,33 @@ export const catalogSaveLeftUnloaded = (code: string | undefined, detail: string
   code === 'engine_down' || detail === 'modelHub.errors.engine_down';
 
 /**
+ * The refusal a tier edit gets when the server owns that model's declaration.
+ *
+ * The UI does not normally offer the write — an `upstream`/`catalog` row renders
+ * its provenance badge and no editor at all — so reaching this code means the
+ * two disagreed: a refresh applied a rung while the editor was open, another
+ * surface changed the source, or the call came from outside this page. That is
+ * a state race, not a transport failure, which is why it needs copy of its own:
+ * the generic "The tier was not saved" offers a retry that cannot succeed, and
+ * retrying a decision the server has already made is the one thing this user
+ * must not do.
+ *
+ * Matched on the code AND on the backend i18n key, because the two response
+ * shapes in this API put the same fact in different fields (`error` for
+ * `source_not_found`, `detail` for every `modelHub.errors.*` catalog refusal)
+ * and this client should not depend on which one the new guard picks.
+ */
+export const TIER_EDIT_MANAGED_FAILURE = 'source_model_tiers_managed';
+
+export const tierEditRefusedAsManaged = (
+  failure: { code: string; detail?: string } | null | undefined,
+): boolean =>
+  failure?.code === TIER_EDIT_MANAGED_FAILURE
+  || failure?.code === `modelHub.errors.${TIER_EDIT_MANAGED_FAILURE}`
+  || failure?.detail === TIER_EDIT_MANAGED_FAILURE
+  || failure?.detail === `modelHub.errors.${TIER_EDIT_MANAGED_FAILURE}`;
+
+/**
  * Why a models.dev fill produced nothing.
  *
  * The server names the one cause that is not about this machine: the upstream

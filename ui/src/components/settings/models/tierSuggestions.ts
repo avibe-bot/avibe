@@ -1,23 +1,34 @@
+import type { ReasoningEffort } from '@/lib/effortOptions';
+
 import type { SourceProtocol } from './types';
 
 /**
- * What the tier editor offers as ghost chips, derived from the protocol this
- * source was proved to speak. The OpenAI protocols name a fixed effort
- * vocabulary, so those four are worth offering; the Anthropic Messages protocol
- * expresses reasoning as a thinking budget rather than a named tier, so there is
- * nothing protocol-derived to suggest and that source stays pure free text.
+ * The effort vocabulary for a source's protocol family.
  *
- * These are suggestions, never a vocabulary: `reasoning_efforts` is an
- * arbitrary-string capability declaration passed to the upstream verbatim, and a
- * relay may accept tiers no protocol ever named. Nothing here is persisted,
- * pre-filled at discovery, or sent to the API — a suggestion becomes data only
- * when the user clicks it, through the same add path typing it would take.
- * `lib/effortOptions.ts` is the sibling table for the OTHER axis — which efforts
- * an agent BACKEND offers — and is deliberately not reused: it answers a
- * different question and carries values (`minimal`, `max`) this one does not.
+ * One table, two readers. The tier editor offers these as ghost chips on a
+ * model the user may still declare; the backend applies the SAME list when
+ * discovery proves a model is reasoning-capable without naming levels (rung 1
+ * of the provenance ladder — upstream capability signals are booleans, not
+ * level enums). Suggesting one set while the ladder applies another would make
+ * a user-typed list and an upstream-declared list disagree for no reason the
+ * user could see.
+ *
+ * Members come from `REASONING_EFFORTS`, so nothing offered here is outside the
+ * unified vocabulary. The lists themselves are per-family because the families
+ * genuinely differ: the OpenAI protocols name a `minimal` tier and stop at
+ * `xhigh`, while the Anthropic side runs `low`..`max` (matching the claude rows
+ * in `vibe/data/backend_models.json` — see `tierSuggestions.test.ts`, which
+ * reads that catalog rather than restating it).
+ *
+ * Suggestions are still not a vocabulary the user is held to: `reasoning_efforts`
+ * is an arbitrary-string declaration passed to the upstream verbatim, the field
+ * stays free text, and a relay may accept tiers no protocol ever named. Nothing
+ * here is persisted, pre-filled at discovery, or sent to the API — a suggestion
+ * becomes data only when the user clicks it, through the same add path typing it
+ * would take.
  */
-export const TIER_SUGGESTIONS: Readonly<Record<SourceProtocol, readonly string[]>> = {
-  anthropic: [],
-  openai_responses: ['low', 'medium', 'high', 'xhigh'],
-  openai_chat: ['low', 'medium', 'high', 'xhigh'],
+export const TIER_SUGGESTIONS: Readonly<Record<SourceProtocol, readonly ReasoningEffort[]>> = {
+  anthropic: ['low', 'medium', 'high', 'xhigh', 'max'],
+  openai_responses: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+  openai_chat: ['minimal', 'low', 'medium', 'high', 'xhigh'],
 };

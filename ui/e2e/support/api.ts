@@ -27,7 +27,17 @@ export type Source = {
   base_url?: string | null;
   credential_ref?: string | null;
   client_nonce?: string | null;
-  models: { id: string; origin: string; reasoning_efforts: string[]; [key: string]: unknown }[];
+  models: {
+    id: string;
+    origin: string;
+    reasoning_efforts: string[];
+    /**
+     * Which rung of the provenance ladder produced `reasoning_efforts`.
+     * Absent on a server that predates the field — the editable case.
+     */
+    reasoning_efforts_source?: 'upstream' | 'catalog' | 'user' | null;
+    [key: string]: unknown;
+  }[];
   state: SourceState;
   adopted_by?: { backend: string; model: string }[];
 };

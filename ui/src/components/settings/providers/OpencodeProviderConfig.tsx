@@ -46,6 +46,7 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { EFFORT_BY_BACKEND, sortEffortsByVocabulary } from '@/lib/effortOptions';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -90,9 +91,14 @@ const SERVER_START_MAX_RETRIES = 5;
 const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
-const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
-const defaultReasoningEfforts = () => [...REASONING_EFFORTS];
+// This form's save path is `_normalize_reasoning_variants` in
+// `vibe/opencode_config.py`, which accepts `none` plus the OpenCode family
+// fallback (`minimal`..`max`). `ultra` is in the unified vocabulary because
+// catalog rows declare it, but offering it here would send a value the
+// save path rejects. Checkboxes and the default-checked list are the same set.
+const OPENCODE_PROVIDER_EFFORTS = EFFORT_BY_BACKEND.opencode;
+const defaultReasoningEfforts = () => [...OPENCODE_PROVIDER_EFFORTS];
 
 const notifyOpenCodeModelOptionsChanged = () => {
   window.dispatchEvent(new CustomEvent('avibe:opencode-model-options-changed'));
@@ -643,7 +649,7 @@ export const OpencodeProviderConfig: React.FC<{
     const next = current.reasoningEfforts.includes(effort)
       ? current.reasoningEfforts.filter((item) => item !== effort)
       : [...current.reasoningEfforts, effort];
-    updateEdit(providerId, { reasoningEfforts: next });
+    updateEdit(providerId, { reasoningEfforts: sortEffortsByVocabulary(next) });
   };
 
   // ---- Default-provider selection ----
@@ -1614,7 +1620,7 @@ export const OpencodeProviderConfig: React.FC<{
                                       <span className="text-[11px] font-medium uppercase text-muted">
                                         {t('settings.backends.opencodeProviderModelReasoning')}
                                       </span>
-                                      {REASONING_EFFORTS.map((effort) => (
+                                      {OPENCODE_PROVIDER_EFFORTS.map((effort) => (
                                         <Button
                                           key={effort}
                                           type="button"
