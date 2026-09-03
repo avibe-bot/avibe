@@ -102,6 +102,10 @@ class CodexModelHubCatalogUnavailableError(RuntimeError):
     """The configured Codex binary could not provide Hub launch metadata."""
 
 
+class CodexPromptRefreshUnavailableError(RuntimeError):
+    """The current app-server cannot safely refresh a persisted thread prompt."""
+
+
 class CodexResumeUnavailableError(RuntimeError):
     """The Codex thread associated with this session can no longer be resumed.
 
@@ -487,6 +491,7 @@ class CodexAgent(BaseAgent):
                 # Render once at the actual Turn boundary. Besides keeping the
                 # payload byte-stable, this avoids repeating Memory admission
                 # side effects while the same request refreshes and starts.
+                self.ensure_agent_session_id(request)
                 developer_instructions = await self._build_thread_developer_instructions(request)
                 await self._refresh_thread_developer_instructions_if_needed(
                     transport,
@@ -541,7 +546,7 @@ class CodexAgent(BaseAgent):
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
-                error_text = f"❌ Codex error: {e}"
+                error_text = self._error_display_text(e)
                 await emit_backend_failure(
                     self.controller,
                     request.context,
@@ -971,6 +976,15 @@ class CodexAgent(BaseAgent):
         payload = getattr(request.context, "platform_specific", None) or {}
         session_id = payload.get("agent_session_id") if isinstance(payload, dict) else None
         setter(request.base_session_id, session_id)
+
+    def _error_display_text(self, error: BaseException) -> str:
+        if isinstance(error, CodexPromptRefreshUnavailableError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t('error.codexPromptRefreshUnavailable', language)}"
+        return f"❌ Codex error: {error}"
 
     def _runtime_ownership_target_for_cwd(
         self,
@@ -2019,12 +2033,6 @@ class CodexAgent(BaseAgent):
             if should_trim:
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
-            if source_prompt_strategy:
-                self._remember_thread_prompt_strategy(
-                    request.base_session_id,
-                    thread_id,
-                    source_prompt_strategy,
-                )
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
@@ -2039,6 +2047,12 @@ class CodexAgent(BaseAgent):
             agent_session_id=target_agent_session_id,
         ):
             raise RuntimeError("Could not persist the forked Codex prompt strategy")
+        if source_prompt_strategy:
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                source_prompt_strategy,
+            )
         self._remember_thread_model_settings_from_response(
             request.base_session_id,
             thread_id,
@@ -2743,6 +2757,38 @@ class CodexAgent(BaseAgent):
             resolved["sha256"] = marker_sha256
         return resolved
 
+    def _prompt_state_agent_session_id(
+        self,
+        request: AgentRequest,
+    ) -> Optional[str]:
+        """Return the row that owns backend state, not necessarily visible output."""
+
+        visible_session_id = self.ensure_agent_session_id(request)
+        if not self._uses_namespaced_backend_session(
+            request.context,
+            subagent_name=getattr(request, "subagent_name", None),
+        ):
+            return visible_session_id
+
+        getter = getattr(
+            getattr(self, "sessions", None),
+            "get_agent_session_row_id",
+            None,
+        )
+        if not callable(getter):
+            raise RuntimeError("Could not resolve the Codex backend session binding")
+        try:
+            backend_session_id = getter(
+                request.session_key,
+                request.base_session_id,
+                self.name,
+            )
+        except Exception as exc:
+            raise RuntimeError("Could not resolve the Codex backend session binding") from exc
+        if not backend_session_id:
+            raise RuntimeError("Could not resolve the Codex backend session binding")
+        return str(backend_session_id)
+
     def _persist_prompt_strategy(
         self,
         request: AgentRequest,
@@ -2797,7 +2843,7 @@ class CodexAgent(BaseAgent):
         try:
             await transport.send_request("collaborationMode/list", {})
         except Exception as exc:
-            raise RuntimeError(
+            raise CodexPromptRefreshUnavailableError(
                 "Cannot safely resume a collaboration-backed Codex thread because "
                 "the current app-server did not confirm collaboration mode support"
             ) from exc
@@ -2812,7 +2858,7 @@ class CodexAgent(BaseAgent):
         developer_instructions: Optional[str] = None,
     ) -> str:
         """Build input, configure overrides, and send turn/start to Codex."""
-        agent_session_id = self.ensure_agent_session_id(request)
+        agent_session_id = self._prompt_state_agent_session_id(request)
         input_items = self._build_input(request)
         _, effective_model, effective_effort, _ = self._resolve_codex_agent_settings(request)
         model_explicit = bool(getattr(request, "vibe_agent_model_explicit", False))

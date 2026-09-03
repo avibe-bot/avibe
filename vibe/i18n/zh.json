@@ -401,6 +401,7 @@
     "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请切回原来的工作目录继续该会话，或在当前目录开始一个新的 Claude Code 会话。",
     "sessionGeneric": "发生错误：{error}",
+    "codexPromptRefreshUnavailable": "Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
     "resultAttachmentUploadFailed": "附件上传失败。要我改成拆分成多条消息发送吗？",
     "resultDeliveryFailed": "⚠️ 消息投递失败，内容可能过长或格式不兼容。你可以让我重新发送一次。",
     "fileAttachmentUploadFailedWithLink": "⚠️ {filename} 没能作为微信文件直接发送。你可以通过 Avibe 下载；如提示登录，请先登录：\n{url}",
