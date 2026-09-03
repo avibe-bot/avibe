@@ -1990,7 +1990,7 @@ class CodexAgent(BaseAgent):
         fork: dict[str, Any],
     ) -> str:
         """Fork an existing Codex thread and bind the new thread id."""
-        self.ensure_agent_session_id(request)
+        target_agent_session_id = self.ensure_agent_session_id(request)
         source_prompt_strategy = self._fork_source_prompt_strategy(fork)
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
@@ -2028,7 +2028,17 @@ class CodexAgent(BaseAgent):
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
-        self.bind_agent_session_id(request, thread_id)
+        target_agent_session_id = (
+            self.bind_agent_session_id(request, thread_id) or target_agent_session_id
+        )
+        if source_prompt_strategy == "collaboration" and not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            None,
+            strategy="collaboration",
+            agent_session_id=target_agent_session_id,
+        ):
+            raise RuntimeError("Could not persist the forked Codex prompt strategy")
         self._remember_thread_model_settings_from_response(
             request.base_session_id,
             thread_id,
@@ -2709,31 +2719,43 @@ class CodexAgent(BaseAgent):
         marker_thread_id = marker.get("thread_id") if isinstance(marker, dict) else None
         marker_strategy = marker.get("strategy") if isinstance(marker, dict) else None
         marker_sha256 = marker.get("sha256") if isinstance(marker, dict) else None
+        marker_sha256_valid = bool(
+            isinstance(marker_sha256, str)
+            and len(marker_sha256) == 64
+            and all(character in "0123456789abcdef" for character in marker_sha256)
+        )
         if (
             marker_thread_id != thread_id
             or marker_strategy not in {"collaboration", "fallback"}
-            or not isinstance(marker_sha256, str)
-            or len(marker_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in marker_sha256)
+            or (marker_strategy == "fallback" and not marker_sha256_valid)
+            or (
+                marker_strategy == "collaboration"
+                and marker_sha256 is not None
+                and not marker_sha256_valid
+            )
         ):
             raise RuntimeError("Stored Codex prompt strategy marker is invalid")
-        return {
+        resolved = {
             "thread_id": thread_id,
             "strategy": marker_strategy,
-            "sha256": marker_sha256,
         }
+        if marker_sha256_valid:
+            resolved["sha256"] = marker_sha256
+        return resolved
 
     def _persist_prompt_strategy(
         self,
         request: AgentRequest,
         thread_id: str,
-        developer_instructions: str,
+        developer_instructions: Optional[str],
         *,
         strategy: str,
         agent_session_id: Optional[str],
     ) -> bool:
         if strategy not in {"collaboration", "fallback"}:
             raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
+        if strategy == "fallback" and not developer_instructions:
+            raise ValueError("Fallback prompt strategy requires developer instructions")
         if not agent_session_id:
             return True
         setter = getattr(
@@ -2746,8 +2768,9 @@ class CodexAgent(BaseAgent):
         marker = {
             "thread_id": thread_id,
             "strategy": strategy,
-            "sha256": self._prompt_fingerprint(developer_instructions),
         }
+        if developer_instructions:
+            marker["sha256"] = self._prompt_fingerprint(developer_instructions)
         try:
             persisted = setter(
                 agent_session_id,
@@ -2766,6 +2789,19 @@ class CodexAgent(BaseAgent):
             )
             return False
         return True
+
+    @staticmethod
+    async def _confirm_collaboration_mode_capability(transport: CodexTransport) -> None:
+        if getattr(transport, "supports_turn_collaboration_mode", False):
+            return
+        try:
+            await transport.send_request("collaborationMode/list", {})
+        except Exception as exc:
+            raise RuntimeError(
+                "Cannot safely resume a collaboration-backed Codex thread because "
+                "the current app-server did not confirm collaboration mode support"
+            ) from exc
+        transport.supports_turn_collaboration_mode = True
 
     async def _start_turn(
         self,
@@ -2836,7 +2872,7 @@ class CodexAgent(BaseAgent):
             developer_instructions
             and persisted_prompt_marker
             and persisted_prompt_marker["strategy"] == "fallback"
-            and persisted_prompt_marker["sha256"]
+            and persisted_prompt_marker.get("sha256")
             == self._prompt_fingerprint(developer_instructions)
         )
         if fallback_prompt_is_current:
@@ -2846,9 +2882,10 @@ class CodexAgent(BaseAgent):
                 developer_instructions,
             )
             prompt_changed = False
+        if prompt_strategy == "collaboration":
+            await self._confirm_collaboration_mode_capability(transport)
         collaboration_mode_is_known = bool(
-            prompt_strategy == "collaboration"
-            or getattr(transport, "supports_turn_collaboration_mode", True)
+            getattr(transport, "supports_turn_collaboration_mode", True)
         )
         collaboration_strategy_has_no_model = bool(
             developer_instructions
