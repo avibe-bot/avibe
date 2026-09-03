@@ -310,7 +310,12 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   `removed_model_ids` is set to its current contents ∪ (`built-in snapshot ids − menu ids`).
   Removals made while the marker is false are recorded in `removed_model_ids` immediately, like
   any other removal, and survive initialization. Until the marker is true the menu is served
-  unchanged, so a partial snapshot can never be mistaken for the user's removals. Load and
+  unchanged, so a partial snapshot can never be mistaken for the user's removals. A catalog
+  created fresh under v2 is written with the marker already true and an empty removed set, so
+  the pending window exists only for files that predate the marker; a fresh-install fixture is
+  distinct from the v1 migration fixtures. Both fields are persisted configuration only: the
+  `AgentSupply` wire projection omits them (`agent-supply.schema.json` stays closed) and the
+  response guard covers that omission. Load and
   mutation fixtures cover the v1 file, the pending window, and the initialized state. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
   the price is that a built-in that entered the snapshot between the v1 save and the first v2
   load is treated as removed — recoverable from the picker, not auto-added. Claude Code's locked `default` row is not a built-in candidate and
@@ -352,7 +357,8 @@ the v2 shapes on the same head.
 | `vibe/i18n/*.json` and `ui/src/components/settings/models/serverCopy.ts` | `detail` keys for the two new error codes |
 | `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` and `agents.<backend>.builtin_baseline_initialized` (C6), with load and mutation fixtures for the v1 file, the pending window, and the initialized state |
 | `vibe/data/model_vendors.json` (new, versioned) | the vendor map and aggregator order C7 defines, covered by a test |
-| `docs/plans/model-hub.md` §4.2 / §4.6 | matching-point wording (C1); removed-id and reconcile rules (C6) |
+| `docs/plans/model-hub.md` §4.2 / §4.6 and its **Guard error-plan relation** table (authoritative per `mirror-registry.json` D18) | matching-point wording (C1); removed-id, marker, and reconcile rules (C6); a new relation row for `backend_model_in_route` requiring a nonempty `would_remove_hops` plan |
+| `config/v2_config.py` → `AgentSupply` projection (`_agent_payload` / `to_payload` split) and the response guard | `removed_model_ids` and `builtin_baseline_initialized` are persisted only and never appear in any `AgentSupply` response |
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
