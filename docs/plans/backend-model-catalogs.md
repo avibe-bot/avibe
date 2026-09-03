@@ -206,15 +206,14 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
    everything with one `PUT`. Whatever the origin, adding a row runs the same one-time
    matching for its initial route (C1); an id no provider supplies simply starts with an
    empty route and the row shows `No model route configured`.
-8. **A removed built-in must be recoverable.** Removing a built-in row hides it rather than
-   forgetting it: the backend catalog records the hidden built-in id, the row leaves the
-   menu and its route follows the removal rule (C3), and the id reappears in the
-   `Codex built-in` group of the picker. Picking it again clears the hidden mark. Removing
-   any other row deletes it; a provider model reappears in `From your providers`, and a
-   custom model is defined again through `Add custom model…`.
+8. **A removed built-in must be recoverable, and nothing removed comes back by itself.**
+   Removing any row records its id as removed (C6); the row leaves the menu and its route
+   follows the removal rule (C3). A removed built-in reappears in the `Codex built-in` group
+   of the picker, a removed provider model in `From your providers`, and picking either again
+   clears the mark; a removed custom model is re-created through `Add custom model…`.
 9. **New built-ins join the menu by themselves; removed ones stay removed.** When the
    backend's built-in list gains a model (a Codex update, a refreshed remote catalog), the
-   product adds it to the menu unless its id carries the hidden mark, inserting it where the
+   product adds it to the menu unless its id is in the removed set (C6), inserting it where the
    built-in list orders it among the built-ins still present (after the last one when none
    follows; at the end when none remains) and seeding its route by C1. Nothing is ever
    removed automatically: a built-in the backend withdraws stays in the menu because a
@@ -230,7 +229,8 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
 - **C1 — Menu-model add runs matching once.** `PUT /api/models/agents/<backend>/models` keeps
   its existing optimistic three-way merge: the caller's additions are `desired − baseline`,
   merged onto the latest stored list, so a concurrent removal of an unrelated row survives.
-  Each addition is a one-time matching point: the server runs the existing `matching-v1`
+  Each addition that is still absent from the latest stored list at commit time is a one-time
+  matching point (an id another caller added meanwhile keeps its existing route untouched): the server runs the existing `matching-v1`
   (including its Claude alias rule) for that menu model against the Sources present in that
   backend's Source order that are configuration-eligible, over each Source's complete
   non-retired inventory — discovered and manual alike (`model-hub.md` §4.2's
@@ -238,7 +238,12 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   writes the accepted hops with `placement-v1`. §4.2 and §4.6 are amended so that "catalog
   change never repeats matching" reads "a menu-model add matches once at that write; refresh,
   restart, health, and turns still never re-match". An id no ordered Source supplies starts
-  with an empty route. The success response is the existing `{agent: AgentSupply}`.
+  with an empty route. The picker echoes what it showed: `PUT` accepts
+  `expected_suppliers?: {<id>: [{source_id, model_id}]}` for caller-added ids, and when the
+  server's matching result differs for any listed id it commits nothing and refuses with
+  `409 candidate_suppliers_changed` carrying the current projection for those ids; the picker
+  refreshes its candidates and asks again. The success response is the existing
+  `{agent: AgentSupply}`.
 - **C2 — Proposed values travel in the candidates read; the save is literal.** The server
   proposes `display_name` and `reasoning_efforts` for every candidate (C4): for a built-in
   from the built-in snapshot, for a provider model from its suppliers (display name from the
@@ -264,28 +269,33 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   response guard exercises it. The v1 hard refusal is retired.
 - **C4 — The server serves the picker's candidates; the client only renders.** One read,
   `GET /api/models/agents/<backend>/models/candidates`, returns
-  `{candidates: {builtin: Candidate[], providers: Candidate[]}}` where `Candidate` is
+  `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` where `Candidate` is
   `{id, display_name, reasoning_efforts, suppliers: [{source_id, source_name, model_id}],
   origin}`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
   (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, hidden ones
   included; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
-  configuration-eligible Sources minus menu ids and minus ids already in `builtin`.
+  configuration-eligible Sources minus menu ids and minus ids already in `builtin`; `in_list`
+  is every current menu row with the same projection, so an already-added model is found by
+  its supplier's name too and its disabled row shows authoritative chips.
   `suppliers` is the server's own `matching-v1` projection for that id — so a Claude alias hop
   appears here exactly as C1 would seed it — in Source order, possibly empty. No client
   re-implements matching, aliasing, eligibility, or snapshot merging. The picker filters both
-  groups by the query on id, display name, and supplier name, and builds `Already in the list`
-  from the catalog it already holds.
-- **C6 — Hidden built-ins and built-in reconcile.** The backend catalog persists
-  `agents.<backend>.hidden_builtin_ids: string[]`. Removing a row whose persisted `origin` is
-  `builtin` marks its id hidden — provenance, not current-snapshot membership, so a built-in
-  the backend has temporarily withdrawn is marked too; adding an id that is hidden clears the
-  mark. Legacy initialization: a persisted catalog without the field is initialized once, at
-  load, to `built-in snapshot ids − menu ids` and persisted, so an upgrade from v1 changes
-  nothing the user sees; reconcile runs only once the field exists. On every built-in snapshot
-  change (startup, remote catalog refresh, CLI cache change) the service adds each snapshot id
-  that is neither in the menu nor hidden, at the position question 9 defines, seeds it per C1
-  and C2, and invalidates the backend's runtime projection. It never removes a row. Claude
-  Code's locked `default` row is not a built-in candidate and cannot be hidden.
+  arrays by the query on id, display name, and supplier name, rendering `in_list` matches as
+  the disabled `Already in the list` group.
+- **C6 — Removed ids never return on their own.** The backend catalog persists
+  `agents.<backend>.removed_model_ids: string[]`. Every row the user removes leaves its id in
+  the set, whatever the row's origin was and whether or not the backend lists the id right now;
+  adding a row with that id by any path clears it. Reconcile — on startup, remote catalog
+  refresh, or CLI cache change — adds each built-in snapshot id that is neither in the menu nor
+  in the set, at the position question 9 defines, seeds it per C1 and C2, and invalidates the
+  backend's runtime projection; it never removes a row. The picker's `builtin` group lists
+  removed built-ins so they are one click away. Legacy initialization: a persisted catalog
+  without the field is initialized once, at load, to `built-in snapshot ids − menu ids` and
+  persisted. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
+  the price is that a built-in that entered the snapshot between the v1 save and the first v2
+  load is treated as removed — recoverable from the picker, not auto-added. Reconcile runs only
+  once the field exists. Claude Code's locked `default` row is not a built-in candidate and
+  cannot be removed.
 - **C7 — models.dev read serves the editor typeahead, additively.** The existing
   `GET /api/models/catalog/models-dev?query=` keeps its shipped shape — `matches`, `provider_id`,
   `provider_name`, and the metadata fields — and gains: deduplication by model id, ranking
@@ -341,13 +351,16 @@ No string explains mechanism.
   reveals a seventh-plus row (the #1829 behaviour is retained).
 - Direct mode still hides the editor and preserves the catalog unchanged.
 - Removing a built-in row and reopening the picker shows that id under the built-in group;
-  picking it restores the row. A built-in id that appears in the backend snapshot after the
-  menu was saved is present in the menu on the next read unless it was removed before, and
-  a previously removed id never returns on its own.
+  picking it restores the row. A built-in id that enters the backend snapshot after the menu
+  was saved is present in the menu on the next read unless a row with that id was removed
+  before — and an id the user removed never returns on its own, whatever the removed row's
+  origin was.
 - The picker lists each candidate id exactly once across all groups.
 - A field the user cleared before the first Save is empty after Save.
 - Every supplier chip the picker shows for a candidate equals the hop set C1 seeds when that
-  candidate is added (the server projects both from the same rule).
+  candidate is added (the server projects both from the same rule), or the add is refused and
+  re-asked with the current chips.
+- Two callers adding the same id concurrently leave exactly one row and one route, matched once.
 - A built-in removed while the backend had withdrawn it does not return when the backend
   lists it again.
 - Loading a v1 catalog shows exactly the same menu before and after the first load, and a
