@@ -25,6 +25,7 @@ from config.v2_config import (
     model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -113,7 +114,9 @@ class ModelHubScenarioAdapter:
             authenticated=True,
             protocol="openai_chat",
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=tuple(discovery_models),
+            models=tuple(
+                DiscoveredModel(id=model_id) for model_id in discovery_models
+            ),
         )
         self.discovery_models = tuple(discovery_models)
         self.refresh_models = tuple(refresh_models) if refresh_models is not None else self.discovery_models
@@ -186,9 +189,9 @@ class ModelHubScenarioAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
-    ) -> tuple[str, ...]:
+    ) -> tuple[DiscoveredModel, ...]:
         self.discovery_calls.append((vendor, protocol, base_url, credential_ref))
-        return self.refresh_models
+        return tuple(DiscoveredModel(id=model_id) for model_id in self.refresh_models)
 
     async def credential_supports_refresh(self, credential_ref: str) -> bool:
         return credential_ref in self.refreshable_credential_refs

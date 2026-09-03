@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "families": [
+    {"prefix": "codestral-", "vendor_id": "mistral"},
+    {"prefix": "deepseek-", "vendor_id": "deepseek"},
+    {"prefix": "mistral-", "vendor_id": "mistral"},
+    {"prefix": "claude-", "vendor_id": "anthropic"},
+    {"prefix": "gemini-", "vendor_id": "google"},
+    {"prefix": "gpt-", "vendor_id": "openai"},
+    {"prefix": "grok-", "vendor_id": "xai"},
+    {"prefix": "kimi-", "vendor_id": "moonshotai"},
+    {"prefix": "glm-", "vendor_id": "zhipuai"},
+    {"prefix": "qwen", "vendor_id": "alibaba"},
+    {"prefix": "o1", "vendor_id": "openai"},
+    {"prefix": "o3", "vendor_id": "openai"},
+    {"prefix": "o4", "vendor_id": "openai"}
+  ],
+  "aggregators": ["openrouter", "together", "fireworks-ai", "groq", "deepinfra"]
+}

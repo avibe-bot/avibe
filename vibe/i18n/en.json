@@ -433,7 +433,17 @@
     "showMessageType": "Show {name}",
     "visibilityShown": "shown",
     "visibilityHidden": "hidden",
-    "messageTypeStatus": "{name} messages are now {action}"
+    "messageTypeStatus": "{name} messages are now {action}",
+    "models": {
+      "sourceDetail": {
+        "tiers": {
+          "managed": {
+            "upstream": "Reasoning tiers are managed by upstream model metadata.",
+            "catalog": "Reasoning tiers are managed by Avibe's built-in model catalog."
+          }
+        }
+      }
+    }
   },
   "audio": {
     "transcriptEchoSingle": "Voice transcript:",
@@ -925,6 +935,7 @@
       "backend_model_locked": "Claude Code Default and built-in model origins cannot be changed.",
       "backend_model_in_route": "Clear this model's route before removing it from the backend model list.",
       "backend_model_conflict": "This backend model changed elsewhere. Reload the list and retry.",
+      "candidate_suppliers_changed": "The available suppliers changed. Reload the model choices and confirm again.",
       "models_dev_unavailable": "models.dev is unavailable. Enter the model metadata manually or retry later.",
       "codex_catalog_unavailable": "Codex could not prepare the local Model Hub catalog. Retry this turn.",
       "engine_down": "The local model gateway is unavailable.",
@@ -945,6 +956,7 @@
       "channel_switch": "{from_source}: supply channel changed",
       "needs_action": "{from_source}: {reason}; action required",
       "supply_interrupted": "{model}: {reason}; model supply interrupted",
+      "reasoning_efforts_override": "{from_source}: {model} reasoning tiers now follow {reason}",
       "reason": {
         "quota_exhausted": "quota exhausted",
         "rate_limited": "rate limited",
@@ -952,6 +964,8 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
+        "upstream_tiers": "upstream model metadata",
+        "catalog_tiers": "Avibe's built-in model catalog",
         "credential_expired": "credential expired",
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",

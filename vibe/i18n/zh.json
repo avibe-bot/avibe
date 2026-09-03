@@ -433,7 +433,17 @@
     "showMessageType": "显示 {name}",
     "visibilityShown": "显示",
     "visibilityHidden": "隐藏",
-    "messageTypeStatus": "{name} 消息已设为 {action}"
+    "messageTypeStatus": "{name} 消息已设为 {action}",
+    "models": {
+      "sourceDetail": {
+        "tiers": {
+          "managed": {
+            "upstream": "推理强度由上游模型元数据管理。",
+            "catalog": "推理强度由 Avibe 内置模型目录管理。"
+          }
+        }
+      }
+    }
   },
   "audio": {
     "transcriptEchoSingle": "语音转写：",
@@ -925,6 +935,7 @@
       "backend_model_locked": "不能修改 Claude Code 的 Default 项或内置模型的来源类型。",
       "backend_model_in_route": "请先清空该模型的路由，再从 Backend 模型列表中移除。",
       "backend_model_conflict": "该 Backend 模型已在其他位置发生变更，请重新加载后再试。",
+      "candidate_suppliers_changed": "可用供应商已发生变化，请刷新模型选项后重新确认。",
       "models_dev_unavailable": "models.dev 当前不可用，请手动填写模型参数或稍后重试。",
       "codex_catalog_unavailable": "Codex 无法准备本地模型网关目录，请重试本回合。",
       "engine_down": "本地模型网关不可用。",
@@ -945,6 +956,7 @@
       "channel_switch": "{from_source}：调用通道已切换",
       "needs_action": "{from_source}：{reason}，需要处理",
       "supply_interrupted": "{model}：{reason}，模型请求已中断",
+      "reasoning_efforts_override": "{from_source}：{model} 的推理强度现按{reason}管理",
       "reason": {
         "quota_exhausted": "额度用完",
         "rate_limited": "请求受限",
@@ -952,6 +964,8 @@
         "network": "网络暂不可用",
         "recovery": "已恢复",
         "manual": "手动调整",
+        "upstream_tiers": "上游模型元数据",
+        "catalog_tiers": "Avibe 内置模型目录",
         "credential_expired": "凭证已过期",
         "credential_revoked": "凭证已撤销",
         "balance_exhausted": "余额不足",

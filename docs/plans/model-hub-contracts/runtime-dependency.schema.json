@@ -7,7 +7,7 @@
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 6 },
+    "contract_version": { "const": 7 },
     "enabled": {
       "type": "boolean",
       "description": "Persisted user intent for the managed gateway. Missing on older payloads means clients must fall back to observed health."
@@ -131,7 +131,7 @@
   },
   "examples": [
     {
-      "contract_version": 6,
+      "contract_version": 7,
       "host_platform": "darwin-arm64",
       "manifest": {
         "name": "cliproxyapi",

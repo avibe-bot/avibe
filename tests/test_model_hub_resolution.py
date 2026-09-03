@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections import deque
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -37,7 +39,10 @@ from core.handlers.model_hub.classification import (
     source_settlement_allowed,
     terminal_outcome_category,
 )
-from core.handlers.model_hub.events import BoundedEventLog
+from core.handlers.model_hub.events import (
+    BoundedEventLog,
+    redact_credential_material,
+)
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.provenance import (
     TurnSupplyBlocker,
@@ -239,7 +244,7 @@ class FakeAdapter:
             await self.discovery_block.wait()
         if self.discovery_error is not None:
             raise self.discovery_error
-        return self.discovered
+        return tuple(DiscoveredModel(id=model_id) for model_id in self.discovered)
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
         self.observed_protocol_orders.append(tuple(protocol_order))
@@ -255,7 +260,7 @@ class FakeAdapter:
             authenticated=True,
             protocol=protocol_order[0],
             discovery=ObservationDiscovery.SUCCEEDED,
-            model_ids=self.discovered,
+            models=tuple(DiscoveredModel(id=model_id) for model_id in self.discovered),
         )
 
     async def invoke(self, source_id, model_id, request, stream, origin):
@@ -613,7 +618,7 @@ def test_machine_permission_denial_precedes_every_status_heuristic(
                 backend="claude",
                 model_id="claude-opus-4-6",
                 request={},
-                attempt_observer=lambda *args: decisions.append(args[-1]),
+                attempt_observer=lambda *args: decisions.append(args[5]),
             )
         )
 
@@ -874,12 +879,14 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
         protocol="openai_responses",
         headers={"x-test": "preserved"},
     )
+    observed_attempts = []
 
     resolved = asyncio.run(
         service.resolve(
             backend="claude",
             model_id="claude-opus-4-6",
             request=request,
+            attempt_observer=lambda *args: observed_attempts.append(args),
         )
     )
 
@@ -891,6 +898,10 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
     assert adapter.invocation_requests[1]["reasoning"] == {"summary": "auto"}
     assert adapter.invocation_requests[1].protocol == "openai_responses"
     assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
+    started = [attempt for attempt in observed_attempts if attempt[4] is None]
+    assert [attempt[0] for attempt in started] == [first.id, second.id]
+    assert started[0][6:] == ((), ())
+    assert started[1][6:] == (("high",), ("low",))
 
 
 def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
@@ -930,6 +941,154 @@ def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
     assert "reasoning_effort" not in adapter.invocation_requests[0]
     assert adapter.invocation_requests[0].protocol == "openai_chat"
     assert adapter.invocation_requests[0].headers == {"x-test": "preserved"}
+
+
+def test_reasoning_effort_strip_log_redacts_values_and_names_declared_tiers(
+    tmp_path,
+    caplog,
+):
+    source = _source("src_effortlog1", ("upstream-model",))
+    source.models[0].reasoning_efforts = ["low", "high"]
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="upstream-model",
+            source_id=source.id,
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+
+    with caplog.at_level("INFO", logger="core.handlers.model_hub.service"):
+        asyncio.run(
+            service.resolve(
+                backend="claude",
+                model_id="claude-opus-4-6",
+                request={
+                    "reasoning_effort": (
+                        "authorization: sk-test-strip-secret-material"
+                    )
+                },
+            )
+        )
+
+    assert "sk-test-strip-secret-material" not in caplog.text
+    assert "[redacted]" in caplog.text
+    assert "declared tiers: ['low', 'high']" in caplog.text
+
+
+def test_reasoning_effort_telemetry_is_utf8_bounded_after_redaction(caplog):
+    source = _source("src_effortbound", ("upstream-model",))
+    long_declared = "层级" * 200
+    source.models[0].reasoning_efforts = ["low", long_declared]
+    long_stripped = (
+        "深度" * 200 + " authorization: sk-test-strip-secret-material"
+    )
+
+    with caplog.at_level("INFO", logger="core.handlers.model_hub.service"):
+        result = ModelHubService._request_for_exact_reasoning_effort(
+            {"reasoning_effort": long_stripped},
+            source,
+            "upstream-model",
+        )
+
+    [stripped] = result.stripped_efforts
+    [declared] = result.declared_efforts
+    safe_stripped = redact_credential_material(long_stripped)
+    stripped_digest = hashlib.sha256(safe_stripped.encode("utf-8")).hexdigest()
+    declared_payload = json.dumps(
+        ("low", long_declared),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    declared_digest = hashlib.sha256(declared_payload.encode("utf-8")).hexdigest()
+    assert len(stripped.encode("utf-8")) <= 256
+    assert len(declared.encode("utf-8")) <= 256
+    assert stripped.endswith(f"[sha256:{stripped_digest}]")
+    assert declared.endswith(f"[sha256:{declared_digest}]")
+    assert hashlib.sha256(long_stripped.encode("utf-8")).hexdigest() not in stripped
+    assert long_stripped not in caplog.text
+    assert long_declared not in caplog.text
+    assert "sk-test-strip-secret-material" not in caplog.text
+    assert stripped in caplog.text
+    assert declared in caplog.text
+
+
+def test_reasoning_effort_telemetry_bounds_many_short_declared_tiers():
+    source = _source("src_effortmany", ("upstream-model",))
+    source.models[0].reasoning_efforts = [
+        f"tier-{index:04d}" for index in range(1_000)
+    ]
+
+    result = ModelHubService._request_for_exact_reasoning_effort(
+        {"reasoning_effort": "undeclared"},
+        source,
+        "upstream-model",
+    )
+
+    [declared] = result.declared_efforts
+    assert len(declared.encode("utf-8")) <= 256
+    assert declared.endswith("]")
+    assert "[sha256:" in declared
+
+
+def test_reasoning_effort_telemetry_preserves_short_values_exactly():
+    source = _source("src_effortshort", ("upstream-model",))
+    source.models[0].reasoning_efforts = ["low", "high"]
+
+    result = ModelHubService._request_for_exact_reasoning_effort(
+        {"reasoning_effort": "ultra"},
+        source,
+        "upstream-model",
+    )
+
+    assert result.stripped_efforts == ("ultra",)
+    assert result.declared_efforts == ("low", "high")
+
+
+@pytest.mark.parametrize(
+    ("request_payload", "expected_request", "expected_stripped"),
+    [
+        ({"reasoning_effort": ""}, {}, ("",)),
+        ({"reasoning_effort": 7}, {}, ("<int>",)),
+        (
+            {"reasoning": {"effort": ["high"], "summary": "auto"}},
+            {"reasoning": {"summary": "auto"}},
+            ("<list>",),
+        ),
+        (
+            {"reasoning": {"effort": None}},
+            {},
+            ("<null>",),
+        ),
+    ],
+    ids=("direct-empty", "direct-int", "nested-list", "nested-null"),
+)
+def test_reasoning_effort_telemetry_records_every_stripped_value(
+    request_payload,
+    expected_request,
+    expected_stripped,
+):
+    source = _source("src_efforttype", ("upstream-model",))
+    source.models[0].reasoning_efforts = ["high"]
+
+    result = ModelHubService._request_for_exact_reasoning_effort(
+        request_payload,
+        source,
+        "upstream-model",
+    )
+
+    assert result.request == expected_request
+    assert result.stripped_efforts == expected_stripped
+    assert result.declared_efforts == ("high",)
 
 
 def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
@@ -1053,215 +1212,6 @@ def test_exact_hop_inspection_rejects_wrong_identity_and_empty_route():
     assert wrong.reason == "model_unsupported"
     assert empty.identity == ("opencode", "openai/menu-model", None, None)
     assert empty.reason == "route_unconfigured"
-
-
-def test_opencode_menu_validation_rejects_noncanonical_identifier(tmp_path):
-    service, store, _ = _service(tmp_path, ModelHubConfig())
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(
-            service.set_opencode_menu(
-                {"view": "featured", "checked": []},
-                {"view": "featured", "checked": ["gpt-5"]}
-            )
-        )
-    assert exc.value.code == "mapping_target_unavailable"
-    assert store.load().agents["opencode"].menu.checked == []
-
-
-def test_opencode_menu_validation_rejects_credential_material(tmp_path):
-    service, store, _ = _service(tmp_path, ModelHubConfig())
-
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(
-            service.set_opencode_menu(
-                {"view": "featured", "checked": []},
-                {
-                    "view": "featured",
-                    "checked": ["custom/sk-test-credential-material"],
-                }
-            )
-        )
-
-    assert exc.value.code == "mapping_target_unavailable"
-    assert store.load().agents["opencode"].menu.checked == []
-
-
-def test_opencode_menu_rejects_a_new_model_absent_from_current_inventory(tmp_path):
-    source = _source("src_opencode01", (), vendor="openai")
-    service, store, _ = _service(tmp_path, _config([source]))
-
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(
-            service.set_opencode_menu(
-                {"view": "featured", "checked": []},
-                {"view": "featured", "checked": ["openai/removed-model"]}
-            )
-        )
-
-    assert exc.value.code == "mapping_target_unavailable"
-    assert exc.value.status == 409
-    assert store.load().agents["opencode"].menu.checked == []
-    assert "openai/removed-model" not in store.load().agents["opencode"].routes
-
-
-def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(tmp_path):
-    source = _source(
-        "src_opencode02",
-        ("upstream-model", "new-model"),
-        vendor="openai",
-    )
-    config = _config([source])
-    opencode = config.agents["opencode"]
-    opencode.menu = ModelHubMenuConfig(
-        view="featured",
-        checked=["openai/menu-model"],
-    )
-    opencode.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
-    opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
-    )
-    service, store, _ = _service(tmp_path, config)
-
-    asyncio.run(
-        service.set_opencode_menu(
-            {"view": "featured", "checked": ["openai/menu-model"]},
-            {
-                "view": "featured",
-                "checked": ["openai/menu-model", "openai/new-model"],
-            }
-        )
-    )
-
-    saved = store.load().agents["opencode"]
-    assert saved.menu.checked == ["openai/menu-model", "openai/new-model"]
-    assert saved.routes["openai/menu-model"].hops == (
-        ModelHubRouteHopConfig(source.id, "upstream-model"),
-    )
-
-
-def test_opencode_menu_hides_a_model_without_removing_its_route(tmp_path):
-    source = _source("src_opencode07", ("upstream-model",), vendor="openai")
-    config = _config([source])
-    opencode = config.agents["opencode"]
-    opencode.menu = ModelHubMenuConfig(
-        view="featured",
-        checked=["openai/menu-model"],
-    )
-    opencode.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
-    opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
-    )
-    service, store, _ = _service(tmp_path, config)
-
-    asyncio.run(
-        service.set_opencode_menu(
-            {"view": "featured", "checked": ["openai/menu-model"]},
-            {"view": "featured", "checked": []},
-        )
-    )
-
-    saved = store.load().agents["opencode"]
-    assert saved.menu.checked == []
-    assert saved.models == []
-    assert saved.routes["openai/menu-model"].hops == (
-        ModelHubRouteHopConfig(source.id, "upstream-model"),
-    )
-
-
-def test_opencode_menu_adds_an_inventory_model_with_an_empty_route(tmp_path):
-    source = _source("src_opencode05", ("upstream-model",), vendor="openai")
-    config = _config([source])
-    service, store, _ = _service(tmp_path, config)
-
-    asyncio.run(
-        service.set_opencode_menu(
-            {"view": "featured", "checked": []},
-            {"view": "featured", "checked": ["openai/upstream-model"]},
-        )
-    )
-
-    saved = store.load().agents["opencode"]
-    assert saved.menu.checked == ["openai/upstream-model"]
-    assert saved.routes["openai/upstream-model"].hops == ()
-
-
-def test_opencode_menu_rejects_a_model_absent_from_inventory(tmp_path):
-    source = _source("src_opencode06", (), vendor="openai")
-    config = _config([source])
-    service, store, _ = _service(tmp_path, config)
-
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(
-            service.set_opencode_menu(
-                {"view": "featured", "checked": []},
-                {"view": "featured", "checked": ["openai/menu-model"]},
-            )
-        )
-
-    assert exc.value.code == "mapping_target_unavailable"
-    assert exc.value.status == 409
-    assert store.load().agents["opencode"].menu.checked == []
-
-
-def test_opencode_menu_applies_local_intent_to_the_latest_saved_menu(tmp_path):
-    source = _source(
-        "src_opencode03",
-        ("model-a", "model-b", "model-c"),
-        vendor="openai",
-    )
-    config = _config([source])
-    config.agents["opencode"].menu = ModelHubMenuConfig(
-        view="featured",
-        checked=["openai/model-a", "openai/model-b"],
-    )
-    config.agents["opencode"].models = [
-        ModelHubBackendModelConfig(id="openai/model-a"),
-        ModelHubBackendModelConfig(id="openai/model-b"),
-    ]
-    config.agents["opencode"].routes.update(
-        {
-            "openai/model-a": ModelHubRouteConfig(),
-            "openai/model-b": ModelHubRouteConfig(),
-        }
-    )
-    service, store, _ = _service(tmp_path, config)
-
-    asyncio.run(
-        service.set_opencode_menu(
-            {"view": "featured", "checked": ["openai/model-a"]},
-            {
-                "view": "featured",
-                "checked": ["openai/model-a", "openai/model-c"],
-            },
-        )
-    )
-
-    assert store.load().agents["opencode"].menu.checked == [
-        "openai/model-a",
-        "openai/model-b",
-        "openai/model-c",
-    ]
-
-
-def test_opencode_menu_does_not_restore_a_concurrently_removed_model(tmp_path):
-    source = _source(
-        "src_opencode04",
-        ("model-a", "model-c"),
-        vendor="openai",
-    )
-    service, store, _ = _service(tmp_path, _config([source]))
-
-    asyncio.run(
-        service.set_opencode_menu(
-            {"view": "featured", "checked": ["openai/model-a"]},
-            {
-                "view": "featured",
-                "checked": ["openai/model-a", "openai/model-c"],
-            },
-        )
-    )
-
-    assert store.load().agents["opencode"].menu.checked == ["openai/model-c"]
 
 
 def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
@@ -1800,7 +1750,7 @@ def test_ambiguous_observation_never_creates_a_source(tmp_path):
         authenticated=True,
         protocol=None,
         discovery=ObservationDiscovery.NOT_ATTEMPTED,
-        model_ids=(),
+        models=(),
     )
     service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
 
@@ -1829,7 +1779,7 @@ def test_authentication_failure_observation_never_creates_a_source(tmp_path):
         authenticated=False,
         protocol=None,
         discovery=ObservationDiscovery.NOT_ATTEMPTED,
-        model_ids=(),
+        models=(),
     )
     service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
 
@@ -1858,7 +1808,7 @@ def test_create_failure_preserves_human_safe_observation_detail(tmp_path):
         authenticated=False,
         protocol=None,
         discovery=ObservationDiscovery.NOT_ATTEMPTED,
-        model_ids=(),
+        models=(),
     )
     service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
 
@@ -1881,7 +1831,7 @@ def test_create_failure_preserves_human_safe_observation_detail(tmp_path):
                 authenticated=False,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             ),
             ObservationOutcome.AUTHENTICATION_FAILED,
         ),
@@ -1923,7 +1873,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
         authenticated=None,
         protocol=None,
         discovery=ObservationDiscovery.NOT_ATTEMPTED,
-        model_ids=(),
+        models=(),
     )
     service, _, _ = _service(tmp_path, ModelHubConfig(), adapter)
 
@@ -1938,13 +1888,14 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 6,
+        "contract_version": 7,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
         "protocol": None,
         "discovery": "not_attempted",
         "models": [],
+        "model_metadata": [],
     }
 
 
@@ -1968,13 +1919,14 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 6,
+        "contract_version": 7,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",
         "protocol": None,
         "discovery": "not_attempted",
         "models": [],
+        "model_metadata": [],
     }
     assert store.load().sources == []
     assert adapter.revoked == ["cred_00000001"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -31,6 +32,7 @@ from config.v2_config import (
     ModelHubSourceUsageConfig,
     V2Config,
     canonical_opencode_menu_identity,
+    normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
     validate_model_hub_source_client_nonce,
@@ -39,8 +41,10 @@ from core.agent_auth_service import BackendLoginInProgressError
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
+from vibe.backend_model_catalog import bundled_catalog_reasoning_efforts_by_model
 
 from .adapter import (
+    DiscoveredModel,
     EngineAdapter,
     EngineHealth,
     EngineStatus,
@@ -60,6 +64,10 @@ from .adapter import (
     validate_source_observation,
 )
 from .async_owner import await_owned_task
+from .catalog_admission import (
+    admissible_backend_model,
+    backend_model_admission_error,
+)
 from .classification import (
     ResolutionDecision,
     classify_outcome,
@@ -73,6 +81,7 @@ from .events import (
     EventReason,
     build_resolution_event,
     contains_credential_material,
+    redact_credential_material,
 )
 from .errors import ModelDiscoveryError
 from .identifiers import STANDARD_OPENCODE_VENDOR_IDS, canonical_model_id
@@ -100,6 +109,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest
+from .reasoning_tiers import resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
     BackendName,
@@ -107,7 +117,7 @@ from .resolver import (
     allowed_origins,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
-    opencode_inventory_menu_ids,
+    opencode_source_model_identity,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -116,10 +126,33 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
-CONTRACT_VERSION = 6
-AGENT_CHAIN_CONTRACT_VERSION = 6
-PROBE_RESULT_CONTRACT_VERSION = 6
+CONTRACT_VERSION = 7
+
+
+def _storable_backend_model_metadata(
+    display_name: object,
+    reasoning_efforts: object,
+) -> tuple[Optional[str], list[str]]:
+    proposed_display_name = normalize_storable_backend_model_text(
+        display_name,
+        field_name="display_name",
+    )
+    proposed_efforts: list[str] = []
+    if isinstance(reasoning_efforts, (list, tuple)):
+        for effort in reasoning_efforts:
+            proposed = normalize_storable_backend_model_text(
+                effort,
+                field_name="reasoning_efforts",
+            )
+            if proposed is not None and proposed not in proposed_efforts:
+                proposed_efforts.append(proposed)
+    return proposed_display_name, proposed_efforts
+
+
+AGENT_CHAIN_CONTRACT_VERSION = 7
+PROBE_RESULT_CONTRACT_VERSION = 7
 _REORDER_ORDER_UNSET = object()
+_REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -347,6 +380,56 @@ class HandleSettlement:
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
 
 
+@dataclass(frozen=True)
+class ExactReasoningEffortRequest:
+    request: Mapping[str, Any]
+    stripped_efforts: tuple[str, ...] = ()
+    declared_efforts: tuple[str, ...] = ()
+
+
+def _bounded_reasoning_effort_telemetry(value: object) -> str:
+    """Redact and fold an untrusted effort value into bounded telemetry."""
+
+    if not isinstance(value, str):
+        if value is None:
+            return "<null>"
+        if isinstance(value, bool):
+            return "<bool>"
+        if isinstance(value, int):
+            return "<int>"
+        if isinstance(value, float):
+            return "<float>"
+        if isinstance(value, list):
+            return "<list>"
+        if isinstance(value, Mapping):
+            return "<dict>"
+        return "<non-string>"
+
+    redacted = redact_credential_material(value)
+    encoded = redacted.encode("utf-8")
+    if len(encoded) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
+        return redacted
+    digest = hashlib.sha256(encoded).hexdigest()
+    suffix = f"... [sha256:{digest}]"
+    preview_bytes = _REASONING_EFFORT_TELEMETRY_MAX_BYTES - len(
+        suffix.encode("utf-8")
+    )
+    preview = encoded[:preview_bytes].decode("utf-8", errors="ignore")
+    return f"{preview}{suffix}"
+
+
+def _bounded_declared_effort_telemetry(values: Iterable[str]) -> tuple[str, ...]:
+    redacted = tuple(redact_credential_material(value) for value in values)
+    payload = json.dumps(
+        redacted,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if len(payload.encode("utf-8")) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
+        return redacted
+    return (_bounded_reasoning_effort_telemetry(payload),)
+
+
 AttemptObserver = Callable[
     [
         str,
@@ -355,6 +438,8 @@ AttemptObserver = Callable[
         bool,
         Optional[RawCallOutcome],
         Optional[ResolutionDecision],
+        tuple[str, ...],
+        tuple[str, ...],
     ],
     None,
 ]
@@ -597,7 +682,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 6,
+        "contract_version": 7,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -693,6 +778,9 @@ class ModelHubService:
         self._runtime_install_reconcile_lock = asyncio.Lock()
         self._runtime_install_reconciled = False
         self._runtime_lifecycle_lock = asyncio.Lock()
+        self._builtin_snapshot_generations: dict[BackendName, str] = {}
+        self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
+        self._pending_builtin_catalog_refresh: set[BackendName] = set()
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -1159,9 +1247,13 @@ class ModelHubService:
             return False
         return True
 
-    async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
+    async def _discover(self, source: ModelHubSourceConfig) -> list[DiscoveredModel]:
         if not source.credential_ref:
-            return [model.id for model in source.models if not model.retired]
+            return [
+                DiscoveredModel(id=model.id)
+                for model in source.models
+                if not model.retired
+            ]
         return list(
             await self._engine_call(
                 self.adapter.discover_models(
@@ -1198,6 +1290,17 @@ class ModelHubService:
             "protocol": observation.protocol,
             "discovery": observation.discovery.value,
             "models": list(observation.model_ids),
+            "model_metadata": [
+                {
+                    "id": model.id,
+                    "supported_parameters": (
+                        list(model.supported_parameters)
+                        if model.supported_parameters is not None
+                        else None
+                    ),
+                }
+                for model in observation.models
+            ],
         }
 
     @staticmethod
@@ -1206,7 +1309,15 @@ class ModelHubService:
             validated = validate_source_observation(observation)
         except (TypeError, ValueError):
             raise ModelHubError("discovery_failed", status=502)
-        if any(contains_credential_material(model_id) for model_id in validated.model_ids):
+        if contains_credential_material(
+            [
+                {
+                    "id": model.id,
+                    "supported_parameters": model.supported_parameters,
+                }
+                for model in validated.models
+            ]
+        ):
             raise ModelHubError("discovery_failed", status=502)
         return validated
 
@@ -1231,7 +1342,7 @@ class ModelHubService:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         except EngineUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
@@ -1244,7 +1355,7 @@ class ModelHubService:
                 authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
+                models=(),
             )
         validated = self._validate_observation(observation)
         if (
@@ -1499,15 +1610,16 @@ class ModelHubService:
         self,
         source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
         *,
         allow_empty: bool = False,
-    ) -> None:
+        catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> list[tuple[str, Literal["upstream", "catalog"]]]:
         # Admit the canonical form, not the text upstream happened to send: what
         # is stored here is what resolution compares and what usage meters, and a
         # listing that names one model twice under two spellings is a failed
         # discovery, not two models.
-        canonical = [canonical_model_id(model_id) for model_id in discovered]
+        canonical = [canonical_model_id(model.id) for model in discovered]
         if (
             (not allow_empty and not discovered and not manual_models)
             or any(
@@ -1517,7 +1629,14 @@ class ModelHubService:
             or len(set(canonical)) != len(canonical)
         ):
             raise ModelHubError("discovery_failed", status=502)
-        discovered = [model_id for model_id in canonical if model_id is not None]
+        canonical_models = [
+            DiscoveredModel(
+                id=model_id,
+                supported_parameters=model.supported_parameters,
+            )
+            for model, model_id in zip(discovered, canonical)
+            if model_id is not None
+        ]
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         existing_by_id = {model.id: model for model in source.models}
@@ -1527,29 +1646,81 @@ class ModelHubService:
             if model.provenance == "discovered" and model.retired
         ]
         retired_model_ids = {model.id for model in retired_models}
+        discovered_by_id = {model.id: model for model in canonical_models}
+        overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
+        if catalog_efforts_by_model is None:
+            catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+
+        def apply_tiers(
+            model: ModelHubModelConfig,
+            metadata: DiscoveredModel | None,
+        ) -> None:
+            resolution = resolve_reasoning_tiers(
+                protocol=source.protocol,
+                model_id=model.id,
+                supported_parameters=(
+                    metadata.supported_parameters if metadata is not None else None
+                ),
+                existing_efforts=model.reasoning_efforts,
+                existing_source=model.reasoning_efforts_source,
+                catalog_efforts_by_model=catalog_efforts_by_model,
+            )
+            if (
+                model.reasoning_efforts
+                and model.reasoning_efforts_source == "user"
+                and resolution.source in {"upstream", "catalog"}
+            ):
+                overrides.append((model.id, resolution.source))
+            model.reasoning_efforts = list(resolution.efforts)
+            model.reasoning_efforts_source = resolution.source
+
         discovered_models = []
-        for model_id in discovered:
+        for metadata in canonical_models:
+            model_id = metadata.id
             if model_id in manual_model_ids or model_id in retired_model_ids:
                 continue
             existing = existing_by_id.get(model_id)
-            discovered_models.append(
-                ModelHubModelConfig(
-                    id=model_id,
-                    provenance="discovered",
-                    reasoning_efforts=list(existing.reasoning_efforts) if existing else [],
-                    display_name=existing.display_name if existing else None,
-                    discovered_at=discovered_at,
-                )
+            model = ModelHubModelConfig(
+                id=model_id,
+                provenance="discovered",
+                reasoning_efforts=list(existing.reasoning_efforts) if existing else [],
+                reasoning_efforts_source=(
+                    existing.reasoning_efforts_source if existing else None
+                ),
+                display_name=existing.display_name if existing else None,
+                discovered_at=discovered_at,
             )
+            apply_tiers(model, metadata)
+            discovered_models.append(model)
+
+        for model in (*retired_models, *manual_models):
+            apply_tiers(model, discovered_by_id.get(model.id))
         source.models = discovered_models + retired_models + manual_models
         source.last_discovered_at = discovered_at
+        return overrides
+
+    def _record_reasoning_tier_overrides(
+        self,
+        source: ModelHubSourceConfig,
+        overrides: Iterable[tuple[str, Literal["upstream", "catalog"]]],
+    ) -> None:
+        for model_id, managed_source in overrides:
+            self._record_event(
+                agent="system",
+                kind="reasoning_efforts_override",
+                model_id=model_id,
+                reason=f"{managed_source}_tiers",
+                from_source=source.id,
+                from_label=source.display_name,
+                now=self.now(),
+            )
 
     async def _finalize_successful_discovery(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
         source: ModelHubSourceConfig,
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
         *,
         force: bool,
         confirmed_remove_hops: object,
@@ -1558,7 +1729,7 @@ class ModelHubService:
         """Apply one successful inventory observation and commit it atomically."""
 
         manual = [model for model in source.models if model.provenance == "manual"]
-        self._apply_discovered_models(
+        overrides = self._apply_discovered_models(
             source,
             manual,
             discovered,
@@ -1574,6 +1745,7 @@ class ModelHubService:
             confirmed_interruptions=confirmed_interruptions,
         )
         await self._commit_synced(previous, updated)
+        self._record_reasoning_tier_overrides(source, overrides)
         return removed_hops, interrupted
 
     async def _commit_new_source_locked(
@@ -1615,6 +1787,47 @@ class ModelHubService:
                 if matched_model is None or any(hop.source_id == source.id for hop in route.hops):
                     continue
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, matched_model))
+
+    def _matching_menu_model_hops(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        menu_model: str,
+    ) -> tuple[ModelHubRouteHopConfig, ...]:
+        """Project matching-v1 in placement-v1 order for one menu model."""
+
+        agent = config.agents[backend]
+        source_by_id = {source.id: source for source in config.sources}
+        hops: list[ModelHubRouteHopConfig] = []
+        checked_models = self._agent_menu_model_ids(agent)
+        if menu_model not in checked_models:
+            checked_models = (*checked_models, menu_model)
+        for source_id in agent.sources.order:
+            source = source_by_id.get(source_id)
+            if source is None or not self._eligible_for_agent(source, backend):
+                continue
+            matched_model = _matching_v1_model_id(
+                backend=backend,
+                requested_model=menu_model,
+                source=source,
+                checked_models=checked_models,
+                include_manual=True,
+            )
+            if matched_model is not None:
+                hops.append(ModelHubRouteHopConfig(source.id, matched_model))
+        return tuple(hops)
+
+    def _seed_menu_model_route(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        menu_model: str,
+    ) -> None:
+        """Apply matching-v1 and placement-v1 once for a newly added menu row."""
+
+        config.agents[backend].routes[menu_model] = ModelHubRouteConfig(
+            hops=self._matching_menu_model_hops(config, backend, menu_model)
+        )
 
     @staticmethod
     def _agent_menu_model_ids(agent: ModelHubAgentSupplyConfig) -> tuple[str, ...]:
@@ -1756,7 +1969,7 @@ class ModelHubService:
                         )
                 account_label: str | None = None
                 state = ModelHubSourceStateConfig(status="standby")
-                discovered: list[str] | None
+                discovered: list[DiscoveredModel] | None
                 if channel == "hub":
                     rollback_credential_ref = cast(str, flow.credential_ref)
                     observation = await self._require_proven_observation(
@@ -1770,7 +1983,7 @@ class ModelHubService:
                         observation.protocol,
                     )
                     if observation.discovery is ObservationDiscovery.SUCCEEDED:
-                        discovered = list(observation.model_ids)
+                        discovered = list(observation.models)
                     elif observation.discovery is ObservationDiscovery.FAILED:
                         discovered = None
                         state = ModelHubSourceStateConfig(
@@ -1805,7 +2018,10 @@ class ModelHubService:
                             detail_key="models.source.needs_action.oauth_expired",
                         )
                     )
-                    discovered = list(_native_model_ids(vendor))
+                    discovered = [
+                        DiscoveredModel(id=model_id)
+                        for model_id in _native_model_ids(vendor)
+                    ]
                 if channel == "native_cli" and not discovered:
                     raise ModelHubError("discovery_failed")
                 source_payload: dict[str, Any] = {
@@ -1837,6 +2053,20 @@ class ModelHubService:
                         discovered,
                         allow_empty=channel == "hub",
                     )
+                else:
+                    catalog_efforts_by_model = (
+                        bundled_catalog_reasoning_efforts_by_model()
+                    )
+                    for model in source.models:
+                        resolution = resolve_reasoning_tiers(
+                            protocol=source.protocol,
+                            model_id=model.id,
+                            existing_efforts=model.reasoning_efforts,
+                            existing_source=model.reasoning_efforts_source,
+                            catalog_efforts_by_model=catalog_efforts_by_model,
+                        )
+                        model.reasoning_efforts = list(resolution.efforts)
+                        model.reasoning_efforts_source = resolution.source
                 try:
                     source = ModelHubSourceConfig.from_payload(source.to_payload())
                 except (TypeError, ValueError):
@@ -2053,7 +2283,10 @@ class ModelHubService:
                 manual = [
                     model for model in source.models if model.provenance == "manual"
                 ]
-                discovered = list(_native_model_ids(binding.vendor))
+                discovered = [
+                    DiscoveredModel(id=model_id)
+                    for model_id in _native_model_ids(binding.vendor)
+                ]
                 if not discovered:
                     source.models = [
                         model
@@ -2071,8 +2304,9 @@ class ModelHubService:
                         status=502,
                         data={"interrupted_pairs": interrupted_pairs},
                     )
-                self._apply_discovered_models(source, manual, discovered)
+                overrides = self._apply_discovered_models(source, manual, discovered)
                 await self._commit_synced(previous, config)
+                self._record_reasoning_tier_overrides(source, overrides)
                 interrupted_pairs = self._would_interrupt(config)
                 self._complete_reauth_flow(
                     flow_id,
@@ -2111,7 +2345,7 @@ class ModelHubService:
                 ]
                 source.credential_ref = replacement_ref
                 discovered = await self._discover(source)
-                self._apply_discovered_models(source, manual, discovered)
+                overrides = self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
                 interrupted_pairs = self._would_interrupt(config)
                 if (
@@ -2122,6 +2356,7 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
+                self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
                     flow_id,
                     binding,
@@ -2447,6 +2682,7 @@ class ModelHubService:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
             if any(
                 model.provenance != "manual"
+                or model.reasoning_efforts_source not in {None, "user"}
                 # The same admission rule the manual-add surface applies. A source
                 # may be created with its models inline, so this is the other way a
                 # client-declared identifier enters config — and a client can still
@@ -2580,10 +2816,21 @@ class ModelHubService:
                 self._apply_discovered_models(
                     source,
                     manual_models,
-                    list(observation.model_ids),
+                    list(observation.models),
                     allow_empty=True,
                 )
             elif observation.discovery is ObservationDiscovery.FAILED:
+                catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+                for model in source.models:
+                    resolution = resolve_reasoning_tiers(
+                        protocol=source.protocol,
+                        model_id=model.id,
+                        existing_efforts=model.reasoning_efforts,
+                        existing_source=model.reasoning_efforts_source,
+                        catalog_efforts_by_model=catalog_efforts_by_model,
+                    )
+                    model.reasoning_efforts = list(resolution.efforts)
+                    model.reasoning_efforts_source = resolution.source
                 source.state = ModelHubSourceStateConfig(
                     status="error",
                     detail_key="models.source.error.unclassified",
@@ -3511,8 +3758,7 @@ class ModelHubService:
                         ),
                     }
                 )
-        agent_payload = agent.to_payload()
-        agent_payload.pop("models", None)
+        agent_payload = agent.to_agent_supply_payload()
         agent_payload["routes"] = (
             agent_payload["routes"] if agent.mode == "hub" else None
         )
@@ -3536,6 +3782,176 @@ class ModelHubService:
             "builtin_models": builtin_models,
             "standard_vendors": standard_vendors,
         }
+
+    def _candidate_suppliers(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        candidate_id: str,
+    ) -> tuple[list[dict], Optional[str], list[str]]:
+        source_by_id = {source.id: source for source in config.sources}
+        suppliers: list[dict] = []
+        display_name: Optional[str] = None
+        reasoning_efforts: list[str] = []
+        for hop in self._matching_menu_model_hops(config, backend, candidate_id):
+            source = source_by_id[hop.source_id]
+            model = next(
+                (
+                    item
+                    for item in source.models
+                    if item.id == hop.model_id and not item.retired
+                ),
+                None,
+            )
+            if model is None:
+                continue
+            suppliers.append(
+                {
+                    "source_id": source.id,
+                    "source_name": source.display_name,
+                    "model_id": hop.model_id,
+                }
+            )
+            proposed_name, proposed_efforts = _storable_backend_model_metadata(
+                model.display_name,
+                model.reasoning_efforts,
+            )
+            if display_name is None and proposed_name is not None:
+                display_name = proposed_name
+            for effort in proposed_efforts:
+                if effort not in reasoning_efforts:
+                    reasoning_efforts.append(effort)
+        return suppliers, display_name, reasoning_efforts
+
+    def agent_model_candidates(self, backend: str) -> dict:
+        agent_backend = cast(BackendName, backend)
+        config = self.store.load()
+        agent = self._agent(config, backend)
+        menu_models = self._catalog_models_payload(agent)
+        menu_ids = {model["id"] for model in menu_models}
+        snapshot = self._current_builtin_models(agent_backend)
+        builtin_ids: set[str] = set()
+        builtin = []
+        for item in snapshot:
+            model_id = item["id"]
+            display_name, reasoning_efforts = _storable_backend_model_metadata(
+                item.get("display_name"),
+                item.get("reasoning_efforts"),
+            )
+            admitted = admissible_backend_model(
+                agent_backend,
+                model_id,
+                {
+                    "origin": "builtin",
+                    "display_name": display_name,
+                    "reasoning_efforts": reasoning_efforts,
+                },
+                claude_builtin_ids=_builtin_model_ids("claude"),
+            )
+            if admitted is None:
+                continue
+            builtin_ids.add(admitted.id)
+            if admitted.id in menu_ids:
+                continue
+            suppliers, _source_label, _source_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                admitted.id,
+            )
+            builtin.append(
+                {
+                    "id": admitted.id,
+                    "display_name": admitted.display_name,
+                    "reasoning_efforts": admitted.reasoning_efforts,
+                    "suppliers": suppliers,
+                    "origin": "builtin",
+                }
+            )
+
+        provider_ids: list[str] = []
+        source_by_id = {source.id: source for source in config.sources}
+        for source_id in agent.sources.order:
+            source = source_by_id.get(source_id)
+            if source is None or not self._eligible_for_agent(source, backend):
+                continue
+            for model in source.models:
+                if model.retired:
+                    continue
+                candidate_id = (
+                    opencode_source_model_identity(source, model.id)
+                    if backend == "opencode"
+                    else model.id
+                )
+                if (
+                    candidate_id in menu_ids
+                    or candidate_id in builtin_ids
+                    or candidate_id in provider_ids
+                ):
+                    continue
+                provider_ids.append(candidate_id)
+
+        providers = []
+        for model_id in provider_ids:
+            suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                model_id,
+            )
+            admitted = admissible_backend_model(
+                agent_backend,
+                model_id,
+                {
+                    "origin": "provider",
+                    "display_name": display_name,
+                    "reasoning_efforts": reasoning_efforts,
+                },
+                claude_builtin_ids=_builtin_model_ids("claude"),
+            )
+            if admitted is None:
+                continue
+            providers.append(
+                {
+                    "id": admitted.id,
+                    "display_name": admitted.display_name,
+                    "reasoning_efforts": admitted.reasoning_efforts,
+                    "suppliers": suppliers,
+                    "origin": "provider",
+                }
+            )
+        in_list = []
+        for model in menu_models:
+            suppliers, source_label, source_efforts = self._candidate_suppliers(
+                config,
+                agent_backend,
+                model["id"],
+            )
+            provider_candidate = admissible_backend_model(
+                agent_backend,
+                model["id"],
+                {
+                    "origin": "provider",
+                    "display_name": source_label,
+                    "reasoning_efforts": source_efforts,
+                },
+                claude_builtin_ids=_builtin_model_ids("claude"),
+            )
+            in_list.append(
+                {
+                    "id": model["id"],
+                    "display_name": model["display_name"],
+                    "reasoning_efforts": model["reasoning_efforts"],
+                    "suppliers": suppliers,
+                    "origin": model["origin"],
+                    "group_if_removed": (
+                        "builtin"
+                        if model["id"] in builtin_ids
+                        else "providers"
+                        if suppliers and provider_candidate is not None
+                        else None
+                    ),
+                }
+            )
+        return {"builtin": builtin, "providers": providers, "in_list": in_list}
 
     def list_agents(self) -> list[dict]:
         config = self.store.load()
@@ -3639,78 +4055,6 @@ class ModelHubService:
             await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
-    async def set_opencode_menu(self, baseline: object, menu: object) -> dict:
-        async with self._mutation_lock:
-            previous = self.store.load()
-            config = self._clone_config(previous)
-            agent = config.agents["opencode"]
-            try:
-                parsed_baseline = ModelHubMenuConfig.from_payload(cast(dict, baseline))
-                parsed_menu = ModelHubMenuConfig.from_payload(cast(dict, menu))
-                current_menu = agent.menu or ModelHubMenuConfig()
-                baseline_checked = set(parsed_baseline.checked)
-                requested_checked = set(parsed_menu.checked)
-                removed = baseline_checked - requested_checked
-                added = [
-                    identifier
-                    for identifier in parsed_menu.checked
-                    if identifier not in baseline_checked
-                ]
-                merged_checked = [
-                    identifier
-                    for identifier in current_menu.checked
-                    if identifier not in removed
-                ]
-                present = set(merged_checked)
-                for identifier in added:
-                    if identifier not in present:
-                        merged_checked.append(identifier)
-                        present.add(identifier)
-                merged_menu = ModelHubMenuConfig(
-                    view=(
-                        parsed_menu.view
-                        if parsed_menu.view != parsed_baseline.view
-                        else current_menu.view
-                    ),
-                    checked=merged_checked,
-                )
-                current_models = {model.id: model for model in agent.models}
-                candidate = agent.to_payload()
-                candidate["menu"] = merged_menu.to_payload()
-                candidate["models"] = [
-                    (
-                        current_models.get(identifier)
-                        or ModelHubBackendModelConfig(
-                            id=identifier,
-                            origin="manual",
-                        )
-                    ).to_payload()
-                    for identifier in merged_menu.checked
-                ]
-                merged_routes = dict(agent.routes)
-                for identifier in merged_menu.checked:
-                    merged_routes.setdefault(identifier, ModelHubRouteConfig())
-                candidate["routes"] = {
-                    identifier: route.to_payload()
-                    for identifier, route in merged_routes.items()
-                }
-                parsed = ModelHubAgentSupplyConfig.from_payload(
-                    candidate,
-                    expected_backend="opencode",
-                )
-            except (TypeError, ValueError) as exc:
-                raise ModelHubError("mapping_target_unavailable") from exc
-            added_to_current = set(merged_menu.checked) - set(current_menu.checked)
-            if not added_to_current.issubset(opencode_inventory_menu_ids(config)):
-                raise ModelHubError("mapping_target_unavailable", status=409)
-            agent.menu = parsed.menu
-            agent.routes = parsed.routes
-            agent.models = parsed.models
-            await self._commit_synced(previous, config)
-            if self.backend_catalog_changed is not None:
-                await self._refresh_backend_catalog("opencode")
-            return self._agent_payload(config, agent)
-
     @classmethod
     def _parse_backend_catalog_models(
         cls,
@@ -3754,6 +4098,77 @@ class ModelHubService:
             raise ModelHubError("backend_model_duplicate")
         return rows
 
+    @staticmethod
+    def _backend_model_admission_error(
+        backend: BackendName,
+        model_id: str,
+    ) -> str | None:
+        return backend_model_admission_error(
+            backend,
+            model_id,
+            claude_builtin_ids=_builtin_model_ids("claude"),
+        )
+
+    @staticmethod
+    def _parse_expected_suppliers(
+        payload: object,
+        caller_added_model_ids: Iterable[str],
+    ) -> dict[str, list[dict[str, str]]]:
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise ModelHubError("backend_model_catalog_invalid")
+        caller_added = set(caller_added_model_ids)
+        parsed: dict[str, list[dict[str, str]]] = {}
+        for model_id, suppliers in payload.items():
+            if (
+                not isinstance(model_id, str)
+                or model_id not in caller_added
+                or not isinstance(suppliers, list)
+            ):
+                raise ModelHubError("backend_model_catalog_invalid")
+            projected: list[dict[str, str]] = []
+            for supplier in suppliers:
+                if (
+                    not isinstance(supplier, dict)
+                    or set(supplier) != {"source_id", "model_id"}
+                    or not isinstance(supplier.get("source_id"), str)
+                    or not supplier["source_id"]
+                    or not isinstance(supplier.get("model_id"), str)
+                    or not supplier["model_id"]
+                ):
+                    raise ModelHubError("backend_model_catalog_invalid")
+                projected.append(
+                    {
+                        "source_id": supplier["source_id"],
+                        "model_id": supplier["model_id"],
+                    }
+                )
+            if len(
+                {(item["source_id"], item["model_id"]) for item in projected}
+            ) != len(projected):
+                raise ModelHubError("backend_model_catalog_invalid")
+            parsed[model_id] = projected
+        return parsed
+
+    def _project_expected_suppliers(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        model_ids: Iterable[str],
+    ) -> dict[str, list[dict[str, str]]]:
+        return {
+            model_id: [
+                {"source_id": hop.source_id, "model_id": hop.model_id}
+                for hop in self._matching_menu_model_hops(
+                    config,
+                    backend,
+                    model_id,
+                )
+            ]
+            for model_id in model_ids
+        }
+
     async def _refresh_backend_catalog(self, backend: BackendName) -> None:
         if self.backend_catalog_changed is None:
             return
@@ -3764,11 +4179,215 @@ class ModelHubService:
         except Exception as exc:
             raise ModelHubError("engine_down", status=503) from exc
 
+    @staticmethod
+    def _insert_builtin_model(
+        agent: ModelHubAgentSupplyConfig,
+        model: ModelHubBackendModelConfig,
+        builtin_order: tuple[str, ...],
+    ) -> None:
+        """Place a new built-in relative to built-ins already in the menu."""
+
+        snapshot_index = builtin_order.index(model.id)
+        positions = {item.id: index for index, item in enumerate(agent.models)}
+        following = next(
+            (
+                positions[model_id]
+                for model_id in builtin_order[snapshot_index + 1 :]
+                if model_id in positions
+            ),
+            None,
+        )
+        if following is not None:
+            agent.models.insert(following, model)
+            return
+        preceding = next(
+            (
+                positions[model_id] + 1
+                for model_id in reversed(builtin_order[:snapshot_index])
+                if model_id in positions
+            ),
+            None,
+        )
+        agent.models.insert(
+            preceding if preceding is not None else len(agent.models),
+            model,
+        )
+
+    def _apply_builtin_reconcile(
+        self,
+        config: ModelHubConfig,
+        snapshots: Mapping[str, Mapping[str, Any]],
+    ) -> list[BackendName]:
+        changed: list[BackendName] = []
+        for backend in ("claude", "codex"):
+            agent = config.agents[backend]
+            raw_snapshot = snapshots.get(backend, {})
+            snapshot: list[ModelHubBackendModelConfig] = []
+            for item in raw_snapshot.get("models", []):
+                display_name, reasoning_efforts = _storable_backend_model_metadata(
+                    item.get("display_name"),
+                    item.get("reasoning_efforts"),
+                )
+                admitted = admissible_backend_model(
+                    cast(BackendName, backend),
+                    item.get("id"),
+                    {
+                        "origin": "builtin",
+                        "display_name": display_name,
+                        "reasoning_efforts": reasoning_efforts,
+                    },
+                    claude_builtin_ids=_builtin_model_ids("claude"),
+                )
+                if admitted is not None:
+                    snapshot.append(admitted)
+            builtin_order = tuple(model.id for model in snapshot)
+            present = {model.id for model in agent.models}
+            removed = set(agent.removed_model_ids)
+            added = False
+            for model in snapshot:
+                model_id = model.id
+                if model_id in present or model_id in removed:
+                    continue
+                self._insert_builtin_model(
+                    agent,
+                    model,
+                    builtin_order,
+                )
+                present.add(model_id)
+                self._seed_menu_model_route(
+                    config,
+                    cast(BackendName, backend),
+                    model_id,
+                )
+                added = True
+            if added:
+                changed.append(cast(BackendName, backend))
+        return changed
+
+    def _builtin_snapshots(
+        self,
+        backends: Iterable[BackendName] = ("claude", "codex"),
+    ) -> dict[str, dict[str, Any]]:
+        from vibe.backend_model_catalog import backend_builtin_snapshot
+
+        return {
+            backend: backend_builtin_snapshot(
+                backend,
+                cli_installed=self._cli_present(backend),
+            )
+            for backend in backends
+            if backend != "opencode"
+        }
+
+    def _reconcile_store_writable(self) -> bool:
+        try:
+            self._ensure_config_writable()
+        except ModelHubError as exc:
+            if exc.code != "config_recovery":
+                raise
+            return False
+        return True
+
+    @staticmethod
+    def _builtin_snapshot_generation(snapshot: Mapping[str, Any]) -> str:
+        generation = snapshot.get("generation")
+        if isinstance(generation, str) and generation:
+            return generation
+        content = {
+            "complete": snapshot.get("complete") is True,
+            "models": snapshot.get("models", []),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                content,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    def _current_builtin_models(
+        self,
+        backend: BackendName,
+    ) -> list[dict[str, Any]]:
+        cached = self._builtin_snapshot_cache.get(backend)
+        if cached is not None:
+            return cached
+        if backend == "opencode":
+            return []
+        from vibe.backend_model_catalog import backend_builtin_models
+
+        return backend_builtin_models(backend)
+
+    async def reconcile_builtin_models(
+        self,
+        backends: Iterable[BackendName] = ("claude", "codex"),
+        *,
+        notify: bool = True,
+    ) -> list[BackendName]:
+        async with self._mutation_lock:
+            selected_backends = tuple(backends)
+            previous = self.store.load()
+            snapshots = self._builtin_snapshots(selected_backends)
+            store_writable = self._reconcile_store_writable()
+            changed_snapshots = {
+                backend: snapshot
+                for backend, snapshot in snapshots.items()
+                if store_writable
+                if self._builtin_snapshot_generations.get(
+                    cast(BackendName, backend)
+                )
+                != self._builtin_snapshot_generation(snapshot)
+            }
+            self._builtin_snapshot_cache.update(
+                {
+                    cast(BackendName, backend): list(snapshot.get("models", []))
+                    for backend, snapshot in snapshots.items()
+                }
+            )
+            changed: list[BackendName] = []
+            if changed_snapshots:
+                config = self._clone_config(previous)
+                changed = self._apply_builtin_reconcile(config, changed_snapshots)
+                if changed:
+                    try:
+                        await self._commit_synced(previous, config)
+                    except ModelHubError as exc:
+                        if exc.code != "config_recovery":
+                            raise
+                        return []
+                self._builtin_snapshot_generations.update(
+                    {
+                        cast(BackendName, backend): self._builtin_snapshot_generation(
+                            snapshot
+                        )
+                        for backend, snapshot in changed_snapshots.items()
+                    }
+                )
+                if notify:
+                    self._pending_builtin_catalog_refresh.update(changed)
+            if notify:
+                pending = tuple(
+                    backend
+                    for backend in selected_backends
+                    if backend in self._pending_builtin_catalog_refresh
+                    and store_writable
+                )
+                for backend in pending:
+                    await self._refresh_backend_catalog(backend)
+                    self._pending_builtin_catalog_refresh.discard(backend)
+            return changed
+
     async def set_agent_models(
         self,
         backend: str,
         baseline: object,
         models: object,
+        *,
+        expected_suppliers: object = None,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
     ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
@@ -3786,39 +4405,110 @@ class ModelHubService:
             current_by_id = {model.id: model for model in agent.models}
             baseline_by_id = {model.id: model for model in baseline_models}
             desired_by_id = {model.id: model for model in desired_models}
+            caller_added_model_ids = [
+                model.id
+                for model in desired_models
+                if model.id not in baseline_by_id
+            ]
+            parsed_expected_suppliers = self._parse_expected_suppliers(
+                expected_suppliers,
+                caller_added_model_ids,
+            )
+            agent_backend = cast(BackendName, backend)
+            builtin_ids = {
+                item["id"]
+                for item in self._current_builtin_models(agent_backend)
+            }
             for model_id in desired_by_id.keys() - current_by_id.keys():
-                canonical = canonical_model_id(model_id)
-                if canonical is None or canonical != model_id:
-                    raise ModelHubError("backend_model_id_invalid")
+                admission_error = self._backend_model_admission_error(
+                    agent_backend,
+                    model_id,
+                )
+                if admission_error == "backend_model_id_invalid":
+                    raise ModelHubError(admission_error)
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
                 if (
-                    (trusted is None and desired.origin == "builtin")
+                    (
+                        trusted is None
+                        and desired.origin == "builtin"
+                        and model_id not in builtin_ids
+                    )
                     or (trusted is not None and desired.origin != trusted.origin)
                 ):
                     raise ModelHubError("backend_model_locked", status=409)
             for model_id in desired_by_id.keys() - current_by_id.keys():
-                if (
-                    backend == "claude"
-                    and model_id not in _builtin_model_ids("claude")
-                    and not model_id.startswith(("claude-", "anthropic-"))
-                ):
-                    raise ModelHubError("backend_model_id_prefix")
+                admission_error = self._backend_model_admission_error(
+                    agent_backend,
+                    model_id,
+                )
+                if admission_error is not None:
+                    raise ModelHubError(admission_error)
+            projections = self._project_expected_suppliers(
+                config,
+                agent_backend,
+                parsed_expected_suppliers,
+            )
+            changed_suppliers = {
+                model_id: projections[model_id]
+                for model_id, expected in parsed_expected_suppliers.items()
+                if projections[model_id] != expected
+            }
+            if changed_suppliers:
+                raise ModelHubError(
+                    "candidate_suppliers_changed",
+                    status=409,
+                    data={"changed": changed_suppliers},
+                )
             merged_by_id = dict(current_by_id)
 
-            for model_id in baseline_by_id.keys() - desired_by_id.keys():
+            removed_hops: list[dict] = []
+            removed_model_ids = [
+                model.id
+                for model in baseline_models
+                if model.id not in desired_by_id and model.id in current_by_id
+            ]
+            for model_id in removed_model_ids:
                 route = agent.routes.get(model_id)
-                if route is not None and route.hops:
-                    raise ModelHubError(
-                        "backend_model_in_route",
-                        status=409,
-                        data={"model_id": model_id},
-                    )
                 current = current_by_id.get(model_id)
                 if current is not None and current != baseline_by_id[model_id]:
                     raise ModelHubError("backend_model_conflict", status=409)
+                if route is not None:
+                    removed_hops.extend(
+                        {
+                            "backend": backend,
+                            "menu_model": model_id,
+                            "source_id": hop.source_id,
+                            "model_id": hop.model_id,
+                            "position": position,
+                        }
+                        for position, hop in enumerate(route.hops, start=1)
+                    )
+                    route.hops = ()
+
+            newly_empty_routes = frozenset(
+                (backend, item["menu_model"])
+                for item in removed_hops
+            )
+            interrupted = self._introduced_interruptions(
+                previous,
+                config,
+                newly_empty_routes=newly_empty_routes,
+            )
+            self._require_guard_plan(
+                force=force,
+                confirmed_remove_hops=confirmed_remove_hops,
+                confirmed_interruptions=confirmed_interruptions,
+                would_remove_hops=removed_hops,
+                would_interrupt=interrupted,
+                error="backend_model_in_route",
+            )
+
+            for model_id in removed_model_ids:
                 merged_by_id.pop(model_id, None)
                 agent.routes.pop(model_id, None)
+                if model_id not in agent.removed_model_ids:
+                    agent.removed_model_ids.append(model_id)
 
             for model_id, desired in desired_by_id.items():
                 baseline_model = baseline_by_id.get(model_id)
@@ -3883,6 +4573,19 @@ class ModelHubService:
                     if model.id not in ordered_ids and model.id in merged_by_id:
                         ordered_ids.append(model.id)
             agent.models = [merged_by_id[model_id] for model_id in ordered_ids]
+            for model_id in caller_added_model_ids:
+                if model_id in agent.removed_model_ids:
+                    agent.removed_model_ids = [
+                        removed_id
+                        for removed_id in agent.removed_model_ids
+                        if removed_id != model_id
+                    ]
+                if model_id not in current_by_id and model_id in merged_by_id:
+                    self._seed_menu_model_route(
+                        config,
+                        agent_backend,
+                        model_id,
+                    )
             if agent.backend == "opencode":
                 agent.menu = ModelHubMenuConfig(
                     view=agent.menu.view if agent.menu else "featured",
@@ -3891,10 +4594,16 @@ class ModelHubService:
             await self._commit_synced(previous, config)
             await self._refresh_backend_catalog(cast(BackendName, backend))
             committed = self.store.load()
-            return self._agent_payload(
-                committed,
-                self._agent(committed, backend),
-            )
+            result = {
+                "agent": self._agent_payload(
+                    committed,
+                    self._agent(committed, backend),
+                )
+            }
+            if removed_hops:
+                result["removed_hops"] = removed_hops
+                result["interrupted"] = interrupted
+            return result
 
     @staticmethod
     def models_dev_matches(query: object) -> list[dict]:
@@ -3917,11 +4626,40 @@ class ModelHubService:
                 {
                     **model.to_payload(),
                     "reasoning_efforts": value,
+                    "reasoning_efforts_source": (
+                        "user" if isinstance(value, list) and value else None
+                    ),
                 }
             )
         except ValueError:
             raise ModelHubError("mapping_target_unavailable") from None
         return validated.reasoning_efforts
+
+    @staticmethod
+    def _raise_if_reasoning_tiers_managed(model: ModelHubModelConfig) -> None:
+        managed_source = model.reasoning_efforts_source
+        if managed_source not in {"upstream", "catalog"}:
+            return
+        raise ModelHubError(
+            "source_model_tiers_managed",
+            status=409,
+            detail=f"settings.models.sourceDetail.tiers.managed.{managed_source}",
+            data={"reasoning_efforts_source": managed_source},
+        )
+
+    @staticmethod
+    def _apply_reasoning_tier_ladder(
+        source: ModelHubSourceConfig,
+        model: ModelHubModelConfig,
+    ) -> None:
+        resolution = resolve_reasoning_tiers(
+            protocol=source.protocol,
+            model_id=model.id,
+            existing_efforts=model.reasoning_efforts,
+            existing_source=model.reasoning_efforts_source,
+        )
+        model.reasoning_efforts = list(resolution.efforts)
+        model.reasoning_efforts_source = resolution.source
 
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:
         if not isinstance(payload, dict):
@@ -3951,15 +4689,24 @@ class ModelHubService:
                     model,
                     reasoning_efforts,
                 )
+                model.reasoning_efforts_source = (
+                    "user" if model.reasoning_efforts else None
+                )
+                self._apply_reasoning_tier_ladder(source, model)
                 source.models.append(model)
             elif existing.provenance == "discovered":
                 raise ModelHubError("source_model_managed_upstream", status=409)
             else:
+                self._raise_if_reasoning_tiers_managed(existing)
                 existing.display_name = display_name
                 existing.reasoning_efforts = self._validated_reasoning_efforts(
                     existing,
                     reasoning_efforts,
                 )
+                existing.reasoning_efforts_source = (
+                    "user" if existing.reasoning_efforts else None
+                )
+                self._apply_reasoning_tier_ladder(source, existing)
             await self._commit_synced(previous, config)
             return self._source_payload(source)
 
@@ -3980,9 +4727,13 @@ class ModelHubService:
             model = next((item for item in source.models if item.id == model_id), None)
             if model is None:
                 raise ModelHubError("mapping_target_unavailable", status=404)
+            self._raise_if_reasoning_tiers_managed(model)
             model.reasoning_efforts = self._validated_reasoning_efforts(
                 model,
                 payload["reasoning_efforts"],
+            )
+            model.reasoning_efforts_source = (
+                "user" if model.reasoning_efforts else None
             )
             await self._commit_synced(previous, config)
             return self._source_payload(source)
@@ -5527,6 +6278,8 @@ class ModelHubService:
                 False,
                 outcome,
                 decision,
+                (),
+                (),
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -5645,18 +6398,27 @@ class ModelHubService:
         request: Mapping[str, Any],
         source: ModelHubSourceConfig,
         model_id: str,
-    ) -> Mapping[str, Any]:
+    ) -> ExactReasoningEffortRequest:
         model = next((item for item in source.models if item.id == model_id), None)
-        supported = set(model.reasoning_efforts) if model is not None else set()
+        declared = tuple(model.reasoning_efforts) if model is not None else ()
+        supported = set(declared)
 
         payload = dict(request)
         changed = False
+        stripped: list[str] = []
+
+        def note_stripped(value: object) -> None:
+            safe_value = _bounded_reasoning_effort_telemetry(value)
+            if safe_value not in stripped:
+                stripped.append(safe_value)
+
         direct = payload.get("reasoning_effort")
         if "reasoning_effort" in payload and not (
             isinstance(direct, str) and direct in supported
         ):
             payload.pop("reasoning_effort")
             changed = True
+            note_stripped(direct)
         reasoning = payload.get("reasoning")
         nested = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
         if (
@@ -5671,15 +6433,31 @@ class ModelHubService:
             else:
                 payload.pop("reasoning")
             changed = True
+            note_stripped(nested)
         if not changed:
-            return request
+            return ExactReasoningEffortRequest(request=request)
         if isinstance(request, ModelHubRequest):
-            return ModelHubRequest(
+            filtered_request: Mapping[str, Any] = ModelHubRequest(
                 payload,
                 protocol=request.protocol,
                 headers=request.headers,
             )
-        return payload
+        else:
+            filtered_request = payload
+        safe_declared = _bounded_declared_effort_telemetry(declared)
+        logger.info(
+            "Stripped undeclared Model Hub reasoning effort(s) %s for source %s "
+            "model %s; declared tiers: %s",
+            stripped,
+            source.id,
+            model_id,
+            list(safe_declared),
+        )
+        return ExactReasoningEffortRequest(
+            request=filtered_request,
+            stripped_efforts=tuple(stripped),
+            declared_efforts=safe_declared,
+        )
 
     async def resolve(
         self,
@@ -5766,11 +6544,12 @@ class ModelHubService:
                 raise AssertionError("runnable hop must have an exact identity")
             if source.id in globally_blocked_source_ids:
                 continue
-            exact_request = self._request_for_exact_reasoning_effort(
+            exact_reasoning_request = self._request_for_exact_reasoning_effort(
                 request,
                 source,
                 target_model,
             )
+            exact_request = exact_reasoning_request.request
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -5800,6 +6579,8 @@ class ModelHubService:
                     False,
                     None,
                     None,
+                    exact_reasoning_request.stripped_efforts,
+                    exact_reasoning_request.declared_efforts,
                 )
             handle, outcome, cancelled = await self._invoke(
                 source=source,
@@ -5894,6 +6675,8 @@ class ModelHubService:
                     False,
                     outcome,
                     decision,
+                    (),
+                    (),
                 )
             if decision.action == "return":
                 self._emit_switch(

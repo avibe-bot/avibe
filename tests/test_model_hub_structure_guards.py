@@ -42,6 +42,7 @@ ROOT = Path(__file__).parents[1]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 TURN_GATEWAY = ROOT / "core/handlers/model_hub/turn_gateway.py"
 SERVICE = ROOT / "core/handlers/model_hub/service.py"
+MIGRATION = ROOT / "core/handlers/model_hub/migration.py"
 USAGE = ROOT / "core/handlers/model_hub/usage.py"
 RPC = ROOT / "core/handlers/model_hub/rpc.py"
 V2_CONFIG = ROOT / "config/v2_config.py"
@@ -1164,6 +1165,44 @@ def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not extractor
         for node in ast.walk(extractor)
     )
+
+
+def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None:
+    expected = {
+        ("service.py", "apply_tiers"): True,
+        ("service.py", "_create_oauth_source"): True,
+        ("service.py", "create_source"): True,
+        ("service.py", "_apply_reasoning_tier_ladder"): False,
+        ("migration.py", "_validated_source"): True,
+        ("migration.py", "apply_native_migration"): True,
+    }
+    calls_by_owner: dict[tuple[str, str | None], list[ast.Call]] = {}
+    for path in (SERVICE, MIGRATION):
+        tree = _tree(path)
+        parents = _parents(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _call_name(node) != "resolve_reasoning_tiers":
+                continue
+            key = (path.name, _owner_name(node, parents))
+            calls_by_owner.setdefault(key, []).append(node)
+
+    assert set(calls_by_owner) == set(expected)
+    assert all(len(calls) == 1 for calls in calls_by_owner.values())
+    for key, needs_batch_index in expected.items():
+        [call] = calls_by_owner[key]
+        injected = next(
+            (
+                keyword.value
+                for keyword in call.keywords
+                if keyword.arg == "catalog_efforts_by_model"
+            ),
+            None,
+        )
+        if needs_batch_index:
+            assert isinstance(injected, ast.Name)
+            assert injected.id == "catalog_efforts_by_model"
+        else:
+            assert injected is None
 
 
 def test_settlement_abandonment_cannot_overwrite_a_committed_terminal_fact() -> None:

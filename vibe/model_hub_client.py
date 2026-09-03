@@ -150,6 +150,9 @@ class ModelHubRemoteService:
     def get_agent_sources(self, backend: str) -> dict:
         return _rpc_sync("get_agent_sources", {"backend": backend})
 
+    def agent_model_candidates(self, backend: str) -> dict:
+        return _rpc_sync("agent_model_candidates", {"backend": backend})
+
     async def set_agent_sources(self, backend: str, sources: object) -> dict:
         return await _rpc(
             "set_agent_sources",
@@ -170,6 +173,11 @@ class ModelHubRemoteService:
         backend: str,
         baseline: object,
         models: object,
+        *,
+        expected_suppliers: object = None,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
     ) -> dict:
         return await _rpc(
             "set_agent_models",
@@ -177,6 +185,10 @@ class ModelHubRemoteService:
                 "backend": backend,
                 "baseline": baseline,
                 "models": models,
+                "expected_suppliers": expected_suppliers,
+                "force": force,
+                "would_remove_hops": confirmed_remove_hops,
+                "would_interrupt": confirmed_interruptions,
             },
         )
 
@@ -187,12 +199,6 @@ class ModelHubRemoteService:
         return await _rpc(
             "set_agent_chain",
             {"backend": backend, "model_id": model_id, "chain": chain},
-        )
-
-    async def set_opencode_menu(self, baseline: object, menu: object) -> dict:
-        return await _rpc(
-            "set_opencode_menu",
-            {"baseline": baseline, "menu": menu},
         )
 
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:

@@ -290,3 +290,10 @@ Recorded here so the gaps are visible rather than merely absent:
   a mock without a real OAuth provider.
 - **Malformed guard echoes** (G1). The echo is built by the product; a browser
   cannot corrupt it without a product-side hook.
+- **Locked-tier provenance on a server that predates the field** (B10). The
+  catalog and upstream lock specs `test.fixme` unless the live instance stamps
+  `reasoning_efforts_source` as `catalog` / `upstream` on the seeded model.
+  Ghost suggestions and the `source_model_tiers_managed` refusal copy still
+  run: the copy is reached by intercepting that one PATCH, and Chinese is a
+  config-GET rewrite for that page only — the instance's language is never
+  saved.

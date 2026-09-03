@@ -3,15 +3,58 @@
 // modules/agents/opencode/utils.py: Codex falls back to minimal..xhigh, Claude is
 // low/medium/high (+ xhigh/max on models that support it), OpenCode uses the
 // broad superset. Codex/Claude model catalogs override these fallbacks.
-export const EFFORT_BY_BACKEND: Record<string, string[]> = {
+
+/**
+ * The unified reasoning-effort vocabulary, weakest to strongest.
+ *
+ * ONE ordered list for the whole UI, per the tier-provenance spec's "unified
+ * vocabulary" section. Two tables used to answer overlapping questions with
+ * different words — which efforts an agent BACKEND offers (below) and which
+ * tiers the Model Hub editor SUGGESTS (`settings/models/tierSuggestions.ts`) —
+ * and disagreed about `minimal` and `max`. Both now draw their members from
+ * here, so a value can only be offered on one surface if it is sayable on the
+ * other.
+ *
+ * It is a vocabulary, not a filter. A `reasoning_efforts` list that arrives
+ * from a source is an arbitrary-string capability declaration forwarded to the
+ * upstream verbatim, so a relay may legitimately declare a tier no protocol
+ * ever named; those render and route unchanged. What this list bounds is
+ * ordering, display, and what THIS UI proposes on its own initiative.
+ *
+ * `ultra` is in the ordered superset because catalog rows for gpt-5.6-sol/terra
+ * declare it. Protocol-family defaults and backend fallbacks still omit it: an
+ * unknown relay model must not be over-claimed.
+ */
+export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+// Typed against the vocabulary rather than `string[]`: a backend list that
+// drifts away from it then fails to compile, which is the check the spec asks
+// for stated where it cannot be forgotten.
+export const EFFORT_BY_BACKEND: Record<string, ReasoningEffort[]> = {
   claude: ['low', 'medium', 'high'],
   codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
   opencode: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 };
 
-const DEFAULT_EFFORTS = ['low', 'medium', 'high'];
+const DEFAULT_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high'];
 
 export const effortOptionsFor = (backend: string): string[] => EFFORT_BY_BACKEND[backend] ?? DEFAULT_EFFORTS;
+
+/** Rank in the unified vocabulary; unknown tokens sort after every named rung. */
+const effortRank = (effort: string): number => {
+  const index = (REASONING_EFFORTS as readonly string[]).indexOf(effort);
+  // A finite sentinel — not Infinity — so two unknowns subtract to 0 instead of NaN.
+  return index < 0 ? REASONING_EFFORTS.length : index;
+};
+
+/** Order a selected-effort list weakest → strongest, then alphabetically for unknowns. */
+export const sortEffortsByVocabulary = (efforts: readonly string[]): string[] =>
+  [...efforts].sort((left, right) => {
+    const delta = effortRank(left) - effortRank(right);
+    return delta !== 0 ? delta : left.localeCompare(right);
+  });
 
 /** Backends whose catalog carries a "" entry: the set an inherited or custom
  *  model inherits when the catalog does not name it. */

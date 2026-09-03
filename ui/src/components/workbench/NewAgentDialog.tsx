@@ -273,8 +273,8 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                 {t('agents.detail.effort')}
               </div>
               <div
-                className="grid h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
-                style={{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }}
+                className="grid min-h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
+                style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
               >
                 {effortOptions.map((opt) => (
                   <button
@@ -282,7 +282,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                     type="button"
                     onClick={() => setEffort(opt)}
                     className={clsx(
-                      'truncate rounded px-0.5 text-[11px] capitalize transition',
+                      'truncate rounded px-0.5 py-1.5 text-[11px] capitalize transition',
                       effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
                     )}
                   >

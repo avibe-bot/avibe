@@ -31,7 +31,7 @@
       "description": "Optional human-readable label. The backend id remains the routing identity."
     },
     "origin": {
-      "enum": ["builtin", "models_dev", "manual"],
+      "enum": ["builtin", "provider", "models_dev", "manual"],
       "description": "How this row was first created. User edits remain authoritative regardless of origin."
     },
     "models_dev_id": {

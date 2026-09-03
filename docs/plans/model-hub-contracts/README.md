@@ -1,14 +1,16 @@
 # Model Hub contracts
 
-Status: **FINAL shape, implementation-gated. `contract_version` is 6 (2026-08-19 usage
-metering); 5 published the 2026-08-11 contract completion.**
+Status: **FINAL shape, implementation-gated. `contract_version` is 7 (2026-09-03
+backend-catalog composition and reasoning-tier provenance); 6 published 2026-08-19
+usage metering; 5 published the 2026-08-11 contract completion.**
 
 These files describe the terminal contract for Model Hub before first release. No bump
 carries a data migration, compatibility reader, conversion transaction, or version
 discriminator: Model Hub has not shipped, so republishing the shape converts nothing.
-`contract_version` is 6 wherever a versioned object exists. The owner-approved
-pre-release network correction removes the earlier persistent network/timeout cooldown
-spelling without adding a compatibility path.
+`contract_version` is 7 wherever a versioned object exists. The owner-approved
+pre-release corrections add server-owned candidate composition, one-time matching
+points, and reasoning-tier provenance while removing the earlier persistent
+network/timeout cooldown spelling, without adding compatibility paths.
 
 `v5` is still written throughout these files and stays: it names the contract-completion
 generation they were authored in, and sentences such as "Minimum v5 set" or
@@ -30,8 +32,9 @@ commit is not evidence that the complete final protocol has landed.
 - Sources are upstream assets. A Source never owns ordering.
 - Gateway stores one explicit Source order per backend and one exact ordered Route chain
   per menu model. Neither has a `follow | custom` or other policy discriminator.
-- Add Source runs the sole placement policy once and persists its positions. Runtime
-  never repeats placement, model matching, vendor matching, or substitution.
+- Add Source, a menu-model add, and a built-in reconcile add each run the same matching
+  and placement policies once and persist the accepted hops. Runtime never repeats
+  placement, model matching, vendor matching, or substitution.
 - Runtime walks the stored Route hops verbatim, rechecking only whether each exact hop is
   runnable now and whether a failure permits fallthrough.
 - A hop whose upstream `model_id` differs from its menu model is an explicit configured
@@ -45,8 +48,8 @@ commit is not evidence that the complete final protocol has landed.
 - Supply state is pull-oriented. Successful fallback is silent; Gateway and Usage are
   the user-visible inspection surfaces.
 
-Normative routing behavior lives only in `docs/plans/model-hub.md`: §4.2 owns Add-time
-placement, §4.3 owns exact-chain execution and credential failures, §4.5 owns state,
+Normative routing behavior lives only in `docs/plans/model-hub.md`: §4.2 owns one-time
+matching and placement, §4.3 owns exact-chain execution and credential failures, §4.5 owns state,
 turn copy, and guarded mutation envelopes, and §6 owns native-config import actions.
 Contract prose points to those authorities and does not add branches.
 
@@ -71,9 +74,12 @@ Contract prose points to those authorities and does not add branches.
    across time, quota, and health changes. Live runnability and current execution
    position may change; Route membership and order may not.
 6. Every Source model id is unique within that Source. The final model item shape is
-   `{id, origin, reasoning_efforts, retired?, display_name?, discovered_at?}`; effort
-   lists are editable capability declarations, may be empty, and have no selected/default
-   item. `retired: true` is a persistent discovered-model tombstone and never supplies.
+   `{id, origin, reasoning_efforts, reasoning_efforts_source, retired?, display_name?,
+   discovered_at?}`. The tier source is `upstream | catalog | user | null`; only `user`
+   and `null` declarations are editable. Older persisted rows without the field load as
+   `user` when their list is non-empty and `null` when it is empty. Effort lists have no
+   selected/default item. `retired: true` is a persistent discovered-model tombstone and
+   never supplies.
 7. A backend has at most one `native_cli` Source. Additional accounts are Hub-held
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
@@ -96,7 +102,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 6 must coexist in all registered version locations on the same tested head:
+`contract_version` 7 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

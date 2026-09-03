@@ -33,6 +33,7 @@ from config.v2_config import (
 from core.handlers.model_hub.service import CONTRACT_VERSION
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
     OBSERVATION_TERMINAL_RULES,
     ObservationDiscovery,
     ObservationOutcome,
@@ -40,7 +41,10 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
     validate_source_observation,
 )
-from scripts.check_model_hub_authorities import check as check_model_hub_authorities
+from scripts.check_model_hub_authorities import (
+    AuthorityInput,
+    check as check_model_hub_authorities,
+)
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -90,9 +94,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
         "mockData.ts",
         "modelRows.test.ts",
     ):
-        assert retired_alias not in (UI_MODEL_CONSUMERS / filename).read_text(
-            encoding="utf-8"
-        )
+        assert retired_alias not in (UI_MODEL_CONSUMERS / filename).read_text(encoding="utf-8")
 
     example = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     example["protocol"] = retired_alias
@@ -104,7 +106,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 6
+    assert schema["properties"]["contract_version"]["const"] == 7
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -128,7 +130,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 6,
+            "contract_version": 7,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -141,6 +143,17 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
             "protocol": observation.protocol,
             "discovery": observation.discovery.value,
             "models": list(observation.model_ids),
+            "model_metadata": [
+                {
+                    "id": model.id,
+                    "supported_parameters": (
+                        list(model.supported_parameters)
+                        if model.supported_parameters is not None
+                        else None
+                    ),
+                }
+                for model in observation.models
+            ],
         }
 
     assert set(OBSERVATION_TERMINAL_RULES) == set(ObservationOutcome)
@@ -158,7 +171,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
                 authenticated=authenticated,
                 protocol=protocol,
                 discovery=discovery,
-                model_ids=(),
+                models=(),
             )
             assert validate_source_observation(observation) is observation
             schema.validate(payload(observation))
@@ -169,7 +182,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
             authenticated=next(iter(rule.authenticated)),
             protocol=next(iter(rule.protocols)),
             discovery=next(iter(rule.discoveries)),
-            model_ids=(),
+            models=(),
         )
         invalid_fields = {
             "reachable": reachable_domain - rule.reachable,
@@ -179,9 +192,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
         }
         for field_name, rejected_values in invalid_fields.items():
             for rejected in rejected_values:
-                invalid_observation = SourceObservation(
-                    **{**baseline.__dict__, field_name: rejected}
-                )
+                invalid_observation = SourceObservation(**{**baseline.__dict__, field_name: rejected})
                 with pytest.raises(ValueError):
                     validate_source_observation(invalid_observation)
                 with pytest.raises(ValidationError):
@@ -189,7 +200,10 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
         if rule.models_must_be_empty:
             invalid_inventory = SourceObservation(
-                **{**baseline.__dict__, "model_ids": ("model-id",)}
+                **{
+                    **baseline.__dict__,
+                    "models": (DiscoveredModel(id="model-id"),),
+                }
             )
             with pytest.raises(ValueError):
                 validate_source_observation(invalid_inventory)
@@ -200,7 +214,12 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
                 **{
                     **baseline.__dict__,
                     "discovery": ObservationDiscovery.SUCCEEDED,
-                    "model_ids": ("model-id",),
+                    "models": (
+                        DiscoveredModel(
+                            id="model-id",
+                            supported_parameters=("reasoning",),
+                        ),
+                    ),
                 }
             )
             assert validate_source_observation(succeeded) is succeeded
@@ -209,7 +228,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
                 **{
                     **baseline.__dict__,
                     "discovery": ObservationDiscovery.FAILED,
-                    "model_ids": ("model-id",),
+                    "models": (DiscoveredModel(id="model-id"),),
                 }
             )
             with pytest.raises(ValueError):
@@ -226,6 +245,58 @@ def test_final_model_validator_requires_explicit_credential_free_efforts():
     example["reasoning_efforts"] = ["authorization: sk-test-credential-material"]
     with pytest.raises(ValueError):
         ModelHubModelConfig.from_payload(example)
+
+
+def test_source_model_reasoning_effort_provenance_round_trips_current_shape():
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["models"][0]["reasoning_efforts"] = ["low", "high"]
+    source["models"][0]["reasoning_efforts_source"] = "catalog"
+
+    parsed = ModelHubSourceConfig.from_payload(source)
+    serialized = parsed.to_payload()
+
+    assert serialized["models"][0]["reasoning_efforts_source"] == "catalog"
+    _assert_valid("source.schema.json", serialized)
+
+
+def test_released_v6_model_shape_infers_user_or_null_tier_provenance():
+    fixture = json.loads(
+        Path(
+            "tests/fixtures/model_hub/released_v6_reasoning_efforts.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    models = [
+        ModelHubModelConfig.from_payload(model) for model in fixture["models"]
+    ]
+
+    assert models[0].reasoning_efforts_source == "user"
+    assert models[1].reasoning_efforts_source is None
+    assert models[0].to_payload()["reasoning_efforts_source"] == "user"
+    assert models[1].to_payload()["reasoning_efforts_source"] is None
+
+
+@pytest.mark.parametrize(
+    ("efforts", "source"),
+    [
+        (["high"], None),
+        ([], "user"),
+        ([], "upstream"),
+        (["high"], "unknown"),
+    ],
+)
+def test_source_model_rejects_incoherent_tier_provenance(efforts, source):
+    model = {
+        "id": "model-a",
+        "display_name": None,
+        "origin": "manual",
+        "reasoning_efforts": efforts,
+        "reasoning_efforts_source": source,
+        "discovered_at": None,
+    }
+
+    with pytest.raises(ValueError):
+        ModelHubModelConfig.from_payload(model)
 
 
 def test_discovered_model_retirement_is_persisted_without_rewriting_legacy_rows():
@@ -288,9 +359,7 @@ def test_persisted_model_hub_identifiers_share_the_canonical_validation_boundary
 
     payload = ModelHubConfig().to_payload()
     opencode = payload["agents"]["opencode"]
-    opencode["routes"]["custom/authorization: sk-test-credential-material"] = {
-        "hops": []
-    }
+    opencode["routes"]["custom/authorization: sk-test-credential-material"] = {"hops": []}
     with pytest.raises(ValueError):
         ModelHubConfig.from_payload(payload)
 
@@ -436,9 +505,7 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
 
     for raw_example in _schema("agent-supply.schema.json")["examples"]:
         example = {
-            key: value
-            for key, value in raw_example.items()
-            if key not in {"builtin_models", "standard_vendors"}
+            key: value for key, value in raw_example.items() if key not in {"builtin_models", "standard_vendors"}
         }
         agent = ModelHubAgentSupplyConfig.from_payload(example)
         # `builtin_models` and `standard_vendors` are read-only endpoint
@@ -450,6 +517,7 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
             "standard_vendors": raw_example.get("standard_vendors"),
         }
         serialized.pop("models", None)
+        serialized.pop("removed_model_ids", None)
         if "routes" not in raw_example:
             serialized.pop("routes", None)
         if "sources" not in raw_example:
@@ -471,15 +539,11 @@ def test_source_client_nonce_round_trips_and_is_unique():
 
     for invalid in (None, "scn_short", "SCN_01j5w8z7p4n6q2rt", "scn_01j5w8z7p4n6q2r!"):
         with pytest.raises(ValueError, match="client_nonce"):
-            ModelHubSourceConfig.from_payload(
-                {**first_payload, "client_nonce": invalid}
-            )
+            ModelHubSourceConfig.from_payload({**first_payload, "client_nonce": invalid})
 
     second_payload = copy.deepcopy(first_payload)
     second_payload["id"] = "src_relay9c2x"
-    duplicate = ModelHubConfig(
-        sources=[first, ModelHubSourceConfig.from_payload(second_payload)]
-    )
+    duplicate = ModelHubConfig(sources=[first, ModelHubSourceConfig.from_payload(second_payload)])
     with pytest.raises(ValueError, match="duplicate client nonces"):
         ModelHubConfig.from_payload(duplicate.to_payload())
 
@@ -516,28 +580,18 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
             validator.validate({**clean, "accept_unavailable_inventory": invalid})
 
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
-    consent_table = api_contract.split(
-        "### Source-create unavailable-inventory consent", 1
-    )[1].split("When `client_nonce` is present", 1)[0]
-    result_rows = [
-        line
-        for line in consent_table.splitlines()
-        if line.startswith("| Protocol ")
-    ]
+    consent_table = api_contract.split("### Source-create unavailable-inventory consent", 1)[1].split(
+        "When `client_nonce` is present", 1
+    )[0]
+    result_rows = [line for line in consent_table.splitlines() if line.startswith("| Protocol ")]
     assert len(result_rows) == 4
 
-    succeeded = next(
-        line for line in result_rows if "`discovery: succeeded`" in line
-    )
+    succeeded = next(line for line in result_rows if "`discovery: succeeded`" in line)
     assert "omitted, `false`, or `true`" in succeeded
     assert "Ordinary create" in succeeded
     assert "legitimately empty" in succeeded
 
-    failed_rows = [
-        line
-        for line in result_rows
-        if line.startswith("| Protocol proved; `discovery: failed` |")
-    ]
+    failed_rows = [line for line in result_rows if line.startswith("| Protocol proved; `discovery: failed` |")]
     assert len(failed_rows) == 2
     rejected = next(line for line in failed_rows if "omitted or `false`" in line)
     accepted = next(line for line in failed_rows if "| `true` |" in line)
@@ -548,19 +602,13 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
     assert "`models: []`" in accepted
     assert "proved protocol" in accepted
 
-    unproved = next(
-        line for line in result_rows if line.startswith("| Protocol not proved")
-    )
+    unproved = next(line for line in result_rows if line.startswith("| Protocol not proved"))
     assert "omitted, `false`, or `true`" in unproved
     assert "no Source is committed" in unproved
     assert "cannot authorize" in unproved
 
-    implementation_plan = (
-        CONTRACTS.parent / "model-hub-implementation.md"
-    ).read_text(encoding="utf-8")
-    ac_54 = implementation_plan.split("### AC-54", 1)[1].split(
-        "### K4 open contract-gap registry", 1
-    )[0]
+    implementation_plan = (CONTRACTS.parent / "model-hub-implementation.md").read_text(encoding="utf-8")
+    ac_54 = implementation_plan.split("### AC-54", 1)[1].split("### K4 open contract-gap registry", 1)[0]
     for required in (
         "accept_unavailable_inventory",
         "K5 round 2",
@@ -589,30 +637,32 @@ def test_per_model_route_put_does_not_consume_stored_source_order():
     assert "only server-side post-creation" in source_order_contract
     assert "implicitly reads and applies the stored Source order" in source_order_contract
 
-    exact_route_contract = api_contract.split("### Exact Route-chain configuration", 1)[
-        1
-    ].split("## Source creation outcome", 1)[0]
+    exact_route_contract = api_contract.split("### Exact Route-chain configuration", 1)[1].split(
+        "## Source creation outcome", 1
+    )[0]
     assert "per-model PUT persists the explicit submitted order" in exact_route_contract
     assert "never reads `sources.order`" in exact_route_contract
     assert "request still carries only explicit `hops`" in exact_route_contract
 
-    section_42 = model_hub_plan.split("### 4.2 Gateway strategy", 1)[1].split(
-        "### 4.3 Runtime resolution", 1
-    )[0]
-    section_46 = model_hub_plan.split(
-        "### 4.6 Configured-chain storage and mutation", 1
-    )[1].split("### 4.7", 1)[0]
+    section_42 = model_hub_plan.split("### 4.2 Gateway strategy", 1)[1].split("### 4.3 Runtime resolution", 1)[0]
+    section_46 = model_hub_plan.split("### 4.6 Configured-chain storage and mutation", 1)[1].split("### 4.7", 1)[0]
     for authority in (section_42, section_46):
         assert "server" in authority
         assert "per-model" in authority
-        assert (
-            "does not read `sources.order`" in authority
-            or "never reads `sources.order`" in authority
-        )
+        assert "does not read `sources.order`" in authority or "never reads `sources.order`" in authority
 
 
 def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
-    validator = Draft7Validator(_schema("guard-refusal.schema.json"))
+    schema = _schema("guard-refusal.schema.json")
+    assert schema["required"] == [
+        "ok",
+        "contract_version",
+        "error",
+        "detail",
+        "would_remove_hops",
+        "would_interrupt",
+    ]
+    validator = Draft7Validator(schema)
     hop = {
         "backend": "claude",
         "menu_model": "claude-opus-4-6",
@@ -628,30 +678,68 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 6,
+        "contract_version": 7,
         "error": "source_in_route_chain",
+        "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
         "would_interrupt": [],
     }
     model_refusal = {**route_refusal, "error": "source_model_in_route_chain"}
+    backend_refusal = {**route_refusal, "error": "backend_model_in_route"}
     supplier_refusal = {
         **route_refusal,
         "error": "source_last_supplier",
         "would_remove_hops": [],
         "would_interrupt": [gap],
     }
-    for payload in (route_refusal, model_refusal, supplier_refusal):
+    candidate_refusal = {
+        "ok": False,
+        "contract_version": 7,
+        "error": "candidate_suppliers_changed",
+        "detail": "modelHub.errors.candidate_suppliers_changed",
+        "changed": {
+            "claude-sonnet-4-6": [
+                {
+                    "source_id": "src_anthkey01",
+                    "model_id": "claude-sonnet-4-6",
+                }
+            ]
+        },
+    }
+    for payload in (
+        route_refusal,
+        model_refusal,
+        backend_refusal,
+        supplier_refusal,
+    ):
         validator.validate(payload)
+
+    response_schema = _schema("api-response.schema.json")
+    candidate_schema = copy.deepcopy(response_schema["definitions"]["CandidateSuppliersChangedResponse"])
+    candidate_schema["properties"]["changed"]["additionalProperties"]["items"] = response_schema["definitions"][
+        "ExpectedSupplier"
+    ]
+    candidate_validator = Draft7Validator(candidate_schema)
+    candidate_validator.validate(candidate_refusal)
 
     for payload in (
         {**route_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
         {**model_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**backend_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
         {**supplier_refusal, "would_remove_hops": [hop], "would_interrupt": []},
         {**route_refusal, "would_remove_hops": [hop, hop]},
         {**supplier_refusal, "would_interrupt": [gap, gap]},
     ):
         with pytest.raises(ValidationError):
             validator.validate(payload)
+
+    for payload in (
+        {**candidate_refusal, "changed": {}},
+        {key: value for key, value in candidate_refusal.items() if key != "detail"},
+        {**candidate_refusal, "would_remove_hops": []},
+    ):
+        with pytest.raises(ValidationError):
+            candidate_validator.validate(payload)
 
 
 def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
@@ -676,9 +764,7 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
         },
         "supply_status": "ok",
         "menu": None,
-        "model_supply": [
-            {"model_id": "claude-opus-4-5", "chain_length": 1}
-        ],
+        "model_supply": [{"model_id": "claude-opus-4-5", "chain_length": 1}],
         "builtin_models": ["claude-opus-4-5"],
         "standard_vendors": None,
         "named_agents": [],
@@ -687,11 +773,11 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     _assert_valid("agent-supply.schema.json", payload)
 
 
-def test_v5_mirror_registry_is_executable_and_complete():
+def test_v7_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 6
+    assert registry["contract_version"] == 7
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -725,11 +811,14 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
     # a released build persisted, so it accepts the released values and ends at
     # the terminal one. The `== [terminal]` branch is what keeps that from
     # spreading to objects that never outlive their request.
-    terminal = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))[
-        "contract_version"
-    ]
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    terminal = registry["contract_version"]
     assert CONTRACT_VERSION == terminal
-    persisted = {"turn-provenance.schema.json"}
+    persisted = registry["contract_version_closure"][
+        "persisted_schema_version_floors"
+    ]
     checked = set()
     for path in sorted(CONTRACTS.glob("*.schema.json")):
         for node in _versioned_nodes(json.loads(path.read_text(encoding="utf-8"))):
@@ -738,10 +827,12 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
             assert accepted == sorted(set(accepted)), path.name
             assert accepted[-1] == terminal, path.name
             if path.name in persisted:
-                assert accepted[0] < terminal, path.name
+                assert accepted == list(
+                    range(persisted[path.name], terminal + 1)
+                ), path.name
             else:
                 assert accepted == [terminal], path.name
-    assert persisted <= checked
+    assert set(persisted) <= checked
     assert "api-response.schema.json" in checked
 
     # The schemas above are structured, so their versions are read from the shape.
@@ -757,9 +848,7 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
     for path in sorted(CONTRACTS.iterdir()):
         if not path.is_file() or path.name.endswith(".schema.json"):
             continue
-        for value in re.findall(
-            r"contract_version[^0-9]{0,12}(\d+)", path.read_text(encoding="utf-8")
-        ):
+        for value in re.findall(r"contract_version[^0-9]{0,12}(\d+)", path.read_text(encoding="utf-8")):
             stated += 1
             assert int(value) == terminal, path.name
     assert stated
@@ -835,16 +924,10 @@ def test_v5_mirror_registry_mutation_probes_detect_every_comparable_drift():
 
 
 def test_d21_live_backoff_reason_consumers_match_authority_individually():
-    registry = json.loads(
-        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
-    )
-    decision = next(
-        item for item in registry["decision_tables"] if item["id"] == "D21"
-    )
+    registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
+    decision = next(item for item in registry["decision_tables"] if item["id"] == "D21")
     authority_spec = decision["authority"]
-    authority = _vocabulary(
-        _schema(authority_spec["schema"]), authority_spec["paths"]
-    )
+    authority = _vocabulary(_schema(authority_spec["schema"]), authority_spec["paths"])
 
     observed = []
     for consumer in decision["consumers"]:
@@ -874,12 +957,8 @@ def test_d21_live_backoff_reason_consumers_match_authority_individually():
     assert all(values == authority for values in observed)
 
     mutated_probe = _schema("probe-result.schema.json")
-    mutated_probe["properties"]["error"]["enum"].remove(
-        "models.source.backoff.connection_failed"
-    )
-    probe_spec = next(
-        item for item in decision["consumers"] if item["kind"] == "schema_vocabulary"
-    )
+    mutated_probe["properties"]["error"]["enum"].remove("models.source.backoff.connection_failed")
+    probe_spec = next(item for item in decision["consumers"] if item["kind"] == "schema_vocabulary")
     assert (
         _vocabulary(
             mutated_probe,
@@ -897,18 +976,48 @@ def test_model_hub_authority_closure_is_generated_from_live_files():
     assert result["ok"], result["findings"]
 
 
+def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeypatch):
+    original_json = AuthorityInput.json
+
+    def without_first_released_version(self, relative):
+        payload = original_json(self, relative)
+        if relative == "docs/plans/model-hub-contracts/turn-provenance.schema.json":
+            payload = copy.deepcopy(payload)
+            payload["properties"]["contract_version"]["enum"].remove(5)
+        return payload
+
+    monkeypatch.setattr(AuthorityInput, "json", without_first_released_version)
+
+    result = check_model_hub_authorities(Path.cwd())
+
+    assert not result["ok"]
+    assert {
+        "kind": "contract_version_schema_drift",
+        "domain": "V1",
+        "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
+        "values": [6, 7],
+        "expected": [5, 6, 7],
+    } in result["findings"]
+
+
+def test_turn_provenance_contract_preserves_an_empty_stripped_effort():
+    payload = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
+    payload["served"]["stripped_reasoning_efforts"] = [""]
+    payload["served"]["declared_reasoning_efforts"] = []
+
+    _assert_valid("turn-provenance.schema.json", payload)
+
+
 def test_permission_denial_contract_has_no_fallback_member():
     retired_reason = "permission_denied"
     event_schema = _schema("resolution-event.schema.json")
     provenance_schema = _schema("turn-provenance.schema.json")
     assert retired_reason not in event_schema["properties"]["reason"]["enum"]
-    assert retired_reason not in (
-        provenance_schema["properties"]["failed_attempts"]["items"]["properties"]["reason"]["enum"]
+    assert (
+        retired_reason
+        not in (provenance_schema["properties"]["failed_attempts"]["items"]["properties"]["reason"]["enum"])
     )
-    assert all(
-        event.get("reason") != retired_reason
-        for event in event_schema["examples"]
-    )
+    assert all(event.get("reason") != retired_reason for event in event_schema["examples"])
     assert all(
         attempt.get("reason") != retired_reason
         for record in provenance_schema["examples"]
@@ -919,27 +1028,17 @@ def test_permission_denial_contract_has_no_fallback_member():
 def test_oauth_nonce_explicit_cancel_totality_is_closed():
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
     model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
-    implementation_plan = (
-        CONTRACTS.parent / "model-hub-implementation.md"
-    ).read_text(encoding="utf-8")
+    implementation_plan = (CONTRACTS.parent / "model-hub-implementation.md").read_text(encoding="utf-8")
 
-    cancel_route = next(
-        line
-        for line in api_contract.splitlines()
-        if "POST `/api/models/oauth/cancel`" in line
-    )
+    cancel_route = next(line for line in api_contract.splitlines() if "POST `/api/models/oauth/cancel`" in line)
     assert "Cancels and forgets the flow." not in api_contract
     assert "committed flow with `client_nonce`" in cancel_route
     assert '`state: "cancelled"`' in cancel_route
     assert "existing `expires_at`" in cancel_route
     assert "flow without a nonce is forgotten" in cancel_route
 
-    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
-        "## Chain and probe", 1
-    )[0]
-    plan_oauth = model_hub_plan.split(
-        "**OAuth-start nonce state machine", 1
-    )[1].split("**Protocol observation", 1)[0]
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split("## Chain and probe", 1)[0]
+    plan_oauth = model_hub_plan.split("**OAuth-start nonce state machine", 1)[1].split("**Protocol observation", 1)[0]
     for section in (api_oauth, plan_oauth):
         assert section.count("| `oauth_nonce.released` |") == 1
         assert section.count("| `oauth_nonce.in_flight` |") == 1
@@ -947,15 +1046,9 @@ def test_oauth_nonce_explicit_cancel_totality_is_closed():
         assert "retained canceled flow" in section
         assert "existing `expires_at`" in section
         assert 'retained `state: "cancelled"` flow' in section
-        assert "none" in next(
-            line
-            for line in section.splitlines()
-            if line.startswith("| `oauth_nonce.committed` |")
-        )
+        assert "none" in next(line for line in section.splitlines() if line.startswith("| `oauth_nonce.committed` |"))
 
-    nonce_description = _schema("oauth-flow.schema.json")["properties"][
-        "client_nonce"
-    ]["description"]
+    nonce_description = _schema("oauth-flow.schema.json")["properties"]["client_nonce"]["description"]
     assert "Explicit cancellation retains that committed flow" in nonce_description
     assert "starts no provider on a same-tuple retry" in nonce_description
 
@@ -984,16 +1077,16 @@ def test_oauth_nonce_explicit_cancel_totality_is_closed():
 
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
-    credential_contract = api_contract.split(
-        "## Credential replacement and reauth", 1
-    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    credential_contract = api_contract.split("## Credential replacement and reauth", 1)[1].split(
+        "## Source refresh and blocked-source recovery", 1
+    )[0]
     assert "{source, recovered, interrupted_pairs}" not in credential_contract
     assert '"recovered"' not in credential_contract
     assert '"interrupted_pairs"' not in credential_contract
     assert api_contract.count("| `oauth_terminal.reauth_success` |") == 1
-    reauth_contract = api_contract.split(
-        "## Credential replacement and reauth", 1
-    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    reauth_contract = api_contract.split("## Credential replacement and reauth", 1)[1].split(
+        "## Source refresh and blocked-source recovery", 1
+    )[0]
     assert "Hub-channel repair does not require this acknowledgement" not in reauth_contract
     assert "For both Hub OAuth and\n   `native_cli` Sources" in reauth_contract
     assert re.search(
@@ -1156,9 +1249,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     ordinary_backoff = next(
         copy.deepcopy(example)
         for example in chain_schema["examples"]
-        if example["chain"]
-        and example["chain"][0]["reason"]
-        == "models.source.backoff.connection_failed"
+        if example["chain"] and example["chain"][0]["reason"] == "models.source.backoff.connection_failed"
     )
     for blocker in (
         {
@@ -1181,9 +1272,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
             chain_validator.validate(mislabeled_waiting)
 
     canceled = next(
-        example
-        for example in _schema("turn-provenance.schema.json")["examples"]
-        if example["outcome"] == "canceled"
+        example for example in _schema("turn-provenance.schema.json")["examples"] if example["outcome"] == "canceled"
     )
     Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
     invented_failure = copy.deepcopy(canceled)
@@ -1201,18 +1290,20 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 6,
+        "contract_version": 7,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
-        "chain": [{
-            "source_id": "src_claudepro1",
-            "model_id": "claude-opus-4-6",
-            "channel": "native_cli",
-            "health": "healthy",
-            "runnable": True,
-            "reason": None,
-            "retry_at": None,
-        }],
+        "chain": [
+            {
+                "source_id": "src_claudepro1",
+                "model_id": "claude-opus-4-6",
+                "channel": "native_cli",
+                "health": "healthy",
+                "runnable": True,
+                "reason": None,
+                "retry_at": None,
+            }
+        ],
         "current": {"source_id": "src_claudepro1", "model_id": "claude-opus-4-6"},
         "supply_state": "ok",
     }
@@ -1227,9 +1318,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         chain_validator.validate(invalid_reason)
 
-    model_supply_validator = Draft7Validator(
-        supply_schema["properties"]["model_supply"]["items"]
-    )
+    model_supply_validator = Draft7Validator(supply_schema["properties"]["model_supply"]["items"])
     empty_model_supply = {
         "model_id": "claude-opus-4-6",
         "chain_length": 0,
@@ -1237,9 +1326,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     }
     model_supply_validator.validate(empty_model_supply)
     with pytest.raises(ValidationError):
-        model_supply_validator.validate(
-            {**empty_model_supply, "has_runnable_hop": True}
-        )
+        model_supply_validator.validate({**empty_model_supply, "has_runnable_hop": True})
 
     probe_schema = _schema("probe-result.schema.json")
     probe_validator = Draft7Validator(probe_schema)
@@ -1265,9 +1352,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
 def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
     model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
-    implementation_plan = (
-        CONTRACTS.parent / "model-hub-implementation.md"
-    ).read_text(encoding="utf-8")
+    implementation_plan = (CONTRACTS.parent / "model-hub-implementation.md").read_text(encoding="utf-8")
     mirror_registry = _schema("mirror-registry.json")
 
     decisions = (
@@ -1277,30 +1362,22 @@ def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
         "oauth_terminal.materialization_interrupted",
         "oauth_terminal.materialization_plain_error",
     )
-    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
-        "## Chain and probe", 1
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split("## Chain and probe", 1)[0]
+    plan_oauth = model_hub_plan.split("**OAuth terminal response and materialization-error matrix", 1)[1].split(
+        "**Protocol observation", 1
     )[0]
-    plan_oauth = model_hub_plan.split(
-        "**OAuth terminal response and materialization-error matrix", 1
-    )[1].split("**Protocol observation", 1)[0]
     for section in (api_oauth, plan_oauth):
         for decision in decisions:
             assert section.count(f"| `{decision}` |") == 1
 
         reauth_success = next(
-            line
-            for line in section.splitlines()
-            if line.startswith("| `oauth_terminal.reauth_success` |")
+            line for line in section.splitlines() if line.startswith("| `oauth_terminal.reauth_success` |")
         )
         interrupted_error = next(
-            line
-            for line in section.splitlines()
-            if line.startswith("| `oauth_terminal.materialization_interrupted` |")
+            line for line in section.splitlines() if line.startswith("| `oauth_terminal.materialization_interrupted` |")
         )
         plain_error = next(
-            line
-            for line in section.splitlines()
-            if line.startswith("| `oauth_terminal.materialization_plain_error` |")
+            line for line in section.splitlines() if line.startswith("| `oauth_terminal.materialization_plain_error` |")
         )
         assert "may be empty" in reauth_success
         assert "present and nonempty" in interrupted_error
@@ -1308,12 +1385,8 @@ def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
         assert "absent" in plain_error
         assert "empty placeholder" in plain_error
 
-    d22 = next(
-        rule for rule in mirror_registry["decision_tables"] if rule["id"] == "D22"
-    )
-    assert d22["authority"]["heading"] == (
-        "OAuth terminal response and materialization-error matrix"
-    )
+    d22 = next(rule for rule in mirror_registry["decision_tables"] if rule["id"] == "D22")
+    assert d22["authority"]["heading"] == ("OAuth terminal response and materialization-error matrix")
     assert d22["consumers"] == [
         {
             "kind": "marker",
@@ -1329,9 +1402,7 @@ def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
         if line.startswith("| **I3 subscription custody and native import**")
     )
     auth_setup_landing = next(
-        line
-        for line in implementation_plan.splitlines()
-        if line.startswith("| `tests/scenarios/auth_setup/")
+        line for line in implementation_plan.splitlines() if line.startswith("| `tests/scenarios/auth_setup/")
     )
     for section in (ac_52, i3_lane, auth_setup_landing):
         assert "AUTH-SETUP-109" in section
@@ -1407,9 +1478,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         assert serialized_source["last_discovered_at"] == source_example["last_discovered_at"], label
         assert source_state_fields == set(serialized_source["state"]), label
         assert source_usage_fields == set(serialized_source["usage"]), label
-        assert source_model_fields - {"retired"} == set(
-            serialized_source["models"][0]
-        ), label
+        assert source_model_fields - {"retired"} == set(serialized_source["models"][0]), label
         assert serialized_source["models"][0].get("retired", False) is False, label
         assert agent_fields == set(serialized_hub["agents"]["claude"]), label
         assert agent_sources_fields == set(serialized_hub["agents"]["claude"]["sources"]), label
@@ -1421,6 +1490,30 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     updated = api.save_config({"show_duration": True, "model_hub": stale_hub_payload})
     assert updated.model_hub.to_payload() == loaded.model_hub.to_payload()
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
+
+
+def test_backend_catalog_without_removed_ids_loads_empty_set(tmp_path):
+    payload = api.config_to_payload(
+        default_config(),
+        include_secrets=True,
+        include_internal=True,
+    )
+    fixture = json.loads(
+        Path("tests/fixtures/model_hub/backend_catalog_without_removed_ids.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["model_hub"]["agents"]["codex"] = fixture
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    original = config_path.read_bytes()
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert config_path.read_bytes() == original
+    agent = loaded.model_hub.agents["codex"]
+    assert agent.removed_model_ids == []
+    assert [model.to_payload() for model in agent.models] == fixture["models"]
 
 
 def _legacy_model_hub_payload(current: dict) -> dict:
@@ -1455,9 +1548,7 @@ def test_config_reload_migrates_v3_model_hub_shape_and_persists_backup(monkeypat
     loaded = V2Config.load(config_path=config_path)
 
     assert loaded.load_warnings == ()
-    assert set(loaded.model_hub.agents["claude"].routes) == set(
-        ModelHubConfig().agents["claude"].routes
-    )
+    assert set(loaded.model_hub.agents["claude"].routes) == set(ModelHubConfig().agents["claude"].routes)
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
     assert persisted["model_hub"]["enabled"] is False
@@ -1732,9 +1823,7 @@ def test_config_reload_spells_route_hops_like_the_inventory_they_name(monkeypatc
     current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     current["model_hub"]["sources"] = [source]
     menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
-    route["hops"] = [
-        {"source_id": source["id"], "model_id": model["id"]} for model in source["models"]
-    ]
+    route["hops"] = [{"source_id": source["id"], "model_id": model["id"]} for model in source["models"]]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
 
@@ -1771,9 +1860,7 @@ def test_loading_a_persisted_config_yields_one_this_product_can_load_again(monke
     current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     current["model_hub"]["sources"] = [source]
     menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
-    route["hops"] = [
-        {"source_id": source["id"], "model_id": spelling} for spelling in (padded.strip(), padded)
-    ]
+    route["hops"] = [{"source_id": source["id"], "model_id": spelling} for spelling in (padded.strip(), padded)]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
 
@@ -2122,9 +2209,7 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     persisted = json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]
     if invalid_invariant == "opencode-identity":
-        assert persisted["agents"]["opencode"]["models"][0]["id"] == (
-            "invalid-opencode-identity"
-        )
+        assert persisted["agents"]["opencode"]["models"][0]["id"] == ("invalid-opencode-identity")
     else:
         assert persisted["sources"] == [source]
 
@@ -2133,9 +2218,7 @@ def test_config_reload_allows_empty_target_on_disabled_legacy_mapping(monkeypatc
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     legacy = _legacy_model_hub_payload(payload["model_hub"])
-    legacy["agents"]["claude"]["mappings"] = [
-        {"builtin_id": "opus", "target_model_id": "", "enabled": False}
-    ]
+    legacy["agents"]["claude"]["mappings"] = [{"builtin_id": "opus", "target_model_id": "", "enabled": False}]
     payload["model_hub"] = legacy
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -2290,6 +2373,42 @@ def test_config_reload_recovers_non_scalar_model_hub_enums(monkeypatch, tmp_path
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
 
 
+@pytest.mark.parametrize("malformed_source", ([], {}), ids=("array", "object"))
+def test_config_reload_recovers_malformed_reasoning_tier_provenance_only(
+    monkeypatch,
+    tmp_path,
+    malformed_source,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(
+        default_config(),
+        include_secrets=True,
+        include_internal=True,
+    )
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["models"][0]["reasoning_efforts_source"] = malformed_source
+    payload["model_hub"]["sources"] = [source]
+    payload["show_duration"] = True
+    payload["platform"] = "slack"
+    payload["platforms"] = {"enabled": ["slack"], "primary": "slack"}
+    payload["agents"]["codex"]["enabled"] = True
+    payload["agents"]["codex"]["cli_path"] = "/preserved/codex"
+    config_path = tmp_path / f"malformed-tier-source-{type(malformed_source).__name__}.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platform == "slack"
+    assert loaded.platforms.enabled == ["slack"]
+    assert loaded.agents.codex.enabled is True
+    assert loaded.agents.codex.cli_path == "/preserved/codex"
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.recovered_sections == ("model_hub",)
+    assert loaded.whole_config_recovery is False
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+
+
 def test_client_config_recovery_projection_redacts_validator_details(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
@@ -2329,15 +2448,9 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
     "mutate",
     [
         lambda hub: hub["agents"]["claude"].update({"sources": "invalid"}),
-        lambda hub: hub["agents"]["claude"].update(
-            {"sources": {"policy": "custom", "order": "invalid"}}
-        ),
-        lambda hub: hub["agents"]["claude"].update(
-            {"sources": {"order": ["src_missing001"]}}
-        ),
-        lambda hub: hub["agents"]["claude"].update(
-            {"sources": {"policy": {}, "order": []}}
-        ),
+        lambda hub: hub["agents"]["claude"].update({"sources": {"policy": "custom", "order": "invalid"}}),
+        lambda hub: hub["agents"]["claude"].update({"sources": {"order": ["src_missing001"]}}),
+        lambda hub: hub["agents"]["claude"].update({"sources": {"policy": {}, "order": []}}),
         lambda hub: hub.update({"priority_order": {"invalid": True}}),
         lambda hub: hub.update({"priority_order": ["src_missing001"]}),
         lambda hub: hub.update({"subscription_hub_experimental": "false"}),
@@ -2387,9 +2500,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
             }
         ),
         lambda hub: hub["agents"]["claude"].update({"routes": "invalid"}),
-        lambda hub: hub["agents"]["claude"].update(
-            {"mappings": [{"builtin_id": "opus", "enabled": True}]}
-        ),
+        lambda hub: hub["agents"]["claude"].update({"mappings": [{"builtin_id": "opus", "enabled": True}]}),
         lambda hub: hub["agents"]["claude"].update(
             {
                 "mappings": [
@@ -2672,12 +2783,8 @@ def test_route_hops_allow_one_source_to_supply_distinct_models():
         ("src_same0001", "model-a"),
         ("src_same0001", "model-b"),
     ]
-    source = ModelHubSourceConfig.from_payload(
-        _schema("source.schema.json")["examples"][0]
-    )
-    source.models.append(
-        ModelHubModelConfig(id="claude-opus-4-5", provenance="manual")
-    )
+    source = ModelHubSourceConfig.from_payload(_schema("source.schema.json")["examples"][0])
+    source.models.append(ModelHubModelConfig(id="claude-opus-4-5", provenance="manual"))
     config = ModelHubConfig(sources=[source])
     config.agents["claude"].sources.order = [source.id]
     config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig.from_payload(
@@ -2857,9 +2964,7 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
         ModelHubConfig.from_payload(incomplete)
 
     extra = json.loads(json.dumps(payload))
-    extra["agents"]["claude"]["routes"]["claude-hidden-model"] = {
-        "hops": []
-    }
+    extra["agents"]["claude"]["routes"]["claude-hidden-model"] = {"hops": []}
     with pytest.raises(ValueError, match="contains non-menu model"):
         ModelHubConfig.from_payload(extra)
 
@@ -2889,24 +2994,18 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
         ModelHubConfig.from_payload(dynamic)
 
     dormant = json.loads(json.dumps(payload))
-    dormant["agents"]["opencode"]["routes"]["openai/dormant-model"] = {
-        "hops": []
-    }
+    dormant["agents"]["opencode"]["routes"]["openai/dormant-model"] = {"hops": []}
     restored = ModelHubConfig.from_payload(dormant)
     assert restored.agents["opencode"].models == []
     assert "openai/dormant-model" in restored.agents["opencode"].routes
 
 
 def test_backend_model_modalities_match_the_contract_directions():
-    input_pdf = ModelHubBackendModelConfig.from_payload(
-        {"id": "custom-model", "input_modalities": ["pdf"]}
-    )
+    input_pdf = ModelHubBackendModelConfig.from_payload({"id": "custom-model", "input_modalities": ["pdf"]})
     assert input_pdf.input_modalities == ["pdf"]
 
     with pytest.raises(ValueError, match="output_modalities"):
-        ModelHubBackendModelConfig.from_payload(
-            {"id": "custom-model", "output_modalities": ["pdf"]}
-        )
+        ModelHubBackendModelConfig.from_payload({"id": "custom-model", "output_modalities": ["pdf"]})
 
 
 def test_config_reload_adds_bundled_routes_without_discarding_legacy_models(tmp_path):

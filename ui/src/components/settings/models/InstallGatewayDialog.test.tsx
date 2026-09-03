@@ -10,7 +10,7 @@ import { modelsApi } from './modelsApi';
 import type { RuntimeDependency } from './types';
 
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
-  contract_version: 6,
+  contract_version: 7,
   manifest: {
     name: 'cliproxyapi',
     resolution: 'resolved',

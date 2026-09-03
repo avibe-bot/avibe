@@ -19,6 +19,8 @@ import {
   oauthFailureKey,
   oauthStartFailureKey,
   serverText,
+  TIER_EDIT_MANAGED_FAILURE,
+  tierEditRefusedAsManaged,
 } from './serverCopy';
 
 const t = (lng: 'en' | 'zh'): TFunction => {
@@ -159,6 +161,7 @@ describe('catalogSaveFailureKey', () => {
   // service's taxonomy drift apart.
   const REFUSALS = [
     ['backend_model_in_route', 'saveRouted'],
+    ['candidate_suppliers_changed', 'saveSuppliersChanged'],
     ['backend_model_conflict', 'saveConflict'],
     ['backend_model_id_prefix', 'saveIdPrefix'],
     ['backend_model_id_invalid', 'saveIdInvalid'],
@@ -204,6 +207,59 @@ describe('catalogSaveFailureKey', () => {
     for (const detail of [undefined, 'modelHub.errors.some_future_code', 'engine_down']) {
       expect(catalogSaveFailureKey(detail)).toBe('settings.models.gateway.catalog.saveFailed');
     }
+  });
+});
+
+describe('tierEditRefusedAsManaged', () => {
+  const MANAGED_COPY = 'settings.models.sourceDetail.fail.tierManaged';
+
+  it.each([
+    ['code', { code: TIER_EDIT_MANAGED_FAILURE }],
+    ['prefixed code', { code: `modelHub.errors.${TIER_EDIT_MANAGED_FAILURE}` }],
+    ['detail', { code: 'bad_request', detail: TIER_EDIT_MANAGED_FAILURE }],
+    ['prefixed detail', { code: 'bad_request', detail: `modelHub.errors.${TIER_EDIT_MANAGED_FAILURE}` }],
+  ])('recognizes the refusal carried in the %s field', (_where, failure) => {
+    // Both response shapes on this API are in play — `error` for
+    // `source_not_found`, `detail` for the `modelHub.errors.*` refusals — and
+    // which one the new guard picks is the backend's choice, not a fact this
+    // client should encode.
+    expect(tierEditRefusedAsManaged(failure)).toBe(true);
+  });
+
+  it('leaves every other failure on the retryable path', () => {
+    for (const failure of [
+      null,
+      undefined,
+      { code: 'source_not_found' },
+      { code: 'engine_down', detail: 'modelHub.errors.engine_down' },
+      // The neighbouring guard on `POST .../models`: a different write, refused
+      // for a different reason, and one the user CAN act on by picking another
+      // model id. Reading it as a locked tier list would replace that with a
+      // sentence about a list they never edited.
+      { code: 'source_model_managed_upstream' },
+      { code: 'bad_request', detail: 'source_model_tiers_managed_by_someone_else' },
+    ]) {
+      expect(tierEditRefusedAsManaged(failure), JSON.stringify(failure)).toBe(false);
+    }
+  });
+
+  it.each(['zh', 'en'] as const)('renders the refusal as a sentence, not a key, in %s', (lng) => {
+    const text = t(lng)(MANAGED_COPY, { defaultValue: '' }) as string;
+    expect(text, lng).not.toBe('');
+    expect(text).not.toContain('settings.models');
+    expect(text).not.toContain(TIER_EDIT_MANAGED_FAILURE);
+    // Same sentence under the server-emitted key: a missing-key defect
+    // (B1/D-3) would otherwise print `modelHub.errors.source_model_tiers_managed`
+    // the moment a future path looks the code up instead of our fail.* alias.
+    expect(t(lng)(`modelHub.errors.${TIER_EDIT_MANAGED_FAILURE}`, { defaultValue: '' })).toBe(text);
+  });
+
+  it('never invites a retry of a decision the server has already made', () => {
+    // The generic tier-save line offers exactly that, which is why this refusal
+    // needs copy of its own: retrying cannot succeed while the rung holds.
+    expect(t('en')(MANAGED_COPY) as string).not.toMatch(/retry|try again/i);
+    expect(t('zh')(MANAGED_COPY) as string).not.toContain('重试');
+    expect(t('zh')(MANAGED_COPY) as string).not.toBe(t('zh')('settings.models.sourceDetail.fail.tier') as string);
   });
 });
 

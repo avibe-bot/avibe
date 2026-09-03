@@ -293,7 +293,8 @@
         "required": [
           "id",
           "origin",
-          "reasoning_efforts"
+          "reasoning_efforts",
+          "reasoning_efforts_source"
         ],
         "additionalProperties": false,
         "allOf": [
@@ -339,6 +340,49 @@
                 }
               }
             }
+          },
+          {
+            "$comment": "A null tier source is the explicit no-declaration state and therefore carries no tiers.",
+            "if": {
+              "properties": {
+                "reasoning_efforts_source": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "reasoning_efforts_source"
+              ]
+            },
+            "then": {
+              "properties": {
+                "reasoning_efforts": {
+                  "maxItems": 0
+                }
+              }
+            }
+          },
+          {
+            "$comment": "Live upstream capability signals and user declarations always resolve to at least one tier. Catalog is intentionally absent from this condition because an exact catalog row may explicitly declare an empty list.",
+            "if": {
+              "properties": {
+                "reasoning_efforts_source": {
+                  "enum": [
+                    "upstream",
+                    "user"
+                  ]
+                }
+              },
+              "required": [
+                "reasoning_efforts_source"
+              ]
+            },
+            "then": {
+              "properties": {
+                "reasoning_efforts": {
+                  "minItems": 1
+                }
+              }
+            }
           }
         ],
         "properties": {
@@ -361,9 +405,22 @@
           },
           "reasoning_efforts": {
             "type": "array",
-            "description": "Declared reasoning-effort capability values for this exact upstream model. Editable for discovered and manual entries; may be empty and has no selected or default item.",
+            "description": "Declared reasoning-effort capability values for this exact upstream model. Upstream and catalog declarations are read-only; user declarations are editable. The list may be empty and has no selected or default item.",
             "items": { "type": "string", "minLength": 1 },
             "uniqueItems": true
+          },
+          "reasoning_efforts_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "upstream",
+              "catalog",
+              "user",
+              null
+            ],
+            "description": "First applicable provenance rung for reasoning_efforts. upstream is live supported_parameters metadata; catalog is the exact bundled model row; user is a typed declaration; null accompanies an empty undeclared list. Older persisted shapes without this field are interpreted by the config loader as user for a non-empty list and null for an empty list."
           },
           "retired": {
             "type": "boolean",
@@ -541,6 +598,7 @@
           "display_name": "Opus 4.6",
           "origin": "discovered",
           "reasoning_efforts": [],
+          "reasoning_efforts_source": null,
           "discovered_at": "2026-07-23T03:00:00Z"
         }
       ],
@@ -574,6 +632,7 @@
           "display_name": "GLM 5.2 Air",
           "origin": "manual",
           "reasoning_efforts": [],
+          "reasoning_efforts_source": null,
           "discovered_at": null
         }
       ],

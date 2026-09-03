@@ -10,7 +10,7 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 6 as const;
+export const CONTRACT_VERSION = 7 as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -85,12 +85,26 @@ export type SourceUsage = {
   projected_exhaust_at?: string | null;
 };
 
+/**
+ * Which rung of the provenance ladder produced `reasoning_efforts`.
+ *
+ * `upstream` (discovery carried a reasoning capability signal) and `catalog`
+ * (the model id matches a builtin catalog entry) are auto-provided and
+ * read-only. `user` is a list the user typed; `null` means no rung applies.
+ *
+ * Required here because `SuppliedModel` is the v7 API wire shape. The server
+ * normalizes older persisted rows before serialization; compatibility with a
+ * pre-v7 server belongs at the UI parsing boundary.
+ */
+export type ReasoningEffortsSource = 'upstream' | 'catalog' | 'user';
+
 export type SuppliedModel = {
   /** Bare model id (no provider prefix). */
   id: string;
   display_name?: string | null;
   origin: ModelOrigin;
   reasoning_efforts: string[];
+  reasoning_efforts_source: ReasoningEffortsSource | null;
   /** Persistent retirement tombstone; retired entries stay readable but are not callable. */
   retired?: boolean;
   discovered_at?: string | null;
@@ -148,7 +162,7 @@ export type AgentMenu = {
 // ── backend-model.schema.json ───────────────────────────────────────────
 /** How the row was first created. User edits stay authoritative afterwards,
  *  which is why this never gates editability — only `locked` does. */
-export type BackendModelOrigin = 'builtin' | 'models_dev' | 'manual';
+export type BackendModelOrigin = 'builtin' | 'provider' | 'models_dev' | 'manual';
 export const BACKEND_MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const;
 export type BackendModelInputModality = (typeof BACKEND_MODEL_INPUT_MODALITIES)[number];
 /** One member shorter than the input vocabulary: the schema declares no `pdf`

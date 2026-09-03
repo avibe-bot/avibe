@@ -4676,12 +4676,36 @@ async def model_hub_agent_models_put(backend):
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        agent = await _model_hub_service().set_agent_models(
+        if set(payload) - {
+            "baseline",
+            "models",
+            "expected_suppliers",
+            "force",
+            "would_remove_hops",
+            "would_interrupt",
+        }:
+            raise ModelHubError("mapping_target_unavailable")
+        result = await _model_hub_service().set_agent_models(
             backend,
             payload.get("baseline"),
             payload.get("models"),
+            expected_suppliers=payload.get("expected_suppliers"),
+            force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
-        return _model_hub_success(agent=agent)
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/models/candidates", methods=["GET"])
+def model_hub_agent_model_candidates_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        candidates = _model_hub_service().agent_model_candidates(backend)
+        return _model_hub_success(candidates=candidates)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -4695,21 +4719,6 @@ def model_hub_models_dev_get():
             request.args.get("query"),
         )
         return _model_hub_success(matches=matches)
-    except ModelHubError as exc:
-        return _model_hub_error(exc)
-
-
-@app.route("/api/models/agents/opencode/menu", methods=["PUT"])
-async def model_hub_opencode_menu_put():
-    from core.handlers.model_hub import ModelHubError
-
-    try:
-        payload = _model_hub_json_object("mapping_target_unavailable")
-        agent = await _model_hub_service().set_opencode_menu(
-            payload.get("baseline"),
-            payload.get("menu"),
-        )
-        return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

@@ -669,6 +669,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             "routes",
             "menu",
             "models",
+            "removed_model_ids",
         }:
             return payload, False, ()
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
@@ -881,8 +882,9 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated = _migrate_fixed_menu_routes_on_load(migrated)
+    model_hub_changed = changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
-    return migrated, changed, warnings
+    return migrated, model_hub_changed, warnings
 
 
 # The spellings a hand-edited config may use for a boolean, both sides in one
@@ -2710,6 +2712,9 @@ class ModelHubModelConfig:
     id: str
     provenance: Literal["discovered", "manual"]
     reasoning_efforts: list[str] = field(default_factory=list)
+    reasoning_efforts_source: Optional[
+        Literal["upstream", "catalog", "user"]
+    ] = None
     display_name: Optional[str] = None
     discovered_at: Optional[str] = None
     retired: Optional[bool] = None
@@ -2723,6 +2728,7 @@ class ModelHubModelConfig:
             "display_name",
             "origin",
             "reasoning_efforts",
+            "reasoning_efforts_source",
             "discovered_at",
             "retired",
         }:
@@ -2732,6 +2738,10 @@ class ModelHubModelConfig:
         if "reasoning_efforts" not in payload:
             raise ValueError("Config 'model_hub.sources.models.reasoning_efforts' is required")
         reasoning_efforts = payload["reasoning_efforts"]
+        if "reasoning_efforts_source" in payload:
+            reasoning_efforts_source = payload["reasoning_efforts_source"]
+        else:
+            reasoning_efforts_source = "user" if reasoning_efforts else None
         display_name = payload.get("display_name")
         discovered_at = payload.get("discovered_at")
         retired = payload.get("retired")
@@ -2747,6 +2757,21 @@ class ModelHubModelConfig:
         ):
             raise ValueError(
                 "Config 'model_hub.sources.models.reasoning_efforts' must be a unique credential-free array of strings"
+            )
+        if reasoning_efforts_source is not None and (
+            not isinstance(reasoning_efforts_source, str)
+            or reasoning_efforts_source not in {"upstream", "catalog", "user"}
+        ):
+            raise ValueError(
+                "Config 'model_hub.sources.models.reasoning_efforts_source' is invalid"
+            )
+        if reasoning_efforts and reasoning_efforts_source is None:
+            raise ValueError(
+                "Config non-empty reasoning efforts require a provenance source"
+            )
+        if not reasoning_efforts and reasoning_efforts_source in {"upstream", "user"}:
+            raise ValueError(
+                "Config empty reasoning efforts cannot use upstream or user provenance"
             )
         if display_name is not None and (
             not isinstance(display_name, str)
@@ -2772,6 +2797,7 @@ class ModelHubModelConfig:
             id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
+            reasoning_efforts_source=reasoning_efforts_source,
             display_name=display_name,
             discovered_at=_validate_optional_datetime(
                 discovered_at,
@@ -2781,11 +2807,15 @@ class ModelHubModelConfig:
         )
 
     def to_payload(self) -> dict:
+        reasoning_efforts_source = self.reasoning_efforts_source
+        if reasoning_efforts_source is None and self.reasoning_efforts:
+            reasoning_efforts_source = "user"
         payload = {
             "id": self.id,
             "display_name": self.display_name,
             "origin": self.provenance,
             "reasoning_efforts": list(self.reasoning_efforts),
+            "reasoning_efforts_source": reasoning_efforts_source,
             "discovered_at": self.discovered_at,
         }
         if self.retired is not None:
@@ -3168,7 +3198,7 @@ _BACKEND_MODEL_OUTPUT_MODALITIES = frozenset(
 @dataclass
 class ModelHubBackendModelConfig:
     id: str
-    origin: Literal["builtin", "models_dev", "manual"] = "manual"
+    origin: Literal["builtin", "provider", "models_dev", "manual"] = "manual"
     display_name: Optional[str] = None
     models_dev_id: Optional[str] = None
     context_window: Optional[int] = None
@@ -3221,7 +3251,7 @@ class ModelHubBackendModelConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.models.id' is invalid")
-        if origin not in {"builtin", "models_dev", "manual"}:
+        if origin not in {"builtin", "provider", "models_dev", "manual"}:
             raise ValueError("Config 'model_hub.agents.models.origin' is invalid")
         for name, value in (
             ("display_name", display_name),
@@ -3313,6 +3343,31 @@ class ModelHubBackendModelConfig:
         }
 
 
+def normalize_storable_backend_model_text(
+    value: object,
+    *,
+    field_name: Literal["display_name", "reasoning_efforts"],
+) -> Optional[str]:
+    """Normalize one proposed metadata value through the persisted model contract."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    candidate = {
+        "id": "metadata-proposal",
+        field_name: (
+            normalized if field_name == "display_name" else [normalized]
+        ),
+    }
+    try:
+        model = ModelHubBackendModelConfig.from_payload(candidate)
+    except (TypeError, ValueError):
+        return None
+    if field_name == "display_name":
+        return model.display_name
+    return model.reasoning_efforts[0]
+
+
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
     if backend not in {"claude", "codex"}:
         return []
@@ -3359,6 +3414,7 @@ class ModelHubAgentSupplyConfig:
     routes: dict[str, ModelHubRouteConfig] = field(default_factory=dict)
     menu: Optional[ModelHubMenuConfig] = None
     models: list[ModelHubBackendModelConfig] = field(default_factory=list)
+    removed_model_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
@@ -3397,6 +3453,7 @@ class ModelHubAgentSupplyConfig:
             "routes",
             "menu",
             "models",
+            "removed_model_ids",
         }:
             raise ValueError("Config 'model_hub.agents' contains unknown fields")
         raw_backend = payload.get("backend")
@@ -3429,6 +3486,20 @@ class ModelHubAgentSupplyConfig:
         }
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
         models_payload = payload.get("models")
+        removed_model_ids = payload.get("removed_model_ids", [])
+        if (
+            not isinstance(removed_model_ids, list)
+            or any(
+                not isinstance(model_id, str)
+                or not model_id
+                or _contains_model_hub_credential_material(model_id)
+                for model_id in removed_model_ids
+            )
+            or len(set(removed_model_ids)) != len(removed_model_ids)
+        ):
+            raise ValueError(
+                "Config 'model_hub.agents.removed_model_ids' must be a unique array of strings"
+            )
         if models_payload is None:
             if backend == "opencode":
                 legacy_ids = list(menu.checked if menu else ())
@@ -3477,6 +3548,7 @@ class ModelHubAgentSupplyConfig:
             routes=routes,
             menu=menu,
             models=models,
+            removed_model_ids=list(removed_model_ids),
         )
 
     def to_payload(self) -> dict:
@@ -3492,6 +3564,13 @@ class ModelHubAgentSupplyConfig:
             "menu": self.menu.to_payload() if self.menu else None,
         }
         payload["models"] = [model.to_payload() for model in self.models]
+        payload["removed_model_ids"] = list(self.removed_model_ids)
+        return payload
+
+    def to_agent_supply_payload(self) -> dict:
+        payload = self.to_payload()
+        payload.pop("models")
+        payload.pop("removed_model_ids")
         return payload
 
 

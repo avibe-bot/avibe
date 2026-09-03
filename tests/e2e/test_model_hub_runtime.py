@@ -599,7 +599,7 @@ def test_a1_feature_flag_disables_the_complete_models_api(
         assert response.status == 404, (method, path, body)
         assert body == {
             "ok": False,
-            "contract_version": 6,
+            "contract_version": 7,
             "error": "feature_disabled",
         }
 

@@ -1,0 +1,21 @@
+{
+  "models": [
+    {
+      "id": "legacy-user-tier-model",
+      "display_name": null,
+      "origin": "manual",
+      "reasoning_efforts": [
+        "turbo",
+        "careful"
+      ],
+      "discovered_at": null
+    },
+    {
+      "id": "legacy-empty-tier-model",
+      "display_name": null,
+      "origin": "discovered",
+      "reasoning_efforts": [],
+      "discovered_at": "2026-08-19T00:00:00Z"
+    }
+  ]
+}

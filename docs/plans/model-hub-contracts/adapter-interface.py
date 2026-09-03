@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v5 (2026-08-09).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v7 (2026-09-03).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -122,6 +122,14 @@ class ObservationDiscovery(str, Enum):
 
 
 @dataclass(frozen=True)
+class DiscoveredModel:
+    """One model inventory row and the only upstream metadata v1 retains."""
+
+    id: str
+    supported_parameters: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class SourceObservation:
     """Response-backed result of an unsaved Source observation."""
 
@@ -130,7 +138,11 @@ class SourceObservation:
     authenticated: bool | None
     protocol: str | None
     discovery: ObservationDiscovery
-    model_ids: tuple[str, ...]
+    models: tuple[DiscoveredModel, ...]
+
+    @property
+    def model_ids(self) -> tuple[str, ...]:
+        return tuple(model.id for model in self.models)
 
 
 @dataclass(frozen=True)
@@ -214,8 +226,23 @@ def validate_source_observation(observation: object) -> SourceObservation:
         bool,
     ):
         raise ValueError("invalid SourceObservation authentication")
-    if not isinstance(observation.model_ids, tuple) or any(
-        not isinstance(model_id, str) or not model_id for model_id in observation.model_ids
+    if not isinstance(observation.models, tuple) or any(
+        not isinstance(model, DiscoveredModel)
+        or not isinstance(model.id, str)
+        or not model.id
+        or (
+            model.supported_parameters is not None
+            and (
+                not isinstance(model.supported_parameters, tuple)
+                or any(
+                    not isinstance(parameter, str) or not parameter
+                    for parameter in model.supported_parameters
+                )
+                or len(set(model.supported_parameters))
+                != len(model.supported_parameters)
+            )
+        )
+        for model in observation.models
     ):
         raise ValueError("invalid SourceObservation inventory")
     if len(set(observation.model_ids)) != len(observation.model_ids):
@@ -241,7 +268,7 @@ def make_source_observation(
     authenticated: bool | None,
     protocol: str | None,
     discovery: ObservationDiscovery,
-    model_ids: Sequence[str],
+    models: Sequence[DiscoveredModel],
 ) -> SourceObservation:
     """Construct an adapter result through the terminal-product authority."""
 
@@ -252,7 +279,7 @@ def make_source_observation(
             authenticated=authenticated,
             protocol=protocol,
             discovery=discovery,
-            model_ids=tuple(model_ids),
+            models=tuple(models),
         )
     )
 
@@ -451,8 +478,8 @@ class EngineAdapter(Protocol):
         protocol: str,
         base_url: str | None,
         credential_ref: str,
-    ) -> Sequence[str]:
-        """Refresh supplyable model ids for a saved Source using its stored protocol."""
+    ) -> Sequence[DiscoveredModel]:
+        """Refresh supplyable models for a saved Source using its stored protocol."""
         ...
 
     async def observe_source(

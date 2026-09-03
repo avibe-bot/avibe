@@ -190,7 +190,8 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
       model (aggregator copies collapsed), each showing name, mono id, vendor, and context;
       choosing one fills id, display name, context, output, modalities, tools, reasoning,
       and efforts, all still editable; the last suggestion is always `Use "{{query}}" as the
-      model ID` for an id models.dev does not know. The old `Fill from models.dev` button is
+      model ID` for an id models.dev does not know (for OpenCode it offers `custom/<query>`
+      unless the query is already an admissible `vendor/model` id). The old `Fill from models.dev` button is
       retired — the typeahead is the same capability, offered before typing instead of after.
       For OpenCode the filled id follows C7's provider rule.
    Rules that hold across all groups: a provider chip on any row — built-in included — means
@@ -248,7 +249,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   server's matching result differs for any listed id it commits nothing and refuses with
   `409 {ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed:
   {<id>: [{source_id, model_id}]}}` — its own registered response shape (with the `detail` key
-  every `ModelHubError` carries), not a guard refusal, since nothing is removed or interrupted; the picker refreshes its candidates and asks again. The success response is the existing
+  every `ModelHubError` carries), not a guard refusal, since nothing is removed or interrupted; the picker then refreshes its candidates, keeps each still-offered chosen id with its new
+  suppliers, drops any id no longer offered (the changed count is the signal; no copy), and asks
+  again; unchecking a re-asked row removes it from the selection and nothing else; the picker refreshes its candidates and asks again. The success response is the existing
   `{agent: AgentSupply}`.
 - **C2 — Proposed values travel in the candidates read; the save is literal.** The server
   proposes `display_name` and `reasoning_efforts` for every candidate (C4): for a built-in
@@ -270,7 +273,8 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   nonempty `would_remove_hops` (`RouteHopRef` = `{backend, menu_model, source_id, model_id,
   position}`); a retry with `force: true` echoing the plan removes the rows and their routes in
   one transaction and returns `{agent, removed_hops, interrupted}`; rows with empty routes are
-  removed without confirmation and return `{agent}`. Property: every response this route
+  removed without confirmation and return `{agent}`. The confirmation shows both the hops and
+  any interrupted Agents with the existing guard-impact surface and echoes both arrays. Property: every response this route
   emits — the plain success, the forced success with `removed_hops` and `interrupted`, and
   the refusal — validates against the response registry after the artifact changes below,
   the 409 refusal alone also validates against `guard-refusal.schema.json`, and the response
@@ -282,7 +286,9 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   `{id, display_name, reasoning_efforts, suppliers: [{source_id, source_name, model_id}],
   origin}`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
   (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, removed ones
-  included; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
+  included, and filtered by the backend's admission rule — configured or cache-only values the
+  backend would not accept as menu ids (an `ANTHROPIC_MODEL` override, an over-long Codex id)
+  are neither candidates nor reconcile input; `providers` is the deduplicated (question 1) inventory of the backend's ordered,
   configuration-eligible Sources minus menu ids and minus ids already in `builtin`, and minus
   any id the backend's admission rule would reject (length, canonical form, Claude prefix,
   OpenCode `vendor/model`) — a candidate is by definition addable; `in_list`
@@ -298,34 +304,22 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
 - **C6 — Removed ids never return on their own.** The backend catalog persists
   `agents.<backend>.removed_model_ids: string[]`. Every row the user removes leaves its id in
   the set, whatever the row's origin was and whether or not the backend lists the id right now;
-  adding a row with that id by any path clears it. Reconcile — on startup, remote catalog
-  refresh, or CLI cache change — adds each built-in snapshot id that is neither in the menu nor
-  in the set, at the position question 9 defines, seeds it per C1 and C2, and invalidates the
-  backend's runtime projection; it never removes a row. The picker's `builtin` group lists
-  removed built-ins so they are one click away. Legacy initialization is a separate persisted
-  marker, `agents.<backend>.builtin_baseline_initialized: boolean` (absent on v1 files =
-  false): reconcile runs only while it is true. It becomes true once — when the snapshot is
-  complete (the bundled catalog, a last-known-good remote catalog, and the local CLI cache
-  when that CLI is installed have each been read at least once) — and at that moment
-  `removed_model_ids` is set to its current contents ∪ (`built-in snapshot ids − menu ids`).
-  Removals made while the marker is false are recorded in `removed_model_ids` immediately, like
-  any other removal, and survive initialization. Until the marker is true the menu is served
-  unchanged, so a partial snapshot can never be mistaken for the user's removals. Reconcile is
-  controller-owned and pull-based: the controller records the generation (content hash) of the
-  built-in snapshot it last reconciled against, and re-reads the snapshot inputs — bundled
-  catalog, remote catalog cache file, CLI cache file — before serving any Model Hub agent read
-  or mutation and at startup; a changed generation triggers reconcile in that same request.
-  No cache producer (the UI process's background refresher included) has to notify the
-  controller, so the two processes stay decoupled as `AGENTS.md` requires. A catalog
-  created fresh under v2 is written with the marker already true and an empty removed set, so
-  the pending window exists only for files that predate the marker; a fresh-install fixture is
-  distinct from the v1 migration fixtures. Both fields are persisted configuration only: the
-  `AgentSupply` wire projection omits them (`agent-supply.schema.json` stays closed) and the
-  response guard covers that omission. Load and
-  mutation fixtures cover the v1 file, the pending window, and the initialized state. This is deliberately conservative: a v1 upgrade changes nothing the user sees, and
-  the price is that a built-in that entered the snapshot between the v1 save and the first v2
-  load is treated as removed — recoverable from the picker, not auto-added. Claude Code's locked `default` row is not a built-in candidate and
-  cannot be removed.
+  adding a row with that id by any path clears it. Reconcile — on startup and before serving
+  any Model Hub agent read or mutation, controller-owned and pull-based on the built-in
+  snapshot's generation — adds each snapshot id that is neither in the menu nor in the set,
+  at the position question 9 defines, seeds it per C1 and C2, and invalidates the backend's
+  runtime projection; it never removes a row, and it never persists or raises while the config
+  store is not writable (recovery mode serves the stored configuration unchanged). A partial
+  snapshot (remote cache or CLI cache not yet read) only means fewer built-ins are known at
+  that moment; nothing is ever tombstoned by inference, so no completeness gate exists. The
+  snapshot's CLI input is read whenever the controller's executable presence probe finds the
+  CLI, independent of `agents.<backend>.enabled`. Remote-catalog cache state (payload,
+  validators, last success, last failure/backoff) is keyed by the catalog `source_key`; a
+  record for another key is never read for the current one. A catalog file written before
+  this field existed loads with an empty set — the v1 shape shipped in no release, so there is
+  no legacy initialization, marker, or pending window. Claude Code's locked `default` row is
+  not a built-in candidate and cannot be removed. The picker's `builtin` group lists removed
+  built-ins so they are one click away.
 - **C7 — models.dev read serves the editor typeahead, additively.** The existing
   `GET /api/models/catalog/models-dev?query=` keeps its shipped shape — `matches`, `provider_id`,
   `provider_name`, and the metadata fields — and gains: deduplication by model id, ranking
@@ -351,7 +345,8 @@ the v2 shapes on the same head.
 
 | Artifact | Change |
 | --- | --- |
-| `docs/plans/model-hub-contracts/backend-model.schema.json` and its TypeScript mirror (`ui/src/components/settings/models/types.ts`) | `origin` enum gains `provider` |
+| `docs/plans/model-hub-contracts/backend-model.schema.json` and its TypeScript mirror (`ui/src/components/settings/models/types.ts`) | `origin` enum gains `provider`; the mirror also gains the `Candidate` type, `first_party` on the models.dev match, and the guarded / `expected_suppliers` fields on the models `PUT`, with the API client's response and error projections (`modelsApi.ts`) |
+| `PUT /api/models/agents/opencode/menu` (route, `api.md` row, response-registry entry, `set_opencode_menu`, tests) | retired — no UI consumer since #1814; the models `PUT` is the single catalog mutation, so C1/C3/C6 cannot be bypassed |
 | `docs/plans/model-hub-contracts/api.md` route table | `PUT /api/models/agents/<backend>/models` row: optional `force`, `would_remove_hops`, `would_interrupt`, `expected_suppliers`; refusals `backend_model_in_route`, `candidate_suppliers_changed`; success `{agent}` or `{agent, removed_hops, interrupted}`. New row `GET /api/models/agents/<backend>/models/candidates`. `GET /api/models/catalog/models-dev` row: additive `first_party`, dedupe, ranking, cap 8 |
 | `docs/plans/model-hub-contracts/api-response.schema.json` | the models `PUT` accepts the forced-success shape beside `AgentResponse`; new candidates response (`Candidate` shape from C4); models-dev response gains `first_party` |
 | `docs/plans/model-hub-contracts/guard-refusal.schema.json` | `error` enum gains `backend_model_in_route`; a `detail` property; the nonempty-`would_remove_hops` relation extends to `backend_model_in_route` |
@@ -361,10 +356,10 @@ the v2 shapes on the same head.
 | `docs/plans/model-hub-contracts/README.md` (product model) and `docs/plans/model-hub-contracts/opencode-overlay.md` | Add Source is no longer the sole matching/placement point: a menu-model add (C1) and a reconcile add (C6) are the other one-time points; runtime still never re-matches |
 | `docs/plans/model-hub-contracts/mirror-registry.json` | registers the two new error codes, the new `origin` value, and the new response shapes with their consumers |
 | `vibe/i18n/*.json` and `ui/src/components/settings/models/serverCopy.ts` | `detail` keys for the two new error codes |
-| `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` and `agents.<backend>.builtin_baseline_initialized` (C6), with load and mutation fixtures for the v1 file, the pending window, and the initialized state |
+| `config/v2_config.py` persisted shape | `agents.<backend>.removed_model_ids` (C6); a file without the field loads with an empty set (one fixture) |
 | `vibe/data/model_vendors.json` (new, versioned) | the vendor map and aggregator order C7 defines, covered by a test |
-| `docs/plans/model-hub.md` §4.2 / §4.6 and its **Guard error-plan relation** table (authoritative per `mirror-registry.json` D18) | matching-point wording (C1); removed-id, marker, and reconcile rules (C6); a new relation row for `backend_model_in_route` requiring a nonempty `would_remove_hops` plan |
-| `config/v2_config.py` → `AgentSupply` projection (`_agent_payload` / `to_payload` split) and the response guard | `removed_model_ids` and `builtin_baseline_initialized` are persisted only and never appear in any `AgentSupply` response |
+| `docs/plans/model-hub.md` §4.2 / §4.6 and its **Guard error-plan relation** table (authoritative per `mirror-registry.json` D18) | matching-point wording (C1); removed-id and reconcile rules (C6); a new relation row for `backend_model_in_route` requiring a nonempty `would_remove_hops` plan |
+| `config/v2_config.py` → `AgentSupply` projection (`_agent_payload` / `to_payload` split) and the response guard | `removed_model_ids` is persisted only and never appears in any `AgentSupply` response |
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
@@ -417,8 +412,8 @@ No string explains mechanism.
 - Two callers adding the same id concurrently leave exactly one row and one route, matched once.
 - A built-in removed while the backend had withdrawn it does not return when the backend
   lists it again.
-- Loading a v1 catalog shows exactly the same menu before and after the first load, and a
-  built-in the user removed under v1 does not return on its own.
+- No Model Hub read or mutation fails or writes while the config store is in recovery mode.
+- A catalog file without `removed_model_ids` loads with an empty set and reconciles normally.
 - In the editor, a models.dev suggestion fills every metadata field it knows and leaves each
   one editable; an id models.dev does not know can still be entered and saved.
 
