@@ -776,6 +776,16 @@
       }
     }
   },
+  "debug": {
+    "cli": {
+      "help": {
+        "command": "查看 Avibe 内部状态",
+        "prompt": "查看维护中的 Prompt 源",
+        "promptExport": "导出 Prompt Studio 源目录",
+        "promptFormat": "导出格式"
+      }
+    }
+  },
   "memory": {
     "cli": {
       "help": {

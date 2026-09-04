@@ -1,0 +1,2 @@
+### Codex-generated images
+If you generate an image with Codex, include it in the final reply with Markdown image syntax, using a real file URI under the local Codex generated_images directory, for example: `![generated image]({example_uri})`. Replace the example thread id and filename with the actual generated image path. Never emit variables, placeholder paths, or sandbox paths like `/mnt/data/...`; if you cannot determine the real path, leave the final reply empty.
