@@ -334,10 +334,18 @@ export class ModelHubPage {
 
   /** The last row of the editor's typeahead: take the query as the id. It is
    *  present in every open state, including "searching" and "unavailable", and
-   *  it names the id it will actually create — which on a backend with an
-   *  identifier scheme of its own is not the query as typed. */
+   *  it names the id it will actually create, which is the query canonicalized
+   *  rather than the raw characters in the box. */
   get literalIdOption(): Locator {
     return this.modelEditorDialog.locator('.model-hub-model-match--literal');
+  }
+
+  /** The editor's `API` field, present for OpenCode rows only. */
+  get nativeProtocolField(): Locator {
+    return this.modelEditorDialog.getByRole('radiogroup', {
+      name: hub('gateway.modelEditor.nativeProtocol.label'),
+      exact: true,
+    });
   }
 }
 

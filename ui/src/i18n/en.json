@@ -1011,8 +1011,7 @@
             "placeholder": "Search models.dev or enter a model ID",
             "required": "Enter a backend model ID.",
             "tooLong": "A model ID may be at most 256 characters.",
-            "invalid": "An OpenCode model ID is provider/model, and needs both halves.",
-          "duplicate": "This list already has a model with this ID."
+            "duplicate": "This list already has a model with this ID."
           },
           "displayName": {
             "label": "Display name",
@@ -1046,6 +1045,11 @@
           "customEffort": "Custom effort",
           "customEffortPlaceholder": "e.g. medium",
           "effortNote": "Efforts are sent to the provider verbatim; with none selected, the request omits the effort parameter.",
+          "nativeProtocol": {
+            "label": "API",
+            "openai_responses": "OpenAI Responses",
+            "anthropic": "Anthropic Messages"
+          },
           "cancel": "Cancel",
           "add": "Add model",
           "apply": "Save model"

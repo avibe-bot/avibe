@@ -29,11 +29,13 @@ import {
   BACKEND_MODEL_ID_MAX_LENGTH,
   BACKEND_MODEL_INPUT_MODALITIES,
   BACKEND_MODEL_OUTPUT_MODALITIES,
+  NATIVE_PROTOCOLS,
   type AgentBackend,
   type BackendModel,
   type BackendModelInputModality,
   type BackendModelOutputModality,
   type ModelsDevMatch,
+  type NativeProtocol,
 } from './types';
 
 type FillState = 'idle' | 'loading' | 'error';
@@ -181,10 +183,8 @@ export const BackendModelEditorDialog: React.FC<{
     // A seeded add opens with the query already running: the user typed it in
     // the picker, and asking for it again would be the surface forgetting. The
     // id it lands as goes through the one chokepoint like every other produced
-    // id — a seed that skipped it would be an id the backend refuses, arriving
-    // by the one route nobody watches. The query stays what was typed: it is a
-    // models.dev search, and searching for the resolved id would search for the
-    // vendor prefix the resolver just added.
+    // id — a seed that skipped it would be a row missing what that chokepoint
+    // is the only place to give it, arriving by the one route nobody watches.
     const next = model ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend);
     seed(next);
     setLookup(model === null ? seedId?.trim() ?? '' : '');
@@ -400,6 +400,7 @@ export const BackendModelEditorDialog: React.FC<{
 
   const efforts = [...new Set([...effortSuggestions, ...draft.reasoning_efforts])];
   const backendName = t(`settings.models.backends.${backend}`, { defaultValue: backend });
+  const protocolLabel = t('settings.models.gateway.modelEditor.nativeProtocol.label') as string;
   const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
 
   return (
@@ -517,9 +518,9 @@ export const BackendModelEditorDialog: React.FC<{
                             activeRow === matches.length && 'is-selected',
                           )}
                         >
-                          {/* The id it will create, not the raw query: on
-                              OpenCode those differ, and the row that names the
-                              other one would be describing a different model. */}
+                          {/* The id it will create, through the same resolver
+                              `commit` uses — not the raw query, whose
+                              surrounding whitespace is not part of the id. */}
                           <span className="model-hub-model-match-literal min-w-0 truncate">
                             {t('settings.models.gateway.modelEditor.useAsId', {
                               query: backendModelId(lookup.trim()),
@@ -675,6 +676,40 @@ export const BackendModelEditorDialog: React.FC<{
               </div>
             )}
           </section>
+
+          {/* The protocol, and the only surface that names it.
+            *
+            * It is a fact about the provider overlay OpenCode is given — which
+            * of the two APIs Avibe answers this model on — not a capability of
+            * the model, so it gets its own block rather than a place under the
+            * group above. Unlabelled, and last: the field label is the one
+            * string this mechanism is allowed to add anywhere, which is also
+            * why no list, picker, row, or chip shows it.
+            *
+            * The value is read from `resolved` rather than from a default of
+            * this component's own, so the box shows what the row would be
+            * stored with. Non-null because C8 makes it required on an OpenCode
+            * row: the server sends one with every saved row, and `draftWithId`
+            * gives every produced row its own — a missing value here would be
+            * that chokepoint broken, not a state to render. */}
+          {backend === 'opencode' && (
+            <section className="model-hub-model-section">
+              <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
+                <div className="flex min-w-0 flex-col gap-1.5">
+                  <p className="model-hub-model-field-label">{protocolLabel}</p>
+                  <SegmentedRadio
+                    value={resolved.native_protocol!}
+                    onChange={(next: NativeProtocol) => patch({ native_protocol: next })}
+                    options={NATIVE_PROTOCOLS.map((id) => ({
+                      id,
+                      label: t(`settings.models.gateway.modelEditor.nativeProtocol.${id}`) as string,
+                    }))}
+                    ariaLabel={protocolLabel}
+                  />
+                </div>
+              </div>
+            </section>
+          )}
         </div>
 
         <DialogFooter className="model-hub-model-editor-foot shrink-0 items-center border-t border-border sm:justify-end">
