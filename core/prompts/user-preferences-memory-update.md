@@ -1,0 +1,1 @@
+Write to this file only when the user explicitly names it as the destination; a general request to remember something is fulfilled with `vibe memory remember`, never here. Anything you decide to record proactively goes through `vibe memory remember` (see Personal Memory) as well.

@@ -885,6 +885,17 @@ def cmd_skill(args) -> int:
     return 1
 
 
+def cmd_debug_prompt(args) -> int:
+    """Export the deterministic Prompt Studio source catalog."""
+
+    if args.debug_command != "prompt" or args.prompt_debug_command != "export":
+        return 1
+    from core.prompt_studio_catalog import export_prompt_studio_catalog
+
+    print(json.dumps(export_prompt_studio_catalog(), ensure_ascii=False, indent=2))
+    return 0
+
+
 def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument("--page", type=int, help="Page number to return. Defaults to 1.")
     parser.add_argument(
@@ -15886,6 +15897,32 @@ def build_parser():
         "name",
         help=i18n_t("skill.cli.help.name", skill_help_language),
     )
+    debug_help_language = _configured_cli_language()
+    debug_parser = subparsers.add_parser(
+        "debug",
+        help=i18n_t("debug.cli.help.command", debug_help_language),
+    )
+    debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt}")
+    debug_subparsers.required = True
+    debug_prompt_parser = debug_subparsers.add_parser(
+        "prompt",
+        help=i18n_t("debug.cli.help.prompt", debug_help_language),
+    )
+    debug_prompt_subparsers = debug_prompt_parser.add_subparsers(
+        dest="prompt_debug_command",
+        metavar="{export}",
+    )
+    debug_prompt_subparsers.required = True
+    debug_prompt_export_parser = debug_prompt_subparsers.add_parser(
+        "export",
+        help=i18n_t("debug.cli.help.promptExport", debug_help_language),
+    )
+    debug_prompt_export_parser.add_argument(
+        "--format",
+        choices=("json",),
+        default="json",
+        help=i18n_t("debug.cli.help.promptFormat", debug_help_language),
+    )
     memory_status_parser = memory_subparsers.add_parser(
         "status",
         help=i18n_t("memory.cli.help.status", memory_help_language),
@@ -17716,6 +17753,8 @@ def main():
         sys.exit(cmd_memory(args))
     if args.command == "skill":
         sys.exit(cmd_skill(args))
+    if args.command == "debug":
+        sys.exit(cmd_debug_prompt(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":

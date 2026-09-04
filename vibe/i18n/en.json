@@ -776,6 +776,16 @@
       }
     }
   },
+  "debug": {
+    "cli": {
+      "help": {
+        "command": "Inspect internal Avibe state",
+        "prompt": "Inspect authored prompt sources",
+        "promptExport": "Export the Prompt Studio source catalog",
+        "promptFormat": "Export format"
+      }
+    }
+  },
   "memory": {
     "cli": {
       "help": {
