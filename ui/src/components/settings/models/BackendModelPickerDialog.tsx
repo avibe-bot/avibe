@@ -168,7 +168,7 @@ export const BackendModelPickerDialog: React.FC<{
     <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
       <DialogContent
         mobileSheetHeight="tall"
-        closeLabel={t('settings.models.gateway.catalog.cancel') as string}
+        closeLabel={t('common.close') as string}
         className="model-hub-catalog-dialog model-hub-picker flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
       >
         <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">

@@ -650,13 +650,19 @@ describe('BackendModelEditorDialog', () => {
 
     await user.type(modelField(), 'abandoned');
     // The header close and the footer button are the same decision, so both
-    // discard the draft rather than one of them saving it.
-    const cancels = screen.getAllByRole('button', { name: 'Cancel' });
-    expect(cancels).toHaveLength(2);
-    await user.click(cancels[0]);
-    await user.click(cancels[1]);
+    // discard the draft rather than one of them saving it. They are still two
+    // controls, so they answer to two names: each `getByRole` below is singular
+    // and throws if the name it asks for reaches more than one of them, which
+    // is what sharing 「Cancel」 did — a screen reader announcing it twice named
+    // neither, and a by-name locator could not address either.
+    const exits = [
+      screen.getByRole('button', { name: 'Close' }),
+      screen.getByRole('button', { name: 'Cancel' }),
+    ];
+    expect(new Set(exits).size).toBe(exits.length);
+    for (const exit of exits) await user.click(exit);
 
-    expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(onCancel).toHaveBeenCalledTimes(exits.length);
     expect(onCommit).not.toHaveBeenCalled();
   });
 });

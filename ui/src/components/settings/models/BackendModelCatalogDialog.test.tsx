@@ -126,6 +126,36 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByLabelText('搜索名称或模型 ID')).toBeTruthy();
   });
 
+  it.each([
+    ['en', { corner: 'Close', footer: 'Cancel' }],
+    ['zh', { corner: '关闭', footer: '取消' }],
+  ] as const)('names the corner and footer exits apart in %s', async (language, exit) => {
+    await i18n.changeLanguage(language);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    const user = userEvent.setup();
+    const { onClose } = renderDialog();
+
+    // The model id is the one string here no locale rewrites.
+    await screen.findByText('alpha');
+
+    // Both ways out leave without saving, which is why they were once given the
+    // same word — and why that word named neither. `getByRole` is singular, so
+    // each line below also asserts the name it asks for reaches nothing else in
+    // the dialog; the pair then has to be two controls rather than one found
+    // twice. A screen reader is under the same constraint: one word announced
+    // for the corner and the footer alike describes the dialog as having a
+    // single exit, and offers no way to say which one is being read.
+    const dialog = within(screen.getByRole('dialog'));
+    const exits = [
+      dialog.getByRole('button', { name: exit.corner }),
+      dialog.getByRole('button', { name: exit.footer }),
+    ];
+    expect(new Set(exits).size).toBe(exits.length);
+
+    for (const control of exits) await user.click(control);
+    expect(onClose).toHaveBeenCalledTimes(exits.length);
+  });
+
   it('shows the catalog and nothing else — no source, route, fallback or mapping control', async () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')], {
       routes: { alpha: { hops: [{ source_id: 'src_a', model_id: 'alpha' }] } },
@@ -962,9 +992,10 @@ describe('BackendModelCatalogDialog', () => {
 
       await screen.findByRole('checkbox', { name: /Backup relay/ });
       // Either control the picker offers to leave is the same answer, and the
-      // dialog treats it as one: 「add none of these」.
-      const [dismiss] = within(screen.getByRole('dialog', { name: 'Add Claude Code models' }))
-        .getAllByRole('button', { name: 'Cancel' });
+      // dialog treats it as one: 「add none of these」. Asked of one name, since
+      // the corner control answers to 「Close」 and only the footer to this.
+      const dismiss = within(screen.getByRole('dialog', { name: 'Add Claude Code models' }))
+        .getByRole('button', { name: 'Cancel' });
       await user.click(dismiss);
 
       // The row and its promise go together. What is left is the list the server
@@ -1004,11 +1035,11 @@ describe('BackendModelCatalogDialog', () => {
       // promise: what remains is the list the server already holds, so there is
       // nothing to save — the surest statement that the refused projection
       // cannot go out again. Asked back at the catalog, since the door closed
-      // the picker on its way out; the editor's own control is named for it,
-      // because the catalog behind it carries that word too.
+      // the picker on its way out; scoped to the editor, whose footer is the
+      // one control in it that carries this word.
       expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('');
-      const [leave] = within(screen.getByRole('dialog', { name: 'Add model' }))
-        .getAllByRole('button', { name: 'Cancel' });
+      const leave = within(screen.getByRole('dialog', { name: 'Add model' }))
+        .getByRole('button', { name: 'Cancel' });
       await user.click(leave);
       await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
       expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
