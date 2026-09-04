@@ -232,7 +232,15 @@ export const BackendModelPickerDialog: React.FC<{
           </div>
         </div>
 
-        <DialogFooter className="model-hub-catalog-foot shrink-0 items-center border-t border-border sm:justify-between">
+        {/* `max-sm:flex-col` overrides the shared footer's `flex-col-reverse`,
+            which exists so a Cancel/Confirm PAIR puts its primary nearest the
+            thumb. This footer's first child is a third, tertiary action, so
+            reversing lifts "Add custom model…" below the pair instead of
+            leaving it above it. Stacking in DOM order restores the approved
+            order — ghost row first, then Cancel/Confirm at the very bottom —
+            and the `sm:` half of the primitive still owns the one-row desktop
+            layout. */}
+        <DialogFooter className="model-hub-catalog-foot shrink-0 items-center border-t border-border max-sm:flex-col sm:justify-between">
           <Button
             type="button"
             variant="ghost"
