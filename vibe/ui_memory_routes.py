@@ -389,7 +389,7 @@ async def _apply_memory_settings_patch(
     """Apply one settings change without durable recovery workflow state."""
 
     from config.v2_config import memory_config_to_payload
-    from vibe import api, internal_client
+    from vibe import api, internal_client, model_service
 
     async with _memory_settings_write_lock():
         try:
@@ -418,9 +418,7 @@ async def _apply_memory_settings_patch(
                 )
             )
             if needs_cloud_key:
-                from vibe.model_service import ensure_model_access_key
-
-                await asyncio.to_thread(ensure_model_access_key, current)
+                await asyncio.to_thread(model_service.ensure_model_access_key, current)
                 current = await asyncio.to_thread(V2Config.load)
                 target_payload, confirm_loss = _memory_settings_patch(
                     current,
@@ -501,7 +499,10 @@ async def _apply_memory_settings_patch(
             )
             if body.get("ok") is not True:
                 return _memory_operation_response(body, status_code)
-            latest = await asyncio.to_thread(V2Config.load)
+            latest = await asyncio.to_thread(
+                model_service.clear_runtime_apply_pending,
+                candidate.memory,
+            )
             return _memory_response(await _settings_ok_payload(latest, body))
 
         try:
@@ -549,7 +550,10 @@ async def _apply_memory_settings_patch(
                 {"status": "failed", "error": error},
                 status_code=409 if response.status_code < 500 else response.status_code,
             )
-        latest = await asyncio.to_thread(V2Config.load)
+        latest = await asyncio.to_thread(
+            model_service.clear_runtime_apply_pending,
+            saved.memory,
+        )
         return _memory_response(
             await _settings_ok_payload(latest, runtime_payload)
         )

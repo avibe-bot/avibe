@@ -643,6 +643,67 @@ def test_explicit_key_bundle_paths_use_the_typed_opt_in_endpoint(
     assert state["memory"].cloud.access_key_revision == 4
 
 
+@pytest.mark.parametrize("rollback_applies", [True, False])
+def test_rotation_rollback_reconciles_the_persisted_pending_bundle(
+    rollback_applies: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current = _active_cloud_memory(
+        key="mak_original",
+        rerank_access_key="mak_rr_deepinfra_original",
+        access_key_revision=4,
+        revision=4,
+    )
+    original_embedding_identity = current.runtime_embedding_identity()
+    _save_memory_config(current, monkeypatch, tmp_path)
+    reconciled: list[MemoryConfig] = []
+
+    def request(_config, _credentials, method, suffix):
+        assert (method, suffix) == ("POST", model_service.MODEL_ACCESS_KEY_SUFFIX)
+        return _key_payload(
+            "mak_rotated",
+            rerank_access_key="mak_rr_dashscope_rotated",
+            include_typed_keys=True,
+        )
+
+    async def reconcile_memory():
+        reconciled.append(deepcopy(V2Config.load().memory))
+        applied = len(reconciled) == 2 and rollback_applies
+        return {
+            "status_code": 200 if applied else 409,
+            "body": {"ok": applied},
+        }
+
+    monkeypatch.setattr(model_service, "_paired_device_request", request)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_memory)
+
+    with pytest.raises(
+        model_service.ModelServiceResolutionError,
+        match="model_access_key_apply_failed",
+    ):
+        model_service.rotate_model_access_key(_paired_model_service_config())
+
+    assert len(reconciled) == 2
+    rotated, rollback = reconciled
+    assert rotated.cloud.model_access_key == "mak_rotated"
+    assert rotated.cloud.rerank_access_key == "mak_rr_dashscope_rotated"
+    assert rotated.cloud.access_key_revision == 4
+    assert rotated.cloud.runtime_apply_pending is True
+    assert rollback.cloud.model_access_key == "mak_original"
+    assert rollback.cloud.rerank_access_key == "mak_rr_deepinfra_original"
+    assert rollback.cloud.access_key_revision == 4
+    assert rollback.cloud.runtime_apply_pending is True
+    assert rollback.runtime_embedding_identity() == original_embedding_identity
+
+    restored = V2Config.load().memory
+    assert restored.cloud.model_access_key == "mak_original"
+    assert restored.cloud.rerank_access_key == "mak_rr_deepinfra_original"
+    assert restored.cloud.access_key_revision == 4
+    assert restored.cloud.runtime_apply_pending is not rollback_applies
+    assert restored.runtime_embedding_identity() == original_embedding_identity
+
+
 def test_enterprise_attachment_pauses_custom_without_recovery_marker() -> None:
     candidate = _resolved(
         _manual_memory(),

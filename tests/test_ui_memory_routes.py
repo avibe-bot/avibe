@@ -4,6 +4,7 @@ import ast
 import builtins
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,9 +20,10 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
     atomic_update_memory,
+    memory_config_from_payload,
 )
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import internal_client, model_service, ui_memory_routes
+from vibe import api, internal_client, model_service, ui_memory_routes
 from vibe.ui_server import app
 
 
@@ -79,6 +81,48 @@ def _custom_memory_with_cloud_bundle(
             source_instance_id="instance-1",
             transition_notice_pending=transition_notice_pending,
         ),
+    )
+
+
+def _paired_model_service_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        remote_access=SimpleNamespace(
+            vibe_cloud=SimpleNamespace(
+                runtime_credentials=lambda: (
+                    "https://backend.example.test",
+                    "instance-1",
+                    "device-secret",
+                )
+            )
+        )
+    )
+
+
+def _current_model_service_status(_config, _credentials, method, suffix) -> dict:
+    assert (method, suffix) == ("GET", "model-service")
+    return {
+        "mode": "platform",
+        "capabilities": {
+            "asr": False,
+            "chat": True,
+            "embedding": True,
+            "multimodal": False,
+            "memory_llm": True,
+        },
+        "memory_llm_source": "chat_fallback",
+        "embedding_identity": "cloud-emb-v2",
+        "quota": {"enforced": False},
+        "revision": 2,
+    }
+
+
+def _persist_refreshed_cloud_bundle(config: V2Config) -> V2Config:
+    candidate = deepcopy(config.memory)
+    candidate.cloud.rerank_access_key = "mak_rr_dashscope_opaque"
+    candidate.cloud.access_key_revision = 2
+    return model_service._persist_candidate(  # noqa: SLF001
+        config.memory,
+        candidate,
     )
 
 
@@ -828,6 +872,146 @@ def test_ensured_active_bundle_remains_pending_when_settings_completion_fails(
     rerank = persisted.runtime_processing().rerank
     assert rerank is not None
     assert rerank.api_key == "mak_rr_dashscope_opaque"
+
+
+@pytest.mark.parametrize(
+    "apply_outcome",
+    ["success", "concurrent_persistence", "failed"],
+)
+def test_successful_settings_reconcile_clears_only_the_exact_applied_bundle(
+    apply_outcome: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    memory = _custom_memory_with_cloud_bundle(access_key_revision=1)
+    memory.mode = "platform"
+    memory.cloud.applied_embedding_identity = "cloud-emb-v2"
+    _save_config(memory)
+    reconciled: list[MemoryConfig] = []
+
+    async def reconcile_memory():
+        reconciled.append(deepcopy(V2Config.load().memory))
+        if apply_outcome == "concurrent_persistence" and len(reconciled) == 1:
+
+            def update(memory: MemoryConfig) -> MemoryConfig:
+                memory.cloud.quota_enforced = True
+                return memory
+
+            atomic_update_memory(update)
+        if apply_outcome == "failed" and len(reconciled) == 1:
+            return {
+                "status_code": 503,
+                "body": {"ok": False, "error": "memory_sidecar_unavailable"},
+            }
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(
+        model_service,
+        "ensure_model_access_key",
+        _persist_refreshed_cloud_bundle,
+    )
+    monkeypatch.setattr(
+        model_service,
+        "_paired_device_request",
+        _current_model_service_status,
+    )
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_memory)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"mode": "platform"},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == (503 if apply_outcome == "failed" else 200)
+    expected_reconciles = 2 if apply_outcome == "failed" else 1
+    assert len(reconciled) == expected_reconciles
+    assert reconciled[0].cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert reconciled[0].cloud.runtime_apply_pending is True
+    persisted = V2Config.load().memory
+    assert persisted.cloud.runtime_apply_pending is (apply_outcome != "success")
+
+    if apply_outcome == "success":
+        result = model_service.sync_model_service_once(_paired_model_service_config())
+        assert result == {"ok": True, "configured": True, "changed": False}
+        assert len(reconciled) == 1
+
+
+def test_successful_identity_reconfigure_clears_the_exact_applied_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    memory = _custom_memory_with_cloud_bundle(
+        access_key_revision=1,
+        transition_notice_pending=True,
+    )
+    memory.mode = "platform"
+    _save_config(memory)
+    reconfigured: list[MemoryConfig] = []
+    reconciled: list[MemoryConfig] = []
+
+    async def preflight(**_kwargs):
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def reconfigure(*, confirm_loss, memory, expected_memory, user_key):
+        assert confirm_loss is True
+        assert user_key == "avibe:local"
+        saved = api.save_memory_config(
+            memory,
+            expected=memory_config_from_payload(expected_memory),
+        )
+        reconfigured.append(deepcopy(saved.memory))
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "operation": "reconfigure",
+                "state": "running",
+                "result": "completed",
+                "data_deleted": True,
+                "data_remaining": False,
+                "roots": [],
+            },
+        }
+
+    async def unexpected_reconcile():
+        reconciled.append(deepcopy(V2Config.load().memory))
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(
+        model_service,
+        "ensure_model_access_key",
+        _persist_refreshed_cloud_bundle,
+    )
+    monkeypatch.setattr(
+        model_service,
+        "_paired_device_request",
+        _current_model_service_status,
+    )
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "memory_reconfigure", reconfigure)
+    monkeypatch.setattr(internal_client, "reconcile_memory", unexpected_reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"acknowledge_transition": True, "confirm_loss": True},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert len(reconfigured) == 1
+    assert reconfigured[0].cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert reconfigured[0].cloud.runtime_apply_pending is True
+    persisted = V2Config.load().memory
+    assert persisted.cloud.runtime_apply_pending is False
+
+    result = model_service.sync_model_service_once(_paired_model_service_config())
+    assert result == {"ok": True, "configured": True, "changed": False}
+    assert reconciled == []
 
 
 def test_confirmed_embedding_identity_change_uses_unified_reconfigure(

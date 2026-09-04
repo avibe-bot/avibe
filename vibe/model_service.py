@@ -431,7 +431,9 @@ def _persist_candidate(current: MemoryConfig, candidate: MemoryConfig) -> V2Conf
     )
 
 
-def _clear_apply_pending(expected: MemoryConfig) -> None:
+def clear_runtime_apply_pending(expected: MemoryConfig) -> V2Config:
+    """Clear pending only when *expected* is still the applied configuration."""
+
     from config.v2_config import atomic_update_memory
 
     def clear(current: MemoryConfig) -> MemoryConfig:
@@ -440,7 +442,7 @@ def _clear_apply_pending(expected: MemoryConfig) -> None:
         current.cloud.runtime_apply_pending = False
         return current
 
-    atomic_update_memory(clear)
+    return atomic_update_memory(clear)
 
 
 def _reconcile_candidate(candidate: MemoryConfig) -> bool:
@@ -455,7 +457,7 @@ def _reconcile_candidate(candidate: MemoryConfig) -> bool:
     if not isinstance(body, dict):
         return False
     if body.get("ok") is True:
-        _clear_apply_pending(candidate)
+        clear_runtime_apply_pending(candidate)
         return True
     return False
 
@@ -579,7 +581,7 @@ def rotate_model_access_key(config: V2Config | None = None) -> dict[str, Any]:
         if not _reconcile_candidate(saved):
             rollback = deepcopy(current)
             rollback.cloud.runtime_apply_pending = False
-            _persist_candidate(saved, rollback)
+            rollback = _persist_candidate(saved, rollback).memory
             _reconcile_candidate(rollback)
             raise ModelServiceResolutionError("model_access_key_apply_failed")
         return {
