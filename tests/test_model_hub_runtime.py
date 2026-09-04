@@ -3048,6 +3048,69 @@ def test_direct_ensure_failure_is_durable_across_manager_reload(
     assert EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).install_state() is None
 
 
+def test_dependency_ensure_settles_an_orphaned_install_claim(
+    tmp_path: Path,
+) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    installer = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    manifest = installer._load_manifest(allow_network=False)
+    assert manifest is not None
+    manifest_archive = installer._manifest_archive_for_platform(manifest)
+    assert manifest_archive is not None
+    target = installer._install_target_identity(manifest, manifest_archive)
+    assert installer.transition_install_claim(
+        InstallClaimTransition.CREATE,
+        generation=RUNTIME_INSTALL_GENERATION_A,
+        target=target,
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=EngineSupervisor(
+            installer=installer,
+            state_store=EngineStateStore(tmp_path / "state"),
+        )
+    )
+
+    result = asyncio.run(adapter.ensure_installed())
+
+    assert result.status.health is EngineHealth.NOT_STARTED
+    assert result.status.verified is True
+    assert installer.install_state() is None
+
+
+def test_direct_ensure_success_preserves_a_newer_install_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    _create_runtime_install_claim(installer)
+
+    def succeed_after_claim_moves(_manager, **kwargs):
+        kwargs["on_resolved"](RUNTIME_INSTALL_TARGET)
+        assert installer.transition_install_claim(
+            InstallClaimTransition.RESUME,
+            generation=RUNTIME_INSTALL_GENERATION_B,
+            previous_generation=RUNTIME_INSTALL_GENERATION_A,
+            target=RUNTIME_INSTALL_TARGET,
+        )
+        return {"ok": True, "changed": False}
+
+    monkeypatch.setattr(
+        managed_runtime.ManagedRuntimeManager,
+        "ensure",
+        succeed_after_claim_moves,
+    )
+
+    assert installer.ensure()["ok"] is True
+    surviving = installer.install_state()
+    assert surviving is not None
+    assert surviving["state"] == "installing"
+    assert surviving["generation"] == RUNTIME_INSTALL_GENERATION_B
+
+
 def test_direct_ensure_lock_contention_is_transient(
     monkeypatch,
     tmp_path: Path,

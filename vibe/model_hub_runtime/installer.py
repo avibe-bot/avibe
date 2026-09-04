@@ -143,7 +143,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
 
         generation = uuid.uuid4().hex
         resolved_target: dict[str, str] | None = None
-        previous_failure = self.install_state()
+        previous_state = self.install_state()
 
         def capture_target(target: dict[str, str]) -> None:
             nonlocal resolved_target
@@ -157,8 +157,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         )
         reason = str(result.get("reason") or "model_hub_engine_install_failed")
         try:
-            if result.get("ok") and previous_failure is not None:
-                self.clear_install_failure(previous_failure)
+            if result.get("ok") and previous_state is not None:
+                self._clear_superseded_install_state(previous_state)
             elif not result.get("ok") and reason not in {
                 "model_hub_engine_install_already_running",
                 "model_hub_engine_platform_unsupported",
@@ -173,13 +173,13 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             logger.exception("Failed to persist direct Model Hub runtime ensure outcome")
         return result
 
-    def clear_install_failure(self, expected: Mapping[str, Any]) -> bool:
-        """Forget a superseded failure without disturbing an active claim."""
+    def _clear_superseded_install_state(self, expected: Mapping[str, Any]) -> bool:
+        """Forget the exact pre-ensure state without disturbing a newer owner."""
 
         with self._install_state_lock:
             with MigrationFileLock(self.install_state_lock_path):
                 current = self._read_install_state_file()
-                if current != expected or current.get("state") != "not_installed":
+                if current != expected:
                     return False
                 try:
                     self.install_state_path.unlink()

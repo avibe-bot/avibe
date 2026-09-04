@@ -42,6 +42,10 @@ reported in Dependencies and Doctor and can be retried manually or by the next
 startup reconcile. CPA failure does not roll back or fail an otherwise
 successful Avibe upgrade.
 
+A synchronous dependency ensure settles only the exact durable install state it
+observed on entry. Success clears an unchanged prior failure or orphaned install
+claim, while a claim replaced by a newer owner remains untouched.
+
 Successful replacement retains one prior managed install for rollback and
 cleans older generations through the existing managed-runtime cleanup policy.
 
