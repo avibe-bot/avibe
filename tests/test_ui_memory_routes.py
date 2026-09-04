@@ -876,7 +876,7 @@ def test_ensured_active_bundle_remains_pending_when_settings_completion_fails(
 
 @pytest.mark.parametrize(
     "apply_outcome",
-    ["success", "concurrent_persistence", "failed"],
+    ["success", "concurrent_persistence"],
 )
 def test_successful_settings_reconcile_clears_only_the_exact_applied_bundle(
     apply_outcome: str,
@@ -899,11 +899,6 @@ def test_successful_settings_reconcile_clears_only_the_exact_applied_bundle(
                 return memory
 
             atomic_update_memory(update)
-        if apply_outcome == "failed" and len(reconciled) == 1:
-            return {
-                "status_code": 503,
-                "body": {"ok": False, "error": "memory_sidecar_unavailable"},
-            }
         return {"status_code": 200, "body": {"ok": True}}
 
     monkeypatch.setattr(
@@ -925,9 +920,8 @@ def test_successful_settings_reconcile_clears_only_the_exact_applied_bundle(
         **_request_options(),
     )
 
-    assert response.status_code == (503 if apply_outcome == "failed" else 200)
-    expected_reconciles = 2 if apply_outcome == "failed" else 1
-    assert len(reconciled) == expected_reconciles
+    assert response.status_code == 200
+    assert len(reconciled) == 1
     assert reconciled[0].cloud.rerank_access_key == "mak_rr_dashscope_opaque"
     assert reconciled[0].cloud.runtime_apply_pending is True
     persisted = V2Config.load().memory
@@ -937,6 +931,92 @@ def test_successful_settings_reconcile_clears_only_the_exact_applied_bundle(
         result = model_service.sync_model_service_once(_paired_model_service_config())
         assert result == {"ok": True, "configured": True, "changed": False}
         assert len(reconciled) == 1
+
+
+@pytest.mark.parametrize(
+    "rollback_outcome",
+    ["success", "failure", "concurrent_persistence"],
+)
+def test_failed_settings_apply_settles_only_a_successful_exact_rollback(
+    rollback_outcome: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    memory = _custom_memory_with_cloud_bundle(access_key_revision=1)
+    memory.mode = "platform"
+    memory.cloud.applied_embedding_identity = "cloud-emb-v2"
+    _save_config(memory)
+    reconciled: list[MemoryConfig] = []
+
+    async def reconcile_memory():
+        reconciled.append(deepcopy(V2Config.load().memory))
+        if len(reconciled) == 1:
+            return {
+                "status_code": 503,
+                "body": {"ok": False, "error": "memory_sidecar_unavailable"},
+            }
+        if rollback_outcome == "concurrent_persistence":
+
+            def update(memory: MemoryConfig) -> MemoryConfig:
+                memory.cloud.quota_enforced = True
+                return memory
+
+            atomic_update_memory(update)
+        applied = rollback_outcome != "failure"
+        return {
+            "status_code": 200 if applied else 503,
+            "body": {"ok": applied},
+        }
+
+    monkeypatch.setattr(
+        model_service,
+        "ensure_model_access_key",
+        _persist_refreshed_cloud_bundle,
+    )
+    monkeypatch.setattr(
+        model_service,
+        "_paired_device_request",
+        _current_model_service_status,
+    )
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_memory)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False, "mode": "platform"},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
+    }
+    assert len(reconciled) == 2
+    target, rollback = reconciled
+    assert target.enabled is False
+    assert rollback.enabled is True
+    for applied in (target, rollback):
+        assert applied.cloud.model_access_key == "mak_opaque"
+        assert applied.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+        assert applied.cloud.access_key_revision == 2
+        assert applied.cloud.runtime_apply_pending is True
+
+    restored = V2Config.load().memory
+    assert restored.enabled is True
+    assert restored.cloud.model_access_key == "mak_opaque"
+    assert restored.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert restored.cloud.access_key_revision == 2
+    assert restored.cloud.runtime_apply_pending is (rollback_outcome != "success")
+    assert restored.cloud.quota_enforced is (
+        rollback_outcome == "concurrent_persistence"
+    )
+
+    if rollback_outcome == "success":
+        result = model_service.sync_model_service_once(_paired_model_service_config())
+        assert result == {"ok": True, "configured": True, "changed": False}
+        assert len(reconciled) == 2
 
 
 def test_successful_identity_reconfigure_clears_the_exact_applied_bundle(

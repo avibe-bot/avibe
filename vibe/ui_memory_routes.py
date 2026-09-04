@@ -535,7 +535,7 @@ async def _apply_memory_settings_patch(
                 fallback="memory_sidecar_unavailable",
             )
             try:
-                await asyncio.to_thread(
+                rollback = await asyncio.to_thread(
                     api.save_memory_config,
                     memory_config_to_payload(
                         current.memory,
@@ -543,7 +543,17 @@ async def _apply_memory_settings_patch(
                     ),
                     expected=saved.memory,
                 )
-                await _memory_internal_response(internal_client.reconcile_memory)
+                rollback_payload, rollback_status = await _memory_internal_result(
+                    internal_client.reconcile_memory
+                )
+                if (
+                    rollback_status == 200
+                    and rollback_payload.get("ok") is True
+                ):
+                    await asyncio.to_thread(
+                        model_service.clear_runtime_apply_pending,
+                        rollback.memory,
+                    )
             except Exception:
                 pass
             return _memory_response(
