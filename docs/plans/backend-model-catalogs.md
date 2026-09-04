@@ -526,10 +526,14 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
   `standard_vendors` projection of agent-supply is removed (no consumer remains).
 - **C10 — Overlay shape** per opencode-overlay.md v4 (providers, `enabled_providers`,
   variants per SDK, fixed provider ids, reserved `avibe-` prefix).
-- **C11 — Engine passthrough.** Engine config entries for API-key upstreams disable cloaking
-  and fingerprint rewrites (exact flags from S3) so a same-protocol request is forwarded
-  unchanged apart from credentials, host, and the mandatory `model` rewrite to the stored hop's
-  model id (user-configured substitutions stay authoritative, `model-hub.md` §4.5).
+- **C11 — Engine passthrough.** Engine config for API-key upstreams sets
+  `disable-claude-cloak-mode: true`, credential `cloak.mode: never`, and
+  `rebuild-mid-system-message: false` (S3), so a same-protocol Anthropic request body is
+  forwarded unchanged apart from the mandatory `model` rewrite to the stored hop's model id
+  (user-configured substitutions stay authoritative, `model-hub.md` §4.5); transport headers
+  and upstream auth are the engine's own. Responses bodies toward a `codex-api-key` upstream
+  are rewritten by the engine (S3): the implementation verifies each real `openai_responses`
+  Source still serves such requests and files the engine follow-up.
 - **C12 — Upgrade** per opencode-overlay.md v4: keyed on the persisted
   `model_hub.contract_version` (absent = 7), the loader discards pre-v8 OpenCode menu state
   (rows, routes, removed markers, `menu`) and touches nothing else; no migration, no
@@ -555,10 +559,12 @@ No new string anywhere else; nothing explains the mechanism.
    equals the set of generated provider ids.
 2. A menu id is byte-identical across Gateway⇄Direct switches, Source add/remove/reorder,
    failover, route edits, and engine restarts; it changes only when the user renames the row.
-3. When the serving hop's Source protocol equals the row's `native_protocol`, the body the
-   upstream receives equals what OpenCode sent apart from credentials, host, and the `model`
-   field rewritten to the stored hop's model id, for both protocols; when it differs, the
-   reasoning field recorded by S4 survives translation.
+3. When the serving hop's Source protocol equals the row's `native_protocol`, an Anthropic
+   request body reaches the upstream JSON-identical apart from the `model` field rewritten to
+   the stored hop's model id, and a Responses request keeps its `input` and `reasoning`; when
+   the protocols differ, a Responses `reasoning.effort` reaches an `anthropic` upstream as
+   `output_config.effort` (S4). Known and accepted: an Anthropic-native row served through an
+   `openai_chat` hop loses its effort.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
 5. Loading a pre-v8 config yields an empty OpenCode menu with Sources, mode, other backends,

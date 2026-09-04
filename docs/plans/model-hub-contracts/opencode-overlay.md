@@ -57,17 +57,32 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   rows whose `native_protocol` maps to that provider and which have a stored nonempty Route
   chain, with the row's display name, context/output limits, modalities, tool and reasoning
   support. `featured|full` is a UI view state; it cannot add a model to the overlay.
-- Reasoning variants are emitted in the shape the provider's SDK consumes:
-  `avibe-openai` → `variants[effort] = { "reasoningEffort": effort }`; `avibe-anthropic` →
-  the shape recorded from the spike (S4). A row with `supports_reasoning: false` has no variants.
+- Reasoning variants are emitted in the shape the provider's SDK consumes (S4):
+  `avibe-openai` → `variants[effort] = { "reasoningEffort": effort }` (reaches the wire as
+  `reasoning.effort`); `avibe-anthropic` → `variants[effort] = { "effort": effort }` (reaches the
+  wire as `output_config.effort`, exact on a same-protocol hop). The legacy
+  `thinking.budgetTokens` shape is not used: the engine folds it into a bucketed effort, and
+  `thinking: {type, effort}` silently becomes a 1024-token budget. A row with
+  `supports_reasoning: false` has no variants.
 - The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
   normalizes a provider, matches inventory, or substitutes a model. When the hop's Source
   protocol equals the row's `native_protocol` the Gateway passes the request through
   unchanged apart from credentials, host, and the `model` field, which it rewrites to the
   stored hop's model id — a user-configured substitution (`model-hub.md` §4.5) is invoked as
-  written (same-protocol passthrough, S3: the engine's
-  Claude/Codex cloaking and fingerprint rewrites are disabled for API-key upstreams); when it
-  differs, the engine's automatic translation applies (S4 records what reasoning fields survive).
+  written. "Unchanged" is a body-level guarantee (S3): with the engine flags
+  `disable-claude-cloak-mode: true`, credential `cloak.mode: never`, and
+  `rebuild-mid-system-message: false`, an Anthropic-frontend body reaches an `anthropic`
+  upstream byte-identical; the engine's transport headers remain its own (a Claude-CLI
+  fingerprint: `User-Agent`, `Anthropic-Beta`, `X-Stainless-*`, session id) and upstream auth
+  is the engine's Bearer form. A Responses-frontend body reaching a `codex-api-key` upstream
+  is rewritten by the engine's Codex executor regardless of flags (`max_output_tokens`
+  dropped; `parallel_tool_calls: true`, `instructions: ""`, and an `image_generation` tool
+  added) — a known engine limitation the implementation verifies against each real
+  `openai_responses` Source before enabling the route, and tracks as an engine follow-up.
+  When the hop's protocol differs, the engine's automatic translation applies; S4 records what
+  survives: Responses-frontend effort reaches an `anthropic` upstream intact, an
+  Anthropic-frontend `output_config.effort` is dropped on the way to an `openai_chat` upstream
+  (a second reason models are grouped by native protocol, not by supplier).
 
 ## Add-time matching (`matching-v1`)
 
@@ -105,13 +120,13 @@ OpenCode menu state — it discards it:
   `menu` object loads to an empty OpenCode menu with Sources and mode intact, and loads
   identically a second time.
 
-## Spike record (S1–S6; filled from the spike lane's evidence before implementation starts)
+## Spike record (S1–S6; evidence captured 2026-09-04 on OpenCode 1.18.18 and CLIProxyAPI 7.2.105 `4a2eb54d`, the binary Avibe's manifest pins, with the repo mock upstream recording path/headers/body)
 
 | # | Question | Evidence |
 | --- | --- | --- |
-| S1 | `@ai-sdk/openai` + custom `baseURL` calls `/v1/responses` (exact base path) | pending |
-| S2 | `@ai-sdk/anthropic` + custom `baseURL` calls `/v1/messages`; client auth header the Gateway accepts | pending |
-| S3 | Same-protocol passthrough body diff, and the engine flags that make it empty for API-key upstreams | pending |
-| S4 | Variant shapes on the wire per SDK, and what survives cross-protocol translation | pending |
-| S5 | `enabled_providers` hides user/env providers in `/config/providers` | pending |
-| S6 | Canonical reference as OpenCode reports it (`avibe-anthropic/<id>`) and provider `name` display | pending |
+| S1 | `@ai-sdk/openai` + custom `baseURL` calls `/v1/responses` | Yes: `options.baseURL = <gateway>/v1`; a prompt through `avibe-openai/gpt-5` hit the mock at `/v1/responses` with `model: gpt-5`. No option exists or is needed to force Responses; the custom-provider path calls the SDK's `languageModel()`, which is Responses. |
+| S2 | `@ai-sdk/anthropic` + custom `baseURL` calls `/v1/messages`; client auth header | Yes: `/v1/messages`, sent with `X-Api-Key` and `Anthropic-Version: 2023-06-01`. The engine accepts its client key as `x-api-key` or `Authorization: Bearer` (200/200; wrong key 401). Toward a `claude-api-key` upstream it sends Bearer. |
+| S3 | Same-protocol passthrough | Not by default: the engine added `metadata.user_id`, split `system` into billing/identity/Claude-Code-prompt segments and moved OpenCode's system text into a user `<system-reminder>`. With `disable-claude-cloak-mode: true` + credential `cloak.mode: never` + `rebuild-mid-system-message: false` the inbound and upstream bodies are JSON-identical. Headers stay fingerprinted (Claude-CLI `User-Agent`, `Anthropic-Beta`, `X-App`, `X-Claude-Code-Session-Id`, `X-Stainless-*`); `fingerprint-profile` does not exist in this version. Responses → `codex-api-key` is rewritten regardless of `codex.identity-confuse`/`optimize-multi-agent-v2` (see Menu projection). |
+| S4 | Variant shapes and cross-protocol survival | OpenAI `{ "reasoningEffort": "high" }` → `reasoning: {effort: high, summary: auto}`, preserved to a Codex upstream. Anthropic top-level `{ "effort": "high" }` → `output_config: {effort: high}`, preserved on a same-protocol hop. Anthropic `{ thinking: {type: enabled, budgetTokens: 4096} }` → engine folds to `thinking: adaptive` + `output_config.effort: medium`; `thinking: {type: enabled, effort: high}` → a 1024-token budget read back as `effort: low` (wrong). Cross-protocol: Responses effort `high` → `anthropic` upstream gets adaptive thinking + `effort: high`; Anthropic budget 4096 → `openai_chat` upstream gets `reasoning_effort: medium`; Anthropic top-level effort → `openai_chat` upstream gets nothing. |
+| S5 | `enabled_providers` hides user/env providers | Yes: with a scratch global config declaring `global-other` with an API key and the overlay's `enabled_providers: ["avibe-openai","avibe-anthropic"]`, `/config/providers` listed only the two Avibe providers. |
+| S6 | Canonical reference and display | `/config/providers` shows each provider's overlay `name` and keys its models by the bare id; a prompt carries `providerID` and `modelID` separately, so the canonical reference string is `avibe-anthropic/claude-opus-5`. |
