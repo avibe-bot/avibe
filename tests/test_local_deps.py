@@ -1457,7 +1457,7 @@ def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
     dependency = api._model_hub_engine_dependency_status()
 
     status, action_class, has_update = expected
-    assert dependency["required"] is True
+    assert dependency["required"] is (status != "unsupported")
     assert dependency["latest_version"] == managed["selected_version"]
     assert dependency["status"] == status
     assert dependency["action_class"] == action_class
@@ -1481,6 +1481,10 @@ def test_model_hub_engine_ensure_uses_direct_manager_without_a_controller(
     monkeypatch.setattr(
         "vibe.internal_client.default_socket_path",
         lambda: tmp_path / "missing-controller.sock",
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: None,
     )
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1514,6 +1518,10 @@ def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
             }
 
     monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1552,6 +1560,10 @@ def test_model_hub_engine_ensure_does_not_bypass_a_live_older_controller(
             raise ModelHubError(controller_error, status=404)
 
     monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1582,6 +1594,10 @@ def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
             )
 
     monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1592,6 +1608,161 @@ def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
 
     assert result["ok"] is False
     assert result["reason"] == "model_hub_engine_archive_download_failed"
+
+
+def test_model_hub_engine_ensure_waits_for_a_starting_controller(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "controller.sock"
+    calls = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            calls.append((force, offline))
+            return {
+                "changed": False,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                },
+            }
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr(
+        api.time,
+        "sleep",
+        lambda _seconds: socket_path.touch(),
+    )
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("the starting controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is True
+    assert calls == [(False, False)]
+
+
+def test_model_hub_engine_ensure_never_falls_back_while_controller_owns_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "missing-controller.sock"
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError("engine_down", status=503)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a controller owner excludes direct replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "engine_down"
+
+
+def test_model_hub_engine_ensure_treats_an_unsupported_host_as_nonfatal(
+    monkeypatch,
+    tmp_path,
+):
+    class Manager:
+        def __init__(self, *, offline):
+            assert offline is None
+
+        def ensure(self, *, force):
+            assert force is False
+            return {
+                "ok": False,
+                "installed": False,
+                "changed": False,
+                "skipped": False,
+                "reason": "model_hub_engine_platform_unsupported",
+                "version": "v7.2.149",
+            }
+
+    monkeypatch.setattr(
+        "vibe.internal_client.default_socket_path",
+        lambda: tmp_path / "missing-controller.sock",
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: None,
+    )
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result == {
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "skipped": True,
+        "reason": "model_hub_engine_platform_unsupported",
+        "version": "v7.2.149",
+        "status": "unsupported",
+    }
+
+
+def test_model_hub_engine_ensure_treats_controller_unsupported_as_nonfatal(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError("runtime_platform_unsupported", status=422)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns dependency admission"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result == {
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "reason": "model_hub_engine_platform_unsupported",
+        "message": "modelHub.errors.runtime_platform_unsupported",
+        "skipped": True,
+        "status": "unsupported",
+    }
 
 
 @pytest.mark.parametrize(

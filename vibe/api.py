@@ -8662,6 +8662,10 @@ _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
 _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
 _STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
 _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS = 60.0
+_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS = 0.05
+_MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON = (
+    "model_hub_engine_platform_unsupported"
+)
 
 
 @dataclass(frozen=True)
@@ -9094,7 +9098,8 @@ def _model_hub_engine_dependency_status() -> dict:
     selected_version = managed.get("selected_version")
     matches_manifest = managed.get("matches_manifest")
     reason = managed.get("reason")
-    if reason == "model_hub_engine_platform_unsupported":
+    platform_supported = reason != _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON
+    if not platform_supported:
         status = "unsupported"
         action_class = "none"
     elif not selected_version:
@@ -9115,7 +9120,7 @@ def _model_hub_engine_dependency_status() -> dict:
     return {
         "id": "model-hub-engine",
         "kind": "runtime",
-        "required": True,
+        "required": platform_supported,
         "installed": installed,
         "version": managed.get("version"),
         "latest_version": selected_version,
@@ -9124,6 +9129,49 @@ def _model_hub_engine_dependency_status() -> dict:
         "action_class": action_class,
         "reason": reason,
         "download_error": managed.get("download_error"),
+    }
+
+
+def _model_hub_controller_owns_engine(socket_path: Path) -> bool:
+    """Wait out controller startup before deciding direct-install ownership.
+
+    A missing dispatch socket means only that the endpoint is not ready. The
+    service pid reservation and instance lock identify the controller owner
+    before durable recovery completes and the socket is bound. If that owner
+    remains alive through the startup deadline, it retains ownership even when
+    the endpoint never becomes ready; returning true prevents a competing
+    direct install from mutating the runtime under it.
+    """
+
+    from vibe import runtime
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+    if owner_pid is None:
+        return False
+
+    deadline = time.monotonic() + runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+    while not socket_path.exists():
+        owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+        if owner_pid is None:
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        time.sleep(_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS)
+    return True
+
+
+def _model_hub_engine_ensure_result(result: dict) -> dict:
+    """Project an unsupported host as a successful non-applicable ensure."""
+
+    if result.get("reason") != _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON:
+        return result
+    return {
+        **result,
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "skipped": True,
+        "status": "unsupported",
     }
 
 
@@ -9139,9 +9187,12 @@ def ensure_model_hub_engine_installed(
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     def ensure_directly() -> dict:
-        return EngineRuntimeManager(offline=offline).ensure(force=force)
+        return _model_hub_engine_ensure_result(
+            EngineRuntimeManager(offline=offline).ensure(force=force)
+        )
 
-    if not default_socket_path().expanduser().resolve().exists():
+    socket_path = default_socket_path().expanduser().resolve()
+    if not _model_hub_controller_owns_engine(socket_path):
         return ensure_directly()
 
     try:
@@ -9152,6 +9203,16 @@ def ensure_model_hub_engine_installed(
             offline=offline is True,
         )
     except ModelHubError as exc:
+        if exc.code == "runtime_platform_unsupported":
+            return _model_hub_engine_ensure_result(
+                {
+                    "ok": False,
+                    "installed": False,
+                    "changed": False,
+                    "reason": _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON,
+                    "message": exc.detail,
+                }
+            )
         dependency_reason = exc.data.get("reason")
         return {
             "ok": False,

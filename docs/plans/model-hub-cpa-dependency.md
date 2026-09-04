@@ -24,10 +24,15 @@ Installation and execution remain separate lifecycle decisions:
   possible.
 - Installing or upgrading CPA does not enable Model Hub or start a stopped CPA
   process. When the controller already owns a running process, replacement goes
-  through that owner so the process restarts on the verified target.
+  through that owner so the process restarts on the verified target. A UI-side
+  reconcile waits for a starting controller's internal endpoint rather than
+  treating an unbound socket as permission to install concurrently.
 - Every Model Hub demand path verifies the packaged target before starting CPA,
   so a stale pointer cannot be started after a failed or skipped background
   reconcile.
+- CPA remains visible on hosts for which Avibe publishes no compatible asset,
+  but that `unsupported` capability state is nonfatal and offers no repair that
+  cannot succeed.
 
 ## Failure Policy
 
@@ -61,6 +66,7 @@ the reviewed target is CLIProxyAPI `v7.2.149` at source commit
 - A stopped Model Hub remains stopped after dependency convergence; a running
   one restarts only after the replacement is verified and activated.
 - Dependencies and Doctor expose missing, stale, unsupported, and failed states
-  without claiming an unknown target is current.
+  without claiming an unknown target is current; unsupported hosts receive a
+  warning rather than a failing required-dependency verdict.
 - A failed CPA update preserves the previous runnable version and does not block
   the Avibe upgrade.

@@ -2159,6 +2159,44 @@ def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(
     assert not any(item.get("code") == "dependencies.tmux.not_ready" for item in items)
 
 
+def test_managed_dependencies_doctor_treats_unsupported_cpa_as_nonfatal(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": False,
+                    "installed": False,
+                    "status": "unsupported",
+                    "reason": "model_hub_engine_platform_unsupported",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    unsupported = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.model-hub-engine.platform_unsupported"
+    )
+    assert unsupported["status"] == "warn"
+    assert "repair" not in unsupported
+    assert not any(
+        item.get("code") == "dependencies.model-hub-engine.not_ready"
+        for item in items
+    )
+
+
 def test_managed_dependencies_doctor_accepts_usable_system_git(monkeypatch):
     monkeypatch.setattr(cli.api, "dependencies_status", lambda **_kwargs: {"deps": []})
     monkeypatch.setattr(
