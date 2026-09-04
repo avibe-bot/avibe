@@ -184,6 +184,7 @@ When model-invocable Skills exist, Avibe injects this shape:
 Skills provide specialized instructions and workflows for specific tasks.
 When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.
 If the user requests a skill by exact name, load that name directly.
+When these rules require an Avibe-managed Skill, reuse an earlier successful `vibe skill load -- <name>` result for that name if it remains in the current context.
 Otherwise, only load skill names listed here or returned by `vibe skill list`; do not guess names.
 Use `vibe skill list --page 2` only when more discovery is useful; ordinary tasks do not require scanning every page.
 
@@ -206,6 +207,7 @@ and retains only exact-name guidance:
 ## Skills
 
 If the user requests a skill by exact name, run `vibe skill load -- <name>` before proceeding.
+When these rules require an Avibe-managed Skill, reuse an earlier successful `vibe skill load -- <name>` result for that name if it remains in the current context.
 Otherwise, do not guess skill names.
 ```
 
