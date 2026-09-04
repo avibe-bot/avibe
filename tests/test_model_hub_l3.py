@@ -5561,6 +5561,47 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
     }
 
 
+def test_opencode_empty_menu_writes_the_empty_overlay(tmp_path: Path) -> None:
+    config = _config([])
+    agent = config.agents["opencode"]
+    agent.menu.checked = []
+    service = _service(tmp_path, sources=[])
+    service.store.config = config
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000/opencode", "gateway-token")
+            ),
+        ),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+
+    assert overlay is not None
+    assert overlay.provider_ids == ("avibe-openai",)
+    assert overlay.checked_identifiers == ()
+    assert overlay.model_provider_ids == ()
+    assert overlay.launches == ()
+    assert json.loads(overlay.content) == {
+        "$schema": "https://opencode.ai/config.json",
+        "enabled_providers": ["avibe-openai"],
+        "provider": {
+            "avibe-openai": {
+                "models": {},
+                "name": "Avibe · OpenAI",
+                "npm": "@ai-sdk/openai",
+                "options": {
+                    "apiKey": "gateway-token",
+                    "baseURL": "http://127.0.0.1:19000/opencode/v1",
+                },
+            }
+        },
+    }
+    assert router.overlay_path.read_bytes() == overlay.content
+
+
 def test_opencode_overlay_identity_is_stable_under_runtime_perturbations(
     tmp_path: Path,
 ) -> None:

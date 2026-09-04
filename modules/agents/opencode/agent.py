@@ -61,7 +61,6 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
     memory_cli_prompt_admitted,
 )
-from core.handlers.model_hub.service import ModelHubError
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
     ModelHubLaunch,
@@ -1198,16 +1197,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation = await configure_overlay(
                     model_hub_overlay
                 )
-            if model_hub_turn_mode == "hub" and model_hub_overlay is None:
-                await self._release_model_hub_overlay_reservation(
-                    server,
-                    model_hub_overlay_reservation,
-                )
-                model_hub_overlay_reservation = None
-                stop_empty = getattr(server, "stop_for_empty_model_hub_menu", None)
-                if callable(stop_empty):
-                    await stop_empty()
-                raise ModelHubError("mapping_target_unavailable", status=409)
             await server.ensure_running()
             caller_context_binding_path = _caller_context_path_for_server(server)
             activation_identity = self._attach_server_activation(server)

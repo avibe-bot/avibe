@@ -23,7 +23,7 @@ from core.native_dispatch_phase import (
 )
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
-from modules.agents.model_hub import launch_for_context
+from modules.agents.model_hub import OpenCodeOverlay, launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.server import (
@@ -78,11 +78,24 @@ def test_opencode_runtime_config_failure_is_localized() -> None:
     assert "internal diagnostic" not in display
 
 
-def test_opencode_hub_turn_with_empty_menu_stops_server_before_launch(
+def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running(
     monkeypatch,
 ) -> None:
     calls: list[str] = []
     reservation = object()
+    empty_overlay = OpenCodeOverlay(
+        path=Path("/tmp/opencode-empty-overlay.json"),
+        content_hash="empty-overlay-hash",
+        content=(
+            b'{"enabled_providers":["avibe-openai"],"provider":'
+            b'{"avibe-openai":{"models":{}}}}\n'
+        ),
+        provider_ids=("avibe-openai",),
+        model_provider_ids=(),
+        checked_identifiers=(),
+        available_identifiers=(),
+        launches=(),
+    )
 
     class _Runtime:
         @staticmethod
@@ -91,11 +104,11 @@ def test_opencode_hub_turn_with_empty_menu_stops_server_before_launch(
 
         @staticmethod
         async def prepare_opencode_overlay():
-            return None
+            return empty_overlay
 
     class _Server:
         async def configure_model_hub_overlay(self, overlay):
-            assert overlay is None
+            assert overlay is empty_overlay
             calls.append("configure")
             return reservation
 
@@ -103,11 +116,8 @@ def test_opencode_hub_turn_with_empty_menu_stops_server_before_launch(
             assert value is reservation
             calls.append("release")
 
-        async def stop_for_empty_model_hub_menu(self):
-            calls.append("stop")
-
         async def ensure_running(self):
-            raise AssertionError("empty Hub menu must not launch OpenCode")
+            calls.append("ensure")
 
     server = _Server()
 
@@ -137,6 +147,12 @@ def test_opencode_hub_turn_with_empty_menu_stops_server_before_launch(
     agent.config = controller.config
     agent._get_server = _get_server
     agent._remove_ack_reaction = _remove_ack
+
+    def _finish_after_start(_server):
+        calls.append("attach")
+        raise RuntimeError("test boundary after server start")
+
+    agent._attach_server_activation = _finish_after_start
     request = AgentRequest(
         context=MessageContext(
             user_id="user",
@@ -154,7 +170,7 @@ def test_opencode_hub_turn_with_empty_menu_stops_server_before_launch(
 
     asyncio.run(agent._process_message(request))
 
-    assert calls == ["configure", "release", "stop", "failure", "ack"]
+    assert calls == ["configure", "ensure", "attach", "release", "failure", "ack"]
 
 
 class _StubClient(BaseIMClient):

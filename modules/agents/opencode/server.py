@@ -808,58 +808,6 @@ class OpenCodeServerManager:
                     if transition is not None and transition[2] is transition_owner:
                         self._model_hub_overlay_transition = None
 
-    async def stop_for_empty_model_hub_menu(self) -> None:
-        """Drain and stop the shared server when Hub has no selectable model."""
-
-        while True:
-            async with self._get_lock():
-                if (
-                    self._active_requests > 0
-                    or self._has_active_run_sessions()
-                    or self._model_hub_overlay_reservations
-                ):
-                    should_wait = True
-                else:
-                    should_wait = False
-                    if await self._is_healthy():
-                        await self._restart_for_auth_refresh_locked(
-                            native_turns_drained=True,
-                        )
-            if not should_wait:
-                return
-            await asyncio.sleep(0.05)
-
-    async def adopt_running_model_hub_overlay(self) -> str:
-        """Use an existing overlaid server without allowing this process to launch one."""
-
-        async with self._get_lock():
-            info = self._read_pid_file()
-            overlay_path = info.get("model_hub_overlay_path") if isinstance(info, dict) else None
-            overlay_hash = info.get("model_hub_overlay_hash") if isinstance(info, dict) else None
-            provider_ids = (
-                info.get("model_hub_overlay_provider_ids")
-                if isinstance(info, dict)
-                else None
-            )
-            if (
-                not self._pid_file_references_current_server(info)
-                or not isinstance(overlay_path, str)
-                or not overlay_path
-                or not isinstance(overlay_hash, str)
-                or not overlay_hash
-                or not isinstance(provider_ids, list)
-                or not provider_ids
-                or any(not isinstance(provider_id, str) or not provider_id for provider_id in provider_ids)
-                or not await self._is_healthy()
-            ):
-                raise RuntimeError("OpenCode Model Hub overlay is not running")
-            self._base_url = f"http://{self.host}:{self.port}"
-            self._model_hub_overlay_path = overlay_path
-            self._model_hub_overlay_hash = overlay_hash
-            self._model_hub_overlay_provider_ids = tuple(dict.fromkeys(provider_ids))
-            self._observe_runtime_generation(info)
-            return self.base_url
-
     async def release_model_hub_overlay_reservation(
         self,
         reservation: object,

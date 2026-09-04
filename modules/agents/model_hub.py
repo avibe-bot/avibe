@@ -1053,14 +1053,33 @@ class ModelHubRuntimeRouter:
         if agent.mode == "direct":
             return None
         checked = tuple(agent.menu.checked if agent.menu is not None else ())
-        if not checked:
-            return None
         gateway_base_url, gateway_token = await self._gateway_credentials(
             "opencode",
             process_scope="opencode:shared-server",
             turn_id=None,
         )
+        base_url = _provider_base_url(gateway_base_url)
         providers: dict[str, dict[str, Any]] = {}
+
+        def ensure_provider(native_protocol: str) -> tuple[str, dict[str, Any]]:
+            provider_spec = _OPENCODE_PROTOCOL_PROVIDERS.get(native_protocol)
+            if provider_spec is None:
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            provider_id = provider_spec["id"]
+            provider = providers.setdefault(
+                provider_id,
+                {
+                    "name": provider_spec["name"],
+                    "npm": provider_spec["npm"],
+                    "options": {"apiKey": gateway_token, "baseURL": base_url},
+                    "models": {},
+                },
+            )
+            return provider_id, provider
+
+        if not checked:
+            ensure_provider("openai_responses")
+
         model_provider_ids: list[tuple[str, str]] = []
         projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
@@ -1075,21 +1094,8 @@ class ModelHubRuntimeRouter:
                 identifier,
                 supply_channel="hub",
             )
-            provider_spec = _OPENCODE_PROTOCOL_PROVIDERS.get(
+            overlay_provider_id, provider = ensure_provider(
                 backend_model.native_protocol or ""
-            )
-            if provider_spec is None:
-                raise ModelHubError("mapping_target_unavailable", status=409)
-            base_url = _provider_base_url(gateway_base_url)
-            overlay_provider_id = provider_spec["id"]
-            provider = providers.setdefault(
-                overlay_provider_id,
-                {
-                    "name": provider_spec["name"],
-                    "npm": provider_spec["npm"],
-                    "options": {"apiKey": gateway_token, "baseURL": base_url},
-                    "models": {},
-                },
             )
             runtime_model = identifier
             projected_model = project_opencode_public_model(backend_model)

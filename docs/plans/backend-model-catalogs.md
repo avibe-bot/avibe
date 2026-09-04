@@ -603,7 +603,8 @@ No new string anywhere else; nothing explains the mechanism.
 1. For every OpenCode menu row — empty Route chain included — the overlay holds exactly one
    model entry, under the provider named by its `native_protocol`; every generated provider
    holds at least one entry, the overlay holds no other provider, and `enabled_providers`
-   equals the set of generated provider ids.
+   equals the set of generated provider ids. With an empty menu the overlay is the empty
+   overlay (`avibe-openai`, no models) and the serve process keeps running.
 2. A menu id is byte-identical across Gateway⇄Direct switches, Source add/remove/reorder,
    failover, route edits, and engine restarts; it changes only when the user renames the row.
 3. When the serving hop is an API-key Source whose protocol equals the row's
@@ -634,4 +635,3 @@ filtering, `modules/agents/opencode/agent.py` addressing), the engine credential
 version 8 · **UI** — bare-id rows, editor `API` field, retired prefixing
 and buckets, e2e fixtures · **docs mirror**. Gemini ships in its own later revision with a
 Gemini Source protocol.
-

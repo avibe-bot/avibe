@@ -6026,19 +6026,7 @@ async def opencode_options_async(
             request_timeout_seconds=opencode_config.request_timeout_seconds,
             resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
         )
-        if model_hub_mode == "hub" and not model_hub_models:
-            await asyncio.wait_for(
-                server.stop_for_empty_model_hub_menu(),
-                timeout=timeout_seconds,
-            )
-            return {"ok": False, "error": "mapping_target_unavailable"}
-        if model_hub_mode == "hub":
-            await asyncio.wait_for(
-                server.adopt_running_model_hub_overlay(),
-                timeout=timeout_seconds,
-            )
-        else:
-            await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
+        await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
         model_request = (
             server.get_available_models(expanded_cwd)
