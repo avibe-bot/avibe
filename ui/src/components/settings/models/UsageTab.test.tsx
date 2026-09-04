@@ -302,7 +302,7 @@ describe('UsageTab', () => {
     expect(rule('.model-hub-usage-axis')).toContain('grid-template-columns: var(--model-hub-usage-axis-columns)');
     expect(rule('.model-hub-usage-axis-label')).toContain('min-width: 0');
     expect(rule('.model-hub-usage-axis-label')).toContain('overflow-wrap: anywhere');
-    expect(rule('.model-hub-usage')).toContain('--model-hub-usage-axis-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr)');
+    expect(rule('.model-hub-usage-axis')).toContain('--model-hub-usage-axis-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr)');
   });
 
   it('MH-USAGE-024: every figure the report states names the row and the column it answers', () => {

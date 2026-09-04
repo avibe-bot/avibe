@@ -16,9 +16,12 @@
 // with itself in every root. The only place the mistake exists is the
 // stylesheet's scope graph, so that is what gets read.
 //
-// The property asserted is self-sufficiency, not a list of tokens: a class that
-// travels resolves every name it consumes from itself or from a scope every
-// element inherits. A token added to such a class later is covered without
+// The property asserted is self-sufficiency, not a list of tokens: a class
+// resolves every name it consumes from itself or from a scope every element
+// inherits. It is asserted of EVERY class this project styles rather than of
+// the ones known to travel, because "this one is only ever mounted there" is a
+// fact about the React tree that the stylesheet cannot see and that the next
+// caller can falsify. A token added to such a class later is covered without
 // editing anything, and a token parked back on a dialog root fails here rather
 // than in a screenshot nobody takes.
 //
@@ -27,6 +30,8 @@
 // are compared against the use: which subtree its selector claims, and which
 // conditions its enclosing at-rules put on it. A rule that answers only the
 // first half sanctions exactly the kind of scope this file exists to catch.
+
+import { customPropertiesIn } from './customProperties.mjs';
 
 // A selector that matches the document root itself, so a custom property
 // declared there is inherited by every element regardless of where it mounts.
@@ -109,24 +114,17 @@ function classesOf(compound) {
   return [...bare.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((match) => match[1]);
 }
 
-/**
- * Every class name a component renders, read from its own source.
- *
- * The component is the authority on this, not a list kept next to the check: a
- * class it stops rendering stops being asserted, and one it starts rendering
- * starts. Only `className` is read, so a class named in a comment or a log line
- * is not mistaken for one that ships.
- */
-function classesRenderedBy(source) {
-  const found = new Set();
-  const attribute = /className\s*=\s*/g;
+// The value of one JSX attribute, wherever it is spelled in a source. A quoted
+// literal ends at its closing quote; a braced expression is read whole, so
+// `cn('a', flag && 'b')` contributes both halves rather than its first.
+function* attributeValues(source, attribute) {
+  const opening = new RegExp(`\\b${attribute}\\s*=\\s*`, 'g');
 
-  for (let match = attribute.exec(source); match; match = attribute.exec(source)) {
-    let cursor = match.index + match[0].length;
+  for (let match = opening.exec(source); match; match = opening.exec(source)) {
+    const cursor = match.index + match[0].length;
     let end = cursor;
 
     if (source[cursor] === '{') {
-      // Read the whole expression, so `cn('a', flag && 'b')` contributes both.
       let depth = 0;
       for (; end < source.length; end += 1) {
         if (source[end] === '{') depth += 1;
@@ -142,13 +140,121 @@ function classesRenderedBy(source) {
       if (end === 0) continue;
     }
 
-    const expression = source.slice(cursor, end);
+    yield source.slice(cursor, end);
+  }
+}
+
+/**
+ * Every class name a component renders, read from its own source.
+ *
+ * The component is the authority on this, not a list kept next to the check: a
+ * class it stops rendering stops being asserted, and one it starts rendering
+ * starts. Only `className` is read, so a class named in a comment or a log line
+ * is not mistaken for one that ships.
+ */
+function classesRenderedBy(source) {
+  const found = new Set();
+
+  for (const expression of attributeValues(source, 'className')) {
     for (const literal of expression.matchAll(/["'`]([^"'`]*)["'`]/g)) {
       for (const name of literal[1].split(/\s+/)) if (name) found.add(name);
     }
   }
 
   return found;
+}
+
+/**
+ * Every custom property a component consumes from its own markup.
+ *
+ * A Tailwind arbitrary value is a `var()` like any other -- `gap-[var(--x)]`
+ * compiles to `gap: var(--x)` -- but it is written on an element, not in a rule,
+ * so no walk of the stylesheet can see it and no selector says which scope it
+ * expects. `BackendModelCatalogDialog` renders one on a `<ul>` carrying no
+ * `model-hub-*` class at all, which is a use with no subject to attribute it
+ * to: the only thing that can answer for it is a scope every element inherits.
+ * `style` is read alongside `className` because `style={{ gap: 'var(--x)' }}`
+ * is the same use spelled the other way.
+ */
+function tokensUsedInMarkup(source) {
+  const found = new Set();
+
+  for (const attribute of ['className', 'style']) {
+    for (const expression of attributeValues(source, attribute)) {
+      for (const match of expression.matchAll(UNGUARDED_USE)) found.add(match[1]);
+    }
+  }
+
+  return found;
+}
+
+// A selector made of nothing but classes, so every element it matches is known
+// from its class list alone. That is what lets a declaration on `.segment`
+// answer for a use whose subject is `.segment.is-selected`: both classes sit on
+// one element, so the declaration is on the element the use applies to. Any
+// other ingredient -- an attribute, a state pseudo, a tag -- adds a condition
+// the use's own subject does not carry, and counting it would sanction a
+// declaration that is only sometimes there.
+const PURE_CLASSES = /^(?:\.-?[_a-zA-Z][\w-]*)+$/;
+
+/**
+ * Every custom property some scope every element inherits, keyed to the
+ * conditions each declaration of it was made under.
+ *
+ * Being declared somewhere is not the question -- that is what
+ * `customPropertiesIn` answers, and what let this defect ship. A declaration
+ * counts only where it is in force, so the conditions travel with it.
+ */
+function inheritableTokens(sheets) {
+  const inheritable = new Map();
+  const record = (key, conditions) => {
+    if (!inheritable.has(key)) inheritable.set(key, []);
+    inheritable.get(key).push(conditions);
+  };
+
+  for (const [, root] of sheets) {
+    // A registered name resolves to its initial value everywhere, so a use of
+    // one is not this defect. A registration carrying no initial value under
+    // `syntax: "*"` does draw nothing, which this treats as resolvable and so
+    // will not report -- a miss rather than a false positive, on the same
+    // grounds `customProperties.mjs` records the name at all.
+    root.walkAtRules('property', (rule) => record(rule.params.trim(), conditionsOn(rule)));
+
+    root.walkDecls((declaration) => {
+      if (!declaration.prop.startsWith('--')) return;
+
+      const owner = declaration.parent;
+      const fromRoot = owner.type === 'rule'
+        && owner.selectors.some((one) => DOCUMENT_ROOT.test(one.trim()));
+      if (insideTheme(declaration) || fromRoot) record(declaration.prop, conditionsOn(declaration));
+    });
+  }
+
+  return inheritable;
+}
+
+/**
+ * Every class name some rule in ``sheets`` takes as its subject.
+ *
+ * Derived rather than listed, so the invariant can be asserted over the whole
+ * token layer without naming a component root anywhere. A class this project
+ * styles is a class this project has to be able to resolve tokens for, under
+ * whichever root a caller mounts it. A rule whose subject is an element, an
+ * attribute or the document root contributes nothing: there is no class to
+ * mount elsewhere, so there is nothing for the scope question to be about.
+ */
+function styledSubjects(sheets) {
+  const subjects = new Set();
+
+  for (const [, root] of sheets) {
+    root.walkRules((rule) => {
+      for (const one of rule.selectors) {
+        for (const name of classesOf(firstCompound(one.trim()))) subjects.add(name);
+      }
+    });
+  }
+
+  return subjects;
 }
 
 /**
@@ -160,48 +266,39 @@ function classesRenderedBy(source) {
  * consumes it and the origin to report, so a failure reads as an instruction.
  */
 function unscopedTokens(sheets, classNames) {
-  const travelling = new Set(classNames);
-  // Both keyed to the conditions the declaration was made under, because a
-  // name being declared somewhere is not the question -- that is what
-  // `customPropertiesIn` answers, and what let this defect ship.
-  const inheritable = new Map();
+  const audited = new Set(classNames);
+  const inheritable = inheritableTokens(sheets);
+  // Keyed by property rather than by class, because what makes a declaration
+  // count is which elements its whole selector claims -- `.a.b` answers for a
+  // use on `.a.b.c` and for nothing else -- and that is a question about the
+  // set, not about any one name in it.
   const declaredOn = new Map();
-  const record = (into, key, conditions) => {
-    if (!into.has(key)) into.set(key, []);
-    into.get(key).push(conditions);
-  };
 
   for (const [, root] of sheets) {
-    // A registered name resolves to its initial value everywhere, so a use of
-    // one is not this defect. A registration carrying no initial value under
-    // `syntax: "*"` does draw nothing, which this treats as resolvable and so
-    // will not report -- a miss rather than a false positive, on the same
-    // grounds `customProperties.mjs` records the name at all.
-    root.walkAtRules('property', (rule) => record(inheritable, rule.params.trim(), conditionsOn(rule)));
-
     root.walkDecls((declaration) => {
       if (!declaration.prop.startsWith('--')) return;
 
       const owner = declaration.parent;
-      const conditions = conditionsOn(declaration);
-      const fromRoot = owner.type === 'rule'
-        && owner.selectors.some((one) => DOCUMENT_ROOT.test(one.trim()));
-      if (insideTheme(declaration) || fromRoot) record(inheritable, declaration.prop, conditions);
       if (owner.type !== 'rule') return;
+      const conditions = conditionsOn(declaration);
 
       for (const one of owner.selectors) {
         const selector = one.trim();
-        for (const name of classesOf(selector)) {
-          // Only a declaration on the class ITSELF is inherited by the whole
-          // subtree. One on `.guard-label > span` reaches that span's children
-          // and no sibling, so counting it would sanction a scope narrower than
-          // the one being consumed.
-          if (selector !== `.${name}`) continue;
-          record(declaredOn, `${name}|${declaration.prop}`, conditions);
-        }
+        // Only a declaration on the element ITSELF is inherited by its whole
+        // subtree. One on `.guard-label > span` reaches that span's children
+        // and no sibling, so counting it would sanction a scope narrower than
+        // the one being consumed.
+        if (!PURE_CLASSES.test(selector)) continue;
+        if (!declaredOn.has(declaration.prop)) declaredOn.set(declaration.prop, []);
+        declaredOn.get(declaration.prop).push({ classes: classesOf(selector), conditions });
       }
     });
   }
+
+  const carried = (property, subject, conditions) => (declaredOn.get(property) ?? []).some(
+    (site) => site.classes.every((name) => subject.includes(name))
+      && site.conditions.every((one) => conditions.includes(one)),
+  );
 
   const unresolved = [];
   for (const [origin, root] of sheets) {
@@ -215,11 +312,12 @@ function unscopedTokens(sheets, classNames) {
       const conditions = conditionsOn(declaration);
       for (const one of owner.selectors) {
         const selector = one.trim();
-        for (const name of classesOf(firstCompound(selector))) {
-          if (!travelling.has(name)) continue;
+        const subject = classesOf(firstCompound(selector));
+        for (const name of subject) {
+          if (!audited.has(name)) continue;
           for (const property of used) {
             if (inForce(inheritable.get(property), conditions)) continue;
-            if (inForce(declaredOn.get(`${name}|${property}`), conditions)) continue;
+            if (carried(property, subject, conditions)) continue;
             unresolved.push({ className: name, property, origin, selector, declaration: declaration.prop });
           }
         }
@@ -230,4 +328,48 @@ function unscopedTokens(sheets, classNames) {
   return unresolved;
 }
 
-export { classesRenderedBy, firstCompound, unscopedTokens };
+/**
+ * The tokens ``sources`` consume from markup without a scope that answers.
+ *
+ * The stylesheet half above can attribute a use to the subject its rule names.
+ * A use written on an element cannot be attributed at all -- the element's
+ * ancestors are a fact about the React tree, and the one that happens to
+ * declare the token today is one refactor away from not being an ancestor. So
+ * the requirement here is the strict one: the name is declared by a scope every
+ * element inherits, unconditionally.
+ *
+ * A name no stylesheet here declares at all is somebody else's to declare --
+ * `--radix-popover-trigger-width` is written by Radix onto the element at open
+ * time, and this project could not anchor it if it wanted to. So what gets
+ * reported is a name THIS token layer declares somewhere but not everywhere,
+ * which is the defect; an externally provided name is left alone, a miss rather
+ * than a false positive, on the same grounds as the fallback rule above.
+ *
+ * ``sources`` is ``[origin, text]`` per shipped file.
+ */
+function unanchoredMarkupTokens(sheets, sources) {
+  const inheritable = inheritableTokens(sheets);
+  const ours = new Map();
+  for (const [, root] of sheets) customPropertiesIn(root, ours);
+  const unresolved = [];
+
+  for (const [origin, text] of sources) {
+    for (const property of tokensUsedInMarkup(text)) {
+      if (!ours.has(property)) continue;
+      if (inForce(inheritable.get(property), [])) continue;
+      unresolved.push({ origin, property });
+    }
+  }
+
+  return unresolved;
+}
+
+export {
+  classesRenderedBy,
+  firstCompound,
+  inheritableTokens,
+  styledSubjects,
+  tokensUsedInMarkup,
+  unanchoredMarkupTokens,
+  unscopedTokens,
+};

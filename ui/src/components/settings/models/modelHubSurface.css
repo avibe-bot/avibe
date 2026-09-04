@@ -22,6 +22,19 @@
  * wire takes --X, and anything that renders as text or an icon takes --X-ink.
  * They are different values in light, where a vivid brand fill and a legible
  * label pull in opposite directions.
+ *
+ * Where a token is declared follows one rule: it has to resolve wherever it is
+ * read. A name declared on a dialog root is only in scope under that root, so
+ * a class that travels -- rendered under a second root, or portalled out of the
+ * first -- reads nothing there and the property falls back to its initial
+ * value, drawing nothing rather than failing. So a token one class reads is
+ * declared on that class; a token several classes read is declared in the
+ * shared `:root` block below; a token that styles a root's own chrome stays on
+ * the root, because the root is its only reader. The exception is a use written
+ * `var(--x, fallback)`: it draws either way, so declaring --x on a context root
+ * is a deliberate override there rather than the defect above.
+ * `scripts/travellingTokens.mjs` checks this, over every class this project
+ * styles and over the tokens the Model Hub's markup reads directly.
  */
 :root {
   /* Neutral wash channel: white over the dark frame. */
@@ -121,6 +134,99 @@
     --model-hub-dialog-shadow: 0 16px 40px 0 color-mix(in srgb, var(--foreground) 14%, transparent);
     --model-hub-drawer-shadow: -18px 0 48px color-mix(in srgb, var(--foreground) 16%, transparent);
   }
+}
+
+/* Metrics more than one class reads, so no one class can own them. Each is
+ * declared once, here, where every element inherits it — including the dialog
+ * and drawer contents Radix portals out of the surface's own subtree, which is
+ * why this is `:root` rather than a wrapper class. A metric only one class
+ * reads is not here: it sits on that class. */
+:root {
+  /* Dialog chrome, shared by the dialogs that draw a footer action row. */
+  --model-hub-dialog-foot-height: 61px;
+  --model-hub-dialog-action-radius: 7px;
+
+  /* Overview: the upstream graph's wires, and the card's footer buttons. */
+  --model-hub-wire-active-width: 1.75px;
+  --model-hub-wire-muted-width: 1px;
+  --model-hub-footer-action-height: 30px;
+
+  /* Add-subscription dialog. */
+  --model-hub-add-sub-body-gap: 14px;
+
+  /* Add-API-key dialog. */
+  --model-hub-add-key-field-gap: 6px;
+  --model-hub-add-key-hint-size: 10.5px;
+  --model-hub-add-key-strip-gap: 10px;
+  --model-hub-add-key-strip-radius: 9px;
+  --model-hub-add-key-strip-title-size: 12px;
+  --model-hub-add-key-control-fill: var(--model-hub-wash-08);
+  --model-hub-add-key-success-fill: var(--model-hub-success-fill);
+
+  /* Route chain dialog. */
+  --model-hub-route-head-height: 72px;
+  --model-hub-route-hop-radius: 8px;
+
+  /* Source detail panel, including its tier table. */
+  --model-hub-source-radius: 0px;
+  --model-hub-source-action-radius: 7px;
+  --model-hub-source-table-row-height: 40px;
+  --model-hub-source-table-columns: minmax(0, 1fr) minmax(120px, 180px) 64px;
+  --model-hub-source-table-gap: 12px;
+  --model-hub-source-table-padding-x: 20px;
+  --model-hub-source-table-padding-y: 7px;
+  --model-hub-source-age-size: 11px;
+  --model-hub-source-tier-size: 10.5px;
+  --model-hub-source-summary-ink: var(--model-hub-muted-b3);
+  --model-hub-source-label-ink: var(--model-hub-ink-73);
+  --model-hub-source-footnote-ink: var(--model-hub-ink-8c);
+  --model-hub-source-chip-padding-y: 4px;
+  --model-hub-source-chip-padding-x: 9px;
+
+  /* Direct-connection card. */
+  --model-hub-direct-gap: 16px;
+  --model-hub-direct-radius: 14px;
+
+  /* Provider order drawer. */
+  --model-hub-order-row-height: 58px;
+  --model-hub-order-row-radius: 9px;
+  --model-hub-order-grip-size: 14px;
+  --model-hub-order-grip-dim: var(--model-hub-wash-33);
+  --model-hub-order-meta-size: 10.5px;
+
+  /* 用量 tab. */
+  --model-hub-usage-padding-x: 18px;
+  --model-hub-usage-columns: minmax(0, 1fr) 104px 84px 84px 116px;
+  --model-hub-usage-gutter: 16px;
+  --model-hub-usage-title-size: 13px;
+  --model-hub-usage-label-size: 11px;
+  --model-hub-usage-cell-size: 12px;
+  --model-hub-usage-note-size: 10.5px;
+  --model-hub-usage-column-radius: 2px;
+  --model-hub-usage-label-ink: var(--model-hub-ink-73);
+  --model-hub-usage-note-ink: var(--model-hub-muted-b3);
+
+  /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
+   * Tailwind arbitrary value in the dialog's markup, which has no selector of
+   * its own to declare it on. */
+  --model-hub-catalog-pad-x: 20px;
+  --model-hub-catalog-row-pad-x: 16px;
+  --model-hub-catalog-row-pad-y: 10px;
+  --model-hub-catalog-row-gap: 14px;
+  --model-hub-catalog-grip-size: 16px;
+  --model-hub-catalog-grip-ink: var(--model-hub-ink-4d);
+  --model-hub-catalog-note-size: 11px;
+
+  /* Model editor. */
+  --model-hub-model-pad-x: 24px;
+  --model-hub-model-control-radius: 8px;
+  --model-hub-model-note-size: 11px;
+  --model-hub-model-match-height: 31px;
+
+  /* Model picker. */
+  --model-hub-picker-row-pad-x: 12px;
+  --model-hub-picker-row-gap: 10px;
+  --model-hub-picker-name-size: 12.5px;
 }
 
 .model-hub-accent-tile--cyan { background: var(--model-hub-cyan-1a); }
@@ -338,25 +444,6 @@
 }
 
 .model-hub-overview {
-  --model-hub-upstream-track: 420px;
-  --model-hub-rail-track: 80px;
-  --model-hub-track-gap: 0px;
-  --model-hub-legend-height: 34px;
-  --model-hub-wire-active-width: 1.75px;
-  --model-hub-wire-muted-width: 1px;
-  --model-hub-wire-node: 7px;
-  --model-hub-wire-node-stroke: 1.25px;
-  --model-hub-footer-action-height: 30px;
-  --model-hub-footer-action-radius: 7px;
-  --model-hub-footer-action-font-size: 11.5px;
-  --model-hub-upstream-info-ink: var(--model-hub-ink-40);
-  --model-hub-upstream-group-ink: var(--model-hub-ink-59);
-  --model-hub-upstream-detail-ink: var(--model-hub-muted-cc);
-  --model-hub-model-row-fill: var(--model-hub-wash-05);
-  --model-hub-model-mode-fill: var(--model-hub-wash-0a);
-  --model-hub-model-current-ink: var(--model-hub-muted-cc);
-  --model-hub-model-collapse-ink: var(--model-hub-ink-59);
-  --model-hub-takeover-current-ink: var(--model-hub-violet-ink);
   --model-hub-agent-head-action-height: 28px;
   --model-hub-agent-head-action-leading: 16px;
   --model-hub-agent-head-status-height: 16px;
@@ -396,7 +483,14 @@
 
 .model-hub-overview-body { position: relative; }
 
+.model-hub-overview-grid {
+  --model-hub-track-gap: 0px;
+  --model-hub-rail-track: 80px;
+  --model-hub-upstream-track: 420px;
+}
+
 .model-hub-upstream-info {
+  --model-hub-upstream-info-ink: var(--model-hub-ink-40);
   width: 13px;
   height: 13px;
   color: var(--model-hub-upstream-info-ink);
@@ -405,18 +499,35 @@
 .model-hub-upstream-info svg { width: 13px; height: 13px; }
 
 .model-hub-upstream-group-label {
+  --model-hub-upstream-group-ink: var(--model-hub-ink-59);
   color: var(--model-hub-upstream-group-ink);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 1.3px;
 }
 
-.model-hub-upstream-detail { color: var(--model-hub-upstream-detail-ink); }
-.model-hub-model-row { background: var(--model-hub-model-row-fill); }
-.model-hub-model-mode-chip { background: var(--model-hub-model-mode-fill); }
-.model-hub-model-current { color: var(--model-hub-model-current-ink); }
-.model-hub-model-current--takeover { color: var(--model-hub-takeover-current-ink); }
+.model-hub-upstream-detail {
+  --model-hub-upstream-detail-ink: var(--model-hub-muted-cc);
+  color: var(--model-hub-upstream-detail-ink);
+}
+.model-hub-model-row {
+  --model-hub-model-row-fill: var(--model-hub-wash-05);
+  background: var(--model-hub-model-row-fill);
+}
+.model-hub-model-mode-chip {
+  --model-hub-model-mode-fill: var(--model-hub-wash-0a);
+  background: var(--model-hub-model-mode-fill);
+}
+.model-hub-model-current {
+  --model-hub-model-current-ink: var(--model-hub-muted-cc);
+  color: var(--model-hub-model-current-ink);
+}
+.model-hub-model-current--takeover {
+  --model-hub-takeover-current-ink: var(--model-hub-violet-ink);
+  color: var(--model-hub-takeover-current-ink);
+}
 .model-hub-model-collapse {
+  --model-hub-model-collapse-ink: var(--model-hub-ink-59);
   justify-content: flex-start;
   padding: 0 12px;
   color: var(--model-hub-model-collapse-ink);
@@ -426,6 +537,8 @@
 .model-hub-model-collapse svg { width: 13px; height: 13px; }
 
 .model-hub-footer-action {
+  --model-hub-footer-action-font-size: 11.5px;
+  --model-hub-footer-action-radius: 7px;
   height: var(--model-hub-footer-action-height);
   padding-inline: 12px;
   border-radius: var(--model-hub-footer-action-radius);
@@ -448,44 +561,26 @@
 
 .model-hub-add-sub-dialog {
   --model-hub-add-sub-width: 620px;
-  --model-hub-add-sub-head-height: 72px;
-  --model-hub-add-sub-title-size: 15px;
-  --model-hub-add-sub-subtitle-size: 10.5px;
-  --model-hub-add-sub-body-gap: 14px;
-  --model-hub-add-sub-body-padding: 20px;
-  --model-hub-add-sub-option-padding: 14px;
-  --model-hub-add-sub-option-radius: 10px;
-  --model-hub-add-sub-option-gap: 12px;
-  --model-hub-add-sub-copy-gap: 6px;
-  --model-hub-add-sub-label-size: 13.5px;
-  --model-hub-add-sub-description-size: 11.5px;
-  --model-hub-add-sub-description-line: 18px;
-  --model-hub-add-sub-risk-radius: 8px;
-  --model-hub-add-sub-risk-padding-y: 9px;
-  --model-hub-add-sub-risk-padding-x: 11px;
-  --model-hub-add-sub-risk-size: 11px;
-  --model-hub-add-sub-risk-line: 17px;
-  --model-hub-add-sub-risk-ink: var(--model-hub-gold-ink);
-  --model-hub-add-sub-hint-size: 11px;
-  --model-hub-add-sub-hint-line: 17px;
-  --model-hub-add-sub-option-idle-fill: var(--model-hub-wash-05);
-  --model-hub-dialog-foot-height: 61px;
-  --model-hub-dialog-action-height: 33px;
-  --model-hub-dialog-action-radius: 7px;
-  --model-hub-dialog-action-size: 12px;
   width: min(var(--model-hub-add-sub-width), calc(100vw - 32px));
   max-width: var(--model-hub-add-sub-width);
   border-radius: 14px;
 }
 
 .model-hub-add-sub-head {
+  --model-hub-add-sub-head-height: 72px;
   height: var(--model-hub-add-sub-head-height);
   padding: 16px 20px;
   gap: 4px;
 }
 
-.model-hub-add-sub-title { font-size: var(--model-hub-add-sub-title-size); }
-.model-hub-add-sub-subtitle { font-size: var(--model-hub-add-sub-subtitle-size); }
+.model-hub-add-sub-title {
+  --model-hub-add-sub-title-size: 15px;
+  font-size: var(--model-hub-add-sub-title-size);
+}
+.model-hub-add-sub-subtitle {
+  --model-hub-add-sub-subtitle-size: 10.5px;
+  font-size: var(--model-hub-add-sub-subtitle-size);
+}
 .model-hub-add-sub-close {
   width: 27px;
   height: 27px;
@@ -494,6 +589,7 @@
 .model-hub-add-sub-close svg { width: 15px; height: 15px; }
 
 .model-hub-add-sub-body {
+  --model-hub-add-sub-body-padding: 20px;
   gap: var(--model-hub-add-sub-body-gap);
   padding: var(--model-hub-add-sub-body-padding);
 }
@@ -501,21 +597,41 @@
 .model-hub-add-sub-options { gap: var(--model-hub-add-sub-body-gap); }
 
 .model-hub-add-sub-option {
+  --model-hub-add-sub-option-gap: 12px;
+  --model-hub-add-sub-option-radius: 10px;
+  --model-hub-add-sub-option-padding: 14px;
   padding: var(--model-hub-add-sub-option-padding);
   border-width: 1px;
   border-radius: var(--model-hub-add-sub-option-radius);
   gap: var(--model-hub-add-sub-option-gap);
 }
-.model-hub-add-sub-option--idle { background: var(--model-hub-add-sub-option-idle-fill); }
+.model-hub-add-sub-option--idle {
+  --model-hub-add-sub-option-idle-fill: var(--model-hub-wash-05);
+  background: var(--model-hub-add-sub-option-idle-fill);
+}
 
-.model-hub-add-sub-option-copy { gap: var(--model-hub-add-sub-copy-gap); }
-.model-hub-add-sub-option-label { font-size: var(--model-hub-add-sub-label-size); }
+.model-hub-add-sub-option-copy {
+  --model-hub-add-sub-copy-gap: 6px;
+  gap: var(--model-hub-add-sub-copy-gap);
+}
+.model-hub-add-sub-option-label {
+  --model-hub-add-sub-label-size: 13.5px;
+  font-size: var(--model-hub-add-sub-label-size);
+}
 .model-hub-add-sub-badge { padding: 3px 8px; font-size: 10px; }
 .model-hub-add-sub-description {
+  --model-hub-add-sub-description-line: 18px;
+  --model-hub-add-sub-description-size: 11.5px;
   font-size: var(--model-hub-add-sub-description-size);
   line-height: var(--model-hub-add-sub-description-line);
 }
 .model-hub-add-sub-risk {
+  --model-hub-add-sub-risk-ink: var(--model-hub-gold-ink);
+  --model-hub-add-sub-risk-line: 17px;
+  --model-hub-add-sub-risk-size: 11px;
+  --model-hub-add-sub-risk-padding-x: 11px;
+  --model-hub-add-sub-risk-padding-y: 9px;
+  --model-hub-add-sub-risk-radius: 8px;
   padding: var(--model-hub-add-sub-risk-padding-y) var(--model-hub-add-sub-risk-padding-x);
   border-radius: var(--model-hub-add-sub-risk-radius);
   font-size: var(--model-hub-add-sub-risk-size);
@@ -523,6 +639,8 @@
   line-height: var(--model-hub-add-sub-risk-line);
 }
 .model-hub-add-sub-hint {
+  --model-hub-add-sub-hint-line: 17px;
+  --model-hub-add-sub-hint-size: 11px;
   min-height: var(--model-hub-add-sub-hint-line);
   font-size: var(--model-hub-add-sub-hint-size);
   line-height: var(--model-hub-add-sub-hint-line);
@@ -532,6 +650,8 @@
   padding: 14px 20px;
 }
 .model-hub-dialog-action {
+  --model-hub-dialog-action-size: 12px;
+  --model-hub-dialog-action-height: 33px;
   height: var(--model-hub-dialog-action-height);
   padding-inline: 14px;
   border-radius: var(--model-hub-dialog-action-radius);
@@ -543,63 +663,29 @@
 .model-hub-add-key-dialog {
   --model-hub-add-key-width: 560px;
   --model-hub-add-key-radius: 14px;
-  --model-hub-add-key-head-padding-y: 16px;
-  --model-hub-add-key-head-padding-x: 20px;
-  --model-hub-add-key-head-gap: 4px;
-  --model-hub-add-key-title-size: 15px;
-  --model-hub-add-key-subtitle-size: 10.5px;
-  --model-hub-add-key-body-padding: 20px;
-  --model-hub-add-key-body-gap: 14px;
-  --model-hub-add-key-field-gap: 6px;
-  --model-hub-add-key-label-size: 11.5px;
-  --model-hub-add-key-input-height: 36px;
-  --model-hub-add-key-input-radius: 8px;
-  --model-hub-add-key-input-padding: 12px;
-  --model-hub-add-key-input-size: 11.5px;
-  --model-hub-add-key-hint-size: 10.5px;
-  --model-hub-add-key-strip-padding-y: 11px;
-  --model-hub-add-key-strip-padding-x: 13px;
-  --model-hub-add-key-strip-gap: 10px;
-  --model-hub-add-key-strip-radius: 9px;
-  --model-hub-add-key-inventory-height: 59px;
-  --model-hub-add-key-badge-size: 10px;
-  --model-hub-add-key-strip-title-size: 12px;
-  --model-hub-add-key-strip-detail-size: 10.5px;
-  --model-hub-add-key-strip-detail-line: 16px;
-  --model-hub-add-key-outcome-padding-y: 14px;
-  --model-hub-add-key-outcome-padding-x: 20px;
-  --model-hub-add-key-segment-padding-y: 7px;
-  --model-hub-add-key-segment-padding-x: 14px;
-  --model-hub-add-key-segment-radius: 6px;
-  --model-hub-add-key-segment-size: 11.5px;
-  --model-hub-add-key-foot-padding-y: 14px;
-  --model-hub-add-key-foot-padding-x: 20px;
-  --model-hub-add-key-foot-gap: 8px;
-  --model-hub-add-key-action-padding-y: 8px;
-  --model-hub-add-key-action-padding-x: 14px;
-  --model-hub-add-key-action-radius: 7px;
-  --model-hub-add-key-action-size: 12px;
-  --model-hub-add-key-control-fill: var(--model-hub-wash-08);
-  --model-hub-add-key-footer-fill: var(--model-hub-wash-05);
-  --model-hub-add-key-error-fill: var(--model-hub-danger-fill);
-  --model-hub-add-key-error-border: var(--model-hub-danger-border);
-  --model-hub-add-key-advisory-fill: var(--model-hub-gold-14);
-  --model-hub-add-key-advisory-border: var(--model-hub-gold-59);
-  --model-hub-add-key-success-fill: var(--model-hub-success-fill);
-  --model-hub-add-key-success-border: var(--model-hub-success-border);
-  --model-hub-add-key-dim-primary: var(--model-hub-dim-brand-fill);
   width: min(var(--model-hub-add-key-width), calc(100vw - 32px));
   max-width: var(--model-hub-add-key-width);
   border-radius: var(--model-hub-add-key-radius);
 }
 
 .model-hub-add-key-head {
+  --model-hub-add-key-head-gap: 4px;
+  --model-hub-add-key-head-padding-x: 20px;
+  --model-hub-add-key-head-padding-y: 16px;
   padding: var(--model-hub-add-key-head-padding-y) var(--model-hub-add-key-head-padding-x);
   gap: var(--model-hub-add-key-head-gap);
 }
-.model-hub-add-key-title { font-size: var(--model-hub-add-key-title-size); }
-.model-hub-add-key-subtitle { font-size: var(--model-hub-add-key-subtitle-size); }
+.model-hub-add-key-title {
+  --model-hub-add-key-title-size: 15px;
+  font-size: var(--model-hub-add-key-title-size);
+}
+.model-hub-add-key-subtitle {
+  --model-hub-add-key-subtitle-size: 10.5px;
+  font-size: var(--model-hub-add-key-subtitle-size);
+}
 .model-hub-add-key-body {
+  --model-hub-add-key-body-gap: 14px;
+  --model-hub-add-key-body-padding: 20px;
   padding: var(--model-hub-add-key-body-padding);
   gap: var(--model-hub-add-key-body-gap);
 }
@@ -610,11 +696,16 @@
   gap: var(--model-hub-add-key-field-gap);
 }
 .model-hub-add-key-label {
+  --model-hub-add-key-label-size: 11.5px;
   color: var(--model-hub-ink-8c);
   font-size: var(--model-hub-add-key-label-size);
   font-weight: 600;
 }
 .model-hub-add-key-input {
+  --model-hub-add-key-input-size: 11.5px;
+  --model-hub-add-key-input-padding: 12px;
+  --model-hub-add-key-input-radius: 8px;
+  --model-hub-add-key-input-height: 36px;
   height: var(--model-hub-add-key-input-height);
   border-radius: var(--model-hub-add-key-input-radius);
   border-color: var(--border);
@@ -673,6 +764,7 @@
    it goes to the trailing edge, out of the way of text that wraps; on the idle
    row it stays in the reading order, between the statement and its hint. */
 .model-hub-add-key-protocol-badge {
+  --model-hub-add-key-badge-size: 10px;
   flex-shrink: 0;
   align-self: center;
   border: 1px solid currentColor;
@@ -715,6 +807,10 @@
   flex-shrink: 0;
 }
 .model-hub-add-key-action {
+  --model-hub-add-key-action-size: 12px;
+  --model-hub-add-key-action-radius: 7px;
+  --model-hub-add-key-action-padding-x: 14px;
+  --model-hub-add-key-action-padding-y: 8px;
   height: auto;
   border-radius: var(--model-hub-add-key-action-radius);
   padding: var(--model-hub-add-key-action-padding-y) var(--model-hub-add-key-action-padding-x);
@@ -722,6 +818,8 @@
   font-weight: 600;
 }
 .model-hub-add-key-strip {
+  --model-hub-add-key-strip-padding-x: 13px;
+  --model-hub-add-key-strip-padding-y: 11px;
   display: flex;
   align-items: flex-start;
   gap: var(--model-hub-add-key-strip-gap);
@@ -732,18 +830,24 @@
 }
 .model-hub-add-key-strip--working { background: var(--model-hub-add-key-control-fill); }
 .model-hub-add-key-strip--error {
+  --model-hub-add-key-error-border: var(--model-hub-danger-border);
+  --model-hub-add-key-error-fill: var(--model-hub-danger-fill);
   border-color: var(--model-hub-add-key-error-border);
   background: var(--model-hub-add-key-error-fill);
 }
 .model-hub-add-key-strip--advisory {
+  --model-hub-add-key-advisory-border: var(--model-hub-gold-59);
+  --model-hub-add-key-advisory-fill: var(--model-hub-gold-14);
   border-color: var(--model-hub-add-key-advisory-border);
   background: var(--model-hub-add-key-advisory-fill);
 }
 .model-hub-add-key-strip--inventory {
+  --model-hub-add-key-inventory-height: 59px;
   min-height: var(--model-hub-add-key-inventory-height);
   align-items: center;
 }
 .model-hub-add-key-strip--success {
+  --model-hub-add-key-success-border: var(--model-hub-success-border);
   align-items: center;
   border-color: var(--model-hub-add-key-success-border);
   background: var(--model-hub-add-key-success-fill);
@@ -759,12 +863,16 @@
   font-weight: 600;
 }
 .model-hub-add-key-strip-detail {
+  --model-hub-add-key-strip-detail-line: 16px;
+  --model-hub-add-key-strip-detail-size: 10.5px;
   color: var(--model-hub-muted-b3);
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: var(--model-hub-add-key-strip-detail-size);
   line-height: var(--model-hub-add-key-strip-detail-line);
 }
 .model-hub-add-key-outcome-wrap {
+  --model-hub-add-key-outcome-padding-x: 20px;
+  --model-hub-add-key-outcome-padding-y: 14px;
   padding: var(--model-hub-add-key-outcome-padding-y) var(--model-hub-add-key-outcome-padding-x);
 }
 .model-hub-add-key-segments {
@@ -776,6 +884,10 @@
   background: var(--model-hub-wash-0a);
 }
 .model-hub-add-key-segment {
+  --model-hub-add-key-segment-size: 11.5px;
+  --model-hub-add-key-segment-radius: 6px;
+  --model-hub-add-key-segment-padding-x: 14px;
+  --model-hub-add-key-segment-padding-y: 7px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -790,6 +902,10 @@
   color: var(--mint-ink);
 }
 .model-hub-add-key-foot {
+  --model-hub-add-key-footer-fill: var(--model-hub-wash-05);
+  --model-hub-add-key-foot-gap: 8px;
+  --model-hub-add-key-foot-padding-x: 20px;
+  --model-hub-add-key-foot-padding-y: 14px;
   gap: var(--model-hub-add-key-foot-gap);
   padding: var(--model-hub-add-key-foot-padding-y) var(--model-hub-add-key-foot-padding-x);
   background: var(--model-hub-add-key-footer-fill);
@@ -798,6 +914,7 @@
  * token — see --model-hub-dim-brand-fill. The hover rule repeats the pair to
  * hold the button steady: a dimmed action is deliberately not interactive-looking. */
 .model-hub-add-key-action--dim {
+  --model-hub-add-key-dim-primary: var(--model-hub-dim-brand-fill);
   background: var(--model-hub-add-key-dim-primary);
   color: var(--mint-ink);
 }
@@ -813,33 +930,11 @@
   --model-hub-route-top: 300px;
   --model-hub-route-viewport-inset: 16px;
   --model-hub-route-radius: 14px;
-  --model-hub-route-head-height: 72px;
-  --model-hub-route-title-size: 15px;
-  --model-hub-route-subtitle-size: 10.5px;
   /* The design's 302px body is what a two-hop chain measures, not a fixed box:
      pinning it left short chains padded with dead space and long ones scrolling
      inside a dialog that never grew. It survives only as the anchor the top
      offset is computed from, so the resting placement still matches the design. */
   --model-hub-route-body-anchor: 302px;
-  --model-hub-route-body-gap: 14px;
-  --model-hub-route-label-size: 10.5px;
-  --model-hub-route-list-radius: 10px;
-  --model-hub-route-list-padding: 8px;
-  --model-hub-route-list-gap: 6px;
-  --model-hub-route-hop-height: 52px;
-  --model-hub-route-hop-radius: 8px;
-  --model-hub-route-hop-gap: 10px;
-  --model-hub-route-ordinal-size: 22px;
-  --model-hub-route-ordinal-radius: 6px;
-  --model-hub-route-add-height: 38px;
-  --model-hub-route-add-size: 11.5px;
-  --model-hub-route-hint-size: 11.5px;
-  --model-hub-route-hint-line: 17px;
-  --model-hub-route-hint-gap: 7px;
-  --model-hub-dialog-foot-height: 61px;
-  --model-hub-dialog-action-height: 33px;
-  --model-hub-dialog-action-radius: 7px;
-  --model-hub-dialog-action-size: 12px;
   --model-hub-route-offset: min(
     var(--model-hub-route-top),
     max(
@@ -875,13 +970,53 @@
 .model-hub-route-head { height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
 .model-hub-route-close { width: 26px; height: 26px; margin: -5px -5px -5px 0; color: var(--model-hub-ink-59); }
 .model-hub-route-close > svg { width: 15px; height: 15px; }
-.model-hub-route-title { font-size: var(--model-hub-route-title-size); }
-.model-hub-route-subtitle { font-size: var(--model-hub-route-subtitle-size); }
-.model-hub-route-body { min-height: 0; flex: 0 1 auto; overflow-y: auto; padding: 20px; gap: var(--model-hub-route-body-gap); }
-.model-hub-route-label { color: var(--model-hub-ink-73); font-size: var(--model-hub-route-label-size); letter-spacing: 1.1px; }
-.model-hub-route-list { padding: var(--model-hub-route-list-padding); gap: var(--model-hub-route-list-gap); border-color: var(--model-hub-wash-14); border-radius: var(--model-hub-route-list-radius); }
-.model-hub-route-hop { height: var(--model-hub-route-hop-height); padding-inline: 10px; gap: var(--model-hub-route-hop-gap); border-radius: var(--model-hub-route-hop-radius); }
-.model-hub-route-ordinal { width: var(--model-hub-route-ordinal-size); height: var(--model-hub-route-ordinal-size); border-radius: var(--model-hub-route-ordinal-radius); font-size: 11px; }
+.model-hub-route-title {
+  --model-hub-route-title-size: 15px;
+  font-size: var(--model-hub-route-title-size);
+}
+.model-hub-route-subtitle {
+  --model-hub-route-subtitle-size: 10.5px;
+  font-size: var(--model-hub-route-subtitle-size);
+}
+.model-hub-route-body {
+  --model-hub-route-body-gap: 14px;
+  min-height: 0;
+  flex: 0 1 auto;
+  overflow-y: auto;
+  padding: 20px;
+  gap: var(--model-hub-route-body-gap);
+}
+.model-hub-route-label {
+  --model-hub-route-label-size: 10.5px;
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-route-label-size);
+  letter-spacing: 1.1px;
+}
+.model-hub-route-list {
+  --model-hub-route-list-gap: 6px;
+  --model-hub-route-list-padding: 8px;
+  --model-hub-route-list-radius: 10px;
+  padding: var(--model-hub-route-list-padding);
+  gap: var(--model-hub-route-list-gap);
+  border-color: var(--model-hub-wash-14);
+  border-radius: var(--model-hub-route-list-radius);
+}
+.model-hub-route-hop {
+  --model-hub-route-hop-gap: 10px;
+  --model-hub-route-hop-height: 52px;
+  height: var(--model-hub-route-hop-height);
+  padding-inline: 10px;
+  gap: var(--model-hub-route-hop-gap);
+  border-radius: var(--model-hub-route-hop-radius);
+}
+.model-hub-route-ordinal {
+  --model-hub-route-ordinal-radius: 6px;
+  --model-hub-route-ordinal-size: 22px;
+  width: var(--model-hub-route-ordinal-size);
+  height: var(--model-hub-route-ordinal-size);
+  border-radius: var(--model-hub-route-ordinal-radius);
+  font-size: 11px;
+}
 .model-hub-route-hop-copy { gap: 3px; }
 .model-hub-route-hop-name { font-size: 12px; }
 .model-hub-route-hop-model { font-size: 10.5px; }
@@ -894,8 +1029,9 @@
    dialog, so it has to bound itself against the space Radix reports instead of
    letting a long model list run past the dialog and off the screen. Its metrics
    live here rather than on `.model-hub-route-dialog` because the popover is
-   portalled out of the dialog and inherits nothing from it — including the
-   dialog-action tokens the confirmation shares with the dialog's Cancel/Save.
+   portalled out of the dialog and inherits nothing from it — which is the same
+   reason the metrics its confirmation shares with the dialog's Cancel/Save are
+   declared at `:root` and not on either root.
 
    Bounding the panel is only half of it: the bound has to land on the list, so
    every fixed band (search, column head, confirm foot) stays out of the way and
@@ -904,9 +1040,6 @@
    to the one element that owns `overflow-y: auto`. */
 .model-hub-route-selector {
   --model-hub-route-selector-max: 300px;
-  --model-hub-route-selector-confirm-height: 33px;
-  --model-hub-route-selector-confirm-size: 12px;
-  --model-hub-dialog-action-radius: 7px;
   max-height: min(
     var(--model-hub-route-selector-max),
     var(--radix-popover-content-available-height, var(--model-hub-route-selector-max))
@@ -953,6 +1086,8 @@
   border-color: var(--model-hub-wash-14);
 }
 .model-hub-route-selector-confirm {
+  --model-hub-route-selector-confirm-size: 12px;
+  --model-hub-route-selector-confirm-height: 33px;
   height: var(--model-hub-route-selector-confirm-height);
   border-radius: var(--model-hub-dialog-action-radius);
   font-size: var(--model-hub-route-selector-confirm-size);
@@ -960,59 +1095,32 @@
 .model-hub-route-actions { gap: 4px; }
 .model-hub-route-action { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
 .model-hub-route-action > svg { width: 13px; height: 13px; }
-.model-hub-route-add { height: var(--model-hub-route-add-height); border-radius: var(--model-hub-route-hop-radius); border-color: var(--model-hub-wash-14); font-size: var(--model-hub-route-add-size); }
+.model-hub-route-add {
+  --model-hub-route-add-size: 11.5px;
+  --model-hub-route-add-height: 38px;
+  height: var(--model-hub-route-add-height);
+  border-radius: var(--model-hub-route-hop-radius);
+  border-color: var(--model-hub-wash-14);
+  font-size: var(--model-hub-route-add-size);
+}
 .model-hub-route-add > svg { width: 13px; height: 13px; }
 .model-hub-route-reseed { font-size: 12px; }
 .model-hub-route-reseed > svg { width: 12px; height: 12px; }
-.model-hub-route-hint { gap: var(--model-hub-route-hint-gap); color: var(--model-hub-ink-73); font-size: var(--model-hub-route-hint-size); line-height: var(--model-hub-route-hint-line); }
+.model-hub-route-hint {
+  --model-hub-route-hint-gap: 7px;
+  --model-hub-route-hint-line: 17px;
+  --model-hub-route-hint-size: 11.5px;
+  gap: var(--model-hub-route-hint-gap);
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-route-hint-size);
+  line-height: var(--model-hub-route-hint-line);
+}
 .model-hub-route-hint > svg { width: 13px; height: 13px; }
 .model-hub-route-hint-copy { width: 420px; max-width: calc(100% - 20px); }
 .model-hub-route-foot { height: var(--model-hub-dialog-foot-height); flex-shrink: 0; padding: 14px 20px; border-color: var(--model-hub-wash-14); }
 
 .model-hub-source-detail {
   --model-hub-source-gap: 0px;
-  --model-hub-source-radius: 0px;
-  --model-hub-source-bar-height: 82px;
-  --model-hub-source-bar-padding-y: 14px;
-  --model-hub-source-bar-padding-x: 20px;
-  --model-hub-source-bar-gap: 12px;
-  --model-hub-source-tile-size: 36px;
-  --model-hub-source-tile-radius: 9px;
-  --model-hub-source-action-height: 32px;
-  --model-hub-source-action-radius: 7px;
-  --model-hub-source-action-size: 12px;
-  --model-hub-source-table-head-height: 36px;
-  --model-hub-source-table-row-height: 40px;
-  --model-hub-source-table-draft-height: 56px;
-  --model-hub-source-table-columns: minmax(0, 1fr) minmax(120px, 180px) 64px;
-  --model-hub-source-table-gap: 12px;
-  --model-hub-source-table-padding-x: 20px;
-  --model-hub-source-table-padding-y: 7px;
-  --model-hub-source-notices-max-height: min(160px, 25dvh);
-  --model-hub-source-title-size: 15px;
-  --model-hub-source-state-size: 12px;
-  --model-hub-source-age-size: 11px;
-  --model-hub-source-summary-size: 10.5px;
-  --model-hub-source-copy-gap: 4px;
-  --model-hub-source-line-height: 17px;
-  --model-hub-source-summary-line: 15px;
-  --model-hub-source-label-size: 11px;
-  --model-hub-source-model-size: 12px;
-  --model-hub-source-pill-size: 10px;
-  --model-hub-source-tier-size: 10.5px;
-  --model-hub-source-footnote-size: 11.5px;
-  --model-hub-source-manual-input-radius: 7px;
-  --model-hub-source-summary-ink: var(--model-hub-muted-b3);
-  --model-hub-source-label-ink: var(--model-hub-ink-73);
-  --model-hub-source-footnote-ink: var(--model-hub-ink-8c);
-  --model-hub-source-table-head-fill: var(--model-hub-wash-05);
-  --model-hub-source-chip-fill: var(--model-hub-wash-0f);
-  --model-hub-source-chip-padding-y: 4px;
-  --model-hub-source-chip-padding-x: 9px;
-  --model-hub-source-pill-padding-y: 3px;
-  --model-hub-source-pill-padding-x: 8px;
-  --model-hub-source-entry-fill: var(--model-hub-wash-0a);
-  --model-hub-source-entry-manual-fill: var(--model-hub-wash-14);
   display: flex;
   min-height: 0;
   height: 100%;
@@ -1022,6 +1130,7 @@
 
 .model-hub-source-dialog { display: flex; }
 .model-hub-source-notices {
+  --model-hub-source-notices-max-height: min(160px, 25dvh);
   max-height: var(--model-hub-source-notices-max-height);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1038,6 +1147,10 @@
 }
 
 .model-hub-source-bar {
+  --model-hub-source-bar-gap: 12px;
+  --model-hub-source-bar-padding-x: 20px;
+  --model-hub-source-bar-padding-y: 14px;
+  --model-hub-source-bar-height: 82px;
   min-height: var(--model-hub-source-bar-height);
   padding: var(--model-hub-source-bar-padding-y) var(--model-hub-source-bar-padding-x);
   gap: var(--model-hub-source-bar-gap);
@@ -1045,11 +1158,16 @@
   border-radius: var(--model-hub-source-radius);
 }
 .model-hub-source-tile {
+  --model-hub-source-tile-radius: 9px;
+  --model-hub-source-tile-size: 36px;
   width: var(--model-hub-source-tile-size);
   height: var(--model-hub-source-tile-size);
   border-radius: var(--model-hub-source-tile-radius);
 }
-.model-hub-source-copy { gap: var(--model-hub-source-copy-gap); }
+.model-hub-source-copy {
+  --model-hub-source-copy-gap: 4px;
+  gap: var(--model-hub-source-copy-gap);
+}
 .model-hub-source-eyebrow {
   color: var(--model-hub-ink-59);
   font-size: 9.5px;
@@ -1057,16 +1175,30 @@
   letter-spacing: 0;
   line-height: 13px;
 }
-.model-hub-source-line { min-height: var(--model-hub-source-line-height); line-height: var(--model-hub-source-line-height); }
-.model-hub-source-title { font-size: var(--model-hub-source-title-size); }
-.model-hub-source-state { font-size: var(--model-hub-source-state-size); }
+.model-hub-source-line {
+  --model-hub-source-line-height: 17px;
+  min-height: var(--model-hub-source-line-height);
+  line-height: var(--model-hub-source-line-height);
+}
+.model-hub-source-title {
+  --model-hub-source-title-size: 15px;
+  font-size: var(--model-hub-source-title-size);
+}
+.model-hub-source-state {
+  --model-hub-source-state-size: 12px;
+  font-size: var(--model-hub-source-state-size);
+}
 .model-hub-source-age { font-size: var(--model-hub-source-age-size); }
 .model-hub-source-summary {
+  --model-hub-source-summary-line: 15px;
+  --model-hub-source-summary-size: 10.5px;
   color: var(--model-hub-source-summary-ink);
   font-size: var(--model-hub-source-summary-size);
   line-height: var(--model-hub-source-summary-line);
 }
 .model-hub-source-action {
+  --model-hub-source-action-size: 12px;
+  --model-hub-source-action-height: 32px;
   width: auto;
   height: var(--model-hub-source-action-height);
   padding-inline: 11px;
@@ -1112,6 +1244,9 @@
   background: var(--background);
 }
 .model-hub-source-table-head {
+  --model-hub-source-table-head-fill: var(--model-hub-wash-05);
+  --model-hub-source-label-size: 11px;
+  --model-hub-source-table-head-height: 36px;
   height: var(--model-hub-source-table-head-height);
   /* Grid items stretch by default, so a plain text cell renders its glyphs at
      the top of a 35px box while a `flex items-center` cell centres them. That
@@ -1128,22 +1263,31 @@
   padding-block: var(--model-hub-source-table-padding-y);
 }
 .model-hub-source-table-draft {
+  --model-hub-source-table-draft-height: 56px;
   min-height: var(--model-hub-source-table-draft-height);
   padding-block: var(--model-hub-source-table-padding-y);
-}
-.model-hub-source-table-add {
-  min-height: var(--model-hub-source-table-add-height);
-  padding-inline: var(--model-hub-source-table-padding-x);
 }
 .model-hub-source-add-hint {
   color: var(--model-hub-source-summary-ink);
   font-size: var(--model-hub-source-tier-size);
 }
-.model-hub-source-model { font-size: var(--model-hub-source-model-size); line-height: 16px; }
-.model-hub-source-manual-id { border-radius: var(--model-hub-source-manual-input-radius); }
-.model-hub-source-pill { font-size: var(--model-hub-source-pill-size); line-height: 14px; }
+.model-hub-source-model {
+  --model-hub-source-model-size: 12px;
+  font-size: var(--model-hub-source-model-size);
+  line-height: 16px;
+}
+.model-hub-source-manual-id {
+  --model-hub-source-manual-input-radius: 7px;
+  border-radius: var(--model-hub-source-manual-input-radius);
+}
+.model-hub-source-pill {
+  --model-hub-source-pill-size: 10px;
+  font-size: var(--model-hub-source-pill-size);
+  line-height: 14px;
+}
 .model-hub-source-tier { font-size: var(--model-hub-source-tier-size); }
 .model-hub-source-tier-chip {
+  --model-hub-source-chip-fill: var(--model-hub-wash-0f);
   background: var(--model-hub-source-chip-fill);
   padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
 }
@@ -1203,16 +1347,21 @@
 /* Entry pills are fills, not outlines, and the two origins differ by weight of
    fill and ink rather than by border. */
 .model-hub-source-entry-pill {
+  --model-hub-source-entry-fill: var(--model-hub-wash-0a);
+  --model-hub-source-pill-padding-x: 8px;
+  --model-hub-source-pill-padding-y: 3px;
   padding: var(--model-hub-source-pill-padding-y) var(--model-hub-source-pill-padding-x);
   border-color: transparent;
   background: var(--model-hub-source-entry-fill);
   color: var(--muted);
 }
 .model-hub-source-entry-pill--manual {
+  --model-hub-source-entry-manual-fill: var(--model-hub-wash-14);
   background: var(--model-hub-source-entry-manual-fill);
   color: var(--foreground);
 }
 .model-hub-source-footnote {
+  --model-hub-source-footnote-size: 11.5px;
   min-height: 16px;
   color: var(--model-hub-source-footnote-ink);
   font-size: var(--model-hub-source-footnote-size);
@@ -1220,13 +1369,14 @@
 }
 
 .model-hub-guard-overlay { background: var(--model-hub-scrim); }
-/* Only the chrome's metrics. The head, title, subtitle, close, foot and action
-   are this dialog's own furniture and render nowhere else, so they resolve here.
-   The evidence BODY below is a different kind of thing: `GuardImpact` and
-   `GuardGapList` are shared, and they mount inside four separate dialogs — this
-   one, the catalog dialog's in-row removal confirmation, the Add-key replace
-   phase, and the route chain's guard phase. A body token declared here reached
-   exactly one of them; in the other three `var()` named a property no ancestor
+/* The worked example behind the scope rule at the top of this file. The guard
+   dialog's own chrome — head, title, subtitle, close, foot, action — has one
+   reader each, so each metric sits on the class that reads it. The evidence
+   BODY below is a different kind of thing: `GuardImpact` and `GuardGapList` are
+   shared, and they mount inside four separate dialogs — this one, the catalog
+   dialog's in-row removal confirmation, the Add-key replace phase, and the
+   route chain's guard phase. A body token declared on this root reached exactly
+   one of them; in the other three `var()` named a property no ancestor
    declares, which is invalid at computed-value time, so the declaration drew
    nothing: the label lost its gap AND its size, and the count lost its padding
    AND its size, which is not a pill missing a margin but 「Hops that will be
@@ -1241,35 +1391,39 @@
 .model-hub-guard-dialog {
   --model-hub-guard-width: 520px;
   --model-hub-guard-radius: 14px;
-  --model-hub-guard-head-padding-y: 16px;
-  --model-hub-guard-head-padding-x: 20px;
-  --model-hub-guard-head-gap: 4px;
-  --model-hub-guard-title-size: 15px;
-  --model-hub-guard-subtitle-size: 10.5px;
-  --model-hub-guard-close-size: 27px;
-  --model-hub-guard-close-icon-size: 15px;
-  --model-hub-guard-foot-padding-y: 14px;
-  --model-hub-guard-foot-padding-x: 20px;
-  --model-hub-guard-foot-gap: 8px;
-  --model-hub-guard-action-padding-y: 8px;
-  --model-hub-guard-action-padding-x: 14px;
-  --model-hub-guard-action-radius: 7px;
-  --model-hub-guard-action-size: 12px;
   width: min(var(--model-hub-guard-width), calc(100vw - 32px));
   gap: 0;
   border-radius: var(--model-hub-guard-radius);
   box-shadow: var(--model-hub-dialog-shadow);
 }
 .model-hub-guard-head {
+  --model-hub-guard-head-gap: 4px;
+  --model-hub-guard-head-padding-x: 20px;
+  --model-hub-guard-head-padding-y: 16px;
   padding: var(--model-hub-guard-head-padding-y) var(--model-hub-guard-head-padding-x);
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-guard-head-gap);
   border-bottom: 1px solid var(--border);
 }
-.model-hub-guard-title { font-size: var(--model-hub-guard-title-size); font-weight: 700; }
-.model-hub-guard-subtitle { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: var(--model-hub-guard-subtitle-size); }
-.model-hub-guard-close { width: var(--model-hub-guard-close-size); height: var(--model-hub-guard-close-size); color: var(--model-hub-ink-59); }
+.model-hub-guard-title {
+  --model-hub-guard-title-size: 15px;
+  font-size: var(--model-hub-guard-title-size);
+  font-weight: 700;
+}
+.model-hub-guard-subtitle {
+  --model-hub-guard-subtitle-size: 10.5px;
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--model-hub-guard-subtitle-size);
+}
+.model-hub-guard-close {
+  --model-hub-guard-close-icon-size: 15px;
+  --model-hub-guard-close-size: 27px;
+  width: var(--model-hub-guard-close-size);
+  height: var(--model-hub-guard-close-size);
+  color: var(--model-hub-ink-59);
+}
 .model-hub-guard-close svg { width: var(--model-hub-guard-close-icon-size); height: var(--model-hub-guard-close-icon-size); }
 /* The travelling body. Each class declares the metrics it and its own
    selector-descendants consume, so none of them depends on where a caller
@@ -1343,34 +1497,56 @@
   line-height: var(--model-hub-guard-hint-line);
 }
 .model-hub-guard-hint svg { width: var(--model-hub-guard-hint-icon-size); height: var(--model-hub-guard-hint-icon-size); margin-top: var(--model-hub-guard-hint-icon-offset); flex: none; color: var(--model-hub-ink-59); }
-.model-hub-guard-foot { padding: var(--model-hub-guard-foot-padding-y) var(--model-hub-guard-foot-padding-x); display: flex; align-items: center; justify-content: flex-end; gap: var(--model-hub-guard-foot-gap); border-top: 1px solid var(--border); background: var(--model-hub-wash-05); }
-.model-hub-guard-action { height: auto; padding: var(--model-hub-guard-action-padding-y) var(--model-hub-guard-action-padding-x); border-radius: var(--model-hub-guard-action-radius); font-size: var(--model-hub-guard-action-size); font-weight: 600; }
+.model-hub-guard-foot {
+  --model-hub-guard-foot-gap: 8px;
+  --model-hub-guard-foot-padding-x: 20px;
+  --model-hub-guard-foot-padding-y: 14px;
+  padding: var(--model-hub-guard-foot-padding-y) var(--model-hub-guard-foot-padding-x);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--model-hub-guard-foot-gap);
+  border-top: 1px solid var(--border);
+  background: var(--model-hub-wash-05);
+}
+.model-hub-guard-action {
+  --model-hub-guard-action-size: 12px;
+  --model-hub-guard-action-radius: 7px;
+  --model-hub-guard-action-padding-x: 14px;
+  --model-hub-guard-action-padding-y: 8px;
+  height: auto;
+  padding: var(--model-hub-guard-action-padding-y) var(--model-hub-guard-action-padding-x);
+  border-radius: var(--model-hub-guard-action-radius);
+  font-size: var(--model-hub-guard-action-size);
+  font-weight: 600;
+}
 
 .model-hub-direct {
-  --model-hub-direct-gap: 16px;
-  --model-hub-direct-benefits-width: 452px;
-  --model-hub-direct-card-height: 330px;
-  --model-hub-direct-radius: 14px;
-  --model-hub-direct-head-height: 56px;
-  --model-hub-direct-content-padding: 12px;
-  --model-hub-direct-content-gap: 10px;
-  --model-hub-direct-row-radius: 10px;
-  --model-hub-direct-note-height: 49px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-direct-gap);
 }
-.model-hub-direct-grid { gap: var(--model-hub-direct-gap); }
+.model-hub-direct-grid {
+  --model-hub-direct-benefits-width: 452px;
+  gap: var(--model-hub-direct-gap);
+}
 .model-hub-direct-card {
+  --model-hub-direct-card-height: 330px;
   min-height: var(--model-hub-direct-card-height);
   border-radius: var(--model-hub-direct-radius);
 }
-.model-hub-direct-head { min-height: var(--model-hub-direct-head-height); }
+.model-hub-direct-head {
+  --model-hub-direct-head-height: 56px;
+  min-height: var(--model-hub-direct-head-height);
+}
 .model-hub-direct-content {
+  --model-hub-direct-content-gap: 10px;
+  --model-hub-direct-content-padding: 12px;
   padding: var(--model-hub-direct-content-padding);
   gap: var(--model-hub-direct-content-gap);
 }
 .model-hub-direct-row {
+  --model-hub-direct-row-radius: 10px;
   border: 1px solid var(--model-hub-wash-14);
   border-radius: var(--model-hub-direct-row-radius);
 }
@@ -1389,6 +1565,7 @@
 .model-hub-direct-benefit-title-row { width: 100%; }
 .model-hub-direct-benefit-detail { width: 100%; color: var(--muted); font-size: 11.5px; line-height: 19px; }
 .model-hub-direct-note {
+  --model-hub-direct-note-height: 49px;
   min-height: var(--model-hub-direct-note-height);
   padding: 14px 18px;
   border-radius: var(--model-hub-direct-radius);
@@ -1436,75 +1613,48 @@
 
 .model-hub-order-drawer {
   --model-hub-order-width: 460px;
-  --model-hub-order-head-padding-y: 18px;
-  --model-hub-order-head-padding-x: 20px;
-  --model-hub-order-head-gap: 6px;
-  --model-hub-order-title-size: 15px;
-  --model-hub-order-subtitle-size: 11.5px;
-  --model-hub-order-subtitle-line: 17px;
-  --model-hub-order-body-padding: 20px;
-  --model-hub-order-body-gap: 18px;
-  --model-hub-order-section-gap: 8px;
-  --model-hub-order-section-size: 10.5px;
-  --model-hub-order-row-height: 58px;
-  --model-hub-order-row-radius: 9px;
-  --model-hub-order-row-padding-x: 12px;
-  --model-hub-order-row-gap: 10px;
-  --model-hub-order-row-ordered: var(--model-hub-wash-08);
-  --model-hub-order-row-held: var(--model-hub-wash-05);
-  --model-hub-order-grip-size: 14px;
-  --model-hub-order-grip-ink: var(--model-hub-ink-4d);
-  --model-hub-order-grip-dim: var(--model-hub-wash-33);
-  --model-hub-order-ordinal-size: 22px;
-  --model-hub-order-ordinal-radius: 6px;
-  --model-hub-order-ordinal-fill: var(--model-hub-wash-0a);
-  --model-hub-order-name-size: 12.5px;
-  --model-hub-order-meta-size: 10.5px;
-  --model-hub-order-tag-padding-y: 3px;
-  --model-hub-order-tag-padding-x: 8px;
-  --model-hub-order-tag-size: 10px;
-  --model-hub-order-action-padding-y: 9px;
-  --model-hub-order-action-padding-x: 12px;
-  --model-hub-order-action-radius: 8px;
-  --model-hub-order-action-size: 11.5px;
-  --model-hub-order-foot-padding-y: 14px;
-  --model-hub-order-foot-padding-x: 20px;
-  --model-hub-order-foot-gap: 8px;
-  --model-hub-order-foot-fill: var(--model-hub-wash-05);
-  --model-hub-order-foot-action-padding-y: 8px;
-  --model-hub-order-foot-action-padding-x: 14px;
-  --model-hub-order-foot-action-radius: 7px;
-  --model-hub-order-foot-action-size: 12px;
   width: min(var(--model-hub-order-width), 100vw);
   border-left: 1px solid var(--border-strong);
   box-shadow: var(--model-hub-drawer-shadow);
 }
 
 .model-hub-order-head {
+  --model-hub-order-head-gap: 6px;
+  --model-hub-order-head-padding-x: 20px;
+  --model-hub-order-head-padding-y: 18px;
   min-height: 82px;
   padding: var(--model-hub-order-head-padding-y) var(--model-hub-order-head-padding-x);
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-order-head-gap);
 }
-.model-hub-order-title { font-size: var(--model-hub-order-title-size); }
+.model-hub-order-title {
+  --model-hub-order-title-size: 15px;
+  font-size: var(--model-hub-order-title-size);
+}
 .model-hub-order-info { width: 13px; height: 13px; color: var(--model-hub-ink-59); }
 .model-hub-order-subtitle {
+  --model-hub-order-subtitle-line: 17px;
+  --model-hub-order-subtitle-size: 11.5px;
   color: var(--model-hub-ink-73);
   font-size: var(--model-hub-order-subtitle-size);
   line-height: var(--model-hub-order-subtitle-line);
 }
 .model-hub-order-close { color: var(--model-hub-ink-59); }
 .model-hub-order-body {
+  --model-hub-order-body-gap: 18px;
+  --model-hub-order-body-padding: 20px;
   padding: var(--model-hub-order-body-padding);
   gap: var(--model-hub-order-body-gap);
 }
 .model-hub-order-section {
+  --model-hub-order-section-gap: 8px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-order-section-gap);
 }
 .model-hub-order-section-head {
+  --model-hub-order-section-size: 10.5px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -1549,6 +1699,8 @@
   line-height: 15px;
 }
 .model-hub-order-row {
+  --model-hub-order-row-gap: 10px;
+  --model-hub-order-row-padding-x: 12px;
   height: var(--model-hub-order-row-height);
   padding-inline: var(--model-hub-order-row-padding-x);
   display: flex;
@@ -1557,9 +1709,16 @@
   border: 1px solid var(--border);
   border-radius: var(--model-hub-order-row-radius);
 }
-.model-hub-order-row--ordered { background: var(--model-hub-order-row-ordered); }
-.model-hub-order-row--held { background: var(--model-hub-order-row-held); }
+.model-hub-order-row--ordered {
+  --model-hub-order-row-ordered: var(--model-hub-wash-08);
+  background: var(--model-hub-order-row-ordered);
+}
+.model-hub-order-row--held {
+  --model-hub-order-row-held: var(--model-hub-wash-05);
+  background: var(--model-hub-order-row-held);
+}
 .model-hub-order-grip {
+  --model-hub-order-grip-ink: var(--model-hub-ink-4d);
   width: var(--model-hub-order-grip-size);
   height: var(--model-hub-order-grip-size);
   flex: none;
@@ -1569,6 +1728,9 @@
 .model-hub-order-grip:disabled { color: var(--model-hub-order-grip-dim); }
 .model-hub-order-grip.is-grabbed { color: var(--mint-ink); }
 .model-hub-order-ordinal {
+  --model-hub-order-ordinal-fill: var(--model-hub-wash-0a);
+  --model-hub-order-ordinal-radius: 6px;
+  --model-hub-order-ordinal-size: 22px;
   width: var(--model-hub-order-ordinal-size);
   height: var(--model-hub-order-ordinal-size);
   display: inline-flex;
@@ -1583,7 +1745,11 @@
   font-weight: 400;
 }
 .model-hub-order-ordinal.is-first { background: var(--mint-soft); color: var(--mint-ink); }
-.model-hub-order-name { font-size: var(--model-hub-order-name-size); font-weight: 600; }
+.model-hub-order-name {
+  --model-hub-order-name-size: 12.5px;
+  font-size: var(--model-hub-order-name-size);
+  font-weight: 600;
+}
 .model-hub-order-identity {
   display: flex;
   min-width: 0;
@@ -1600,6 +1766,9 @@
   line-height: normal;
 }
 .model-hub-order-tag {
+  --model-hub-order-tag-size: 10px;
+  --model-hub-order-tag-padding-x: 8px;
+  --model-hub-order-tag-padding-y: 3px;
   padding: var(--model-hub-order-tag-padding-y) var(--model-hub-order-tag-padding-x);
   flex: none;
   border: 1px solid var(--border);
@@ -1609,6 +1778,10 @@
   font-weight: 600;
 }
 .model-hub-order-row-action {
+  --model-hub-order-action-size: 11.5px;
+  --model-hub-order-action-radius: 8px;
+  --model-hub-order-action-padding-x: 12px;
+  --model-hub-order-action-padding-y: 9px;
   min-height: 31px;
   padding: var(--model-hub-order-action-padding-y) var(--model-hub-order-action-padding-x);
   border-radius: var(--model-hub-order-action-radius);
@@ -1630,12 +1803,20 @@
 }
 .model-hub-order-state--error { color: var(--destructive-ink); }
 .model-hub-order-foot {
+  --model-hub-order-foot-fill: var(--model-hub-wash-05);
+  --model-hub-order-foot-gap: 8px;
+  --model-hub-order-foot-padding-x: 20px;
+  --model-hub-order-foot-padding-y: 14px;
   min-height: 61px;
   padding: var(--model-hub-order-foot-padding-y) var(--model-hub-order-foot-padding-x);
   gap: var(--model-hub-order-foot-gap);
   background: var(--model-hub-order-foot-fill);
 }
 .model-hub-order-action {
+  --model-hub-order-foot-action-size: 12px;
+  --model-hub-order-foot-action-radius: 7px;
+  --model-hub-order-foot-action-padding-x: 14px;
+  --model-hub-order-foot-action-padding-y: 8px;
   min-height: 33px;
   padding: var(--model-hub-order-foot-action-padding-y) var(--model-hub-order-foot-action-padding-x);
   border-radius: var(--model-hub-order-foot-action-radius);
@@ -1651,27 +1832,6 @@
   --model-hub-adopt-width: 560px;
   --model-hub-adopt-radius: 14px;
   --model-hub-adopt-shadow: var(--model-hub-dialog-shadow);
-  --model-hub-adopt-head-padding-y: 16px;
-  --model-hub-adopt-head-padding-x: 20px;
-  --model-hub-adopt-head-gap: 4px;
-  --model-hub-adopt-title-size: 15px;
-  --model-hub-adopt-close-size: 15px;
-  --model-hub-adopt-subtitle-size: 11.5px;
-  --model-hub-adopt-body-padding: 20px;
-  --model-hub-adopt-body-gap: 16px;
-  --model-hub-adopt-section-gap: 8px;
-  --model-hub-adopt-section-size: 11.5px;
-  --model-hub-adopt-bullet-gap: 9px;
-  --model-hub-adopt-bullet-icon: 13px;
-  --model-hub-adopt-bullet-size: 12.5px;
-  --model-hub-adopt-bullet-line: 20px;
-  --model-hub-adopt-foot-fill: var(--model-hub-wash-05);
-  --model-hub-adopt-foot-padding-y: 14px;
-  --model-hub-adopt-foot-padding-x: 20px;
-  --model-hub-adopt-action-padding-y: 8px;
-  --model-hub-adopt-action-padding-x: 14px;
-  --model-hub-adopt-action-radius: 7px;
-  --model-hub-adopt-action-size: 12px;
   width: min(var(--model-hub-adopt-width), calc(100vw - 32px));
   max-width: var(--model-hub-adopt-width);
   max-height: calc(100dvh - 32px);
@@ -1680,25 +1840,36 @@
   box-shadow: var(--model-hub-adopt-shadow);
 }
 .model-hub-adopt-head {
+  --model-hub-adopt-head-gap: 4px;
+  --model-hub-adopt-head-padding-x: 20px;
+  --model-hub-adopt-head-padding-y: 16px;
   padding: var(--model-hub-adopt-head-padding-y) var(--model-hub-adopt-head-padding-x);
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-adopt-head-gap);
   border-bottom: 1px solid var(--border);
 }
-.model-hub-adopt-title { font-size: var(--model-hub-adopt-title-size); font-weight: 700; }
+.model-hub-adopt-title {
+  --model-hub-adopt-title-size: 15px;
+  font-size: var(--model-hub-adopt-title-size);
+  font-weight: 700;
+}
 .model-hub-adopt-close {
+  --model-hub-adopt-close-size: 15px;
   width: 27px;
   height: 27px;
   color: var(--model-hub-ink-59);
 }
 .model-hub-adopt-close svg { width: var(--model-hub-adopt-close-size); height: var(--model-hub-adopt-close-size); }
 .model-hub-adopt-subtitle {
+  --model-hub-adopt-subtitle-size: 11.5px;
   color: var(--model-hub-muted-b3);
   font-family: 'JetBrains Mono', monospace;
   font-size: var(--model-hub-adopt-subtitle-size);
 }
 .model-hub-adopt-body {
+  --model-hub-adopt-body-gap: 16px;
+  --model-hub-adopt-body-padding: 20px;
   padding: var(--model-hub-adopt-body-padding);
   display: flex;
   flex-direction: column;
@@ -1706,6 +1877,8 @@
   overflow-y: auto;
 }
 .model-hub-adopt-section {
+  --model-hub-adopt-section-size: 11.5px;
+  --model-hub-adopt-section-gap: 8px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-adopt-section-gap);
@@ -1716,6 +1889,10 @@
   font-weight: 600;
 }
 .model-hub-adopt-bullet {
+  --model-hub-adopt-bullet-line: 20px;
+  --model-hub-adopt-bullet-size: 12.5px;
+  --model-hub-adopt-bullet-icon: 13px;
+  --model-hub-adopt-bullet-gap: 9px;
   display: flex;
   align-items: flex-start;
   gap: var(--model-hub-adopt-bullet-gap);
@@ -1754,6 +1931,9 @@
   font-size: 10.5px;
 }
 .model-hub-adopt-foot {
+  --model-hub-adopt-foot-padding-x: 20px;
+  --model-hub-adopt-foot-padding-y: 14px;
+  --model-hub-adopt-foot-fill: var(--model-hub-wash-05);
   padding: var(--model-hub-adopt-foot-padding-y) var(--model-hub-adopt-foot-padding-x);
   display: flex;
   align-items: center;
@@ -1763,6 +1943,10 @@
   background: var(--model-hub-adopt-foot-fill);
 }
 .model-hub-adopt-action {
+  --model-hub-adopt-action-size: 12px;
+  --model-hub-adopt-action-radius: 7px;
+  --model-hub-adopt-action-padding-x: 14px;
+  --model-hub-adopt-action-padding-y: 8px;
   min-height: 33px;
   padding: var(--model-hub-adopt-action-padding-y) var(--model-hub-adopt-action-padding-x);
   border-radius: var(--model-hub-adopt-action-radius);
@@ -1785,37 +1969,13 @@
  */
 .model-hub-usage {
   --model-hub-usage-gap: 16px;
-  --model-hub-usage-bar-padding-y: 13px;
-  --model-hub-usage-bar-padding-x: 18px;
-  --model-hub-usage-padding-x: 18px;
-  --model-hub-usage-head-height: 36px;
-  --model-hub-usage-row-min-height: 46px;
-  --model-hub-usage-row-padding-y: 9px;
-  --model-hub-usage-columns: minmax(0, 1fr) 104px 84px 84px 116px;
-  --model-hub-usage-gutter: 16px;
-  --model-hub-usage-title-size: 13px;
-  --model-hub-usage-section-size: 12px;
-  --model-hub-usage-label-size: 11px;
-  --model-hub-usage-value-size: 20px;
-  --model-hub-usage-cell-size: 12px;
-  --model-hub-usage-note-size: 10.5px;
-  --model-hub-usage-model-indent: 14px;
-  --model-hub-usage-chart-height: 132px;
-  --model-hub-usage-chart-gap: 3px;
-  --model-hub-usage-column-radius: 2px;
-  --model-hub-usage-axis-gap: 12px;
-  --model-hub-usage-axis-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
-  --model-hub-usage-head-fill: var(--model-hub-wash-05);
-  --model-hub-usage-label-ink: var(--model-hub-ink-73);
-  --model-hub-usage-note-ink: var(--model-hub-muted-b3);
-  --model-hub-usage-model-ink: var(--model-hub-ink-8c);
-  --model-hub-usage-track-fill: var(--model-hub-wash-08);
-  --model-hub-usage-column-fill: color-mix(in srgb, var(--mint) 55%, transparent);
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-usage-gap);
 }
 .model-hub-usage-bar {
+  --model-hub-usage-bar-padding-x: 18px;
+  --model-hub-usage-bar-padding-y: 13px;
   padding: var(--model-hub-usage-bar-padding-y) var(--model-hub-usage-bar-padding-x);
 }
 .model-hub-usage-title { font-size: var(--model-hub-usage-title-size); }
@@ -1841,6 +2001,7 @@
   font-size: var(--model-hub-usage-label-size);
 }
 .model-hub-usage-stat-value {
+  --model-hub-usage-value-size: 20px;
   font-size: var(--model-hub-usage-value-size);
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
@@ -1852,10 +2013,15 @@
 .model-hub-usage-card-head {
   padding: 11px var(--model-hub-usage-padding-x);
 }
-.model-hub-usage-section-title { font-size: var(--model-hub-usage-section-size); }
+.model-hub-usage-section-title {
+  --model-hub-usage-section-size: 12px;
+  font-size: var(--model-hub-usage-section-size);
+}
 /* Grid items stretch by default, which would leave a plain text cell drawing its
  * glyphs against the top of the box while a flex cell beside it centres them. */
 .model-hub-usage-head {
+  --model-hub-usage-head-fill: var(--model-hub-wash-05);
+  --model-hub-usage-head-height: 36px;
   min-height: var(--model-hub-usage-head-height);
   padding: 0 var(--model-hub-usage-padding-x);
   grid-template-columns: var(--model-hub-usage-columns);
@@ -1866,6 +2032,8 @@
   font-size: var(--model-hub-usage-label-size);
 }
 .model-hub-usage-row {
+  --model-hub-usage-row-padding-y: 9px;
+  --model-hub-usage-row-min-height: 46px;
   min-height: var(--model-hub-usage-row-min-height);
   padding: var(--model-hub-usage-row-padding-y) var(--model-hub-usage-padding-x);
   grid-template-columns: var(--model-hub-usage-columns);
@@ -1873,6 +2041,8 @@
   font-size: var(--model-hub-usage-cell-size);
 }
 .model-hub-usage-row--model {
+  --model-hub-usage-model-ink: var(--model-hub-ink-8c);
+  --model-hub-usage-model-indent: 14px;
   padding-left: calc(var(--model-hub-usage-padding-x) + var(--model-hub-usage-model-indent));
   color: var(--model-hub-usage-model-ink);
 }
@@ -1894,6 +2064,8 @@
   gap: 9px;
 }
 .model-hub-usage-chart {
+  --model-hub-usage-chart-gap: 3px;
+  --model-hub-usage-chart-height: 132px;
   height: var(--model-hub-usage-chart-height);
   gap: var(--model-hub-usage-chart-gap);
 }
@@ -1901,17 +2073,21 @@
  * empty row cannot be told apart from a day the report never covered, and that
  * distinction is the reason the series is plotted day by day at all. */
 .model-hub-usage-track {
+  --model-hub-usage-track-fill: var(--model-hub-wash-08);
   min-width: 0;
   height: 100%;
   border-radius: var(--model-hub-usage-column-radius);
   background: var(--model-hub-usage-track-fill);
 }
 .model-hub-usage-column {
+  --model-hub-usage-column-fill: color-mix(in srgb, var(--mint) 55%, transparent);
   border-radius: var(--model-hub-usage-column-radius);
   background: var(--model-hub-usage-column-fill);
 }
 .model-hub-usage-a11y-table { contain: strict; }
 .model-hub-usage-axis {
+  --model-hub-usage-axis-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+  --model-hub-usage-axis-gap: 12px;
   display: grid;
   grid-template-columns: var(--model-hub-usage-axis-columns);
   gap: var(--model-hub-usage-axis-gap);
@@ -2003,16 +2179,19 @@
 }
 
 .model-hub-wire-node {
+  --model-hub-wire-node: 7px;
   r: calc(var(--model-hub-wire-node) / 2);
 }
 
 .model-hub-wire-node--shared-anchor {
+  --model-hub-wire-node-stroke: 1.25px;
   fill: var(--background);
   stroke: var(--model-hub-ink-73);
   stroke-width: var(--model-hub-wire-node-stroke);
 }
 
 .model-hub-legend {
+  --model-hub-legend-height: 34px;
   min-height: var(--model-hub-legend-height);
 }
 
@@ -2027,55 +2206,36 @@
 }
 
 /* ── Backend model catalog ────────────────────────────────────────────────
- * The catalog dialog and its row editor. One block for both: they are two
- * halves of one editing surface, and the metrics they share — the 40px control
- * height that puts search and 「Add model」 on one line, the row borders, the
- * chip shape — drift the moment they are declared twice.
+ * The catalog dialog and its row editor: two halves of one editing surface. The
+ * metrics they share — the 40px control height that puts search and 「Add model」
+ * on one line, the row borders, the chip shape — drift the moment they are
+ * declared twice, so each is declared once in the shared block at the top.
  */
 
-.model-hub-catalog-dialog {
-  --model-hub-catalog-pad-x: 20px;
-  --model-hub-catalog-head-height: 70px;
-  --model-hub-catalog-title-size: 18px;
-  --model-hub-catalog-body-gap: 12px;
-  --model-hub-catalog-control-height: 40px;
-  --model-hub-catalog-control-radius: 8px;
-  --model-hub-catalog-column-size: 11px;
-  --model-hub-catalog-row-height: 62px;
-  --model-hub-catalog-row-radius: 10px;
-  --model-hub-catalog-row-pad-x: 16px;
-  --model-hub-catalog-row-pad-y: 10px;
-  --model-hub-catalog-row-gap: 14px;
-  --model-hub-catalog-row-locked-fill: var(--model-hub-wash-05);
-  --model-hub-catalog-grip-size: 16px;
-  --model-hub-catalog-grip-ink: var(--model-hub-ink-4d);
-  --model-hub-catalog-name-size: 13.5px;
-  --model-hub-catalog-id-size: 11.5px;
-  --model-hub-catalog-action-size: 32px;
-  --model-hub-catalog-action-radius: 8px;
-  --model-hub-catalog-foot-pad-y: 14px;
-  --model-hub-catalog-count-size: 12px;
-  --model-hub-catalog-note-size: 11px;
-  --model-hub-catalog-consequence-size: 12px;
-  --model-hub-catalog-confirm-height: 32px;
-  --model-hub-catalog-confirm-pad-x: 14px;
-}
-
 .model-hub-catalog-head {
+  --model-hub-catalog-head-height: 70px;
   min-height: var(--model-hub-catalog-head-height);
   padding: 0 var(--model-hub-catalog-pad-x);
 }
-.model-hub-catalog-title { font-size: var(--model-hub-catalog-title-size); }
+.model-hub-catalog-title {
+  --model-hub-catalog-title-size: 18px;
+  font-size: var(--model-hub-catalog-title-size);
+}
 
 .model-hub-catalog-body {
+  --model-hub-catalog-body-gap: 12px;
   gap: var(--model-hub-catalog-body-gap);
   padding: 16px var(--model-hub-catalog-pad-x) 0;
 }
 
 /* The one height search and 「Add model」 both answer to. */
-.model-hub-catalog-control { height: var(--model-hub-catalog-control-height); }
+.model-hub-catalog-control {
+  --model-hub-catalog-control-height: 40px;
+  height: var(--model-hub-catalog-control-height);
+}
 
 .model-hub-catalog-search {
+  --model-hub-catalog-control-radius: 8px;
   padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: var(--model-hub-catalog-control-radius);
@@ -2087,6 +2247,7 @@
 }
 
 .model-hub-catalog-columns {
+  --model-hub-catalog-column-size: 11px;
   padding: 4px 4px 0;
   font-size: var(--model-hub-catalog-column-size);
   font-weight: 600;
@@ -2094,13 +2255,18 @@
 }
 
 .model-hub-catalog-row {
+  --model-hub-catalog-row-radius: 10px;
+  --model-hub-catalog-row-height: 62px;
   min-height: var(--model-hub-catalog-row-height);
   padding: var(--model-hub-catalog-row-pad-y) var(--model-hub-catalog-row-pad-x);
   border: 1px solid var(--border);
   border-radius: var(--model-hub-catalog-row-radius);
   background: var(--background);
 }
-.model-hub-catalog-row--locked { background: var(--model-hub-catalog-row-locked-fill); }
+.model-hub-catalog-row--locked {
+  --model-hub-catalog-row-locked-fill: var(--model-hub-wash-05);
+  background: var(--model-hub-catalog-row-locked-fill);
+}
 .model-hub-catalog-row--static { min-height: 48px; }
 /* A row being asked about is the row the answer applies to, so the question
  * stays inside it and the stronger border says which one is waiting. */
@@ -2127,16 +2293,20 @@
 }
 
 .model-hub-catalog-name {
+  --model-hub-catalog-name-size: 13.5px;
   font-size: var(--model-hub-catalog-name-size);
   font-weight: 600;
   color: var(--foreground);
 }
 .model-hub-catalog-id {
+  --model-hub-catalog-id-size: 11.5px;
   font-size: var(--model-hub-catalog-id-size);
   color: var(--muted);
 }
 
 .model-hub-catalog-action {
+  --model-hub-catalog-action-radius: 8px;
+  --model-hub-catalog-action-size: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2185,6 +2355,7 @@
  * scale — the dialog's own wrapper is sized for a dialog and would push the row
  * open. Same gap as the question it sits in. */
 .model-hub-catalog-consequence {
+  --model-hub-catalog-consequence-size: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2192,6 +2363,8 @@
   color: var(--foreground);
 }
 .model-hub-catalog-confirm-action {
+  --model-hub-catalog-confirm-pad-x: 14px;
+  --model-hub-catalog-confirm-height: 32px;
   height: var(--model-hub-catalog-confirm-height);
   padding: 0 var(--model-hub-catalog-confirm-pad-x);
 }
@@ -2203,42 +2376,33 @@
 }
 
 .model-hub-catalog-foot {
+  --model-hub-catalog-foot-pad-y: 14px;
   padding: var(--model-hub-catalog-foot-pad-y) var(--model-hub-catalog-pad-x);
 }
 .model-hub-catalog-count {
+  --model-hub-catalog-count-size: 12px;
   font-size: var(--model-hub-catalog-count-size);
   color: var(--muted);
 }
 
-.model-hub-model-editor {
-  --model-hub-model-pad-x: 24px;
-  --model-hub-model-head-height: 84px;
-  --model-hub-model-eyebrow-size: 11px;
-  --model-hub-model-title-size: 18px;
-  --model-hub-model-section-gap: 20px;
-  --model-hub-model-section-size: 11px;
-  --model-hub-model-label-size: 12px;
-  --model-hub-model-control-height: 40px;
-  --model-hub-model-control-radius: 8px;
-  --model-hub-model-chip-height: 28px;
-  --model-hub-model-chip-radius: 7px;
-  --model-hub-model-chip-size: 12px;
-  --model-hub-model-note-size: 11px;
-  --model-hub-model-match-height: 31px;
-}
-
 .model-hub-model-editor-head {
+  --model-hub-model-head-height: 84px;
   min-height: var(--model-hub-model-head-height);
   padding: 0 var(--model-hub-model-pad-x);
 }
 .model-hub-model-editor-eyebrow {
+  --model-hub-model-eyebrow-size: 11px;
   font-size: var(--model-hub-model-eyebrow-size);
   font-weight: 600;
   color: var(--muted);
 }
-.model-hub-model-editor-title { font-size: var(--model-hub-model-title-size); }
+.model-hub-model-editor-title {
+  --model-hub-model-title-size: 18px;
+  font-size: var(--model-hub-model-title-size);
+}
 
 .model-hub-model-editor-body {
+  --model-hub-model-section-gap: 20px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-model-section-gap);
@@ -2252,18 +2416,23 @@
   gap: 10px;
 }
 .model-hub-model-section-label {
+  --model-hub-model-section-size: 11px;
   font-size: var(--model-hub-model-section-size);
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--muted);
 }
 .model-hub-model-field-label {
+  --model-hub-model-label-size: 12px;
   font-size: var(--model-hub-model-label-size);
   font-weight: 600;
   color: var(--foreground);
 }
 
-.model-hub-model-control { height: var(--model-hub-model-control-height); }
+.model-hub-model-control {
+  --model-hub-model-control-height: 40px;
+  height: var(--model-hub-model-control-height);
+}
 
 .model-hub-model-token {
   padding: 0 12px;
@@ -2282,6 +2451,9 @@
 }
 
 .model-hub-model-chip {
+  --model-hub-model-chip-size: 12px;
+  --model-hub-model-chip-radius: 7px;
+  --model-hub-model-chip-height: 28px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2376,34 +2548,20 @@
  * line of text, not an editable record.
  */
 
-.model-hub-picker {
-  --model-hub-picker-group-gap: 8px;
-  --model-hub-picker-group-inner-gap: 4px;
-  --model-hub-picker-head-size: 11px;
-  --model-hub-picker-row-height: 36px;
-  --model-hub-picker-row-radius: 8px;
-  --model-hub-picker-row-pad-x: 12px;
-  --model-hub-picker-row-gap: 10px;
-  --model-hub-picker-name-size: 12.5px;
-  --model-hub-picker-id-size: 11px;
-  --model-hub-picker-suppliers-row-height: 52px;
-  /* What a stacked row measures (frame B‴): the strip sits 4px under the name
-   * it belongs to. The indent is not a length — the strip starts where the
-   * entry does, which is already past the checkbox. */
-  --model-hub-picker-stack-gap: 4px;
-}
-
 .model-hub-picker-list {
+  --model-hub-picker-group-gap: 8px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-picker-group-gap);
 }
 .model-hub-picker-group {
+  --model-hub-picker-group-inner-gap: 4px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-picker-group-inner-gap);
 }
 .model-hub-picker-group-head {
+  --model-hub-picker-head-size: 11px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2414,6 +2572,8 @@
 }
 
 .model-hub-picker-row {
+  --model-hub-picker-row-radius: 8px;
+  --model-hub-picker-row-height: 36px;
   display: flex;
   align-items: center;
   gap: var(--model-hub-picker-row-gap);
@@ -2423,6 +2583,14 @@
   border-radius: var(--model-hub-picker-row-radius);
   background: var(--background);
   text-align: left;
+}
+
+.model-hub-picker-row--suppliers {
+  /* What a stacked row measures (frame B‴): the strip sits 4px under the name
+   * it belongs to. The indent is not a length — the strip starts where the
+   * entry does, which is already past the checkbox. */
+  --model-hub-picker-stack-gap: 4px;
+  --model-hub-picker-suppliers-row-height: 52px;
 }
 .model-hub-picker-row.is-picked {
   border-color: var(--mint);
@@ -2457,6 +2625,7 @@
  * lighter weight, monospaced, because then the id IS the label. */
 .model-hub-picker-name--id { font-weight: 500; }
 .model-hub-picker-id {
+  --model-hub-picker-id-size: 11px;
   font-size: var(--model-hub-picker-id-size);
   color: var(--muted);
 }

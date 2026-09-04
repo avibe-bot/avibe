@@ -6,45 +6,35 @@ import { describe, expect, it } from 'vitest';
 
 import postcss from 'postcss';
 
+import { intendedFiles } from './lintPolicy.mjs';
+import { rendersAtAll } from './nonRenderingText.mjs';
 import { eachStylesheet } from './stylesheets.mjs';
-import { classesRenderedBy, firstCompound, unscopedTokens } from './travellingTokens.mjs';
+import {
+  classesRenderedBy,
+  firstCompound,
+  styledSubjects,
+  tokensUsedInMarkup,
+  unanchoredMarkupTokens,
+  unscopedTokens,
+} from './travellingTokens.mjs';
 
 const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
 
-// The components whose styling has to survive being mounted somewhere else.
-// This is the one thing the stylesheet cannot know and the check cannot derive:
-// a class is only "travelling" because more than one dialog renders it, which
-// is a fact about the React tree. So it is stated once, as the subject of the
-// check -- and the classes themselves are then read out of these files, so the
-// enumeration ends here rather than being copied into an assertion.
-//
-// Add a component to this list when it becomes shared. Both of these are: they
-// are the evidence body of a guarded Model Hub mutation, and `SourceDetailPanel`,
-// `SourceMutationReport`, `BackendModelCatalogDialog`, `AddApiKeyDialog` and
-// `RouteChainDialog` each mount them under a different root class.
-const TRAVELLING_COMPONENTS = [
-  'src/components/settings/models/GuardImpact.tsx',
-  'src/components/settings/models/GuardGapList.tsx',
-];
+// The class the original defect was found on: the evidence body of a guarded
+// Model Hub mutation, which `SourceDetailPanel`, `SourceMutationReport`,
+// `BackendModelCatalogDialog`, `AddApiKeyDialog` and `RouteChainDialog` each
+// mount under a different root. It is named here as an anchor -- proof the
+// derived subject set below really reaches the case that started this -- and
+// nowhere as the subject of the check, which is every class this project styles.
+const FOUND_ON = 'model-hub-guard-body';
 
-// The body's outer wrapper has no component of its own: every caller writes the
-// `<div className="model-hub-guard-body">` itself, so no single file's
-// `className` values name it the way the two components above name theirs.
-// Hence the name here. One name covers every caller, present and future,
-// because what gets asserted is a property of the class -- it resolves its
-// tokens from itself or from an inherited scope -- and that holds under
-// whichever root a caller mounts it in.
-const TRAVELLING_WRAPPERS = ['model-hub-guard-body'];
-
-// Every shipped source, so a class can be asked who renders it. Tests are
-// excluded: a class named only by an assertion does not ship.
-function* shippedSources(directory) {
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const at = path.join(directory, entry.name);
-    if (entry.isDirectory()) yield* shippedSources(at);
-    else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
-      yield fs.readFileSync(at, 'utf8');
-    }
+// Every source that ships, as `[origin, text]`. `intendedFiles` and
+// `rendersAtAll` are the same pair `eachStylesheet` uses, so "which files ship"
+// has one answer here rather than a second one written next to the check.
+function* shippedSources() {
+  for (const relative of intendedFiles(UI_ROOT, { extensions: ['.ts', '.tsx'] })) {
+    if (!rendersAtAll(relative)) continue;
+    yield [relative, fs.readFileSync(path.join(UI_ROOT, relative), 'utf8')];
   }
 }
 
@@ -195,59 +185,105 @@ describe('unscopedTokens', () => {
 
     expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
   });
+
+  it('accepts a declaration on fewer of the same element classes than the use carries', () => {
+    // `.travels` and `.is-open` sit on one element, so a declaration naming only
+    // the first is a declaration on the very element the use applies to.
+    const sheets = sheetsOf('.travels { --gap: 6px } .travels.is-open { gap: var(--gap); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
+  });
+
+  it('reports a declaration that asks for more classes than the use does', () => {
+    // The other direction is a different element: `.travels` alone matches
+    // without `.is-open`, and there the declaration is not there.
+    const sheets = sheetsOf('.travels.is-open { --gap: 6px } .travels { gap: var(--gap); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
+  });
+
+  it('reports a declaration guarded by anything that is not a class', () => {
+    // Each of these adds a condition the use's own subject does not carry, so
+    // the declaration is on the element only some of the time.
+    for (const guard of ['.travels:hover', '.travels[data-open="true"]', 'div.travels']) {
+      const sheets = sheetsOf(`${guard} { --gap: 6px } .travels { gap: var(--gap); }`);
+
+      expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
+    }
+  });
 });
 
-describe('the shared guard body', () => {
+describe('tokensUsedInMarkup', () => {
+  it('reads a Tailwind arbitrary value and an inline style alike', () => {
+    const source = [
+      'const a = <ul className="flex gap-[var(--row-gap)]" />;',
+      "const b = <li style={{ paddingInline: 'var(--row-pad)' }} />;",
+    ].join('\n');
+
+    expect(tokensUsedInMarkup(source)).toEqual(new Set(['--row-gap', '--row-pad']));
+  });
+
+  it('leaves a fallback-bearing use alone, which draws something either way', () => {
+    expect(tokensUsedInMarkup('<ul className="gap-[var(--row-gap,4px)]" />')).toEqual(new Set());
+  });
+});
+
+describe('unanchoredMarkupTokens', () => {
+  const sheetsOf = (css) => [['inline', postcss.parse(css)]];
+  const sourcesOf = (tsx) => [['Component.tsx', tsx]];
+
+  it('accepts a name a scope every element inherits declares', () => {
+    const sheets = sheetsOf(':root { --row-gap: 14px }');
+
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual([]);
+  });
+
+  it('reports a name only some class declares, because markup names no subject', () => {
+    const sheets = sheetsOf('.dialog { --row-gap: 14px }');
+
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual([
+      { origin: 'Component.tsx', property: '--row-gap' },
+    ]);
+  });
+
+  it('says nothing about a name no stylesheet here declares, which is somebody else to anchor', () => {
+    // `--radix-popover-trigger-width` is written onto the element by Radix at
+    // open time. This project could not anchor it if it wanted to.
+    const sheets = sheetsOf('.dialog { --row-gap: 14px }');
+    const sources = sourcesOf('<ul className="w-[var(--radix-popover-trigger-width)]" />');
+
+    expect(unanchoredMarkupTokens(sheets, sources)).toEqual([]);
+  });
+});
+
+describe('this project', () => {
   const sheets = [...eachStylesheet(UI_ROOT)];
-  const travelling = new Set(TRAVELLING_WRAPPERS);
-  for (const relative of TRAVELLING_COMPONENTS) {
-    for (const name of classesRenderedBy(fs.readFileSync(path.join(UI_ROOT, relative), 'utf8'))) {
-      travelling.add(name);
-    }
-  }
+  const sources = [...shippedSources()];
+  const styled = styledSubjects(sheets);
 
-  it('names only wrappers the product still renders', () => {
-    // The other half of the subject check below. A wrapper no file renders any
-    // more is a name nobody checks, so it fails here rather than sitting in the
-    // list looking like coverage.
-    const rendered = new Set();
-    for (const source of shippedSources(path.join(UI_ROOT, 'src'))) {
-      for (const name of classesRenderedBy(source)) rendered.add(name);
-    }
-
-    for (const wrapper of TRAVELLING_WRAPPERS) expect(rendered).toContain(wrapper);
-  });
-
-  it('renders classes this project styles, so the check has a subject', () => {
-    // Without this the assertion below passes by asking about nothing, which is
-    // how a check outlives the thing it checks. `readFileSync` already fails
-    // loudly if a component moves; this covers the quieter half, where the
-    // files still parse but nothing recognisable comes out of them.
-    expect(travelling.size).toBeGreaterThan(0);
-
-    // Not every class needs a rule here: these components also render Tailwind
-    // utilities (`flex-1`, `min-w-0`), which are generated at build time and
-    // carry no custom properties, and `unscopedTokens` never reaches a class no
-    // rule takes as its subject. So the requirement is that the project styles
-    // some of what they render -- not all of it.
-    const styled = new Set();
-    for (const [, root] of sheets) {
-      root.walkRules((rule) => {
-        for (const one of rule.selectors) {
-          for (const name of travelling) if (one.includes(`.${name}`)) styled.add(name);
-        }
-      });
-    }
+  it('styles classes the product renders, so the checks have a subject', () => {
+    // Without this the assertions below pass by asking about nothing, which is
+    // how a check outlives the thing it checks. Both sides are covered: the
+    // stylesheets style something, the sources render something, and the class
+    // the defect was found on is still in both.
     expect(styled.size).toBeGreaterThan(0);
+    expect(styled).toContain(FOUND_ON);
+
+    const rendered = new Set();
+    for (const [, text] of sources) for (const name of classesRenderedBy(text)) rendered.add(name);
+    expect(rendered).toContain(FOUND_ON);
   });
 
-  it('resolves every token it consumes wherever a caller mounts it', () => {
-    // The four roots are `.model-hub-guard-dialog`, `.model-hub-catalog-dialog`,
-    // `.model-hub-add-key-dialog` and `.model-hub-route-dialog`. None of them is
-    // named here on purpose: a token resolvable from the class itself or from
-    // `:root` is resolvable under all four and under a fifth nobody has written
-    // yet, which is the property that makes the body shared rather than the
-    // guard dialog's.
-    expect(unscopedTokens(sheets, travelling)).toEqual([]);
+  it('resolves every token every class it styles consumes, wherever that class mounts', () => {
+    // No root is named here on purpose, and none needs to be: a token
+    // resolvable from the class itself or from `:root` is resolvable under
+    // every root that exists and under one nobody has written yet. Asserted of
+    // all of them rather than of the few known to travel, because which class
+    // travels is a fact about the React tree that this file cannot see.
+    expect(unscopedTokens(sheets, styled)).toEqual([]);
+  });
+
+  it('anchors every token its markup reads directly, which no selector can scope', () => {
+    expect(unanchoredMarkupTokens(sheets, sources)).toEqual([]);
   });
 });
