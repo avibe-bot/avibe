@@ -2010,6 +2010,27 @@ class CodexAgent(BaseAgent):
         """Fork an existing Codex thread and bind the new thread id."""
         target_agent_session_id = self.ensure_agent_session_id(request)
         source_prompt_strategy = self._fork_source_prompt_strategy(fork)
+        source_prompt_instructions: Optional[str] = None
+        if source_prompt_strategy == "injected_pending_persist":
+            source_session_id = str(fork.get("source_session_id") or "").strip()
+            source_thread_id = str(fork.get("source_native_session_id") or "").strip()
+            pending = getattr(self, "_thread_unpersisted_prompts", {}).get(
+                source_session_id
+            )
+            if (
+                pending
+                and pending[0] == source_thread_id
+                and pending[2] in {"fallback", "fallback_pending_clear"}
+            ):
+                _, source_prompt_instructions, source_prompt_strategy = pending
+            else:
+                # This process cannot prove which prompt bytes the source
+                # injected, so a fork must not inherit an unrepairable state.
+                source_prompt_strategy = "unavailable"
+        elif source_prompt_strategy == "fallback_pending_injection":
+            # The source injection outcome is ambiguous. The fork already
+            # carries whatever native history exists; never append it again.
+            source_prompt_strategy = "unavailable"
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
@@ -2054,17 +2075,35 @@ class CodexAgent(BaseAgent):
         target_agent_session_id = (
             self.bind_agent_session_id(request, thread_id) or target_agent_session_id
         )
-        if source_prompt_strategy in {
+        if source_prompt_instructions is not None:
+            persisted_prompt_strategy = self._persist_prompt_strategy(
+                request,
+                thread_id,
+                source_prompt_instructions,
+                strategy=source_prompt_strategy,
+                agent_session_id=target_agent_session_id,
+            )
+            if persisted_prompt_strategy:
+                self._remember_thread_developer_instructions(
+                    request.base_session_id,
+                    thread_id,
+                    source_prompt_instructions,
+                )
+        elif source_prompt_strategy in {
             "collaboration",
             "fallback_pending_clear",
             "unavailable",
-        } and not self._persist_prompt_strategy(
-            request,
-            thread_id,
-            None,
-            strategy=source_prompt_strategy,
-            agent_session_id=target_agent_session_id,
-        ):
+        }:
+            persisted_prompt_strategy = self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=source_prompt_strategy,
+                agent_session_id=target_agent_session_id,
+            )
+        else:
+            persisted_prompt_strategy = True
+        if not persisted_prompt_strategy:
             raise CodexPromptRefreshUnavailableError(
                 "Could not persist the forked Codex prompt strategy"
             )

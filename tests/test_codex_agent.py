@@ -2316,6 +2316,61 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
         )
 
+    async def test_fork_finalizes_a_source_prompt_with_pending_marker_persistence(self):
+        agent = object.__new__(CodexAgent)
+        agent.ensure_agent_session_id = Mock(return_value="ses-target")
+        agent._fork_source_prompt_strategy = Mock(
+            return_value="injected_pending_persist"
+        )
+        agent._thread_unpersisted_prompts = {
+            "ses-source": ("thread-source", "stable prompt", "fallback")
+        }
+        agent._resolve_codex_agent_settings = Mock(
+            return_value=(None, "gpt-5.4", "high", None)
+        )
+        agent._inject_caller_env_config = Mock(return_value=("path-state", True))
+        agent._mark_fork_correction_pending = Mock()
+        agent._clear_fork_correction_pending = Mock()
+        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._inject_forked_session_correction = AsyncMock()
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent.bind_agent_session_id = Mock(return_value="ses-target")
+        agent._persist_prompt_strategy = Mock(return_value=True)
+        agent._remember_thread_model_settings_from_response = Mock()
+        agent._remember_thread_caller_env_config = Mock()
+        agent._remember_thread_git_path_config = Mock()
+        agent._caller_env_for_request = Mock(return_value={})
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            base_session_id="ses-target",
+        )
+        fork = {
+            "source_session_id": "ses-source",
+            "source_native_session_id": "thread-source",
+        }
+        transport = SimpleNamespace(
+            send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}})
+        )
+
+        thread_id = await agent._fork_thread(transport, request, fork)
+
+        self.assertEqual(thread_id, "thread-fork")
+        agent._persist_prompt_strategy.assert_called_once_with(
+            request,
+            "thread-fork",
+            "stable prompt",
+            strategy="fallback",
+            agent_session_id="ses-target",
+        )
+        self.assertEqual(
+            agent._thread_developer_instructions["ses-target"],
+            ("thread-fork", "stable prompt"),
+        )
+        self.assertEqual(
+            agent._thread_prompt_strategies["ses-target"],
+            ("thread-fork", "fallback"),
+        )
+
     async def test_fork_persists_carried_collaboration_strategy_for_target(self):
         agent = object.__new__(CodexAgent)
         agent.ensure_agent_session_id = Mock(return_value="ses-target")
