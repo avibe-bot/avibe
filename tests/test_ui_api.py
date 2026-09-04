@@ -2555,12 +2555,22 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
                         "name": "DeepSeek",
                         "models": {"deepseek-chat": {"vibe_remote": {"user_model": True}}},
                     },
+                    {
+                        "id": "avibe-openai",
+                        "name": "Avibe · OpenAI",
+                        "models": {
+                            "gpt-5": {
+                                "vibe_remote": {"model_hub_projected": True},
+                            }
+                        },
+                    },
                 ],
                 "default": {"anthropic": "claude-x"},
             },
             "reasoning_options": {
                 "anthropic/claude-x": [{"value": "__default__"}, {"value": "low"}, {"value": "high"}],
                 "deepseek/deepseek-chat": [{"value": "low"}],
+                "gpt-5": [{"value": "high"}],
             },
         },
     }
@@ -2574,12 +2584,19 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
     providers = {p["id"]: p for p in result["providers"]}
     assert providers["deepseek"]["custom"] is True
     assert providers["anthropic"]["custom"] is False
+    assert "avibe-openai" not in providers
     by_value = {m["value"]: m for m in result["models"]}
     # custom-provider models + reasoning + source annotation flow through unchanged
     assert by_value["anthropic/claude-x"]["reasoning_efforts"] == ["low", "high"]
     assert by_value["anthropic/claude-x"]["default"] is True
     assert by_value["anthropic/claude-x"]["source"] == "catalog"
     assert by_value["deepseek/deepseek-chat"]["source"] == "user"
+    assert by_value["gpt-5"] == {
+        "value": "gpt-5",
+        "default": False,
+        "source": "catalog",
+        "reasoning_efforts": ["high"],
+    }
 
     filtered = api.agent_model_options("opencode", provider="deepseek")
     assert [p["id"] for p in filtered["providers"]] == ["deepseek"]

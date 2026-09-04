@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional
 import aiohttp
 
 from config import paths
+from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
 from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
@@ -81,11 +82,17 @@ def _project_model_hub_models(
         if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
     for public_identifier, model_config in runtime_models.items():
-        if not isinstance(public_identifier, str) or "/" not in public_identifier:
+        if not isinstance(public_identifier, str) or not public_identifier:
             continue
-        provider_id, model_id = public_identifier.split("/", 1)
-        if not provider_id or not model_id:
+        native_protocol = (
+            model_config.get("native_protocol")
+            if isinstance(model_config, dict)
+            else None
+        )
+        provider_id = OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL.get(native_protocol)
+        if provider_id is None:
             continue
+        model_id = public_identifier
         provider = provider_index.get(provider_id)
         if provider is None:
             provider = {"id": provider_id, "name": provider_id, "models": {}}
@@ -111,6 +118,7 @@ def _project_model_hub_models(
         public_model = dict(existing_model) if isinstance(existing_model, dict) else {}
         if isinstance(model_config, dict):
             public_model.update(model_config)
+        public_model.pop("native_protocol", None)
         public_model["id"] = model_id
         metadata = public_model.get("vibe_remote")
         public_metadata = dict(metadata) if isinstance(metadata, dict) else {}

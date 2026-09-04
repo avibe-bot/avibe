@@ -5378,9 +5378,10 @@ def test_opencode_public_models_follow_persisted_config_without_overlay(
     service.store.config = config
 
     assert service.opencode_public_models() == {
-        "avibe-openai/current-model": {
+        "current-model": {
             "id": "current-model",
             "name": "Current model",
+            "native_protocol": "openai_responses",
             "variants": {
                 "low": {"reasoningEffort": "low"},
                 "high": {"reasoningEffort": "high"},
@@ -5410,9 +5411,10 @@ def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disable
     service = _service(tmp_path, sources=[source])
     service.store.config = config
 
-    assert service.opencode_public_models()["avibe-openai/no-reasoning"] == {
+    assert service.opencode_public_models()["no-reasoning"] == {
         "id": "no-reasoning",
         "name": "no-reasoning",
+        "native_protocol": "openai_responses",
         "reasoning": False,
     }
 

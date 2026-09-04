@@ -480,8 +480,9 @@ def _project_opencode_public_models(
     for model in agent.models:
         if model.native_protocol not in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL:
             raise ValueError("OpenCode model native_protocol is invalid")
-        provider_id = OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL[model.native_protocol]
-        projected[f"{provider_id}/{model.id}"] = project_opencode_public_model(model)
+        public_model = project_opencode_public_model(model)
+        public_model["native_protocol"] = model.native_protocol
+        projected[model.id] = public_model
     return projected
 
 

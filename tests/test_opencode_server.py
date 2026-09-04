@@ -295,18 +295,19 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         models = await manager.get_available_models(
             "/tmp/work",
             model_hub_models={
-                "custom/current-model": {
-                    "id": "custom/current-model",
+                "current-model": {
+                    "id": "current-model",
                     "name": "Current model",
+                    "native_protocol": "openai_responses",
                 },
             },
         )
 
         model_index = {row["id"]: row["models"] for row in models["providers"]}
-        self.assertEqual(set(model_index), {"openai", "custom"})
+        self.assertEqual(set(model_index), {"openai", "avibe-openai"})
         self.assertEqual(set(model_index["openai"]), {"native-model"})
         self.assertEqual(
-            model_index["custom"]["current-model"],
+            model_index["avibe-openai"]["current-model"],
             {
                 "id": "current-model",
                 "name": "Current model",
@@ -389,12 +390,14 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         models = await manager.get_available_models(
             "/tmp/work",
             model_hub_models={
-                "avibe-openai/gpt-5": {
+                "gpt-5": {
                     "id": "gpt-5",
+                    "native_protocol": "openai_responses",
                     "variants": {"high": {}},
                 },
-                "avibe-anthropic/claude-opus-5": {
+                "claude-opus-5": {
                     "id": "claude-opus-5",
+                    "native_protocol": "anthropic",
                 },
             },
         )

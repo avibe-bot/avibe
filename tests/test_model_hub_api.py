@@ -3751,13 +3751,23 @@ def test_opencode_public_models_cross_the_controller_rpc_boundary(monkeypatch):
 
     def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"avibe-openai/current-model": {"id": "current-model"}}
+        return {
+            "current-model": {
+                "id": "current-model",
+                "native_protocol": "openai_responses",
+            }
+        }
 
     monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
 
     models = ModelHubRemoteService().opencode_public_models()
 
-    assert models == {"avibe-openai/current-model": {"id": "current-model"}}
+    assert models == {
+        "current-model": {
+            "id": "current-model",
+            "native_protocol": "openai_responses",
+        }
+    }
     assert calls == [("get_opencode_public_models", None)]
 
 
@@ -4352,7 +4362,10 @@ def test_opencode_options_route_passes_controller_projection(monkeypatch):
     from vibe import api
 
     projection = {
-        "avibe-openai/current-model": {"id": "current-model"},
+        "current-model": {
+            "id": "current-model",
+            "native_protocol": "openai_responses",
+        },
     }
     calls = []
 
