@@ -419,9 +419,11 @@ No string explains mechanism.
 - Direct mode still hides the editor and preserves the catalog unchanged.
 - Removing a built-in row and reopening the picker shows that id under the built-in group;
   picking it restores the row. A built-in id that enters the backend snapshot after the menu
-  was saved is present in the menu on the next read unless a row with that id was removed
-  before — and an id the user removed never returns on its own, whatever the removed row's
-  origin was.
+  was saved is in the menu after the next reconcile trigger — startup, a snapshot refresh
+  completing, the periodic tick, or the picker's candidates read — unless a row with that id
+  was removed before; an ordinary read reconciles nothing and observes whichever of those ran
+  last. An id the user removed never returns on its own, whatever the removed row's origin
+  was.
 - The picker lists each candidate id exactly once across all groups.
 - A field the user cleared before the first Save is empty after Save.
 - Every supplier chip the picker shows for a candidate equals the hop set C1 seeds when that
