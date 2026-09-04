@@ -31,7 +31,6 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
-    canonical_opencode_menu_identity,
     normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
@@ -88,7 +87,7 @@ from .events import (
     redact_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import STANDARD_OPENCODE_VENDOR_IDS, canonical_model_id
+from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -121,7 +120,6 @@ from .resolver import (
     allowed_origins,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
-    opencode_source_model_identity,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -130,7 +128,7 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
-CONTRACT_VERSION = 7
+CONTRACT_VERSION = 8
 
 
 def _storable_backend_model_metadata(
@@ -153,8 +151,8 @@ def _storable_backend_model_metadata(
     return proposed_display_name, proposed_efforts
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 7
-PROBE_RESULT_CONTRACT_VERSION = 7
+AGENT_CHAIN_CONTRACT_VERSION = 8
+PROBE_RESULT_CONTRACT_VERSION = 8
 _REORDER_ORDER_UNSET = object()
 _REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
@@ -171,6 +169,8 @@ def project_opencode_public_model(
 ) -> dict[str, Any]:
     """Project backend-owned metadata without upstream Route details."""
 
+    if model.native_protocol not in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL:
+        raise ValueError("OpenCode model native_protocol is invalid")
     identifier = model.id
     projected: dict[str, Any] = {
         "id": identifier,
@@ -194,13 +194,21 @@ def project_opencode_public_model(
         projected["modalities"] = modalities
     if model.supports_tools is not None:
         projected["tool_call"] = model.supports_tools
-    if model.supports_reasoning is not None:
-        projected["reasoning"] = model.supports_reasoning
+    if model.supports_reasoning is False:
+        projected["reasoning"] = False
+    elif (
+        model.supports_reasoning is True
+        and model.native_protocol == "openai_responses"
+    ):
+        # Anthropic variants already express support. ``reasoning: true`` makes
+        # that SDK add a budget-based option which overrides the selected effort.
+        projected["reasoning"] = True
+    variant_key = {
+        "openai_responses": "reasoningEffort",
+        "anthropic": "effort",
+    }[model.native_protocol]
     variants = (
-        {
-            effort: {"reasoningEffort": effort}
-            for effort in model.reasoning_efforts
-        }
+        {effort: {variant_key: effort} for effort in model.reasoning_efforts}
         if model.supports_reasoning is not False
         else {}
     )
@@ -477,7 +485,11 @@ def _project_opencode_public_models(
         return {}
     projected: dict[str, dict[str, Any]] = {}
     for model in agent.models:
-        projected[model.id] = project_opencode_public_model(model)
+        if model.native_protocol not in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL:
+            raise ValueError("OpenCode model native_protocol is invalid")
+        public_model = project_opencode_public_model(model)
+        public_model["native_protocol"] = model.native_protocol
+        projected[model.id] = public_model
     return projected
 
 
@@ -636,6 +648,7 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
     source_origins = allowed_origins(source)
     if source.kind == "subscription" and not source_origins:
         raise ModelHubError("mode_switch_blocked", status=409)
+    active_models = [model for model in source.models if not model.retired]
     return SourceBinding(
         source_id=source.id,
         vendor=source.vendor,
@@ -643,7 +656,10 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
         base_url=source.base_url,
         credential_ref=source.credential_ref,
         allowed_origins=source_origins,
-        model_ids=tuple(model.id for model in source.models if not model.retired),
+        model_ids=tuple(model.id for model in active_models),
+        model_reasoning_efforts=tuple(
+            (model.id, tuple(model.reasoning_efforts)) for model in active_models
+        ),
     )
 
 
@@ -686,7 +702,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 7,
+        "contract_version": 8,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1796,7 +1812,6 @@ class ModelHubService:
                     backend=cast(BackendName, backend),
                     requested_model=menu_model,
                     source=source,
-                    checked_models=menu_ids,
                 )
                 if matched_model is None or any(hop.source_id == source.id for hop in route.hops):
                     continue
@@ -1813,9 +1828,6 @@ class ModelHubService:
         agent = config.agents[backend]
         source_by_id = {source.id: source for source in config.sources}
         hops: list[ModelHubRouteHopConfig] = []
-        checked_models = self._agent_menu_model_ids(agent)
-        if menu_model not in checked_models:
-            checked_models = (*checked_models, menu_model)
         for source_id in agent.sources.order:
             source = source_by_id.get(source_id)
             if source is None or not self._eligible_for_agent(source, backend):
@@ -1824,7 +1836,6 @@ class ModelHubService:
                 backend=backend,
                 requested_model=menu_model,
                 source=source,
-                checked_models=checked_models,
                 include_manual=True,
             )
             if matched_model is not None:
@@ -3675,7 +3686,6 @@ class ModelHubService:
             if agent.menu_kind == "fixed"
             else None
         )
-        standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
         requested_model = self._requested_model(agent)
         unavailable_source_ids = self._unavailable_native_sources(config, backend)
         now = self.now()
@@ -3794,7 +3804,6 @@ class ModelHubService:
             "named_agents": named_agents,
             "catalog_models": self._catalog_models_payload(agent),
             "builtin_models": builtin_models,
-            "standard_vendors": standard_vendors,
         }
 
     def _candidate_suppliers(
@@ -3841,6 +3850,13 @@ class ModelHubService:
         agent_backend = cast(BackendName, backend)
         config = self.store.load()
         agent = self._agent(config, backend)
+        from vibe.models_dev_catalog import native_protocol_for_model_id
+
+        def protocol_payload(model_id: str) -> dict[str, str]:
+            if backend != "opencode":
+                return {}
+            return {"native_protocol": native_protocol_for_model_id(model_id)}
+
         menu_models = self._catalog_models_payload(agent)
         menu_ids = {model["id"] for model in menu_models}
         snapshot = self._current_builtin_models(agent_backend)
@@ -3859,6 +3875,7 @@ class ModelHubService:
                     "origin": "builtin",
                     "display_name": display_name,
                     "reasoning_efforts": reasoning_efforts,
+                    **protocol_payload(model_id),
                 },
                 claude_builtin_ids=_builtin_model_ids("claude"),
             )
@@ -3879,6 +3896,7 @@ class ModelHubService:
                     "reasoning_efforts": admitted.reasoning_efforts,
                     "suppliers": suppliers,
                     "origin": "builtin",
+                    **protocol_payload(admitted.id),
                 }
             )
 
@@ -3891,11 +3909,7 @@ class ModelHubService:
             for model in source.models:
                 if model.retired:
                     continue
-                candidate_id = (
-                    opencode_source_model_identity(source, model.id)
-                    if backend == "opencode"
-                    else model.id
-                )
+                candidate_id = model.id
                 if (
                     candidate_id in menu_ids
                     or candidate_id in builtin_ids
@@ -3918,6 +3932,7 @@ class ModelHubService:
                     "origin": "provider",
                     "display_name": display_name,
                     "reasoning_efforts": reasoning_efforts,
+                    **protocol_payload(model_id),
                 },
                 claude_builtin_ids=_builtin_model_ids("claude"),
             )
@@ -3930,6 +3945,7 @@ class ModelHubService:
                     "reasoning_efforts": admitted.reasoning_efforts,
                     "suppliers": suppliers,
                     "origin": "provider",
+                    **protocol_payload(admitted.id),
                 }
             )
         in_list = []
@@ -3963,6 +3979,7 @@ class ModelHubService:
                         if suppliers and provider_candidate is not None
                         else None
                     ),
+                    **protocol_payload(model["id"]),
                 }
             )
         return {"builtin": builtin, "providers": providers, "in_list": in_list}
@@ -4102,11 +4119,15 @@ class ModelHubService:
                 model = ModelHubBackendModelConfig.from_payload(item)
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("backend_model_catalog_invalid") from exc
-            if backend == "opencode":
-                try:
-                    canonical_opencode_menu_identity(model.id)
-                except ValueError as exc:
-                    raise ModelHubError("backend_model_id_invalid") from exc
+            if backend == "opencode" and model.native_protocol is None:
+                raise ModelHubError("backend_model_catalog_invalid")
+            if backend != "opencode" and model.native_protocol is not None:
+                raise ModelHubError("backend_model_catalog_invalid")
+            if backend == "opencode" and cls._backend_model_admission_error(
+                "opencode",
+                model.id,
+            ):
+                raise ModelHubError("backend_model_id_invalid")
             rows.append(model)
         if len({model.id for model in rows}) != len(rows):
             raise ModelHubError("backend_model_duplicate")

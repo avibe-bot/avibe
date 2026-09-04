@@ -5961,13 +5961,6 @@ async def opencode_options_async(
     cache_projection_matches = (
         cache_entry.get("model_hub_projection") == projection_key
     )
-    if (
-        cache_data
-        and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
-        and cache_projection_matches
-    ):
-        return {"ok": True, "data": cache_data, "cached": True}
-
     server = None
     try:
         from config.v2_compat import to_app_config
@@ -5976,8 +5969,23 @@ async def opencode_options_async(
             OpenCodeServerManager,
             build_reasoning_effort_options,
         )
+        from modules.agents.opencode.utils import opencode_model_picker_value
 
         v2_config = V2Config.load()
+        model_hub_agents = getattr(getattr(v2_config, "model_hub", None), "agents", {})
+        model_hub_agent = (
+            model_hub_agents.get("opencode")
+            if isinstance(model_hub_agents, dict)
+            else None
+        )
+        model_hub_mode = getattr(model_hub_agent, "mode", "direct")
+        if (
+            model_hub_mode != "hub"
+            and cache_data
+            and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
+            and cache_projection_matches
+        ):
+            return {"ok": True, "data": cache_data, "cached": True}
         config = to_app_config(v2_config)
         if not config.opencode:
             return {"ok": False, "error": "opencode disabled"}
@@ -5993,16 +6001,22 @@ async def opencode_options_async(
                 provider_id = provider.get("id") or provider.get("provider_id") or provider.get("name")
                 if not provider_id:
                     continue
-                model_ids = []
+                model_items = []
                 provider_models = provider.get("models", {})
                 if isinstance(provider_models, dict):
-                    model_ids = list(provider_models.keys())
+                    model_items = list(provider_models.items())
                 elif isinstance(provider_models, list):
-                    model_ids = [
-                        model.get("id") for model in provider_models if isinstance(model, dict) and model.get("id")
+                    model_items = [
+                        (model.get("id"), model)
+                        for model in provider_models
+                        if isinstance(model, dict) and model.get("id")
                     ]
-                for model_id in model_ids:
-                    model_key = f"{provider_id}/{model_id}"
+                for model_id, model_info in model_items:
+                    model_key = opencode_model_picker_value(
+                        provider_id,
+                        model_id,
+                        model_info,
+                    )
                     options[model_key] = builder(models, model_key)
             return options
 
@@ -6023,45 +6037,46 @@ async def opencode_options_async(
             )
         )
         models = await asyncio.wait_for(model_request, timeout=timeout_seconds)
-        provider_catalog_available = True
-        try:
-            providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
-        except Exception as exc:
-            logger.debug("OpenCode provider auth filter skipped: provider list failed: %s", exc)
-            providers_raw = {}
-            provider_catalog_available = False
-        try:
-            from vibe.opencode_config import read_opencode_provider_auth_entries
+        if model_hub_mode != "hub":
+            provider_catalog_available = True
+            try:
+                providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
+            except Exception as exc:
+                logger.debug("OpenCode provider auth filter skipped: provider list failed: %s", exc)
+                providers_raw = {}
+                provider_catalog_available = False
+            try:
+                from vibe.opencode_config import read_opencode_provider_auth_entries
 
-            auth_entries = await asyncio.to_thread(
-                read_opencode_provider_auth_entries, logger_instance=logger
-            )
-        except Exception as exc:
-            logger.debug("OpenCode provider auth filter skipped: auth read failed: %s", exc)
-            auth_entries = {}
-        allowed_provider_ids: set[str] | None = None
-        if provider_catalog_available:
-            config_api_key_provider_ids = await _read_opencode_config_api_key_provider_ids()
-            custom_config_provider_ids = await _read_opencode_custom_provider_ids()
-            allowed_provider_ids = _configured_opencode_provider_ids(
-                providers_raw=providers_raw,
-                auth_entries=auth_entries,
-                config_api_key_provider_ids=config_api_key_provider_ids,
-                custom_config_provider_ids=custom_config_provider_ids,
-            )
-            models = _filter_opencode_models_to_configured_providers(
+                auth_entries = await asyncio.to_thread(
+                    read_opencode_provider_auth_entries, logger_instance=logger
+                )
+            except Exception as exc:
+                logger.debug("OpenCode provider auth filter skipped: auth read failed: %s", exc)
+                auth_entries = {}
+            allowed_provider_ids: set[str] | None = None
+            if provider_catalog_available:
+                config_api_key_provider_ids = await _read_opencode_config_api_key_provider_ids()
+                custom_config_provider_ids = await _read_opencode_custom_provider_ids()
+                allowed_provider_ids = _configured_opencode_provider_ids(
+                    providers_raw=providers_raw,
+                    auth_entries=auth_entries,
+                    config_api_key_provider_ids=config_api_key_provider_ids,
+                    custom_config_provider_ids=custom_config_provider_ids,
+                )
+                models = _filter_opencode_models_to_configured_providers(
+                    models,
+                    providers_raw=providers_raw,
+                    auth_entries=auth_entries,
+                    config_api_key_provider_ids=config_api_key_provider_ids,
+                    custom_config_provider_ids=custom_config_provider_ids,
+                )
+            user_model_index = await _read_opencode_user_model_index()
+            models = _merge_opencode_user_models(
                 models,
-                providers_raw=providers_raw,
-                auth_entries=auth_entries,
-                config_api_key_provider_ids=config_api_key_provider_ids,
-                custom_config_provider_ids=custom_config_provider_ids,
+                user_model_index,
+                allowed_provider_ids=allowed_provider_ids,
             )
-        user_model_index = await _read_opencode_user_model_index()
-        models = _merge_opencode_user_models(
-            models,
-            user_model_index,
-            allowed_provider_ids=allowed_provider_ids,
-        )
         defaults = await asyncio.wait_for(server.get_default_config(expanded_cwd), timeout=timeout_seconds)
         reasoning_options = _build_reasoning_options(models, build_reasoning_effort_options)
         data = {
@@ -6860,7 +6875,13 @@ def _opencode_model_options(
         _oc_is_user_model = None
         custom_ids = set()
 
+    from modules.agents.opencode.utils import (
+        opencode_model_is_hub_projected,
+        opencode_model_picker_value,
+    )
+
     provider_filter = (provider or "").strip().lower() or None
+    matched_provider_filter = False
     providers_out: list[dict] = []
     models_out: list[dict] = []
     for prov in providers_raw:
@@ -6871,7 +6892,7 @@ def _opencode_model_options(
             continue
         if provider_filter and pid.lower() != provider_filter:
             continue
-        providers_out.append({"id": pid, "name": prov.get("name") or pid, "custom": pid in custom_ids})
+        matched_provider_filter = True
         prov_models = prov.get("models")
         if isinstance(prov_models, dict):
             model_items = list(prov_models.items())
@@ -6879,28 +6900,34 @@ def _opencode_model_options(
             model_items = [(m.get("id"), m) for m in prov_models if isinstance(m, dict) and m.get("id")]
         else:
             model_items = []
+        if not model_items or not all(
+            opencode_model_is_hub_projected(model_info)
+            for _model_id, model_info in model_items
+        ):
+            providers_out.append({"id": pid, "name": prov.get("name") or pid, "custom": pid in custom_ids})
         for model_id, model_info in model_items:
             if not isinstance(model_id, str) or not model_id:
                 continue
-            value = f"{pid}/{model_id}"
+            projected = opencode_model_is_hub_projected(model_info)
+            value = opencode_model_picker_value(pid, model_id, model_info)
             source = "catalog"
             if _oc_is_user_model is not None and isinstance(model_info, dict) and _oc_is_user_model(model_id, model_info):
                 source = "user"
-            models_out.append(
-                {
-                    "value": value,
-                    "provider": pid,
-                    "default": default_block.get(pid) == model_id,
-                    "source": source,
-                    "reasoning_efforts": _effort_values(reasoning_map.get(value)),
-                }
-            )
+            row = {
+                "value": value,
+                "default": default_block.get(pid) == model_id,
+                "source": source,
+                "reasoning_efforts": _effort_values(reasoning_map.get(value)),
+            }
+            if not projected:
+                row["provider"] = pid
+            models_out.append(row)
 
     opencode_cfg = getattr(getattr(config, "agents", None), "opencode", None) if config is not None else None
     default_provider = getattr(opencode_cfg, "default_provider", None) if opencode_cfg is not None else None
 
     notes: list[str] = []
-    if provider_filter and not providers_out:
+    if provider_filter and not matched_provider_filter:
         notes.append(f"no configured OpenCode provider matches '{provider}'")
     return {
         "ok": True,

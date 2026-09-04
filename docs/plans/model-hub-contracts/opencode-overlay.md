@@ -26,18 +26,16 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   edit, `native_protocol` edit, gateway credential rotation) Avibe waits for active work to
   finish, then restarts the serve process. Restarts are config events: no `resolution-event`
   of kind `channel_switch`/`switch` is emitted.
-- **Nothing projectable.** When the OpenCode menu is empty (the last checked row was
-  removed), Avibe writes no overlay and drains and stops
-  the serve process; it relaunches with a fresh overlay when a projectable row exists again.
-  In Gateway mode a serve process never runs without an overlay, so the user's providers are
-  never exposed and a stale provider set never lingers in `/config/providers`.
+- **Empty menu.** With no checked rows the overlay is the empty overlay —
+  `enabled_providers` naming `avibe-openai` and that provider with `models: {}` — written
+  through the same change-and-restart path as any other overlay; the serve process is never
+  stopped or launched without an overlay in Gateway mode.
 
 ## Provider entries
 
 - One provider entry per downstream protocol used by at least one checked menu row, so no
-  generated provider is ever empty and `enabled_providers` equals the generated set. When the
-  OpenCode menu is empty the existing `mapping_target_unavailable` refusal applies, no overlay
-  is written, and the serve process is stopped (Delivery):
+  generated provider is ever empty and `enabled_providers` equals the generated set. With an
+  empty menu the empty overlay (Delivery) is written instead:
 
   | `native_protocol` | provider id | `name` | `npm` | downstream endpoint |
   | --- | --- | --- | --- | --- |

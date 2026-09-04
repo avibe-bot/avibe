@@ -40,9 +40,37 @@ class SourceRecord:
     allowed_origins: tuple[str, ...]
     model_ids: tuple[str, ...]
     prefix: str
+    model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SourceRecord:
+        try:
+            raw_reasoning_efforts = payload["model_reasoning_efforts"]
+        except KeyError as exc:
+            raise EngineStateError("invalid engine source reasoning state") from exc
+        if not isinstance(raw_reasoning_efforts, list):
+            raise EngineStateError("invalid engine source reasoning state")
+        raw_model_ids = payload.get("model_ids", [])
+        if not isinstance(raw_model_ids, list):
+            raise EngineStateError("invalid engine source state")
+        model_ids = tuple(str(model) for model in raw_model_ids)
+        parsed_reasoning_efforts: list[tuple[str, tuple[str, ...]]] = []
+        seen_reasoning_models: set[str] = set()
+        for item in raw_reasoning_efforts:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0]
+                or item[0] not in model_ids
+                or not isinstance(item[1], list)
+                or any(not isinstance(effort, str) or not effort for effort in item[1])
+                or len(set(item[1])) != len(item[1])
+                or item[0] in seen_reasoning_models
+            ):
+                raise EngineStateError("invalid engine source reasoning state")
+            seen_reasoning_models.add(item[0])
+            parsed_reasoning_efforts.append((item[0], tuple(item[1])))
         return cls(
             source_id=str(payload["source_id"]),
             vendor=str(payload["vendor"]),
@@ -50,8 +78,9 @@ class SourceRecord:
             base_url=str(payload["base_url"]) if payload.get("base_url") else None,
             credential_ref=str(payload["credential_ref"]),
             allowed_origins=tuple(str(item) for item in payload.get("allowed_origins", [])),
-            model_ids=tuple(str(model) for model in payload.get("model_ids", [])),
+            model_ids=model_ids,
             prefix=str(payload["prefix"]),
+            model_reasoning_efforts=tuple(parsed_reasoning_efforts),
         )
 
 
@@ -209,6 +238,19 @@ class EngineStateStore:
                     raise EngineStateError("source requires at least one model id")
                 if any(not model for model in model_ids):
                     raise EngineStateError("model id cannot be empty")
+                reasoning_by_model: dict[str, tuple[str, ...]] = {}
+                for model_id, efforts in binding.model_reasoning_efforts:
+                    normalized_model_id = str(model_id).strip()
+                    if not normalized_model_id or normalized_model_id not in model_ids:
+                        raise EngineStateError("reasoning model id is not registered")
+                    if normalized_model_id in reasoning_by_model:
+                        raise EngineStateError("duplicate reasoning model id")
+                    normalized_efforts = tuple(
+                        dict.fromkeys(str(effort).strip() for effort in efforts)
+                    )
+                    if any(not effort for effort in normalized_efforts):
+                        raise EngineStateError("reasoning effort cannot be empty")
+                    reasoning_by_model[normalized_model_id] = normalized_efforts
                 records.append(
                     SourceRecord(
                         source_id=source_id,
@@ -225,6 +267,7 @@ class EngineStateStore:
                             if previous
                             else f"avibe-{secrets.token_hex(12)}"
                         ),
+                        model_reasoning_efforts=tuple(reasoning_by_model.items()),
                     )
                 )
             self._write_sources(records)
@@ -246,7 +289,18 @@ class EngineStateStore:
                 raise EngineStateError("source requires at least one model id")
             if any(not model for model in models):
                 raise EngineStateError("model id cannot be empty")
-            updated_record = SourceRecord(**{**asdict(current), "model_ids": models})
+            retained_reasoning = tuple(
+                (model_id, efforts)
+                for model_id, efforts in current.model_reasoning_efforts
+                if model_id in models
+            )
+            updated_record = SourceRecord(
+                **{
+                    **asdict(current),
+                    "model_ids": models,
+                    "model_reasoning_efforts": retained_reasoning,
+                }
+            )
             self._write_sources([updated_record if source.source_id == source_id else source for source in sources])
             return updated_record
 
@@ -426,6 +480,10 @@ class EngineStateStore:
                         **asdict(source),
                         "allowed_origins": list(source.allowed_origins),
                         "model_ids": list(source.model_ids),
+                        "model_reasoning_efforts": [
+                            [model_id, list(efforts)]
+                            for model_id, efforts in source.model_reasoning_efforts
+                        ],
                     }
                     for source in sources
                 ]

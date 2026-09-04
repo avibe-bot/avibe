@@ -313,7 +313,7 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
 
     claude_model = fixed_model("claude")
     codex_model = fixed_model("codex")
-    opencode_model = "custom/route-model"
+    opencode_model = "route-model"
     models = (claude_model, codex_model, "route-model")
     first = source("src_delete01", models)
     doomed = source("src_delete02", models)
@@ -335,7 +335,12 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
         agent = config.agents[backend]
         if backend == "opencode":
             agent.menu.checked = [opencode_model]
-            agent.models = [ModelHubBackendModelConfig(id=opencode_model)]
+            agent.models = [
+                ModelHubBackendModelConfig(
+                    id=opencode_model,
+                    native_protocol="openai_responses",
+                )
+            ]
         agent.routes[menu_model] = ModelHubRouteConfig(
             hops=tuple(ModelHubRouteHopConfig(item.id, upstream_model) for item in (first, doomed, last))
         )

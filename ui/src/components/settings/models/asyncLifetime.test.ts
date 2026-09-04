@@ -567,8 +567,8 @@ describe('savedSourcesKey / savedMenuKey', () => {
   });
 
   it('reads the menu the drawer seeds from', () => {
-    expect(savedMenuKey({ view: 'featured', checked: ['zhipuai/glm-5.2'] })).not.toBe(
-      savedMenuKey({ view: 'full', checked: ['zhipuai/glm-5.2'] }),
+    expect(savedMenuKey({ view: 'featured', checked: ['glm-5.2'] })).not.toBe(
+      savedMenuKey({ view: 'full', checked: ['glm-5.2'] }),
     );
     expect(savedMenuKey(null)).toBe(savedMenuKey({ view: 'featured', checked: [] }));
   });

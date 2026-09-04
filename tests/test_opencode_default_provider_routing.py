@@ -15,9 +15,67 @@ import dataclasses
 from config.v2_config import OpenCodeConfig
 from modules.agents.opencode.agent import resolve_opencode_model_dict
 from modules.agents.opencode.utils import (
+    build_opencode_model_option_items,
+    build_reasoning_effort_options,
     resolve_opencode_configured_default_model,
     resolve_opencode_model_id,
 )
+
+
+def test_model_hub_picker_keeps_bare_identity_and_hides_transport_provider() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "avibe-openai",
+                "name": "Avibe · OpenAI",
+                "models": {
+                    "gpt-5": {
+                        "id": "gpt-5",
+                        "name": "GPT-5",
+                        "variants": {"high": {"reasoningEffort": "high"}},
+                        "vibe_remote": {"model_hub_projected": True},
+                    }
+                },
+            }
+        ],
+        "default": {},
+    }
+
+    assert build_opencode_model_option_items(catalog, 10) == [
+        {"label": "GPT-5", "value": "gpt-5"}
+    ]
+    assert build_reasoning_effort_options(catalog, "gpt-5") == [
+        {"value": "__default__", "label": "(Default)"},
+        {"value": "high", "label": "High"}
+    ]
+
+
+def test_model_hub_picker_keeps_slash_bearing_id_whole_for_variants() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "avibe-openai",
+                "name": "Avibe · OpenAI",
+                "models": {
+                    "moonshotai/kimi-k2": {
+                        "id": "moonshotai/kimi-k2",
+                        "name": "Kimi K2",
+                        "variants": {"xhigh": {"reasoningEffort": "xhigh"}},
+                        "vibe_remote": {"model_hub_projected": True},
+                    }
+                },
+            }
+        ],
+        "default": {},
+    }
+
+    assert build_opencode_model_option_items(catalog, 10) == [
+        {"label": "Kimi K2", "value": "moonshotai/kimi-k2"}
+    ]
+    assert build_reasoning_effort_options(catalog, "moonshotai/kimi-k2") == [
+        {"value": "__default__", "label": "(Default)"},
+        {"value": "xhigh", "label": "Extra High"},
+    ]
 
 
 def test_opencode_config_default_provider_is_unset_by_default() -> None:

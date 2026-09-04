@@ -106,7 +106,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 7
+    assert schema["properties"]["contract_version"]["const"] == 8
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -130,7 +130,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 7,
+            "contract_version": 8,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -349,17 +349,35 @@ def test_source_validator_enforces_final_cross_field_and_inventory_rules():
     assert parsed.base_url == "https://relay.example/v1?api-version=2026-07-23"
 
 
-def test_persisted_model_hub_identifiers_share_the_canonical_validation_boundary():
+def test_opencode_persisted_rows_use_bare_canonical_ids_and_require_native_protocol():
     payload = ModelHubConfig().to_payload()
     opencode = payload["agents"]["opencode"]
     opencode["menu"]["checked"] = ["gpt-5"]
     opencode["routes"]["gpt-5"] = {"hops": []}
-    with pytest.raises(ValueError):
-        ModelHubConfig.from_payload(payload)
+    opencode["models"] = [
+        ModelHubBackendModelConfig(
+            id="gpt-5",
+            native_protocol="openai_responses",
+        ).to_payload()
+    ]
+    parsed = ModelHubConfig.from_payload(payload)
+    assert parsed.agents["opencode"].models[0].id == "gpt-5"
+
+    pre_v4 = copy.deepcopy(payload)
+    pre_v4["agents"]["opencode"]["models"][0].pop("native_protocol")
+    with pytest.raises(ValueError, match="native_protocol"):
+        ModelHubConfig.from_payload(pre_v4)
+
+    missing_menu = copy.deepcopy(payload)
+    missing_menu["agents"]["opencode"].pop("menu")
+    with pytest.raises(ValueError, match="menu.*required"):
+        ModelHubConfig.from_payload(missing_menu)
 
     payload = ModelHubConfig().to_payload()
     opencode = payload["agents"]["opencode"]
-    opencode["routes"]["custom/authorization: sk-test-credential-material"] = {"hops": []}
+    opencode["routes"][" authorization: sk-test-credential-material "] = {
+        "hops": []
+    }
     with pytest.raises(ValueError):
         ModelHubConfig.from_payload(payload)
 
@@ -505,16 +523,27 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
 
     for raw_example in _schema("agent-supply.schema.json")["examples"]:
         example = {
-            key: value for key, value in raw_example.items() if key not in {"builtin_models", "standard_vendors"}
+            key: value for key, value in raw_example.items() if key != "builtin_models"
         }
+        if raw_example["backend"] == "opencode":
+            example["models"] = [
+                ModelHubBackendModelConfig(
+                    id=model_id,
+                    native_protocol=(
+                        "anthropic"
+                        if model_id.startswith("claude-")
+                        else "openai_responses"
+                    ),
+                ).to_payload()
+                for model_id in raw_example["menu"]["checked"]
+            ]
         agent = ModelHubAgentSupplyConfig.from_payload(example)
-        # `builtin_models` and `standard_vendors` are read-only endpoint
-        # projections (v1.2), not persisted config — reconstruct them
+        # `builtin_models` is a read-only endpoint projection, not persisted
+        # config. Reconstruct it
         # the way `_agent_payload` merges them onto to_payload().
         serialized = {
             **agent.to_payload(),
             "builtin_models": raw_example.get("builtin_models"),
-            "standard_vendors": raw_example.get("standard_vendors"),
         }
         serialized.pop("models", None)
         serialized.pop("removed_model_ids", None)
@@ -680,7 +709,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 7,
+        "contract_version": 8,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -696,7 +725,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 7,
+        "contract_version": 8,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -768,18 +797,17 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
         "menu": None,
         "model_supply": [{"model_id": "claude-opus-4-5", "chain_length": 1}],
         "builtin_models": ["claude-opus-4-5"],
-        "standard_vendors": None,
         "named_agents": [],
     }
 
     _assert_valid("agent-supply.schema.json", payload)
 
 
-def test_v7_mirror_registry_is_executable_and_complete():
+def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 7
+    assert registry["contract_version"] == 8
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -997,8 +1025,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7],
-        "expected": [5, 6, 7],
+        "values": [6, 7, 8],
+        "expected": [5, 6, 7, 8],
     } in result["findings"]
 
 
@@ -1139,7 +1167,6 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         "model_supply": [],
         "named_agents": [],
         "builtin_models": [],
-        "standard_vendors": None,
     }
     supply_validator.validate(base_supply)
 
@@ -1292,7 +1319,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 7,
+        "contract_version": 8,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "chain": [
@@ -1519,10 +1546,12 @@ def test_backend_catalog_without_removed_ids_loads_empty_set(tmp_path):
 
 
 def _legacy_model_hub_payload(current: dict) -> dict:
-    """Build the persisted v3.0.9 Model Hub shape from a current fixture."""
+    """Build the released Claude/Codex v3.0.9 shape from a current fixture."""
 
     agents = {}
     for backend, agent in current["agents"].items():
+        if backend == "opencode":
+            continue
         agents[backend] = {
             "backend": agent["backend"],
             "mode": agent["mode"],
@@ -1539,25 +1568,52 @@ def _legacy_model_hub_payload(current: dict) -> dict:
     }
 
 
-def test_config_reload_migrates_v3_model_hub_shape_and_persists_backup(monkeypatch, tmp_path):
+def test_config_reload_rejects_pre_v4_opencode_shape_on_invalid_config_path(
+    monkeypatch,
+    tmp_path,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
-    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    opencode = payload["model_hub"]["agents"]["opencode"]
+    opencode["menu"] = {"view": "featured", "checked": ["openai/gpt-5"]}
+    opencode["models"] = [
+        {
+            "id": "openai/gpt-5",
+            "display_name": "GPT-5",
+            "origin": "manual",
+            "models_dev_id": None,
+            "context_window": None,
+            "max_output_tokens": None,
+            "input_modalities": [],
+            "output_modalities": [],
+            "supports_tools": None,
+            "supports_reasoning": None,
+            "reasoning_efforts": [],
+        }
+    ]
+    opencode["routes"] = {"openai/gpt-5": {"hops": []}}
+    opencode["mappings"] = [
+        {
+            "builtin_id": "openai/gpt-5",
+            "target_model_id": "gpt-5",
+            "enabled": True,
+        }
+    ]
     payload["migration_sentinel"] = {"keep": True}
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.load_warnings == ()
-    assert set(loaded.model_hub.agents["claude"].routes) == set(ModelHubConfig().agents["claude"].routes)
-    persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
-    assert persisted["model_hub"]["enabled"] is False
-    assert persisted["migration_sentinel"] == {"keep": True}
-    backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+    backups = list(config_path.parent.glob("config.json.bak-recovery-*"))
     assert backups
     assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    migration_source = inspect.getsource(v2_config._migrate_legacy_model_hub_payload)
+    assert "opencode" not in migration_source
 
 
 def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_path):
@@ -1991,40 +2047,6 @@ def test_config_reload_recovers_backend_ineligible_legacy_custom_source_order(
     assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
     assert config_path.read_text(encoding="utf-8") == original
-
-
-def test_config_reload_preserves_enabled_unchecked_legacy_opencode_mapping(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
-    source["models"][0]["provenance"] = source["models"][0].pop("origin")
-    source["models"][0].pop("reasoning_efforts")
-    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
-    legacy = _legacy_model_hub_payload(current["model_hub"])
-    legacy["sources"] = [source]
-    legacy["agents"]["opencode"]["mode"] = "hub"
-    legacy["agents"]["opencode"]["sources"] = {
-        "policy": "custom",
-        "order": [source["id"]],
-    }
-    legacy["agents"]["opencode"]["menu"] = {"view": "featured", "checked": []}
-    legacy["agents"]["opencode"]["mappings"] = [
-        {
-            "builtin_id": "custom/glm-5.2-air",
-            "target_model_id": "glm-5.2-air",
-            "enabled": True,
-        }
-    ]
-    current["model_hub"] = legacy
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(current), encoding="utf-8")
-
-    loaded = V2Config.load(config_path=config_path)
-
-    route = loaded.model_hub.agents["opencode"].routes["custom/glm-5.2-air"]
-    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
-        (source["id"], source["models"][0]["id"]),
-    ]
-    assert loaded.load_warnings == ()
 
 
 def test_config_reload_keeps_legacy_hub_subscription_backend_specific(monkeypatch, tmp_path):
@@ -2974,11 +2996,12 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
     dynamic["agents"]["opencode"]["mode"] = "hub"
     dynamic["agents"]["opencode"]["menu"] = {
         "view": "featured",
-        "checked": ["custom/model"],
+        "checked": ["model"],
     }
     dynamic["agents"]["opencode"]["models"] = [
         {
-            "id": "custom/model",
+            "id": "model",
+            "native_protocol": "openai_responses",
             "display_name": None,
             "origin": "manual",
             "models_dev_id": None,
@@ -2992,14 +3015,14 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
         }
     ]
     dynamic["agents"]["opencode"]["routes"] = {}
-    with pytest.raises(ValueError, match="missing menu model 'custom/model'"):
+    with pytest.raises(ValueError, match="missing menu model 'model'"):
         ModelHubConfig.from_payload(dynamic)
 
     dormant = json.loads(json.dumps(payload))
-    dormant["agents"]["opencode"]["routes"]["openai/dormant-model"] = {"hops": []}
+    dormant["agents"]["opencode"]["routes"]["dormant-model"] = {"hops": []}
     restored = ModelHubConfig.from_payload(dormant)
     assert restored.agents["opencode"].models == []
-    assert "openai/dormant-model" in restored.agents["opencode"].routes
+    assert "dormant-model" in restored.agents["opencode"].routes
 
 
 def test_backend_model_modalities_match_the_contract_directions():

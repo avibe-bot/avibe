@@ -724,7 +724,7 @@ class MemoryStore:
         self.requested_models = {
             "claude": "shared-model",
             "codex": "shared-model",
-            "opencode": "openai/shared-model",
+            "opencode": "shared-model",
         }
 
     def load(self) -> ModelHubConfig:
@@ -1199,7 +1199,7 @@ def _config(sources: list[ModelHubSourceConfig]) -> ModelHubConfig:
         agent.sources = ModelHubAgentSourcesConfig(
             order=[source.id for source in eligible],
         )
-        requested_model = "openai/shared-model" if backend == "opencode" else "shared-model"
+        requested_model = "shared-model"
         agent.routes[requested_model] = ModelHubRouteConfig(
             hops=tuple(
                 ModelHubRouteHopConfig(
@@ -1210,9 +1210,12 @@ def _config(sources: list[ModelHubSourceConfig]) -> ModelHubConfig:
             )
         )
     agents["opencode"].models = [
-        ModelHubBackendModelConfig(id="openai/shared-model")
+        ModelHubBackendModelConfig(
+            id="shared-model",
+            native_protocol="openai_responses",
+        )
     ]
-    agents["opencode"].menu.checked = ["openai/shared-model"]
+    agents["opencode"].menu.checked = ["shared-model"]
     return ModelHubConfig(sources=sources, agents=agents)
 
 
@@ -2363,7 +2366,7 @@ def test_opencode_gateway_round_trips_aliased_tool_names(tmp_path: Path) -> None
                 response = await client.post(
                     f"{base_url}/v1/chat/completions",
                     json={
-                        "model": "openai/shared-model",
+                        "model": "shared-model",
                         "messages": [{"role": "user", "content": "update the list"}],
                         "tools": [
                             {
@@ -5131,7 +5134,7 @@ def test_ambiguous_mixed_and_opencode_attempts_leave_no_record(
         registry.begin_gateway_request(
             backend="opencode",
             token=opencode_token,
-            requested_model_id="openai/shared-model",
+            requested_model_id="shared-model",
         )
         is None
     )
@@ -5298,15 +5301,17 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     source.models[0].reasoning_efforts = ["medium"]
     config = _config([source])
     agent = config.agents["opencode"]
-    agent.routes.pop("openai/shared-model")
-    agent.routes["openai/menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),))
+    agent.routes.pop("shared-model")
+    agent.routes["menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),))
     agent.models = [
         ModelHubBackendModelConfig(
-            id="openai/menu-model",
+            id="menu-model",
+            native_protocol="openai_responses",
+            supports_reasoning=True,
             reasoning_efforts=["low", "high"],
         )
     ]
-    agent.menu.checked = ["openai/menu-model"]
+    agent.menu.checked = ["menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
     gateway = SimpleNamespace(
@@ -5322,19 +5327,26 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
 
     assert overlay is not None
     payload = json.loads(overlay.content)
-    assert overlay.provider_id.startswith("avibe-model-hub-")
-    assert overlay.provider_id != "avibe-model-hub"
-    provider = payload["provider"][overlay.provider_id]
-    assert provider["models"]["openai/menu-model"]["id"] == "openai/menu-model"
-    assert provider["models"]["openai/menu-model"]["variants"] == {
+    assert overlay.provider_ids == ("avibe-openai",)
+    assert payload["enabled_providers"] == ["avibe-openai"]
+    provider = payload["provider"]["avibe-openai"]
+    assert provider["name"] == "Avibe · OpenAI"
+    assert provider["npm"] == "@ai-sdk/openai"
+    assert provider["options"] == {
+        "apiKey": "gateway-token",
+        "baseURL": "http://127.0.0.1:19000/v1",
+    }
+    assert provider["models"]["menu-model"]["id"] == "menu-model"
+    assert provider["models"]["menu-model"]["variants"] == {
         "high": {"reasoningEffort": "high"},
         "low": {"reasoningEffort": "low"},
     }
+    assert provider["models"]["menu-model"]["reasoning"] is True
     assert overlay.launches[0].target_model == "upstream-model"
     assert opencode_model_catalog_for_overlay(overlay) == {
         "providers": [
             {
-                "id": overlay.provider_id,
+                "id": "avibe-openai",
                 "models": provider["models"],
             }
         ],
@@ -5351,25 +5363,27 @@ def test_opencode_public_models_follow_persisted_config_without_overlay(
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes = {
-        "custom/current-model": ModelHubRouteConfig(
+        "current-model": ModelHubRouteConfig(
             hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
         )
     }
     agent.models = [
         ModelHubBackendModelConfig(
-            id="custom/current-model",
+            id="current-model",
+            native_protocol="openai_responses",
             display_name="Current model",
             reasoning_efforts=["low", "high"],
         )
     ]
-    agent.menu.checked = ["custom/current-model"]
+    agent.menu.checked = ["current-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
 
     assert service.opencode_public_models() == {
-        "custom/current-model": {
-            "id": "custom/current-model",
+        "current-model": {
+            "id": "current-model",
             "name": "Current model",
+            "native_protocol": "openai_responses",
             "variants": {
                 "low": {"reasoningEffort": "low"},
                 "high": {"reasoningEffort": "high"},
@@ -5389,18 +5403,20 @@ def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disable
     agent = config.agents["opencode"]
     agent.models = [
         ModelHubBackendModelConfig(
-            id="custom/no-reasoning",
+            id="no-reasoning",
+            native_protocol="openai_responses",
             supports_reasoning=False,
             reasoning_efforts=["low", "high"],
         )
     ]
-    agent.menu.checked = ["custom/no-reasoning"]
+    agent.menu.checked = ["no-reasoning"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
 
-    assert service.opencode_public_models()["custom/no-reasoning"] == {
-        "id": "custom/no-reasoning",
-        "name": "custom/no-reasoning",
+    assert service.opencode_public_models()["no-reasoning"] == {
+        "id": "no-reasoning",
+        "name": "no-reasoning",
+        "native_protocol": "openai_responses",
         "reasoning": False,
     }
 
@@ -5420,7 +5436,8 @@ def test_opencode_public_model_omits_unspecified_modality_directions(
     expected: dict[str, list[str]] | None,
 ) -> None:
     model = ModelHubBackendModelConfig(
-        id="custom/modalities",
+        id="modalities",
+        native_protocol="openai_responses",
         input_modalities=input_modalities,
         output_modalities=output_modalities,
     )
@@ -5433,7 +5450,7 @@ def test_opencode_public_model_omits_unspecified_modality_directions(
         assert projected["modalities"] == expected
 
 
-def test_opencode_overlay_private_provider_id_is_credential_scoped(
+def test_opencode_overlay_provider_ids_are_stable_across_gateway_tokens(
     tmp_path: Path,
 ) -> None:
     source = _source("src_overlay10", "Overlay")
@@ -5455,12 +5472,18 @@ def test_opencode_overlay_private_provider_id_is_credential_scoped(
 
     assert first is not None
     assert second is not None
-    assert first.provider_id != second.provider_id
-    assert set(json.loads(first.content)["provider"]) == {first.provider_id}
-    assert set(json.loads(second.content)["provider"]) == {second.provider_id}
+    assert first.provider_ids == second.provider_ids == ("avibe-openai",)
+    assert set(json.loads(first.content)["provider"]) == {"avibe-openai"}
+    assert set(json.loads(second.content)["provider"]) == {"avibe-openai"}
+    assert json.loads(first.content)["provider"]["avibe-openai"]["options"]["apiKey"] == (
+        "gateway-token-one"
+    )
+    assert json.loads(second.content)["provider"]["avibe-openai"]["options"]["apiKey"] == (
+        "gateway-token-two"
+    )
 
 
-def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: Path) -> None:
+def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path) -> None:
     first = _source(
         "src_overlay11",
         "First",
@@ -5478,13 +5501,27 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     config = _config([first, second])
     agent = config.agents["opencode"]
     agent.models = [
-        ModelHubBackendModelConfig(id="custom/first-model"),
-        ModelHubBackendModelConfig(id="custom/second-model"),
+        ModelHubBackendModelConfig(
+            id="first-model",
+            native_protocol="anthropic",
+            supports_reasoning=True,
+            reasoning_efforts=["high"],
+        ),
+        ModelHubBackendModelConfig(
+            id="second-model",
+            native_protocol="openai_responses",
+            reasoning_efforts=["high"],
+        ),
+        ModelHubBackendModelConfig(
+            id="empty-route-model",
+            native_protocol="anthropic",
+        ),
     ]
-    agent.menu.checked = ["custom/first-model", "custom/second-model"]
+    agent.menu.checked = ["first-model", "second-model", "empty-route-model"]
     agent.routes = {
-        "custom/first-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(first.id, "first-model"),)),
-        "custom/second-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(second.id, "second-model"),)),
+        "first-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(first.id, "first-model"),)),
+        "second-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(second.id, "second-model"),)),
+        "empty-route-model": ModelHubRouteConfig(),
     }
     service = _service(tmp_path, sources=[first, second])
     service.store.config = config
@@ -5500,18 +5537,156 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
 
     assert overlay is not None
     payload = json.loads(overlay.content)
-    assert set(payload["provider"]) == {overlay.provider_id}
-    provider = payload["provider"][overlay.provider_id]
-    assert provider["npm"] == "@ai-sdk/openai-compatible"
-    assert provider["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
-    assert set(provider["models"]) == {
-        "custom/first-model",
-        "custom/second-model",
+    assert set(payload["provider"]) == {"avibe-openai", "avibe-anthropic"}
+    assert set(payload["enabled_providers"]) == set(payload["provider"])
+    assert overlay.provider_ids == ("avibe-anthropic", "avibe-openai")
+    anthropic = payload["provider"]["avibe-anthropic"]
+    openai = payload["provider"]["avibe-openai"]
+    assert anthropic["name"] == "Avibe · Anthropic"
+    assert anthropic["npm"] == "@ai-sdk/anthropic"
+    assert anthropic["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
+    assert anthropic["models"]["first-model"]["variants"] == {
+        "high": {"effort": "high"},
+    }
+    assert "reasoning" not in anthropic["models"]["first-model"]
+    assert set(anthropic["models"]) == {"first-model", "empty-route-model"}
+    assert openai["name"] == "Avibe · OpenAI"
+    assert openai["npm"] == "@ai-sdk/openai"
+    assert openai["models"]["second-model"]["variants"] == {
+        "high": {"reasoningEffort": "high"},
     }
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",
         "second-model",
     }
+
+
+def test_opencode_empty_menu_writes_the_empty_overlay(tmp_path: Path) -> None:
+    config = _config([])
+    agent = config.agents["opencode"]
+    agent.menu.checked = []
+    service = _service(tmp_path, sources=[])
+    service.store.config = config
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000/opencode", "gateway-token")
+            ),
+        ),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+
+    assert overlay is not None
+    assert overlay.provider_ids == ("avibe-openai",)
+    assert overlay.checked_identifiers == ()
+    assert overlay.model_provider_ids == ()
+    assert overlay.launches == ()
+    assert json.loads(overlay.content) == {
+        "$schema": "https://opencode.ai/config.json",
+        "enabled_providers": ["avibe-openai"],
+        "provider": {
+            "avibe-openai": {
+                "models": {},
+                "name": "Avibe · OpenAI",
+                "npm": "@ai-sdk/openai",
+                "options": {
+                    "apiKey": "gateway-token",
+                    "baseURL": "http://127.0.0.1:19000/opencode/v1",
+                },
+            }
+        },
+    }
+    assert router.overlay_path.read_bytes() == overlay.content
+
+
+def test_opencode_overlay_identity_is_stable_under_runtime_perturbations(
+    tmp_path: Path,
+) -> None:
+    first = _source("src_stable001", "First", model_id="upstream-first")
+    second = _source("src_stable002", "Second", model_id="upstream-second")
+    config = _config([first, second])
+    agent = config.agents["opencode"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="stable-model",
+            native_protocol="openai_responses",
+            reasoning_efforts=["high"],
+        )
+    ]
+    agent.menu.checked = ["stable-model"]
+    agent.routes = {
+        "stable-model": ModelHubRouteConfig(
+            hops=(
+                ModelHubRouteHopConfig(first.id, "upstream-first"),
+                ModelHubRouteHopConfig(second.id, "upstream-second"),
+            )
+        )
+    }
+    service = _service(tmp_path, sources=[first, second])
+    service.store.config = config
+    endpoint = AsyncMock(
+        return_value=("http://127.0.0.1:19000", "gateway-token-one")
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(endpoint=endpoint),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    def projected_content() -> bytes:
+        overlay = asyncio.run(router.prepare_opencode_overlay())
+        assert overlay is not None
+        payload = json.loads(overlay.content)
+        for provider in payload["provider"].values():
+            provider["options"]["apiKey"] = "<gateway-token>"
+        assert overlay.checked_identifiers == ("stable-model",)
+        return json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+    baseline = projected_content()
+    perturbations = (
+        lambda: agent.sources.order.reverse(),
+        lambda: setattr(
+            first,
+            "state",
+            ModelHubSourceStateConfig(
+                status="needs_action",
+                detail_key="models.source.needs_action.oauth_expired",
+            ),
+        ),
+        lambda: setattr(
+            agent.routes["stable-model"],
+            "hops",
+            (ModelHubRouteHopConfig(second.id, "upstream-second"),),
+        ),
+        lambda: config.sources.append(
+            _source("src_stable003", "Unrouted", model_id="unrouted")
+        ),
+        lambda: config.sources.pop(),
+        lambda: None,
+    )
+    for perturb in perturbations:
+        perturb()
+        assert projected_content() == baseline
+
+    endpoint.return_value = (
+        "http://127.0.0.1:19000",
+        "gateway-token-two",
+    )
+    assert projected_content() == baseline
+
+    agent.mode = "direct"
+    assert asyncio.run(router.prepare_opencode_overlay()) is None
+    assert [model.id for model in agent.models] == ["stable-model"]
+    agent.mode = "hub"
+    assert projected_content() == baseline
 
 
 def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path) -> None:
@@ -5522,15 +5697,20 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
     )
     config = _config([source])
     agent = config.agents["opencode"]
-    agent.routes.pop("openai/shared-model")
-    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
+    agent.routes.pop("shared-model")
+    agent.routes["menu-model"] = ModelHubRouteConfig(
         hops=(
             ModelHubRouteHopConfig(source.id, "stale-model"),
             ModelHubRouteHopConfig(source.id, "supported-model"),
         )
     )
-    agent.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
-    agent.menu.checked = ["openai/menu-model"]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="menu-model",
+            native_protocol="openai_responses",
+        )
+    ]
+    agent.menu.checked = ["menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
     router = ModelHubRuntimeRouter(
@@ -5557,10 +5737,15 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     )
     config = _config([source])
     agent = config.agents["opencode"]
-    agent.routes.pop("openai/shared-model")
-    agent.routes["openai/menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "stale-model"),))
-    agent.models = [ModelHubBackendModelConfig(id="openai/menu-model")]
-    agent.menu.checked = ["openai/menu-model"]
+    agent.routes.pop("shared-model")
+    agent.routes["menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "stale-model"),))
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id="menu-model",
+            native_protocol="openai_responses",
+        )
+    ]
+    agent.menu.checked = ["menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
     router = ModelHubRuntimeRouter(
@@ -5574,14 +5759,14 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"][overlay.provider_id]
+    provider = json.loads(overlay.content)["provider"]["avibe-openai"]
     assert provider["models"] == {
-        "openai/menu-model": {
-            "id": "openai/menu-model",
-            "name": "openai/menu-model",
+        "menu-model": {
+            "id": "menu-model",
+            "name": "menu-model",
         }
     }
-    assert overlay.checked_identifiers == ("openai/menu-model",)
+    assert overlay.checked_identifiers == ("menu-model",)
     assert overlay.available_identifiers == ()
     assert overlay.launches == ()
 
@@ -6240,7 +6425,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 7,
+            "contract_version": 8,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -8329,7 +8514,7 @@ def test_probe_request_matches_live_backend_protocol_matrix(
         outcomes=[_outcome(RawOutcomeKind.SUCCESS)],
     )
 
-    requested_model = "openai/shared-model" if backend == "opencode" else "shared-model"
+    requested_model = "shared-model"
     result = asyncio.run(service.probe_agent(backend, requested_model))
 
     assert result["reachable"] is True
@@ -8365,7 +8550,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 7,
+        "contract_version": 8,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,
@@ -8918,7 +9103,7 @@ def test_known_opencode_turn_is_fail_closed_but_not_unknown(
         registry.begin_gateway_request(
             backend="opencode",
             token=token,
-            requested_model_id="openai/shared-model",
+            requested_model_id="shared-model",
         )
         is None
     )

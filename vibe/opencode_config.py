@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -22,7 +21,6 @@ _CUSTOM_PROVIDER_LABELS = {
     "openai-compatible": "OpenAI compatible",
     "anthropic-compatible": "Anthropic compatible",
 }
-MODEL_HUB_RUNTIME_PROVIDER_PREFIX = "avibe-model-hub-"
 _RESERVED_PROVIDER_IDS = {
     "alibaba-cn",
     "anthropic",
@@ -52,6 +50,51 @@ class OpenCodeConfigProbeResult:
     path: Optional[Path] = None
     existing_paths: list[Path] = field(default_factory=list)
     errors: list[tuple[Path, str]] = field(default_factory=list)
+
+
+class OpenCodeRuntimeConfigInvalidError(RuntimeError):
+    """The inherited OpenCode runtime override cannot be safely managed."""
+
+
+def managed_opencode_runtime_config_content(raw: str | bytes | None) -> str:
+    """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
+
+    if raw is None:
+        payload: Any = {}
+    else:
+        try:
+            content = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+            if not isinstance(content, str):
+                raise TypeError("runtime config override must be text")
+            payload = parse_jsonc_object(content)
+        except (TypeError, UnicodeDecodeError, ValueError) as exc:
+            raise OpenCodeRuntimeConfigInvalidError(
+                "OpenCode runtime config override is invalid JSONC"
+            ) from exc
+    if not isinstance(payload, dict):
+        raise OpenCodeRuntimeConfigInvalidError(
+            "OpenCode runtime config override must be a JSON object"
+        )
+
+    tools = payload.get("tools")
+    managed_tools = dict(tools) if isinstance(tools, dict) else {}
+    managed_tools["skill"] = False
+    payload["tools"] = managed_tools
+
+    permission = payload.get("permission")
+    if permission is None:
+        managed_permission: dict[str, Any] = {}
+    elif isinstance(permission, str):
+        managed_permission = {"*": permission}
+    elif isinstance(permission, dict):
+        managed_permission = dict(permission)
+    else:
+        raise OpenCodeRuntimeConfigInvalidError(
+            "OpenCode runtime permission override must be a string or object"
+        )
+    managed_permission["skill"] = "deny"
+    payload["permission"] = managed_permission
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def get_opencode_config_paths(home: Path | None = None) -> list[Path]:
@@ -494,7 +537,7 @@ def _normalize_model_id(model_id: str, *, provider_id: str | None = None) -> str
     return candidate
 
 
-def _normalize_custom_provider_id(provider_id: str, *, reject_reserved: bool = False) -> str:
+def _normalize_custom_provider_id(provider_id: str) -> str:
     if not isinstance(provider_id, str) or not provider_id.strip():
         raise ValueError("provider_id is required")
     candidate = provider_id.strip().lower()
@@ -502,8 +545,6 @@ def _normalize_custom_provider_id(provider_id: str, *, reject_reserved: bool = F
         raise ValueError("provider_id is too long")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", candidate):
         raise ValueError("provider_id must use lowercase letters, numbers, dot, hyphen, or underscore")
-    if reject_reserved and is_reserved_opencode_provider_id(candidate):
-        raise ValueError("provider_id already exists")
     return candidate
 
 
@@ -511,13 +552,6 @@ def is_reserved_opencode_provider_id(provider_id: str) -> bool:
     if not isinstance(provider_id, str):
         return False
     return provider_id.strip().lower() in _RESERVED_PROVIDER_IDS
-
-
-def model_hub_runtime_provider_id(gateway_token: str) -> str:
-    """Derive the private OpenCode provider namespace for one gateway process."""
-
-    digest = hashlib.sha256(gateway_token.encode()).hexdigest()[:24]
-    return f"{MODEL_HUB_RUNTIME_PROVIDER_PREFIX}{digest}"
 
 
 def get_opencode_custom_provider_adapter(
@@ -729,15 +763,24 @@ def upsert_opencode_custom_provider(
     logger_instance: Optional[logging.Logger] = None,
 ) -> Path:
     active_logger = logger_instance or logger
-    provider_id = _normalize_custom_provider_id(provider_id, reject_reserved=True)
+    provider_id = _normalize_custom_provider_id(provider_id)
     name = _normalize_custom_provider_name(name)
     adapter = _normalize_custom_provider_adapter(adapter)
     base_url = _normalize_base_url(base_url)
 
     config, target_path = _load_or_create_user_config(home=home, logger_instance=active_logger)
+    provider_map = config.get("provider")
+    provider_exists = isinstance(provider_map, dict) and provider_id in provider_map
+    if not provider_exists and (
+        is_reserved_opencode_provider_id(provider_id)
+        or provider_id.startswith("avibe-")
+    ):
+        raise ValueError("provider_id already exists")
     provider_config = _get_provider_config(config, provider_id)
-    existing_meta = provider_config.get(_CUSTOM_PROVIDER_META_KEY)
-    if provider_config and not (isinstance(existing_meta, dict) and existing_meta.get("custom") is True):
+    if provider_exists and get_opencode_custom_provider_adapter(
+        provider_id,
+        provider_config,
+    ) is None:
         raise ValueError("provider_id already exists")
 
     options = provider_config.setdefault("options", {})

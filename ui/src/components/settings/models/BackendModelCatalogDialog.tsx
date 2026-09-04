@@ -365,13 +365,6 @@ export const BackendModelCatalogDialog: React.FC<{
   const movableIds = draft.filter((model) => !model.locked).map((model) => model.id);
   const takenIds = new Set(draft.map((model) => model.id));
   const effortSuggestions = [...new Set(draft.flatMap((model) => model.reasoning_efforts))];
-  /** Threaded from the server's own projection rather than mirrored here: the
-   *  editor's id rule has to agree with the backend that will accept the id. */
-  const standardVendors = React.useMemo(
-    () => new Set(baseline?.agent.standard_vendors ?? []),
-    [baseline?.agent.standard_vendors],
-  );
-
   /** Reordering permutes which movable row sits in which movable slot; a locked
    *  row keeps its absolute index, so the order sent never moves one. */
   const reorderMovable = (nextIds: string[]) => {
@@ -1136,14 +1129,14 @@ export const BackendModelCatalogDialog: React.FC<{
           // editor itself commits under (`backendModelId`, which `draftWithId`
           // applies there). The lookup is a total function of the id, so the id
           // it is asked about has to be the one the row would be saved as: asked
-          // about a typed `foo` it does not find the user's saved `custom/foo`,
+          // about a typed `foo` it finds the user's saved `foo`,
           // and the editor — resolving the id only on commit — would then write
           // a blank row onto it, dropping the limits, modalities, capabilities
           // and name they had described. The resolver is idempotent, so the
           // editor re-applying it to this seed changes nothing.
           onCustom={(typed) => {
             addCandidates([]);
-            const seedId = backendModelId(typed, backend, standardVendors);
+            const seedId = backendModelId(typed);
             const existing = heldRowFor(seedId, draftRef.current, baselineRef.current?.models ?? []);
             setEditing(existing ? { model: existing } : { model: null, seedId });
           }}
@@ -1158,7 +1151,6 @@ export const BackendModelCatalogDialog: React.FC<{
           seedId={editing.seedId}
           takenIds={takenIds}
           effortSuggestions={effortSuggestions}
-          standardVendors={standardVendors}
           onCancel={() => setEditing(null)}
           onCommit={commitEdit}
         />

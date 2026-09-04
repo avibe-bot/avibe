@@ -1,16 +1,16 @@
 # Model Hub contracts
 
-Status: **FINAL shape, implementation-gated. `contract_version` is 7 (2026-09-03
-backend-catalog composition and reasoning-tier provenance); 6 published 2026-08-19
+Status: **FINAL shape, implementation-gated. `contract_version` is 8 (2026-09-05
+OpenCode bare ids and per-protocol overlay); 7 defined 2026-09-03 for
+backend-catalog composition and reasoning-tier provenance; 6 published 2026-08-19
 usage metering; 5 published the 2026-08-11 contract completion.**
 
 These files describe the terminal contract for Model Hub before first release. No bump
 carries a data migration, compatibility reader, conversion transaction, or version
 discriminator: Model Hub has not shipped, so republishing the shape converts nothing.
-`contract_version` is 7 wherever a versioned object exists. The owner-approved
-pre-release corrections add server-owned candidate composition, one-time matching
-points, and reasoning-tier provenance while removing the earlier persistent
-network/timeout cooldown spelling, without adding compatibility paths.
+`contract_version` is 8 wherever a versioned object exists. The owner-approved
+pre-release correction adds OpenCode bare ids, server-owned native protocols, and
+per-protocol runtime providers while deleting the prefixed-id compatibility paths.
 
 `v5` is still written throughout these files and stays: it names the contract-completion
 generation they were authored in, and sentences such as "Minimum v5 set" or
@@ -104,7 +104,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 7 must coexist in all registered version locations on the same tested head:
+`contract_version` 8 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

@@ -907,7 +907,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 7
+    assert runtime["contract_version"] == 8
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1125,7 +1125,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 7, "status": {"health": "ok"}}
+        return {"contract_version": 8, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1142,7 +1142,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 7, "status": {"health": "not_started"}}
+        return {"contract_version": 8, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1159,7 +1159,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 7, "status": {"health": "installing"}}
+        return {"contract_version": 8, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1903,11 +1903,8 @@ def test_source_create_nonce_owns_permanent_credential_through_cancellation(tmp_
     asyncio.run(scenario())
 
 
-def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
-    """Integration (2026-07-24): list_agents() carries the read-only builtin_models /
-    standard_vendors projections straight from the backend modules, so the UI never
-    hand-mirrors a fixed menu or the OpenCode vendor list (agent-supply v1.2)."""
-    from core.handlers.model_hub.identifiers import STANDARD_OPENCODE_VENDOR_IDS
+def test_agents_endpoint_projects_builtin_models(tmp_path):
+    """list_agents() carries each fixed menu from the backend catalog."""
     from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
     service, _store, _adapter = _service(tmp_path)
@@ -1920,10 +1917,8 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
         expected = [entry["id"] for entry in backend_model_entries(backend, catalog)]
         assert expected, f"bundled catalog must list built-in {backend} models"
         assert agents[backend]["builtin_models"] == expected
-        assert agents[backend]["standard_vendors"] is None
 
     assert agents["opencode"]["builtin_models"] is None
-    assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
 
 
 def test_agents_project_one_shared_backend_catalog_contract(tmp_path):
@@ -1952,12 +1947,67 @@ def test_agents_project_one_shared_backend_catalog_contract(tmp_path):
     assert agents["opencode"]["catalog_models"] == []
 
 
+def test_catalog_model_protocol_condition_is_identical_in_both_contracts():
+    model = {
+        "id": "fixture-model",
+        "display_name": None,
+        "origin": "manual",
+        "models_dev_id": None,
+        "context_window": None,
+        "max_output_tokens": None,
+        "input_modalities": [],
+        "output_modalities": [],
+        "supports_tools": None,
+        "supports_reasoning": None,
+        "reasoning_efforts": [],
+        "locked": False,
+        "routeable": True,
+    }
+    supply_validator = Draft7Validator(
+        _schema("agent-supply.schema.json"),
+        registry=_api_response_registry(),
+    )
+    catalog_validator = Draft7Validator(
+        {"$ref": "model-hub/api-response.schema.json#/definitions/AgentCatalogResponse"},
+        registry=_api_response_registry(),
+    )
+
+    for backend in ("claude", "codex", "opencode"):
+        for carries_protocol in (False, True):
+            row = {
+                **model,
+                **(
+                    {"native_protocol": "openai_responses"}
+                    if carries_protocol
+                    else {}
+                ),
+            }
+            expected_valid = carries_protocol is (backend == "opencode")
+            supply = {
+                "backend": backend,
+                "mode": "hub",
+                "menu_kind": "open" if backend == "opencode" else "fixed",
+                "catalog_models": [row],
+            }
+            catalog = {
+                "ok": True,
+                "contract_version": CONTRACT_VERSION,
+                "agent": {
+                    "backend": backend,
+                    "mode": "hub",
+                    "catalog_models": [row],
+                },
+            }
+            assert (not list(supply_validator.iter_errors(supply))) is expected_valid
+            assert (not list(catalog_validator.iter_errors(catalog))) is expected_valid
+
+
 @pytest.mark.parametrize(
     ("backend", "model_id"),
     (
         ("claude", "claude-deepseek-v4"),
         ("codex", "deepseek-v4"),
-        ("opencode", "aihub/deepseek-v4"),
+        ("opencode", "deepseek-v4"),
     ),
 )
 def test_backend_catalog_add_edit_and_runtime_refresh(
@@ -1988,6 +2038,8 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         "locked": False,
         "routeable": True,
     }
+    if backend == "opencode":
+        added["native_protocol"] = "openai_responses"
 
     response = asyncio.run(service.set_agent_models(backend, baseline, [*baseline, added]))
 
@@ -2207,7 +2259,7 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     )
 
 
-def test_opencode_candidates_collapse_custom_vendors_into_one_identity(tmp_path):
+def test_opencode_candidates_collapse_suppliers_into_one_bare_identity(tmp_path):
     service, store, _adapter = _service(tmp_path)
     sources = [
         ModelHubSourceConfig(
@@ -2230,10 +2282,46 @@ def test_opencode_candidates_collapse_custom_vendors_into_one_identity(tmp_path)
     candidates = service.agent_model_candidates("opencode")
 
     assert candidates["builtin"] == []
-    assert [item["id"] for item in candidates["providers"]] == ["custom/shared-model"]
+    assert [item["id"] for item in candidates["providers"]] == ["shared-model"]
+    assert candidates["providers"][0]["native_protocol"] == "openai_responses"
     assert [supplier["source_id"] for supplier in candidates["providers"][0]["suppliers"]] == [
         source.id for source in sources
     ]
+
+
+def test_candidate_protocol_projection_is_total_only_for_opencode(tmp_path):
+    from vibe.models_dev_catalog import native_protocol_for_model_id
+
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_protocol1",
+        kind="api_key",
+        vendor="custom",
+        display_name="Protocol fixtures",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-protocol-fixture", provenance="discovered"),
+            ModelHubModelConfig(id="gpt-protocol-fixture", provenance="discovered"),
+        ],
+        credential_ref="cred_protocol1",
+    )
+    store.config.sources = [source]
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id]
+
+    for backend in ("claude", "codex", "opencode"):
+        candidates = service.agent_model_candidates(backend)
+        rows = [row for group in candidates.values() for row in group]
+        assert rows
+        for row in rows:
+            assert ("native_protocol" in row) is (backend == "opencode")
+            if backend == "opencode":
+                assert row["native_protocol"] == native_protocol_for_model_id(
+                    row["id"]
+                )
 
 
 def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_path):
@@ -3663,13 +3751,23 @@ def test_opencode_public_models_cross_the_controller_rpc_boundary(monkeypatch):
 
     def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"custom/current-model": {"id": "custom/current-model"}}
+        return {
+            "current-model": {
+                "id": "current-model",
+                "native_protocol": "openai_responses",
+            }
+        }
 
     monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
 
     models = ModelHubRemoteService().opencode_public_models()
 
-    assert models == {"custom/current-model": {"id": "custom/current-model"}}
+    assert models == {
+        "current-model": {
+            "id": "current-model",
+            "native_protocol": "openai_responses",
+        }
+    }
     assert calls == [("get_opencode_public_models", None)]
 
 
@@ -3707,7 +3805,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 7,
+        "contract_version": 8,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -4264,7 +4362,10 @@ def test_opencode_options_route_passes_controller_projection(monkeypatch):
     from vibe import api
 
     projection = {
-        "custom/current-model": {"id": "custom/current-model"},
+        "current-model": {
+            "id": "current-model",
+            "native_protocol": "openai_responses",
+        },
     }
     calls = []
 
@@ -7986,7 +8087,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 7
+    assert runtime["contract_version"] == 8
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

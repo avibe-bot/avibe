@@ -63,7 +63,6 @@ const hubAgent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   named_agents: [],
   menu: null,
   builtin_models: [],
-  standard_vendors: null,
   ...over,
 });
 
@@ -102,7 +101,7 @@ describe('agentGroupStatus', () => {
     expect(agentGroupStatus([
       {
         name: 'opencode',
-        effective_model_id: 'openai/gpt-5.6-terra',
+        effective_model_id: 'gpt-5.6-terra',
         supply_status: 'interrupted',
         route_reason: 'route_unconfigured',
       },
@@ -110,7 +109,7 @@ describe('agentGroupStatus', () => {
     expect(agentGroupStatus([
       {
         name: 'opencode',
-        effective_model_id: 'openai/gpt-5.6-terra',
+        effective_model_id: 'gpt-5.6-terra',
         supply_status: 'interrupted',
         route_reason: null,
       },

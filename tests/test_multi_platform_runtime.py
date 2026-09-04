@@ -23,7 +23,7 @@ from core.native_dispatch_phase import (
 )
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
-from modules.agents.model_hub import launch_for_context
+from modules.agents.model_hub import OpenCodeOverlay, launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.server import (
@@ -76,6 +76,101 @@ def test_opencode_runtime_config_failure_is_localized() -> None:
 
     assert "运行时配置" in display
     assert "internal diagnostic" not in display
+
+
+def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    reservation = object()
+    empty_overlay = OpenCodeOverlay(
+        path=Path("/tmp/opencode-empty-overlay.json"),
+        content_hash="empty-overlay-hash",
+        content=(
+            b'{"enabled_providers":["avibe-openai"],"provider":'
+            b'{"avibe-openai":{"models":{}}}}\n'
+        ),
+        provider_ids=("avibe-openai",),
+        model_provider_ids=(),
+        checked_identifiers=(),
+        available_identifiers=(),
+        launches=(),
+    )
+
+    class _Runtime:
+        @staticmethod
+        def turn_mode(_backend):
+            return "hub"
+
+        @staticmethod
+        async def prepare_opencode_overlay():
+            return empty_overlay
+
+    class _Server:
+        async def configure_model_hub_overlay(self, overlay):
+            assert overlay is empty_overlay
+            calls.append("configure")
+            return reservation
+
+        async def release_model_hub_overlay_reservation(self, value):
+            assert value is reservation
+            calls.append("release")
+
+        async def ensure_running(self):
+            calls.append("ensure")
+
+    server = _Server()
+
+    async def _get_server():
+        return server
+
+    async def _emit_failure(*_args, **_kwargs):
+        calls.append("failure")
+
+    async def _remove_ack(_request):
+        calls.append("ack")
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        _emit_failure,
+    )
+    controller = type(
+        "Controller",
+        (),
+        {
+            "config": type("Config", (), {"language": "en"})(),
+            "model_hub_runtime": _Runtime(),
+        },
+    )()
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent._get_server = _get_server
+    agent._remove_ack_reaction = _remove_ack
+
+    def _finish_after_start(_server):
+        calls.append("attach")
+        raise RuntimeError("test boundary after server start")
+
+    agent._attach_server_activation = _finish_after_start
+    request = AgentRequest(
+        context=MessageContext(
+            user_id="user",
+            channel_id="channel",
+            platform="slack",
+            platform_specific={},
+        ),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::channel",
+    )
+
+    asyncio.run(agent._process_message(request))
+
+    assert calls == ["configure", "ensure", "attach", "release", "failure", "ack"]
 
 
 class _StubClient(BaseIMClient):

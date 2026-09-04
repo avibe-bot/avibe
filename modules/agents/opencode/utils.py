@@ -61,6 +61,28 @@ def _opencode_model_entry_id(model_entry: Any) -> str:
     return model_id if isinstance(model_id, str) else ""
 
 
+def opencode_model_is_hub_projected(model_info: object) -> bool:
+    if not isinstance(model_info, dict):
+        return False
+    metadata = model_info.get("vibe_remote")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("model_hub_projected") is True
+    )
+
+
+def opencode_model_picker_value(
+    provider_id: str,
+    model_id: str,
+    model_info: object,
+) -> str:
+    """Keep Model Hub's bare identity out of OpenCode transport addressing."""
+
+    if opencode_model_is_hub_projected(model_info):
+        return model_id
+    return f"{provider_id}/{model_id}" if provider_id else model_id
+
+
 def _opencode_model_hub_model_ids(provider: dict) -> set[str]:
     """Return models projected from Model Hub for one public provider."""
 
@@ -76,8 +98,7 @@ def _opencode_model_hub_model_ids(provider: dict) -> set[str]:
     for model_id, model_info in entries:
         if not isinstance(model_id, str) or not isinstance(model_info, dict):
             continue
-        metadata = model_info.get("vibe_remote")
-        if isinstance(metadata, dict) and metadata.get("model_hub_projected") is True:
+        if opencode_model_is_hub_projected(model_info):
             projected.add(model_id)
     return projected
 
@@ -283,8 +304,28 @@ def resolve_opencode_reasoning_effort(
 
 
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:
+    if not isinstance(opencode_models, dict):
+        return {}
+    if isinstance(target_model, str) and target_model:
+        matches = []
+        for provider in opencode_models.get("providers", []) or []:
+            if not isinstance(provider, dict):
+                continue
+            model_info = find_opencode_model_info(
+                opencode_models,
+                get_opencode_provider_id(provider),
+                target_model,
+            )
+            if opencode_model_is_hub_projected(model_info):
+                matches.append(model_info)
+        if len(matches) == 1:
+            variants = matches[0].get("variants", {})
+            return variants if isinstance(variants, dict) else {}
+        if matches:
+            return {}
+
     target_provider, target_model_id = _parse_model_key(target_model)
-    if not target_provider or not target_model_id or not isinstance(opencode_models, dict):
+    if not target_provider or not target_model_id:
         return {}
     model_info = find_opencode_model_info(opencode_models, target_provider, target_model_id)
     if isinstance(model_info, dict):
@@ -494,9 +535,17 @@ def build_opencode_model_option_items(
             else:
                 model_name = model_id
 
-            full_model = f"{provider_id}/{model_id}" if provider_id else model_id
+            full_model = opencode_model_picker_value(
+                provider_id,
+                model_id,
+                model_info,
+            )
             is_default = defaults.get(provider_id) == model_id if provider_id else False
-            display = f"{provider_name}: {model_name}" if provider_name else model_name
+            display = (
+                model_name
+                if opencode_model_is_hub_projected(model_info)
+                else f"{provider_name}: {model_name}" if provider_name else model_name
+            )
             if is_default:
                 display += " (default)"
 

@@ -19,10 +19,9 @@ import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { isComposingKey } from '@/lib/imeComposition';
 import { cn } from '@/lib/utils';
-import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, opencodeMenuIdentity, retireModelsDevMatch } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
-import type { StandardVendors } from './menus/identifiers';
 import { apiFailure, modelsApi } from './modelsApi';
 import { modelsDevFillFailureKey } from './serverCopy';
 import {
@@ -127,14 +126,9 @@ export const BackendModelEditorDialog: React.FC<{
   /** Effort values this backend's other rows already use. Suggestions, never a
    *  vocabulary — every effort is sent verbatim and any string is equally valid. */
   effortSuggestions: readonly string[];
-  /** OpenCode's standard vendor ids, as the server projects them — the input to
-   *  the shared id rule both typeahead rows resolve through (`backendModelId`).
-   *  Empty for every other backend, and for a server too old to project them:
-   *  `custom/` is then the answer for every query, which OpenCode still accepts. */
-  standardVendors: StandardVendors;
   onCancel: () => void;
   onCommit: (model: BackendModel) => void;
-}> = ({ open, backend, model, seedId, takenIds, effortSuggestions, standardVendors, onCancel, onCommit }) => {
+}> = ({ open, backend, model, seedId, takenIds, effortSuggestions, onCancel, onCommit }) => {
   const { t } = useTranslation();
   const creating = model === null;
   const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
@@ -191,10 +185,10 @@ export const BackendModelEditorDialog: React.FC<{
     // by the one route nobody watches. The query stays what was typed: it is a
     // models.dev search, and searching for the resolved id would search for the
     // vendor prefix the resolver just added.
-    const next = model ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend, standardVendors);
+    const next = model ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend);
     seed(next);
     setLookup(model === null ? seedId?.trim() ?? '' : '');
-  }, [backend, model, open, seed, seedId, standardVendors]);
+  }, [backend, model, open, seed, seedId]);
 
   /**
    * The typeahead: what has been typed so far, answered by models.dev.
@@ -248,14 +242,14 @@ export const BackendModelEditorDialog: React.FC<{
    * Add mode resolves the id through the one chokepoint here, so the rules below
    * and the row `commit` sends judge and write the same value — the one the
    * backend receives. Checking the raw box instead would measure a length and a
-   * collision against an id that does not exist yet: `custom/` is part of what
-   * gets stored, and a row already holding `custom/foo` collides with a freshly
-   * typed `foo`.
+   * collision against an id that does not exist yet: canonicalization trims
+   * surrounding whitespace, and a row already holding `foo` collides with a
+   * freshly typed ` foo `.
    *
    * An edit mints nothing. The id came from the server and is held read-only, so
    * resolving it again would rename a saved row whose id predates the rule.
    */
-  const resolved = creating ? draftWithId(draft, trimmedId, backend, standardVendors) : draft;
+  const resolved = creating ? draftWithId(draft, trimmedId, backend) : draft;
   // Every id rule is a rule about what the user may type, and only add mode lets
   // them type it — an edit shows the id read-only. Judging a value the dialog
   // itself locks is what made a persisted row whose id predates the length
@@ -267,16 +261,9 @@ export const BackendModelEditorDialog: React.FC<{
       ? 'required'
       : resolved.id.length > BACKEND_MODEL_ID_MAX_LENGTH
         ? 'tooLong'
-        // Asked of the resolved id for the same reason the length and the
-        // collision are: `custom/` is part of what gets stored, so the shape
-        // rule has to judge the value the backend will actually parse. It is
-        // the last rule that can be answered without the list, and the
-        // collision check below is the one that needs it.
-        : !opencodeMenuIdentity(resolved.id, backend)
-          ? 'invalid'
-          : takenIds.has(resolved.id)
-            ? 'duplicate'
-            : null;
+        : takenIds.has(resolved.id)
+          ? 'duplicate'
+          : null;
   const valid = idError === null && context.ok && output.ok;
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
@@ -302,7 +289,7 @@ export const BackendModelEditorDialog: React.FC<{
     // its provider publishes it as. `origin` is `models_dev` unconditionally
     // because the typeahead is add mode's field: a saved row's own creation path
     // is never re-decided here.
-    const next = applyModelsDevMatch(draft, match, 'models_dev', backend, standardVendors);
+    const next = applyModelsDevMatch(draft, match, 'models_dev', backend);
     const name = match.display_name ?? '';
     const context = groupTokens(match.context_window);
     const output = groupTokens(match.max_output_tokens);
@@ -319,7 +306,7 @@ export const BackendModelEditorDialog: React.FC<{
    *  earlier fill still owned was retired by `changeId` the moment they typed
    *  again, and what survived that is what they typed themselves. */
   const takeLookupAsId = () => {
-    setDraft((current) => draftWithId(current, lookup.trim(), backend, standardVendors));
+    setDraft((current) => draftWithId(current, lookup.trim(), backend));
     setLookup('');
   };
 
@@ -535,7 +522,7 @@ export const BackendModelEditorDialog: React.FC<{
                               other one would be describing a different model. */}
                           <span className="model-hub-model-match-literal min-w-0 truncate">
                             {t('settings.models.gateway.modelEditor.useAsId', {
-                              query: backendModelId(lookup.trim(), backend, standardVendors),
+                              query: backendModelId(lookup.trim()),
                             })}
                           </span>
                         </button>

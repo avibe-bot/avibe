@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import io
 import json
@@ -13,10 +14,6 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import message_deliveries as delivery_store
-from modules.agents.opencode.utils import (
-    build_opencode_model_option_items,
-    resolve_opencode_allowed_providers,
-)
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
@@ -47,6 +44,28 @@ OpenCodeManagedPolicyRefreshPendingError = (
 )
 OpenCodeRuntimeConfigInvalidError = SERVER_MODULE.OpenCodeRuntimeConfigInvalidError
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
+
+
+def _model_hub_overlay(path: str, model_id: str | None):
+    models = {} if model_id is None else {model_id: {"id": model_id}}
+    content = json.dumps(
+        {
+            "enabled_providers": ["avibe-openai"],
+            "provider": {
+                "avibe-openai": {
+                    "models": models,
+                }
+            }
+        },
+        sort_keys=True,
+    )
+    composed = SERVER_MODULE._managed_runtime_config_content(content)
+    return types.SimpleNamespace(
+        path=Path(path),
+        content_hash=hashlib.sha256(composed.encode()).hexdigest(),
+        content=content,
+        provider_ids=("avibe-openai",),
+    )
 
 
 class _FakeResponse:
@@ -278,18 +297,19 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         models = await manager.get_available_models(
             "/tmp/work",
             model_hub_models={
-                "custom/current-model": {
-                    "id": "custom/current-model",
+                "current-model": {
+                    "id": "current-model",
                     "name": "Current model",
+                    "native_protocol": "openai_responses",
                 },
             },
         )
 
         model_index = {row["id"]: row["models"] for row in models["providers"]}
-        self.assertEqual(set(model_index), {"openai", "custom"})
+        self.assertEqual(set(model_index), {"openai", "avibe-openai"})
         self.assertEqual(set(model_index["openai"]), {"native-model"})
         self.assertEqual(
-            model_index["custom"]["current-model"],
+            model_index["avibe-openai"]["current-model"],
             {
                 "id": "current-model",
                 "name": "Current model",
@@ -298,7 +318,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_user_catalog_boundary_excludes_model_hub_runtime_provider(self):
-        private_id = "avibe-model-hub-0123456789abcdef01234567"
+        runtime_ids = ("avibe-openai", "avibe-anthropic")
         legacy_custom_id = "avibe-model-hub-fedcba9876543210fedcba98"
 
         class _CatalogSession(_FakeSession):
@@ -308,16 +328,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                     payload = {
                         "providers": [
                             {
-                                "id": private_id,
+                                "id": "avibe-openai",
                                 "models": {
-                                    "openai/gpt-5": {
-                                        "id": "openai/gpt-5",
+                                    "gpt-5": {
+                                        "id": "gpt-5",
                                         "variants": {"high": {}},
                                     },
-                                    "custom/first-model": {
-                                        "id": "custom/first-model",
-                                    },
                                 },
+                            },
+                            {
+                                "id": "avibe-anthropic",
+                                "models": {"claude-opus-5": {"id": "claude-opus-5"}},
                             },
                             {"id": legacy_custom_id, "models": {"relay-model": {}}},
                             {"id": "custom", "models": {"native-model": {}}},
@@ -334,7 +355,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                             },
                         ],
                         "default": {
-                            private_id: "openai/gpt-5",
+                            "avibe-openai": "gpt-5",
+                            "avibe-anthropic": "claude-opus-5",
                             legacy_custom_id: "relay-model",
                             "openai": "gpt-5",
                         },
@@ -342,17 +364,19 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 elif url.endswith("/provider"):
                     payload = {
                         "all": {
-                            private_id: {"id": private_id},
+                            "avibe-openai": {"id": "avibe-openai"},
+                            "avibe-anthropic": {"id": "avibe-anthropic"},
                             legacy_custom_id: {"id": legacy_custom_id},
                             "openai": {"id": "openai"},
                         },
-                        "connected": [private_id, legacy_custom_id, "openai"],
+                        "connected": [*runtime_ids, legacy_custom_id, "openai"],
                     }
                 else:
                     payload = {
-                        "model": f"{private_id}/openai/gpt-5",
+                        "model": "avibe-openai/gpt-5",
                         "provider": {
-                            private_id: {"options": {"apiKey": "private"}},
+                            "avibe-openai": {"options": {"apiKey": "private"}},
+                            "avibe-anthropic": {"options": {"apiKey": "private"}},
                             legacy_custom_id: {},
                             "openai": {},
                         },
@@ -360,7 +384,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 return _FakeResponse(status=200, json_data=payload)
 
         manager = OpenCodeServerManager(binary="opencode", port=4096)
-        manager._model_hub_overlay_provider_id = private_id
+        manager._model_hub_overlay_provider_ids = runtime_ids
         session = _CatalogSession()
         manager._get_http_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
         manager.ensure_running = AsyncMock()  # type: ignore[method-assign]
@@ -368,12 +392,14 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         models = await manager.get_available_models(
             "/tmp/work",
             model_hub_models={
-                "openai/gpt-5": {
-                    "id": "openai/gpt-5",
+                "gpt-5": {
+                    "id": "gpt-5",
+                    "native_protocol": "openai_responses",
                     "variants": {"high": {}},
                 },
-                "custom/first-model": {
-                    "id": "custom/first-model",
+                "claude-opus-5": {
+                    "id": "claude-opus-5",
+                    "native_protocol": "anthropic",
                 },
             },
         )
@@ -383,7 +409,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [row["id"] for row in models["providers"]],
-            [legacy_custom_id, "custom", "openai"],
+            [legacy_custom_id, "custom", "openai", *runtime_ids],
         )
         self.assertEqual(
             models["default"],
@@ -408,50 +434,28 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         public_models = {
             row["id"]: row["models"] for row in models["providers"]
         }
-        self.assertEqual(set(public_models["openai"]), {"gpt-4", "gpt-5"})
-        self.assertEqual(public_models["openai"]["gpt-5"]["name"], "GPT-5")
+        public_openai = {entry["id"]: entry for entry in public_models["openai"]}
+        self.assertEqual(set(public_openai), {"gpt-4", "gpt-5"})
+        self.assertEqual(public_openai["gpt-5"]["name"], "GPT-5")
         self.assertEqual(
-            public_models["openai"]["gpt-5"]["capabilities"],
+            public_openai["gpt-5"]["capabilities"],
             {"tools": True},
         )
+        self.assertEqual(set(public_models["custom"]), {"native-model"})
         self.assertEqual(
-            public_models["openai"]["gpt-5"]["variants"],
-            {"high": {}},
-        )
-        self.assertTrue(
-            public_models["openai"]["gpt-5"]["vibe_remote"][
-                "model_hub_projected"
-            ]
-        )
-        self.assertEqual(set(public_models["custom"]), {"native-model", "first-model"})
-        self.assertEqual(
-            public_models["custom"]["first-model"],
+            public_models["avibe-openai"]["gpt-5"],
             {
-                "id": "first-model",
+                "id": "gpt-5",
+                "variants": {"high": {}},
                 "vibe_remote": {"model_hub_projected": True},
             },
         )
-        allowed_providers = resolve_opencode_allowed_providers(
-            {"providers": {"openai": {}}},
-            models,
-        )
         self.assertEqual(
-            allowed_providers,
-            ["openai"],
-        )
-        picker_values = {
-            item["value"]
-            for item in build_opencode_model_option_items(
-                models,
-                max_total=99,
-                allowed_providers=allowed_providers,
-            )
-        }
-        self.assertIn("custom/first-model", picker_values)
-        self.assertNotIn("custom/native-model", picker_values)
-        self.assertNotIn(f"{legacy_custom_id}/relay-model", picker_values)
-        self.assertFalse(
-            any(value.startswith(f"{private_id}/") for value in picker_values)
+            public_models["avibe-anthropic"]["claude-opus-5"],
+            {
+                "id": "claude-opus-5",
+                "vibe_remote": {"model_hub_projected": True},
+            },
         )
 
     async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
@@ -2903,12 +2907,7 @@ def test_changed_overlay_still_waits_for_active_run_before_restart():
     manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
     manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
-    overlay = types.SimpleNamespace(
-        path=Path("/tmp/new-overlay.json"),
-        content_hash="new-hash",
-        content='{"provider": {}}',
-        provider_id="avibe-model-hub-new",
-    )
+    overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
 
     async def exercise():
         configuring = asyncio.create_task(manager.configure_model_hub_overlay(overlay))
@@ -2925,6 +2924,27 @@ def test_changed_overlay_still_waits_for_active_run_before_restart():
     manager._restart_for_auth_refresh_locked.assert_awaited_once()
 
 
+def test_empty_model_hub_overlay_uses_the_normal_change_path():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    overlay = _model_hub_overlay("/tmp/empty-overlay.json", None)
+
+    reservation = asyncio.run(manager.configure_model_hub_overlay(overlay))
+    asyncio.run(manager.release_model_hub_overlay_reservation(reservation))
+
+    assert json.loads(overlay.content)["provider"]["avibe-openai"]["models"] == {}
+    assert manager._model_hub_overlay_path == str(overlay.path)
+    assert manager._model_hub_overlay_hash == overlay.content_hash
+    manager._restart_for_auth_refresh_locked.assert_awaited_once_with(
+        native_turns_drained=True,
+    )
+
+
 def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
     manager = OpenCodeServerManager(binary="opencode", port=4096)
     manager._model_hub_overlay_path = "/tmp/old-overlay.json"
@@ -2938,12 +2958,7 @@ def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
     manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
     manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
-    overlay = types.SimpleNamespace(
-        path=Path("/tmp/new-overlay.json"),
-        content_hash="new-hash",
-        content='{"provider": {}}',
-        provider_id="avibe-model-hub-new",
-    )
+    overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
 
     reservation = asyncio.run(manager.configure_model_hub_overlay(overlay))
     asyncio.run(manager.release_model_hub_overlay_reservation(reservation))
@@ -2956,27 +2971,16 @@ def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
 def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay():
     """MH-RUNTIME-003: a queued change drains without old-overlay starvation."""
 
+    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "old-model")
+    new_overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
     manager = OpenCodeServerManager(binary="opencode", port=4096)
     manager._model_hub_overlay_path = "/tmp/old-overlay.json"
-    manager._model_hub_overlay_hash = "old-hash"
+    manager._model_hub_overlay_hash = old_overlay.content_hash
     manager._active_run_sessions.add("sess-active")
     manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
     manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
     manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
-    old_overlay = types.SimpleNamespace(
-        path=Path("/tmp/old-overlay.json"),
-        content_hash="old-hash",
-        content='{"provider": {}}',
-        provider_id="avibe-model-hub-old",
-    )
-    new_overlay = types.SimpleNamespace(
-        path=Path("/tmp/new-overlay.json"),
-        content_hash="new-hash",
-        content='{"provider": {}}',
-        provider_id="avibe-model-hub-new",
-    )
-
     async def exercise():
         configuring = asyncio.create_task(
             manager.configure_model_hub_overlay(new_overlay)
@@ -3004,26 +3008,15 @@ def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_o
 def test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run():
     """MH-RUNTIME-004: selection stays leased through active-run registration."""
 
+    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "old-model")
+    new_overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
     manager = OpenCodeServerManager(binary="opencode", port=4096)
     manager._model_hub_overlay_path = "/tmp/old-overlay.json"
-    manager._model_hub_overlay_hash = "old-hash"
+    manager._model_hub_overlay_hash = old_overlay.content_hash
     manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
     manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
     manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
-    old_overlay = types.SimpleNamespace(
-        path=Path("/tmp/old-overlay.json"),
-        content_hash="old-hash",
-        content='{"provider": {}}',
-        provider_id="avibe-model-hub-old",
-    )
-    new_overlay = types.SimpleNamespace(
-        path=Path("/tmp/new-overlay.json"),
-        content_hash="new-hash",
-        content='{"provider": {}}',
-        provider_id="avibe-model-hub-new",
-    )
-
     async def exercise():
         reservation = await manager.configure_model_hub_overlay(new_overlay)
         reverting = asyncio.create_task(

@@ -1,6 +1,5 @@
 import { catalogModelIds } from './backendCatalog';
 import { eligibleSources } from './eligibility';
-import { buildIdentifier } from './menus/identifiers';
 import type { RegionRead } from './regionRead';
 import type { AgentBackend, AgentChain, AgentSupply, Source } from './types';
 
@@ -46,12 +45,9 @@ export function orderedRouteSources(agent: AgentSupply, sources: Source[]): Sour
 /** Whether the model already exists on an eligible supplier omitted from this Agent's order. */
 export function modelHasOffOrderSupplier(agent: AgentSupply, sources: Source[], modelId: string): boolean {
   const enabled = new Set(agent.sources?.order ?? []);
-  const standardVendors = new Set(agent.standard_vendors ?? []);
   return eligibleSources(sources, agent).some(
     (source) => !enabled.has(source.id) && source.models.some((model) => (
-      agent.menu_kind === 'open'
-        ? buildIdentifier(source.vendor, model.id, standardVendors) === modelId
-        : model.id === modelId
+      model.id === modelId
     )),
   );
 }

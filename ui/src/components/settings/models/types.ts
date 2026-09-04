@@ -10,7 +10,7 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 7 as const;
+export const CONTRACT_VERSION = 8 as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -92,9 +92,9 @@ export type SourceUsage = {
  * (the model id matches a builtin catalog entry) are auto-provided and
  * read-only. `user` is a list the user typed; `null` means no rung applies.
  *
- * Required here because `SuppliedModel` is the v7 API wire shape. The server
+ * Required here because `SuppliedModel` is the v8 API wire shape. The server
  * normalizes older persisted rows before serialization; compatibility with a
- * pre-v7 server belongs at the UI parsing boundary.
+ * pre-v8 server belongs at the UI parsing boundary.
  */
 export type ReasoningEffortsSource = 'upstream' | 'catalog' | 'user';
 
@@ -155,7 +155,7 @@ export type MenuKind = 'fixed' | 'open';
 
 export type AgentMenu = {
   view: 'featured' | 'full';
-  /** prefixed identifiers, e.g. zhipuai/glm-5.2. */
+  /** Bare canonical model identifiers, stored exactly as emitted. */
   checked: string[];
 };
 
@@ -172,12 +172,14 @@ export const BACKEND_MODEL_OUTPUT_MODALITIES = ['text', 'image', 'audio', 'video
 export type BackendModelOutputModality = (typeof BACKEND_MODEL_OUTPUT_MODALITIES)[number];
 export const BACKEND_MODEL_ID_MAX_LENGTH = 256 as const;
 export const BACKEND_MODEL_EFFORT_MAX_LENGTH = 64 as const;
+export const NATIVE_PROTOCOLS = ['openai_responses', 'anthropic'] as const;
+export type NativeProtocol = (typeof NATIVE_PROTOCOLS)[number];
 
 /** One model a backend Agent exposes: backend menu metadata, never upstream
  *  inventory and never a Route. The catalog deliberately holds no Source id,
  *  upstream model id, priority or fallback — those stay with the Route. */
 export type BackendModel = {
-  /** The exact identifier the backend Agent emits. OpenCode uses provider/model. */
+  /** The exact identifier the backend Agent emits. OpenCode stores a bare id. */
   id: string;
   display_name: string | null;
   origin: BackendModelOrigin;
@@ -196,6 +198,8 @@ export type BackendModel = {
   /** Sent verbatim upstream. `[]` means the backend omits the effort parameter,
    *  which is a decision — not an absence the UI may fill in. */
   reasoning_efforts: string[];
+  /** Required for OpenCode rows and absent for Claude/Codex rows. */
+  native_protocol?: NativeProtocol;
   /** Server-derived: visible, but not editable, removable or reorderable. */
   locked: boolean;
   /** Server-derived: false only for a backend-owned selector such as Claude
@@ -246,6 +250,8 @@ export type ModelCandidateSupplier = {
  *  the catalog draft on selection (C2). */
 export type ModelCandidate = {
   id: string;
+  /** Server-derived for OpenCode candidates; absent for other backends. */
+  native_protocol?: NativeProtocol;
   display_name: string | null;
   reasoning_efforts: string[];
   /** In the backend's Source order. Empty is meaningful: nothing supplies this
@@ -299,6 +305,7 @@ export type ModelsDevMatch = {
   supports_tools: boolean | null;
   supports_reasoning: boolean | null;
   reasoning_efforts: string[];
+  native_protocol: NativeProtocol;
   /** Whether this provider is the model's own vendor rather than an aggregator
    *  reselling it (v2 C7). Optional because it postdates the shipped shape: a
    *  server that does not state it leaves the ranking to the order it served. */
@@ -421,10 +428,6 @@ export type AgentSupply = {
    *  built-in model ids (from vibe/backend_model_catalog.py). null for open-menu
    *  backends. The route editor renders these; the UI never hardcodes menus. */
   builtin_models?: string[] | null;
-  /** v1.2 read-only projection: opencode only — server mirror of
-   *  STANDARD_OPENCODE_VENDOR_IDS, so the UI never hand-mirrors vendor prefixes.
-   *  null otherwise. */
-  standard_vendors?: string[] | null;
 };
 
 // ── migration-scan.schema.json ──────────────────────────────────────────

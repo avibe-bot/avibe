@@ -14,7 +14,7 @@ const agent = (mode: AgentSupply['mode']): AgentSupply => ({
 });
 
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
-  contract_version: 7,
+  contract_version: 8,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [] },
   status: { installed_version: health === 'not_installed' ? null : '1', verified: health !== 'not_installed', health },
 });

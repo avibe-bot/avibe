@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v7 (2026-09-03).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v8 (2026-09-05).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -70,6 +70,9 @@ class SourceBinding:
     model_ids: tuple[str, ...]  # declared supply list (discovered + manual
     # custom entries); required by the engine's generic/API-key config. Bare
     # model ids, no provider prefix.
+    model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Per-model levels declared by the Source. CLIProxyAPI needs these on its
+    # model registration or it removes an otherwise valid reasoning effort.
 
 
 class OriginNotAllowedError(Exception):

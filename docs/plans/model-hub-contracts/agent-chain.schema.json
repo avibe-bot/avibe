@@ -7,7 +7,7 @@
   "required": ["contract_version", "backend", "model_id", "chain", "current", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 7 },
+    "contract_version": { "const": 8 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "model_id": { "type": "string" },
     "current": {
@@ -161,7 +161,7 @@
   ],
   "examples": [
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "chain": [{ "source_id": "src_claudepro1", "model_id": "claude-opus-4-6", "channel": "native_cli", "health": "cooldown", "runnable": false, "reason": null, "retry_at": "2026-07-29T04:00:00Z" }],
@@ -169,7 +169,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "backend": "opencode",
       "model_id": "custom/glm-5.2",
       "chain": [{ "source_id": "src_relay9c1x", "model_id": "glm-5.2", "channel": "hub", "health": "backoff", "runnable": false, "reason": "models.source.backoff.connection_failed", "retry_at": "2026-08-11T11:55:08Z" }],
@@ -177,7 +177,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "healthy", "runnable": false, "reason": "native_cli_unavailable", "retry_at": null }],
@@ -185,7 +185,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "backoff", "runnable": false, "reason": "native_cli_unavailable", "retry_at": "2026-08-11T11:55:08Z" }],
@@ -193,7 +193,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "chain": [],

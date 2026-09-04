@@ -32,6 +32,126 @@ PROTOCOL_PATHS = {
     "openai_responses": "/v1/responses",
     "openai_chat": "/v1/chat/completions",
 }
+# Frozen from opencode-overlay.md S3/S4. The mock only captures what the real
+# engine sends; the E2E cases submit each frontend body to that engine.
+OPENCODE_V4_S3_PASSTHROUGH_FIXTURES = {
+    "anthropic_api_key": {
+        "protocol": "anthropic",
+        "stored_model": "claude-sonnet-4-5",
+        "frontend_body": {
+            "model": "menu-model",
+            "max_tokens": 128,
+            "system": [
+                {
+                    "type": "text",
+                    "text": "System fixture",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+        },
+        "upstream_body": {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 128,
+            "system": [
+                {
+                    "type": "text",
+                    "text": "System fixture",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+        },
+        "expected_top_level_diff": {
+            "added": {},
+            "removed": [],
+            "changed": {
+                "model": ["menu-model", "claude-sonnet-4-5"],
+            },
+        },
+    },
+    "responses_api_key": {
+        "protocol": "openai_responses",
+        "stored_model": "gpt-5",
+        "frontend_body": {
+            "model": "menu-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "prompt_cache_key": "cache-fixture",
+            "max_output_tokens": 128,
+            "include": ["reasoning.encrypted_content"],
+            "store": False,
+            "stream": True,
+        },
+        "upstream_body": {
+            "model": "gpt-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "prompt_cache_key": "cache-fixture",
+            "parallel_tool_calls": True,
+            "instructions": "",
+            "tools": [{"type": "image_generation", "output_format": "png"}],
+            "include": ["reasoning.encrypted_content"],
+            "store": False,
+            "stream": True,
+        },
+        "expected_top_level_diff": {
+            "added": {
+                "instructions": "",
+                "parallel_tool_calls": True,
+                "tools": [{"type": "image_generation", "output_format": "png"}],
+            },
+            "removed": ["max_output_tokens"],
+            "changed": {
+                "model": ["menu-model", "gpt-5"],
+            },
+        },
+    },
+}
+OPENCODE_V4_S4_VARIANT_FIXTURES = {
+    "openai_same_protocol": {
+        "protocol": "openai_responses",
+        "frontend_protocol": "openai_responses",
+        "stored_model": "gpt-5",
+        "variant": {"reasoningEffort": "high"},
+        "upstream_fragment": {
+            "reasoning": {"effort": "high", "summary": "auto"},
+        },
+    },
+    "anthropic_same_protocol": {
+        "protocol": "anthropic",
+        "frontend_protocol": "anthropic",
+        "stored_model": "claude-sonnet-4-5",
+        "variant": {"effort": "high"},
+        "upstream_fragment": {
+            "output_config": {"effort": "high"},
+        },
+    },
+    "responses_to_anthropic": {
+        "protocol": "anthropic",
+        "frontend_protocol": "openai_responses",
+        "stored_model": "claude-sonnet-4-5",
+        "variant": {"reasoningEffort": "high"},
+        "upstream_fragment": {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "high"},
+        },
+    },
+}
 CAPTURED_HEADER_NAMES = (
     "accept",
     "anthropic-beta",

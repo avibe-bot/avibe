@@ -541,7 +541,10 @@ def test_gather_routing_modal_data_only_fetches_current_backend() -> None:
 def test_gather_routing_modal_data_uses_current_model_hub_projection() -> None:
     handler, server = _make_routing_handler()
     projection = {
-        "custom/current-model": {"id": "custom/current-model"},
+        "current-model": {
+            "id": "current-model",
+            "native_protocol": "openai_responses",
+        },
     }
     handler.controller.model_hub_service = SimpleNamespace(
         opencode_public_models=lambda: projection,

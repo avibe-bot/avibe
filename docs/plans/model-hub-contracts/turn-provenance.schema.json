@@ -36,7 +36,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": {
-      "enum": [5, 6, 7],
+      "enum": [5, 6, 7, 8],
       "$comment": "The only versioned object that is written to disk instead of exchanged inside one request, so its released values are a set rather than a constant. A record a v5 build persisted keeps validating -- tests/fixtures/model_hub/released_v5_permission_denied.json is the evidence -- while new records carry the terminal value, which is the last member. Every other versioned object is an in-process envelope and stays pinned to that value alone.",
       "description": "Generation that wrote this record. Nothing branches on it: readers accept every released value and the shape is identical across them."
     },
@@ -359,7 +359,7 @@
   ],
   "examples": [
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -384,7 +384,7 @@
       "blockers": []
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -405,7 +405,7 @@
       "blockers": []
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -425,7 +425,7 @@
       ]
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -445,7 +445,7 @@
       "blockers": []
     },
     {
-      "contract_version": 7,
+      "contract_version": 8,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",

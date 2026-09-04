@@ -50,10 +50,10 @@ from core.handlers.model_hub.provenance import (
     project_turn_outcome_copy,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
 from core.handlers.model_hub.resolver import (
-    canonical_opencode_menu_identity,
+    allowed_origins,
     inspect_exact_hop,
+    resolve_model_hub_turn,
 )
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
@@ -349,10 +349,10 @@ def test_matching_v1_is_literal_for_non_native_and_codex():
     assert _matching_v1_model_id(backend="claude", requested_model="claude-opus-4-6-20260115", source=source) == "claude-opus-4-6-20260115"
 
 
-def test_matching_v1_opencode_bare_name_requires_unique_checked_suffix():
+def test_matching_v1_opencode_uses_the_same_literal_identity_as_codex():
     source = _source("src_openv001", ("x",), vendor="custom")
-    assert _matching_v1_model_id(backend="opencode", requested_model="x", source=source, checked_models=("custom/x",)) == "x"
-    assert _matching_v1_model_id(backend="opencode", requested_model="x", source=source, checked_models=("a/x", "custom/x")) is None
+    assert _matching_v1_model_id(backend="opencode", requested_model="x", source=source) == "x"
+    assert _matching_v1_model_id(backend="opencode", requested_model="custom/x", source=source) is None
 
 
 def test_matching_v1_never_routes_to_manual_inventory():
@@ -370,9 +370,8 @@ def test_matching_v1_never_routes_to_manual_inventory():
     assert (
         _matching_v1_model_id(
             backend="opencode",
-            requested_model="custom/manual-target",
+            requested_model="manual-target",
             source=source,
-            checked_models=("custom/manual-target",),
         )
         is None
     )
@@ -380,27 +379,29 @@ def test_matching_v1_never_routes_to_manual_inventory():
 
 def test_runtime_opencode_resolution_never_repeats_bare_name_matching():
     source = _source("src_openv001", ("x",), vendor="custom")
-    config = _config([source], model="custom/x")
+    config = _config([source], model="x")
     agent = config.agents["opencode"]
-    agent.menu = ModelHubMenuConfig(view="featured", checked=["custom/x"])
-    agent.routes["custom/x"] = ModelHubRouteConfig(
+    agent.menu = ModelHubMenuConfig(view="featured", checked=["x"])
+    agent.models = [ModelHubBackendModelConfig(id="x", native_protocol="openai_responses")]
+    agent.routes["x"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "x"),)
     )
 
-    exact = resolve_model_hub_turn(config, "opencode", "custom/x")
-    bare = resolve_model_hub_turn(config, "opencode", "x")
+    exact = resolve_model_hub_turn(config, "opencode", "x")
+    prefixed = resolve_model_hub_turn(config, "opencode", "custom/x")
 
     assert exact.source is source
     assert exact.target_model == "x"
-    assert bare.source is None
+    assert prefixed.source is None
 
 
 def test_runtime_opencode_resolution_preserves_absent_selection():
     source = _source("src_openv002", ("x",), vendor="custom")
-    config = _config([source], model="custom/x")
+    config = _config([source], model="x")
     agent = config.agents["opencode"]
-    agent.menu = ModelHubMenuConfig(view="featured", checked=["custom/x"])
-    agent.routes["custom/x"] = ModelHubRouteConfig(
+    agent.menu = ModelHubMenuConfig(view="featured", checked=["x"])
+    agent.models = [ModelHubBackendModelConfig(id="x", native_protocol="openai_responses")]
+    agent.routes["x"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "x"),)
     )
 
@@ -1174,19 +1175,17 @@ def test_launch_failure_reports_unsupported_exact_hop():
 
 def test_exact_hop_inspection_is_the_single_identity_and_supply_authority():
     source = _source("src_exact001", ("upstream-model",), vendor="openai")
-    config = _config([source], model="openai/menu-model")
+    config = _config([source], model="menu-model")
     hop = ModelHubRouteHopConfig(source.id, "upstream-model")
 
-    inspected = inspect_exact_hop(config, "opencode", "openai/menu-model", hop)
+    inspected = inspect_exact_hop(config, "opencode", "menu-model", hop)
 
     assert inspected.identity == (
         "opencode",
-        "openai/menu-model",
+        "menu-model",
         source.id,
         "upstream-model",
     )
-    assert inspected.menu_provider_id == "openai"
-    assert inspected.menu_model_id == "menu-model"
     assert inspected.configuration_eligible is True
     assert inspected.inventory_member is True
     assert inspected.supply_eligible is True
@@ -1196,55 +1195,55 @@ def test_exact_hop_inspection_is_the_single_identity_and_supply_authority():
 
 def test_exact_hop_inspection_rejects_wrong_identity_and_empty_route():
     source = _source("src_exact002", ("actual-model",), vendor="openai")
-    config = _config([source], model="openai/menu-model")
+    config = _config([source], model="menu-model")
 
     wrong = inspect_exact_hop(
         config,
         "opencode",
-        "openai/menu-model",
+        "menu-model",
         ModelHubRouteHopConfig(source.id, "wrong-model"),
     )
-    empty = inspect_exact_hop(config, "opencode", "openai/menu-model", None)
+    empty = inspect_exact_hop(config, "opencode", "menu-model", None)
 
     assert wrong.inventory_member is False
     assert wrong.supply_eligible is False
     assert wrong.runnable is False
     assert wrong.reason == "model_unsupported"
-    assert empty.identity == ("opencode", "openai/menu-model", None, None)
+    assert empty.identity == ("opencode", "menu-model", None, None)
     assert empty.reason == "route_unconfigured"
 
 
 def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
     config = ModelHubConfig()
     config.agents["opencode"].mode = "hub"
-    config.agents["opencode"].menu.checked = ["openai/visible-model"]
+    config.agents["opencode"].menu.checked = ["visible-model"]
     config.agents["opencode"].models = [
-        ModelHubBackendModelConfig(id="openai/visible-model")
+        ModelHubBackendModelConfig(id="visible-model", native_protocol="openai_responses")
     ]
     service, store, _ = _service(tmp_path, config)
-    store.requested_models["opencode"] = "custom/hidden-model"
+    store.requested_models["opencode"] = "hidden-model"
     service.named_agents_override = lambda backend: (
-        [("researcher", "custom/hidden-model")] if backend == "opencode" else []
+        [("researcher", "hidden-model")] if backend == "opencode" else []
     )
 
     payload = service.get_agent_sources("opencode")
     resolution = resolve_model_hub_turn(
         config,
         "opencode",
-        "custom/hidden-model",
+        "hidden-model",
     )
 
-    assert payload["selected_model_id"] == "custom/hidden-model"
+    assert payload["selected_model_id"] == "hidden-model"
     assert payload["supply_status"] == "interrupted"
     assert payload["named_agents"] == [
         {
             "name": "researcher",
-            "effective_model_id": "custom/hidden-model",
+            "effective_model_id": "hidden-model",
             "supply_status": "interrupted",
             "route_reason": "route_unconfigured",
         }
     ]
-    assert resolution.requested_model == "custom/hidden-model"
+    assert resolution.requested_model == "hidden-model"
     assert resolution.route_unconfigured is True
     assert resolution.route_reason == "route_unconfigured"
 
@@ -1274,7 +1273,7 @@ def test_direct_mode_rejects_chain_write_before_config_mutation(tmp_path):
     ("backend", "hidden_model"),
     [
         ("claude", "claude-hidden-model"),
-        ("opencode", "openai/hidden-model"),
+        ("opencode", "hidden-model"),
     ],
 )
 def test_chain_write_rejects_models_outside_the_current_menu(
@@ -1284,11 +1283,11 @@ def test_chain_write_rejects_models_outside_the_current_menu(
 ):
     source = _source("src_menu0001", ("upstream-model",), vendor="openai")
     config = _config([source])
-    config.agents["opencode"].menu.checked = ["openai/visible-model"]
+    config.agents["opencode"].menu.checked = ["visible-model"]
     config.agents["opencode"].models = [
-        ModelHubBackendModelConfig(id="openai/visible-model")
+        ModelHubBackendModelConfig(id="visible-model", native_protocol="openai_responses")
     ]
-    config.agents["opencode"].routes["openai/visible-model"] = ModelHubRouteConfig()
+    config.agents["opencode"].routes["visible-model"] = ModelHubRouteConfig()
     service, store, _ = _service(tmp_path, config)
     before = store.load().to_payload()
 
@@ -1340,137 +1339,6 @@ def test_engine_binding_excludes_empty_inventory(tmp_path):
     service, _store, _ = _service(tmp_path, config)
 
     assert service._bindings(config) == []
-
-
-def test_opencode_identity_computation_stays_in_validator_and_resolver():
-    from ast import (
-        Attribute,
-        AsyncFunctionDef,
-        FunctionDef,
-        Import,
-        ImportFrom,
-        Module,
-        Name,
-        NodeVisitor,
-        parse,
-        walk,
-    )
-    from pathlib import Path
-
-    OPENCODE_IDENTITY_NAMES = {
-        "STANDARD_OPENCODE_VENDOR_IDS",
-        "opencode_provider_id",
-        "opencode_model_id",
-        "parse_opencode_model_id",
-    }
-
-    class RawIdentityCalls(NodeVisitor):
-        def __init__(self):
-            self.calls = []
-
-        def visit_Call(self, node):
-            symbol = (
-                node.func.id
-                if isinstance(node.func, Name)
-                else node.func.attr
-                if isinstance(node.func, Attribute)
-                else None
-            )
-            if symbol in {
-                "parse_opencode_model_id",
-                "normalize_opencode_requested_model",
-                "opencode_model_id",
-            }:
-                self.calls.append(symbol)
-            self.generic_visit(node)
-
-        def visit_Import(self, node):
-            if any(
-                alias.name == "core.handlers.model_hub.identifiers"
-                for alias in node.names
-            ):
-                self.calls.append("core.handlers.model_hub.identifiers")
-            self.generic_visit(node)
-
-        def visit_ImportFrom(self, node):
-            if node.module == "core.handlers.model_hub.identifiers":
-                # The OpenCode identity names only. That module also owns model-ID
-                # spelling, which the config validator is now the single owner of
-                # — a different property, guarded by its own owner test, and one
-                # this partition has nothing to say about.
-                self.calls.extend(
-                    alias.name
-                    for alias in node.names
-                    if alias.name in OPENCODE_IDENTITY_NAMES
-                )
-            if node.module == "core.handlers.model_hub.resolver":
-                self.calls.extend(
-                    alias.name
-                    for alias in node.names
-                    if alias.name == "normalize_opencode_requested_model"
-                )
-            self.generic_visit(node)
-
-    root = Path(__file__).parents[1]
-    config_path = root / "config/v2_config.py"
-    allowed = {
-        config_path,
-        root / "core/handlers/model_hub/identifiers.py",
-        root / "core/handlers/model_hub/resolver.py",
-    }
-    violations = {}
-    for production_root in ("config", "core", "modules", "vibe"):
-        for path in (root / production_root).rglob("*.py"):
-            if path in allowed:
-                continue
-            visitor = RawIdentityCalls()
-            visitor.visit(parse(path.read_text(encoding="utf-8")))
-            if visitor.calls:
-                violations[str(path.relative_to(root))] = visitor.calls
-    assert violations == {}
-
-    config_tree = parse(config_path.read_text(encoding="utf-8"))
-    validator = next(
-        node
-        for node in config_tree.body
-        if isinstance(node, FunctionDef)
-        and node.name == "canonical_opencode_menu_identity"
-    )
-    validator_calls = RawIdentityCalls()
-    validator_calls.visit(validator)
-    assert set(validator_calls.calls) == {"parse_opencode_model_id"}
-    other_config_calls = RawIdentityCalls()
-    other_config_calls.visit(
-        Module(
-            body=[node for node in config_tree.body if node is not validator],
-            type_ignores=[],
-        )
-    )
-    assert other_config_calls.calls == []
-
-    shared_startup = parse(
-        (root / "modules/agents/model_hub.py").read_text(encoding="utf-8")
-    )
-    overlay = next(
-        node
-        for node in walk(shared_startup)
-        if isinstance(node, AsyncFunctionDef)
-        and node.name == "prepare_opencode_overlay"
-    )
-    resolution_inputs = {
-        node.attr
-        for node in walk(overlay)
-        if isinstance(node, Attribute)
-        and isinstance(node.value, Name)
-        and node.value.id == "resolution"
-    }
-    assert {"candidate_hops", "projectable_hops"} <= resolution_inputs
-    assert "inspected_hops" not in resolution_inputs
-
-    assert canonical_opencode_menu_identity("openai/menu-model") == (
-        "openai",
-        "menu-model",
-    )
 
 
 def test_agent_chain_projects_exact_hops_and_blockers(tmp_path):
@@ -1714,9 +1582,14 @@ def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
     opencode = config.agents["opencode"]
     opencode.mode = "hub"
     assert opencode.menu is not None
-    opencode.menu.checked = ["openai/gpt-5.6"]
-    opencode.models = [ModelHubBackendModelConfig(id="openai/gpt-5.6")]
-    opencode.routes["openai/gpt-5.6"] = ModelHubRouteConfig()
+    opencode.menu.checked = ["gpt-5.6"]
+    opencode.models = [
+        ModelHubBackendModelConfig(
+            id="gpt-5.6",
+            native_protocol="openai_responses",
+        )
+    ]
+    opencode.routes["gpt-5.6"] = ModelHubRouteConfig()
     adapter = FakeAdapter(discovered=("gpt-5.6",))
     service, store, _ = _service(tmp_path, config, adapter)
 
@@ -1736,7 +1609,7 @@ def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
     assert store.load().sources[0].vendor == "openai"
     assert any(
         position["backend"] == "opencode"
-        and position["menu_model"] == "openai/gpt-5.6"
+        and position["menu_model"] == "gpt-5.6"
         and position["model_id"] == "gpt-5.6"
         for position in result["added_to"]
     )
@@ -1888,7 +1761,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 7,
+        "contract_version": 8,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1919,7 +1792,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 7,
+        "contract_version": 8,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",

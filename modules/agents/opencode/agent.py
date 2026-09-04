@@ -1153,6 +1153,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         steer_state: _OpenCodeSteerState | None = None
         poll_server: _SteeringAwareOpenCodeServer | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
+        model_hub_turn_mode: str | None = None
         model_hub_launch: ModelHubLaunch | None = None
         model_hub_overlay_reservation: object | None = None
         server = None
@@ -1181,9 +1182,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
             if callable(turn_mode):
+                model_hub_turn_mode = turn_mode("opencode")
                 bind_turn_mode(
                     request.context,
-                    turn_mode("opencode"),
+                    model_hub_turn_mode,
                 )
             prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
             if callable(prepare_overlay):
@@ -1378,7 +1380,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
             # routing for legacy installs.
-            default_provider = getattr(opencode_cfg, "default_provider", None)
+            default_provider = (
+                None
+                if model_hub_overlay is not None
+                else getattr(opencode_cfg, "default_provider", None)
+            )
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
             display_model_dict = resolve_opencode_model_dict(
                 requested_model_str,

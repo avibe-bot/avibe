@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -15,8 +16,15 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
+import yaml
 
-from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
+from tests.e2e.drivers.mock_llm_upstream import (
+    MockLLMUpstream,
+    OPENCODE_V4_S3_PASSTHROUGH_FIXTURES,
+    OPENCODE_V4_S4_VARIANT_FIXTURES,
+)
+from tests.e2e.test_model_hub_runtime import _engine_app, _install_engine
+from tests.e2e.test_model_hub_sources import _configure_protocol, _create_source
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -93,6 +101,7 @@ def _json_request(
     method: str = "GET",
     body: object | None = None,
     headers: dict[str, str] | None = None,
+    timeout: float = 2,
 ) -> tuple[int, dict[str, str], Any]:
     status, response_headers, raw = _request(
         base_url,
@@ -100,6 +109,7 @@ def _json_request(
         method=method,
         body=body,
         headers=headers,
+        timeout=timeout,
     )
     return status, response_headers, json.loads(raw)
 
@@ -111,6 +121,341 @@ def _configure(base_url: str, **config: object) -> dict[str, Any]:
     assert status == 200
     assert payload["ok"] is True
     return payload["config"]
+
+
+def _top_level_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "added": {key: after[key] for key in after.keys() - before.keys()},
+        "removed": sorted(before.keys() - after.keys()),
+        "changed": {
+            key: [before[key], after[key]]
+            for key in before.keys() & after.keys()
+            if before[key] != after[key]
+        },
+    }
+
+
+def _send_through_real_engine(
+    model_hub_app_factory,
+    mock_llm_upstream: MockLLMUpstream,
+    *,
+    upstream_protocol: str,
+    frontend_protocol: str,
+    stored_model: str,
+    frontend_body: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    with _engine_app(model_hub_app_factory) as app:
+        _install_engine(app)
+        _configure_protocol(
+            mock_llm_upstream,
+            upstream_protocol,
+            models=[
+                {
+                    "id": stored_model,
+                    "supported_parameters": ["reasoning"],
+                }
+            ],
+        )
+        source, _ = _create_source(
+            app,
+            mock_llm_upstream,
+            protocol=upstream_protocol,
+            nonce="scn_0000opencodev4s3",
+            extra=(
+                {"base_url": f"{mock_llm_upstream.url}/v1"}
+                if upstream_protocol == "openai_responses"
+                else None
+            ),
+        )
+        source_model = next(
+            model for model in source["models"] if model["id"] == stored_model
+        )
+        assert "high" in source_model["reasoning_efforts"], source_model
+        started = app.client.post("/api/models/runtime/start", {})
+        started_body = started.json()
+        assert started.status == 200, started_body
+        listening = started_body["runtime"]["status"]["listening"]
+
+        [config_path] = list(
+            (
+                app.avibe_home
+                / "runtime"
+                / "model-hub"
+                / "state"
+                / "instances"
+            ).glob("*/config.yaml")
+        )
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        entry_key = (
+            "claude-api-key"
+            if upstream_protocol == "anthropic"
+            else "codex-api-key"
+        )
+        [credential] = config[entry_key]
+        inbound = {
+            **frontend_body,
+            "model": f"{credential['prefix']}/{stored_model}",
+        }
+        _configure_protocol(
+            mock_llm_upstream,
+            upstream_protocol,
+            models=[
+                {
+                    "id": stored_model,
+                    "supported_parameters": ["reasoning"],
+                }
+            ],
+        )
+        path = (
+            "/v1/messages"
+            if frontend_protocol == "anthropic"
+            else "/v1/responses"
+        )
+        auth_header = (
+            {"X-Api-Key": config["api-keys"][0]}
+            if frontend_protocol == "anthropic"
+            else {"Authorization": f"Bearer {config['api-keys'][0]}"}
+        )
+        status, _, response_body = _request(
+            f"http://{listening['host']}:{listening['port']}",
+            path,
+            method="POST",
+            body=inbound,
+            headers=auth_header,
+            timeout=20,
+        )
+        captured = [
+            request
+            for request in mock_llm_upstream.requests()
+            if request["path"]
+            == (
+                "/v1/messages"
+                if upstream_protocol == "anthropic"
+                else "/v1/responses"
+            )
+        ]
+        assert len(captured) == 1, {
+            "engine_status": status,
+            "engine_body": response_body[:1000].decode("utf-8", errors="replace"),
+            "upstream_requests": mock_llm_upstream.requests(),
+        }
+        return status, captured[0]["body"]
+
+
+def _send_through_opencode_gateway_engine(
+    model_hub_app_factory,
+    mock_llm_upstream: MockLLMUpstream,
+    *,
+    upstream_protocol: str,
+    native_protocol: str,
+    stored_model: str,
+    variant: dict[str, Any],
+) -> dict[str, Any]:
+    binary = shutil.which("opencode")
+    if binary is None:
+        pytest.skip("OpenCode executable is unavailable")
+    menu_model = "menu-model"
+    upstream_path = (
+        "/v1/messages"
+        if upstream_protocol == "anthropic"
+        else "/v1/responses"
+    )
+    with _engine_app(model_hub_app_factory) as app:
+        configured = app.client.post(
+            "/api/config",
+            {"agents": {"opencode": {"enabled": True, "cli_path": binary}}},
+        )
+        assert configured.status == 200, configured.json()
+        _install_engine(app)
+        _configure_protocol(
+            mock_llm_upstream,
+            upstream_protocol,
+            models=[
+                {
+                    "id": stored_model,
+                    "supported_parameters": ["reasoning"],
+                }
+            ],
+        )
+        source, _ = _create_source(
+            app,
+            mock_llm_upstream,
+            protocol=upstream_protocol,
+            nonce="scn_0000opencodev4s4",
+            extra=(
+                {"base_url": f"{mock_llm_upstream.url}/v1"}
+                if upstream_protocol == "openai_responses"
+                else None
+            ),
+        )
+        source_model = next(
+            model for model in source["models"] if model["id"] == stored_model
+        )
+        assert "high" in source_model["reasoning_efforts"], source_model
+        sources = app.client.put(
+            "/api/models/agents/opencode/sources",
+            {"order": [source["id"]]},
+        )
+        assert sources.status == 200, sources.json()
+        current_models = app.client.get("/api/models/agents/opencode/models")
+        current_body = current_models.json()
+        assert current_models.status == 200, current_body
+        baseline = current_body["agent"]["catalog_models"]
+        row = {
+            "id": menu_model,
+            "origin": "manual",
+            "supports_reasoning": True,
+            "reasoning_efforts": ["high"],
+            "native_protocol": native_protocol,
+        }
+        models = app.client.put(
+            "/api/models/agents/opencode/models",
+            {"baseline": baseline, "models": [row]},
+        )
+        assert models.status == 200, models.json()
+        mode = app.client.patch(
+            "/api/models/agents/opencode/mode",
+            {"mode": "hub"},
+        )
+        assert mode.status == 200, mode.json()
+        chain = app.client.put(
+            f"/api/models/agents/opencode/chain?model={menu_model}",
+            {
+                "hops": [
+                    {"source_id": source["id"], "model_id": stored_model}
+                ]
+            },
+        )
+        assert chain.status == 200, chain.json()
+        started = app.client.post("/api/models/runtime/start", {})
+        assert started.status == 200, started.json()
+
+        agent = app.client.post(
+            "/api/agents",
+            {
+                "name": "opencode-v4-e2e",
+                "backend": "opencode",
+                "model": menu_model,
+                "reasoning_effort": "high",
+                "system_prompt": "System fixture",
+            },
+        )
+        assert agent.status == 200, agent.json()
+        project = app.client.post(
+            "/api/projects",
+            {
+                "folder_path": str(app.runtime_root),
+                "display_name": "OpenCode v4 E2E",
+            },
+        )
+        assert project.status == 201, project.json()
+        session = app.client.post(
+            "/api/sessions",
+            {
+                "project_id": project.json()["id"],
+                "agent_name": "opencode-v4-e2e",
+                "model": menu_model,
+                "reasoning_effort": "high",
+            },
+        )
+        assert session.status == 201, session.json()
+
+        _configure_protocol(
+            mock_llm_upstream,
+            upstream_protocol,
+            models=[
+                {
+                    "id": stored_model,
+                    "supported_parameters": ["reasoning"],
+                }
+            ],
+        )
+        sent = app.client.post(
+            f"/api/sessions/{session.json()['id']}/messages",
+            {"text": "hello"},
+        )
+        assert sent.status == 202, sent.json()
+        deadline = time.monotonic() + 30
+        captured: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            captured = [
+                request
+                for request in mock_llm_upstream.requests()
+                if request["path"] == upstream_path
+                and "You are a title generator"
+                not in json.dumps(request["body"], sort_keys=True)
+            ]
+            if captured:
+                break
+            time.sleep(0.1)
+        assert len(captured) == 1, app.diagnostics()
+        overlay = json.loads(
+            (
+                app.avibe_home
+                / "runtime"
+                / "model-hub"
+                / "opencode-overlay.json"
+            ).read_text(encoding="utf-8")
+        )
+        provider_id = {
+            "anthropic": "avibe-anthropic",
+            "openai_responses": "avibe-openai",
+        }[native_protocol]
+        assert overlay["provider"][provider_id]["models"][menu_model]["variants"][
+            "high"
+        ] == variant
+        return captured[0]["body"]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    OPENCODE_V4_S3_PASSTHROUGH_FIXTURES.values(),
+    ids=OPENCODE_V4_S3_PASSTHROUGH_FIXTURES,
+)
+def test_opencode_v4_s3_engine_diffs_are_frozen_against_mock_capture(
+    model_hub_app_factory,
+    mock_llm_upstream,
+    fixture: dict[str, Any],
+) -> None:
+    status, captured_body = _send_through_real_engine(
+        model_hub_app_factory,
+        mock_llm_upstream,
+        upstream_protocol=fixture["protocol"],
+        frontend_protocol=fixture["protocol"],
+        stored_model=fixture["stored_model"],
+        frontend_body=fixture["frontend_body"],
+    )
+
+    assert status == 200
+    assert captured_body == fixture["upstream_body"]
+    assert _top_level_diff(
+        fixture["frontend_body"],
+        captured_body,
+    ) == fixture["expected_top_level_diff"]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    OPENCODE_V4_S4_VARIANT_FIXTURES.values(),
+    ids=OPENCODE_V4_S4_VARIANT_FIXTURES,
+)
+def test_opencode_v4_s4_variant_shapes_are_frozen_against_mock_capture(
+    model_hub_app_factory,
+    mock_llm_upstream,
+    fixture: dict[str, Any],
+) -> None:
+    captured_body = _send_through_opencode_gateway_engine(
+        model_hub_app_factory,
+        mock_llm_upstream,
+        upstream_protocol=fixture["protocol"],
+        native_protocol=fixture["frontend_protocol"],
+        stored_model=fixture["stored_model"],
+        variant=fixture["variant"],
+    )
+
+    assert captured_body["model"] == fixture["stored_model"]
+    for key, value in fixture["upstream_fragment"].items():
+        assert captured_body.get(key) == value, captured_body
 
 
 @pytest.mark.parametrize("protocol", PROTOCOL_CASES)
