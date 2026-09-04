@@ -669,7 +669,7 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
     monkeypatch.setenv("EVEROS_EMBEDDING__API_KEY", "embedding-secret")
     monkeypatch.setenv("EVEROS_RERANK__BASE_URL", "https://rerank.example.test/v1/inference")
     monkeypatch.setenv("EVEROS_RERANK__MODEL", "rerank-model")
-    monkeypatch.setenv("EVEROS_RERANK__API_KEY", "rerank-secret")
+    monkeypatch.setenv("EVEROS_RERANK__API_KEY", "mak_rr_dashscope_opaque")
     monkeypatch.setenv("EVEROS_MULTIMODAL__BASE_URL", "https://vision.example.test/v1")
     monkeypatch.setenv("EVEROS_MULTIMODAL__MODEL", "vision-model")
     monkeypatch.setenv("EVEROS_MULTIMODAL__API_KEY", "vision-secret")
@@ -687,7 +687,7 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
         "embedding_api_key": "embedding-secret",
         "rerank_base_url": "https://rerank.example.test/v1/inference",
         "rerank_model": "rerank-model",
-        "rerank_api_key": "rerank-secret",
+        "rerank_api_key": "mak_rr_dashscope_opaque",
         "rerank_provider": None,
         "multimodal_base_url": "https://vision.example.test/v1",
         "multimodal_model": "vision-model",

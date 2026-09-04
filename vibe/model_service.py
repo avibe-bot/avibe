@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import logging
@@ -18,6 +18,7 @@ from config.v2_config import (
     MemoryCloudLlmSource,
     MemoryConfig,
     V2Config,
+    managed_rerank_projection,
     memory_config_to_payload,
 )
 
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_SERVICE_POLL_SECONDS = 60
 MODEL_SERVICE_REFRESH_PATH = "/api/model-service/refresh"
+MODEL_ACCESS_KEY_SUFFIX = "model-access-key?include_typed_keys=1"
 _SYNC_LOCK = threading.Lock()
 _WORKER_LOCK = threading.Lock()
 _REFRESH_EVENT = threading.Event()
@@ -51,7 +53,8 @@ class ModelServiceStatus:
 
 @dataclass(frozen=True)
 class ModelAccessKeyMint:
-    key: str
+    key: str = field(repr=False)
+    rerank_access_key: str | None = field(repr=False)
     created_at: str
     rotated: bool
     previous_valid_until: str | None
@@ -121,11 +124,15 @@ def _status_from_payload(payload: object) -> ModelServiceStatus:
 
 
 def _mint_from_payload(payload: object) -> ModelAccessKeyMint:
-    if not isinstance(payload, Mapping) or set(payload) != {
+    legacy_fields = {
         "key",
         "created_at",
         "rotated",
         "previous_valid_until",
+    }
+    if not isinstance(payload, Mapping) or set(payload) not in {
+        frozenset(legacy_fields),
+        frozenset((*legacy_fields, "typed_keys")),
     }:
         raise ModelServiceResolutionError("model_access_key_invalid_response")
     key = payload.get("key")
@@ -142,8 +149,16 @@ def _mint_from_payload(payload: object) -> ModelAccessKeyMint:
     created_at = _iso8601(payload.get("created_at"))
     previous = _iso8601(previous_valid_until, nullable=True)
     assert isinstance(created_at, str)
+    typed_keys = payload.get("typed_keys")
+    typed_rerank = typed_keys.get("rerank") if isinstance(typed_keys, Mapping) else None
+    rerank_access_key = (
+        typed_rerank
+        if managed_rerank_projection(key, typed_rerank) is not None
+        else None
+    )
     return ModelAccessKeyMint(
         key=key,
+        rerank_access_key=rerank_access_key,
         created_at=created_at,
         rotated=rotated,
         previous_valid_until=previous,
@@ -234,6 +249,8 @@ def _resolved_memory(
     if first_resolution:
         _cancel_organization_transition(candidate)
         candidate.cloud.model_access_key = None
+        candidate.cloud.rerank_access_key = None
+        candidate.cloud.access_key_revision = None
         candidate.cloud.organization_attached = False
     if candidate.mode is None:
         candidate.mode = _memory_mode_after_initialization(candidate)
@@ -248,6 +265,8 @@ def _resolved_memory(
     candidate.cloud.source_instance_id = instance_id
     if minted is not None:
         candidate.cloud.model_access_key = minted.key
+        candidate.cloud.rerank_access_key = minted.rerank_access_key
+        candidate.cloud.access_key_revision = status.revision
 
     if status.scope == "organization":
         if status.memory_available():
@@ -324,6 +343,8 @@ def _fenced_cloud_memory(current: MemoryConfig) -> MemoryConfig:
     had_cloud_state = bool(
         cloud.scope
         or cloud.model_access_key
+        or cloud.rerank_access_key
+        or cloud.access_key_revision is not None
         or cloud.proxy_base_url
         or cloud.source_instance_id
         or cloud.organization_attached
@@ -339,6 +360,8 @@ def _fenced_cloud_memory(current: MemoryConfig) -> MemoryConfig:
     candidate.cloud.revision = None
     candidate.cloud.quota_enforced = False
     candidate.cloud.model_access_key = None
+    candidate.cloud.rerank_access_key = None
+    candidate.cloud.access_key_revision = None
     candidate.cloud.proxy_base_url = None
     _cancel_organization_transition(candidate)
     candidate.cloud.runtime_apply_pending = (
@@ -478,14 +501,17 @@ def sync_model_service_once(config: V2Config | None = None) -> dict[str, Any]:
             changed = True
 
         current_key = current.cloud.model_access_key
-        if _status_needs_model_key(current, status) and not current_key:
+        if _status_needs_model_key(current, status) and (
+            not current_key
+            or current.cloud.access_key_revision != status.revision
+        ):
             try:
                 minted = _mint_from_payload(
                     _paired_device_request(
                         config,
                         credentials,
                         "POST",
-                        "model-access-key",
+                        MODEL_ACCESS_KEY_SUFFIX,
                     )
                 )
             except Exception:
@@ -533,11 +559,13 @@ def rotate_model_access_key(config: V2Config | None = None) -> dict[str, Any]:
                 config,
                 credentials,
                 "POST",
-                "model-access-key",
+                MODEL_ACCESS_KEY_SUFFIX,
             )
         )
         candidate = deepcopy(current)
         candidate.cloud.model_access_key = minted.key
+        candidate.cloud.rerank_access_key = minted.rerank_access_key
+        candidate.cloud.access_key_revision = current.cloud.revision
         candidate.cloud.runtime_apply_pending = True
         candidate.validate()
         saved = _persist_candidate(current, candidate).memory
@@ -571,18 +599,24 @@ def ensure_model_access_key(config: V2Config | None = None) -> V2Config:
             or current.cloud.scope not in {"platform", "organization"}
         ):
             raise ModelServiceResolutionError("model_service_not_configured")
-        if current.cloud.model_access_key:
+        if (
+            current.cloud.model_access_key
+            and current.cloud.access_key_revision is not None
+            and current.cloud.access_key_revision == current.cloud.revision
+        ):
             return V2Config.load()
         minted = _mint_from_payload(
             _paired_device_request(
                 config,
                 credentials,
                 "POST",
-                "model-access-key",
+                MODEL_ACCESS_KEY_SUFFIX,
             )
         )
         candidate = deepcopy(current)
         candidate.cloud.model_access_key = minted.key
+        candidate.cloud.rerank_access_key = minted.rerank_access_key
+        candidate.cloud.access_key_revision = current.cloud.revision
         candidate.validate()
         return _persist_candidate(current, candidate)
 

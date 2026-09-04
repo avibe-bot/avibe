@@ -321,7 +321,12 @@ def test_scrub_data_redacts_sensitive_values():
     event = {
         "request": {
             "headers": {"Authorization": "Bearer abc", "Cookie": "session=secret"},
-            "data": {"bot_token": "xoxb-secret", "nested": [{"client_secret": "shh"}]},
+            "data": {
+                "bot_token": "xoxb-secret",
+                "model_access_key": "mak_opaque",
+                "rerank_access_key": "mak_rr_deepinfra_opaque",
+                "nested": [{"client_secret": "shh"}],
+            },
         },
         "message": "token=abc123 and xapp-123456",
     }
@@ -331,6 +336,8 @@ def test_scrub_data_redacts_sensitive_values():
     assert scrubbed["request"]["headers"]["Authorization"] == "[Filtered]"
     assert scrubbed["request"]["headers"]["Cookie"] == "[Filtered]"
     assert scrubbed["request"]["data"]["bot_token"] == "[Filtered]"
+    assert scrubbed["request"]["data"]["model_access_key"] == "[Filtered]"
+    assert scrubbed["request"]["data"]["rerank_access_key"] == "[Filtered]"
     assert scrubbed["request"]["data"]["nested"][0]["client_secret"] == "[Filtered]"
     assert "[Filtered]" in scrubbed["message"]
 

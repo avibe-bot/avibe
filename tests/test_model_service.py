@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from types import SimpleNamespace
 
+import pytest
+
 from config.v2_config import (
     MemoryCloudCapabilities,
     MemoryCloudConfig,
@@ -12,6 +14,23 @@ from config.v2_config import (
 )
 from vibe import model_service
 from vibe import ui_memory_routes
+
+
+def _key_payload(
+    key: str,
+    *,
+    rerank_access_key: object = None,
+    include_typed_keys: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "key": key,
+        "created_at": "2026-08-17T00:00:00Z",
+        "rotated": False,
+        "previous_valid_until": None,
+    }
+    if include_typed_keys:
+        payload["typed_keys"] = {"rerank": rerank_access_key}
+    return payload
 
 
 def _status(
@@ -66,12 +85,7 @@ def _resolved(
     minted = None
     if key is not None:
         minted = model_service._mint_from_payload(  # noqa: SLF001
-            {
-                "key": key,
-                "created_at": "2026-08-17T00:00:00Z",
-                "rotated": False,
-                "previous_valid_until": None,
-            }
+            _key_payload(key)
         )
     return model_service._resolved_memory(  # noqa: SLF001
         current,
@@ -80,6 +94,253 @@ def _resolved(
         proxy_base_url="https://backend.example.test/v1/model",
         minted=minted,
     )
+
+
+def _active_cloud_memory(
+    *,
+    key: str = "mak_opaque",
+    rerank_access_key: str | None = None,
+    access_key_revision: int | None = 1,
+    revision: int = 1,
+) -> MemoryConfig:
+    return MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="chat_fallback",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            revision=revision,
+            model_access_key=key,
+            rerank_access_key=rerank_access_key,
+            access_key_revision=access_key_revision,
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+
+
+def test_model_access_key_parser_accepts_legacy_and_typed_responses() -> None:
+    legacy = model_service._mint_from_payload(  # noqa: SLF001
+        _key_payload("mak_opaque")
+    )
+    typed = model_service._mint_from_payload(  # noqa: SLF001
+        _key_payload(
+            "mak_opaque",
+            rerank_access_key="mak_rr_dashscope_opaque",
+            include_typed_keys=True,
+        )
+    )
+
+    assert legacy.key == typed.key == "mak_opaque"
+    assert legacy.rerank_access_key is None
+    assert typed.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert "mak_opaque" not in repr(typed)
+    assert "mak_rr_dashscope_opaque" not in repr(typed)
+
+
+@pytest.mark.parametrize(
+    "typed_keys",
+    [
+        None,
+        [],
+        {},
+        {"rerank": None},
+        {"rerank": "mak_rr_future_opaque"},
+        {"rerank": "mak_rr_deepinfra_"},
+        {"rerank": "mak_rr_deepinfra_different"},
+    ],
+)
+def test_model_access_key_parser_keeps_base_key_for_any_unusable_typed_shape(
+    typed_keys: object,
+) -> None:
+    payload = _key_payload("mak_opaque")
+    payload["typed_keys"] = typed_keys
+
+    minted = model_service._mint_from_payload(payload)  # noqa: SLF001
+
+    assert minted.key == "mak_opaque"
+    assert minted.rerank_access_key is None
+
+
+@pytest.mark.parametrize(
+    (
+        "current_key",
+        "current_rerank",
+        "current_key_revision",
+        "status_revision",
+        "minted_key",
+        "minted_rerank",
+    ),
+    [
+        ("mak_opaque", None, 1, 2, "mak_opaque", "mak_rr_deepinfra_opaque"),
+        (
+            "mak_opaque",
+            "mak_rr_deepinfra_opaque",
+            1,
+            2,
+            "mak_opaque",
+            None,
+        ),
+        (
+            "mak_old",
+            "mak_rr_deepinfra_old",
+            1,
+            2,
+            "mak_new",
+            "mak_rr_deepinfra_new",
+        ),
+        (
+            "mak_opaque",
+            "mak_rr_deepinfra_opaque",
+            1,
+            2,
+            "mak_opaque",
+            "mak_rr_dashscope_opaque",
+        ),
+        ("mak_opaque", None, None, 1, "mak_opaque", "mak_rr_dashscope_opaque"),
+    ],
+)
+def test_key_bundle_changes_use_one_processing_reconciliation_without_embedding_change(
+    monkeypatch: pytest.MonkeyPatch,
+    current_key: str,
+    current_rerank: str | None,
+    current_key_revision: int | None,
+    status_revision: int,
+    minted_key: str,
+    minted_rerank: str | None,
+) -> None:
+    state = {
+        "memory": _active_cloud_memory(
+            key=current_key,
+            rerank_access_key=current_rerank,
+            access_key_revision=current_key_revision,
+            revision=1,
+        )
+    }
+    prior_embedding_identity = state["memory"].runtime_embedding_identity()
+    prior_processing = state["memory"].runtime_processing()
+    requests: list[str] = []
+    reconciled: list[MemoryConfig] = []
+
+    class _Cloud:
+        @staticmethod
+        def runtime_credentials() -> tuple[str, str, str]:
+            return "https://backend.example.test", "instance-1", "device-secret"
+
+    config = SimpleNamespace(
+        remote_access=SimpleNamespace(vibe_cloud=_Cloud()),
+    )
+
+    def load() -> SimpleNamespace:
+        return SimpleNamespace(memory=deepcopy(state["memory"]))
+
+    def request(_config, _credentials, _method, suffix):
+        requests.append(suffix)
+        if suffix == "model-service":
+            return _status(revision=status_revision)
+        assert suffix == model_service.MODEL_ACCESS_KEY_SUFFIX
+        return _key_payload(
+            minted_key,
+            rerank_access_key=minted_rerank,
+            include_typed_keys=minted_rerank is not None,
+        )
+
+    def persist(_expected, candidate):
+        state["memory"] = deepcopy(candidate)
+        return SimpleNamespace(memory=deepcopy(candidate))
+
+    def reconcile(candidate):
+        reconciled.append(deepcopy(candidate))
+        return True
+
+    monkeypatch.setattr(model_service.V2Config, "load", load)
+    monkeypatch.setattr(model_service, "_paired_device_request", request)
+    monkeypatch.setattr(model_service, "_persist_candidate", persist)
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+
+    result = model_service.sync_model_service_once(config)
+
+    assert result["ok"] is True
+    assert requests == ["model-service", model_service.MODEL_ACCESS_KEY_SUFFIX]
+    assert len(reconciled) == 1
+    assert state["memory"].cloud.model_access_key == minted_key
+    assert state["memory"].cloud.rerank_access_key == minted_rerank
+    assert state["memory"].cloud.access_key_revision == status_revision
+    assert state["memory"].runtime_processing() != prior_processing
+    assert state["memory"].runtime_embedding_identity() == prior_embedding_identity
+    assert state["memory"].cloud.applied_embedding_identity == "emb-v1"
+    assert state["memory"].cloud.transition_notice_pending is False
+
+
+@pytest.mark.parametrize("operation", ["ensure", "rotate"])
+def test_explicit_key_bundle_paths_use_the_typed_opt_in_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    state = {
+        "memory": _active_cloud_memory(
+            access_key_revision=None if operation == "ensure" else 4,
+            revision=4,
+        )
+    }
+    requests: list[tuple[str, str]] = []
+    reconciled: list[MemoryConfig] = []
+
+    class _Cloud:
+        @staticmethod
+        def runtime_credentials() -> tuple[str, str, str]:
+            return "https://backend.example.test", "instance-1", "device-secret"
+
+    config = SimpleNamespace(
+        remote_access=SimpleNamespace(vibe_cloud=_Cloud()),
+    )
+
+    def load() -> SimpleNamespace:
+        return SimpleNamespace(memory=deepcopy(state["memory"]))
+
+    def request(_config, _credentials, method, suffix):
+        requests.append((method, suffix))
+        return _key_payload(
+            "mak_rotated",
+            rerank_access_key="mak_rr_deepinfra_rotated",
+            include_typed_keys=True,
+        )
+
+    def persist(_expected, candidate):
+        state["memory"] = deepcopy(candidate)
+        return SimpleNamespace(memory=deepcopy(candidate))
+
+    def reconcile(candidate):
+        reconciled.append(deepcopy(candidate))
+        return True
+
+    monkeypatch.setattr(model_service.V2Config, "load", load)
+    monkeypatch.setattr(model_service, "_paired_device_request", request)
+    monkeypatch.setattr(model_service, "_persist_candidate", persist)
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+
+    if operation == "ensure":
+        result = model_service.ensure_model_access_key(config)
+        assert result.memory == state["memory"]
+        assert reconciled == []
+    else:
+        result = model_service.rotate_model_access_key(config)
+        assert result["ok"] is True
+        assert len(reconciled) == 1
+
+    assert requests == [("POST", model_service.MODEL_ACCESS_KEY_SUFFIX)]
+    assert state["memory"].cloud.model_access_key == "mak_rotated"
+    assert state["memory"].cloud.rerank_access_key == (
+        "mak_rr_deepinfra_rotated"
+    )
+    assert state["memory"].cloud.access_key_revision == 4
 
 
 def test_enterprise_attachment_pauses_custom_without_recovery_marker() -> None:
@@ -111,6 +372,8 @@ def test_cloud_identity_change_keeps_last_applied_runtime_identity() -> None:
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
             model_access_key="mak_first",
+            rerank_access_key="mak_rr_deepinfra_first",
+            access_key_revision=1,
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -247,6 +510,8 @@ def test_unpairing_fences_cloud_egress_and_retains_identity_baseline() -> None:
 
     assert fenced.runtime_source() == "unavailable"
     assert fenced.cloud.model_access_key is None
+    assert fenced.cloud.rerank_access_key is None
+    assert fenced.cloud.access_key_revision is None
     assert fenced.cloud.applied_embedding_identity == "emb-v1"
     assert fenced.cloud.runtime_apply_pending is True
 

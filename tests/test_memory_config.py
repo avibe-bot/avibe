@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from config import paths
+from config import v2_config as v2_config_module
 from config.v2_config import (
     MemoryConfig,
     MemoryCloudConfig,
@@ -287,6 +288,227 @@ def test_released_optional_endpoint_shapes_remain_stable(tmp_path: Path) -> None
     stored = json.loads(path.read_text(encoding="utf-8"))["memory"]["processing"]
     assert "rerank" not in stored
     assert "multimodal" not in stored
+
+
+def test_older_cloud_cache_loads_without_typed_key_fields_or_shape_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            _payload(
+                {
+                    "enabled": False,
+                    "mode": "platform",
+                    "cloud": {
+                        "revision": 4,
+                        "model_access_key": "mak_opaque",
+                    },
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.cloud.model_access_key == "mak_opaque"
+    assert loaded.memory.cloud.rerank_access_key is None
+    assert loaded.memory.cloud.access_key_revision is None
+    loaded.save(path)
+    stored_cloud = json.loads(path.read_text(encoding="utf-8"))["memory"]["cloud"]
+    assert "rerank_access_key" not in stored_cloud
+    assert "access_key_revision" not in stored_cloud
+
+
+def test_typed_rerank_persists_one_secret_without_provider_or_status_state(
+    tmp_path: Path,
+) -> None:
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": False,
+                "mode": "platform",
+                "cloud": {
+                    "revision": 7,
+                    "model_access_key": "mak_opaque",
+                    "rerank_access_key": "mak_rr_deepinfra_opaque",
+                    "access_key_revision": 7,
+                },
+            }
+        )
+    )
+    path = tmp_path / "config.json"
+    config.save(path)
+
+    stored_cloud = json.loads(path.read_text(encoding="utf-8"))["memory"]["cloud"]
+    public_cloud = config_to_payload(config)["memory"]["cloud"]
+    cloud_fields = {field_info.name for field_info in fields(MemoryCloudConfig)}
+
+    assert stored_cloud["model_access_key"] == "mak_opaque"
+    assert stored_cloud["rerank_access_key"] == "mak_rr_deepinfra_opaque"
+    assert stored_cloud["access_key_revision"] == 7
+    assert "rerank_access_key" not in public_cloud
+    assert "access_key_revision" not in public_cloud
+    assert "rerank_provider" not in cloud_fields
+    assert "rerank" not in stored_cloud["capabilities"]
+    assert "mak_opaque" not in repr(config.memory.cloud)
+    assert "mak_rr_deepinfra_opaque" not in repr(config.memory.cloud)
+
+
+@pytest.mark.parametrize(
+    ("typed_prefix", "provider", "path", "model"),
+    [
+        (
+            "mak_rr_deepinfra_",
+            "deepinfra",
+            "rerank/deepinfra",
+            "avibe-cloud-rerank",
+        ),
+        (
+            "mak_rr_dashscope_",
+            "dashscope",
+            "rerank/dashscope",
+            "gte-rerank-v2",
+        ),
+    ],
+)
+def test_managed_rerank_closed_table_projects_exact_everos_endpoint(
+    typed_prefix: str,
+    provider: str,
+    path: str,
+    model: str,
+) -> None:
+    memory = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=v2_config_module.MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+            ),
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_opaque",
+            rerank_access_key=f"{typed_prefix}opaque",
+            proxy_base_url="https://backend.example.test/v1/model",
+        ),
+    )
+    memory.validate()
+
+    rerank = memory.runtime_processing().rerank
+
+    assert rerank == MemoryEndpointConfig(
+        base_url=f"https://backend.example.test/v1/model/{path}",
+        model=model,
+        api_key=f"{typed_prefix}opaque",
+        provider=provider,
+    )
+
+
+def test_managed_rerank_prefix_table_is_closed_and_rejects_all_other_shapes() -> None:
+    projections = v2_config_module._MEMORY_CLOUD_RERANK_PROJECTIONS  # noqa: SLF001
+    assert {prefix for prefix, _provider, _path, _model in projections} == {
+        "mak_rr_deepinfra_",
+        "mak_rr_dashscope_",
+    }
+
+    unusable = {
+        None,
+        "",
+        "mak_rr_future_opaque",
+        "mak_rr_deepinfra_",
+        "mak_rr_deepinfra_different",
+        "mak_rr_dashscope_opaque ",
+    }
+    assert all(
+        v2_config_module.managed_rerank_projection("mak_opaque", value) is None
+        for value in unusable
+    )
+
+
+@pytest.mark.parametrize(
+    "rerank_access_key",
+    [[], "mak_rr_future_opaque", "mak_rr_deepinfra_different"],
+)
+def test_disk_load_recovers_only_an_unusable_typed_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rerank_access_key: object,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            _payload(
+                {
+                    "enabled": False,
+                    "mode": "platform",
+                    "cloud": {
+                        "revision": 2,
+                        "model_access_key": "mak_opaque",
+                        "rerank_access_key": rerank_access_key,
+                        "access_key_revision": 2,
+                    },
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.cloud.model_access_key == "mak_opaque"
+    assert loaded.memory.cloud.rerank_access_key is None
+    assert loaded.memory.cloud.access_key_revision == 2
+    assert loaded.recovered_sections == ("memory.cloud.rerank_access_key",)
+
+
+def test_managed_rerank_is_optional_for_basic_memory_and_custom_rerank_is_independent() -> None:
+    managed = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=v2_config_module.MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+            ),
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_opaque",
+            proxy_base_url="https://backend.example.test/v1/model",
+        ),
+    )
+    managed.validate()
+    assert managed.runtime_source() == "cloud"
+    assert managed.runtime_processing().rerank is None
+
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "custom-rerank",
+        "api_key": "custom-secret",
+        "provider": "deepinfra",
+    }
+    custom = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": True,
+                "mode": "custom",
+                "processing": processing,
+                "cloud": {
+                    "model_access_key": "mak_opaque",
+                    "rerank_access_key": "mak_rr_dashscope_opaque",
+                },
+            }
+        )
+    ).memory
+    assert custom.runtime_source() == "custom"
+    assert custom.runtime_processing().rerank == custom.processing.rerank
 
 
 def test_atomic_memory_update_writes_only_canonical_shape(

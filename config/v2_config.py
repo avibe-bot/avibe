@@ -1284,6 +1284,8 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
         cloud["capabilities"] = {}
         cloud["embedding_identity"] = None
         cloud["model_access_key"] = None
+        cloud["rerank_access_key"] = None
+        cloud["access_key_revision"] = None
         cloud["proxy_base_url"] = None
 
     if managed_fence and field_name in {
@@ -1871,6 +1873,7 @@ _MEMORY_MAX_URL_BYTES = 2048
 _MEMORY_MAX_MODEL_BYTES = 512
 _MEMORY_MAX_API_KEY_BYTES = 16 * 1024
 _MEMORY_CLOUD_MODEL_ALIAS = "avibe-cloud-chat"
+_MEMORY_CLOUD_RERANK_ALIAS = "avibe-cloud-rerank"
 _MEMORY_CLOUD_MULTIMODAL_ALIAS = "avibe-cloud-multimodal"
 
 MemoryMode = Literal["platform", "custom"]
@@ -1880,6 +1883,44 @@ MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
 MEMORY_RERANK_PROVIDERS = frozenset(get_args(MemoryRerankProvider))
 DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
 DASHSCOPE_RERANK_MODEL = "gte-rerank-v2"
+
+_MEMORY_CLOUD_RERANK_PROJECTIONS: tuple[
+    tuple[str, MemoryRerankProvider, str, str], ...
+] = (
+    (
+        "mak_rr_deepinfra_",
+        "deepinfra",
+        "rerank/deepinfra",
+        _MEMORY_CLOUD_RERANK_ALIAS,
+    ),
+    (
+        "mak_rr_dashscope_",
+        "dashscope",
+        "rerank/dashscope",
+        DASHSCOPE_RERANK_MODEL,
+    ),
+)
+
+
+def managed_rerank_projection(
+    base_access_key: object,
+    rerank_access_key: object,
+) -> tuple[MemoryRerankProvider, str, str] | None:
+    """Resolve one typed MAK through Avibe's closed managed-rerank table."""
+
+    if (
+        not isinstance(base_access_key, str)
+        or not base_access_key.startswith("mak_")
+        or not isinstance(rerank_access_key, str)
+    ):
+        return None
+    opaque = base_access_key.removeprefix("mak_")
+    if not opaque:
+        return None
+    for prefix, provider, path, model in _MEMORY_CLOUD_RERANK_PROJECTIONS:
+        if rerank_access_key == f"{prefix}{opaque}":
+            return provider, path, model
+    return None
 
 
 @dataclass
@@ -2017,6 +2058,8 @@ class MemoryCloudConfig:
     revision: int | None = None
     quota_enforced: bool = False
     model_access_key: str | None = field(default=None, repr=False)
+    rerank_access_key: str | None = field(default=None, repr=False)
+    access_key_revision: int | None = None
     proxy_base_url: str | None = None
     source_instance_id: str = ""
     organization_attached: bool = False
@@ -2064,6 +2107,14 @@ class MemoryCloudConfig:
             or self.revision < 0
         ):
             raise ValueError("Config 'memory.cloud.revision' must be a non-negative integer or null")
+        if self.access_key_revision is not None and (
+            isinstance(self.access_key_revision, bool)
+            or not isinstance(self.access_key_revision, int)
+            or self.access_key_revision < 0
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.access_key_revision' must be a non-negative integer or null"
+            )
         for name, value in (
             ("quota_enforced", self.quota_enforced),
             ("organization_attached", self.organization_attached),
@@ -2089,6 +2140,19 @@ class MemoryCloudConfig:
             )
             if not self.model_access_key.startswith("mak_"):
                 raise ValueError("Config 'memory.cloud.model_access_key' is invalid")
+        if self.rerank_access_key is not None:
+            self.rerank_access_key = _validate_memory_key(
+                self.rerank_access_key,
+                path="memory.cloud.rerank_access_key",
+            )
+            if (
+                managed_rerank_projection(
+                    self.model_access_key,
+                    self.rerank_access_key,
+                )
+                is None
+            ):
+                raise ValueError("Config 'memory.cloud.rerank_access_key' is invalid")
 
     def memory_capability_available(self) -> bool:
         return bool(
@@ -2181,6 +2245,19 @@ class MemoryConfig:
             self.cloud.applied_embedding_identity
             or self.cloud.embedding_identity
         )
+        rerank = None
+        rerank_projection = managed_rerank_projection(
+            key,
+            self.cloud.rerank_access_key,
+        )
+        if rerank_projection is not None:
+            rerank_provider, rerank_path, rerank_model = rerank_projection
+            rerank = MemoryEndpointConfig(
+                base_url=f"{base_url}/{rerank_path}",
+                model=rerank_model,
+                api_key=self.cloud.rerank_access_key,
+                provider=rerank_provider,
+            )
         multimodal = None
         if self.cloud.capabilities.multimodal:
             multimodal = MemoryEndpointConfig(
@@ -2199,7 +2276,7 @@ class MemoryConfig:
                 model=f"avibe-cloud-embedding-{embedding_identity}",
                 api_key=key,
             ),
-            rerank=None,
+            rerank=rerank,
             multimodal=multimodal,
         )
 
@@ -2350,34 +2427,41 @@ def memory_config_to_payload(
         )
     if memory.processing.multimodal is not None:
         processing["multimodal"] = endpoint_payload(memory.processing.multimodal)
+    cloud_payload = {
+        "scope": memory.cloud.scope,
+        "capabilities": {
+            "asr": memory.cloud.capabilities.asr,
+            "chat": memory.cloud.capabilities.chat,
+            "embedding": memory.cloud.capabilities.embedding,
+            "multimodal": memory.cloud.capabilities.multimodal,
+            "memory_llm": memory.cloud.capabilities.memory_llm,
+        },
+        "memory_llm_source": memory.cloud.memory_llm_source,
+        "embedding_identity": memory.cloud.embedding_identity,
+        "revision": memory.cloud.revision,
+        "quota_enforced": memory.cloud.quota_enforced,
+        "model_access_key": (
+            memory.cloud.model_access_key if include_secrets else None
+        ),
+        "has_model_access_key": bool(memory.cloud.model_access_key),
+        "proxy_base_url": memory.cloud.proxy_base_url,
+        "source_instance_id": memory.cloud.source_instance_id,
+        "organization_attached": memory.cloud.organization_attached,
+        "transition_notice_pending": memory.cloud.transition_notice_pending,
+        "applied_embedding_identity": memory.cloud.applied_embedding_identity,
+        "runtime_apply_pending": memory.cloud.runtime_apply_pending,
+    }
+    if include_secrets:
+        if memory.cloud.rerank_access_key is not None:
+            cloud_payload["rerank_access_key"] = memory.cloud.rerank_access_key
+        if memory.cloud.access_key_revision is not None:
+            cloud_payload["access_key_revision"] = memory.cloud.access_key_revision
+
     payload = {
         "enabled": memory.enabled,
         "mode": memory.mode,
         "processing": processing,
-        "cloud": {
-            "scope": memory.cloud.scope,
-            "capabilities": {
-                "asr": memory.cloud.capabilities.asr,
-                "chat": memory.cloud.capabilities.chat,
-                "embedding": memory.cloud.capabilities.embedding,
-                "multimodal": memory.cloud.capabilities.multimodal,
-                "memory_llm": memory.cloud.capabilities.memory_llm,
-            },
-            "memory_llm_source": memory.cloud.memory_llm_source,
-            "embedding_identity": memory.cloud.embedding_identity,
-            "revision": memory.cloud.revision,
-            "quota_enforced": memory.cloud.quota_enforced,
-            "model_access_key": (
-                memory.cloud.model_access_key if include_secrets else None
-            ),
-            "has_model_access_key": bool(memory.cloud.model_access_key),
-            "proxy_base_url": memory.cloud.proxy_base_url,
-            "source_instance_id": memory.cloud.source_instance_id,
-            "organization_attached": memory.cloud.organization_attached,
-            "transition_notice_pending": memory.cloud.transition_notice_pending,
-            "applied_embedding_identity": memory.cloud.applied_embedding_identity,
-            "runtime_apply_pending": memory.cloud.runtime_apply_pending,
-        },
+        "cloud": cloud_payload,
     }
     if include_internal and memory.legacy_needs_repair:
         payload["repair_required"] = True

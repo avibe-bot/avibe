@@ -10,14 +10,20 @@ import pytest
 
 import avibe_memory.runtime as runtime_module
 from avibe_memory.capture_adapter import EnabledMemoryAdapter
-from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
+from config.v2_config import (
+    MemoryCloudCapabilities,
+    MemoryCloudConfig,
+    MemoryConfig,
+    MemoryEndpointConfig,
+    MemoryProcessingConfig,
+)
 from avibe_memory.everos import ProviderHealthSnapshot
 from avibe_memory.processing_record import (
     MaintenanceObservation,
     RuntimeHealthProjection,
     SourceObservation,
 )
-from avibe_memory.runtime import MemoryConfig, MemoryRuntime
+from avibe_memory.runtime import MemoryRuntime
 from avibe_memory.store import MemoryStore
 from avibe_memory.types import MemoryItems, MemoryListItem, MemoryListPage
 from vibe.memory_contract import MemoryRuntimeBusyError
@@ -33,6 +39,58 @@ def _runtime(tmp_path: Path) -> MemoryRuntime:
         store=store,
         effective_home=tmp_path,
     )
+
+
+def test_typed_rerank_change_reaches_sidecar_without_embedding_rebuild() -> None:
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="chat_fallback",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_opaque",
+            rerank_access_key="mak_rr_deepinfra_opaque",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+    candidate = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=current.cloud.capabilities,
+            memory_llm_source="chat_fallback",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_opaque",
+            rerank_access_key="mak_rr_dashscope_opaque",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+
+    settings = runtime_module._process_settings(candidate)  # noqa: SLF001
+
+    assert current.runtime_processing() != candidate.runtime_processing()
+    assert current.runtime_embedding_identity() == candidate.runtime_embedding_identity()
+    assert runtime_module._embedding_configuration_changed(  # noqa: SLF001
+        current,
+        candidate,
+    ) is False
+    assert settings.rerank_base_url == (
+        "https://backend.example.test/v1/model/rerank/dashscope"
+    )
+    assert settings.rerank_model == "gte-rerank-v2"
+    assert settings.rerank_api_key == "mak_rr_dashscope_opaque"
+    assert settings.rerank_provider == "dashscope"
 
 
 @pytest.mark.asyncio
