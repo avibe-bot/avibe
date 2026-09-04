@@ -1248,12 +1248,19 @@
 }
 .model-hub-source-search { background: var(--model-hub-wash-05); }
 .model-hub-source-table { border-radius: var(--model-hub-source-radius); }
+/* Every band sits inside the same table edges and splits its cells by the same
+   gap, whether or not it stands in the table's columns. */
 .model-hub-source-table-head,
 .model-hub-source-table-row,
 .model-hub-source-table-draft {
-  grid-template-columns: var(--model-hub-source-table-columns);
   column-gap: var(--model-hub-source-table-gap);
   padding-inline: var(--model-hub-source-table-padding-x);
+}
+/* The columns are what a heading makes a claim about, so only the bands read
+   against that heading take them. */
+.model-hub-source-table-head,
+.model-hub-source-table-row {
+  grid-template-columns: var(--model-hub-source-table-columns);
 }
 .model-hub-source-row-action {
   width: 26px;
@@ -1281,11 +1288,23 @@
   min-height: var(--model-hub-source-table-row-height);
   padding-block: var(--model-hub-source-table-padding-y);
 }
+/* The draft is a form, not a row, so it stops claiming the row's columns.
+   Sharing them cannot work: the trailing track is cut for two 26px icon buttons,
+   the draft's controls are words instead — 取消 plus 添加模型 measure 128px, and
+   more than that in English — and the only cell with room to pay for the
+   difference is the shared 1fr, which would slide the tier cell out from under
+   the header it is read against. Two lines instead: the model id over the full
+   width, then the tier editor beside controls sized by their own labels. Height
+   follows that content, as it does for a row whose tier editor is open. */
 .model-hub-source-table-draft {
-  --model-hub-source-table-draft-height: 56px;
-  min-height: var(--model-hub-source-table-draft-height);
+  grid-template-columns: minmax(0, 1fr) auto;
   padding-block: var(--model-hub-source-table-padding-y);
 }
+/* Stated as a span to both edges rather than as a column count: the count is a
+   layout decision that has already changed once, and a cell carrying `col-span-3`
+   through that change is how the failure line ends up in an implicit fourth
+   track. Correct in the stacked band below md too, where there is one column. */
+.model-hub-source-draft-line { grid-column: 1 / -1; }
 .model-hub-source-add-hint {
   color: var(--model-hub-source-summary-ink);
   font-size: var(--model-hub-source-tier-size);
@@ -1299,10 +1318,20 @@
   --model-hub-source-manual-input-radius: 7px;
   border-radius: var(--model-hub-source-manual-input-radius);
 }
+/* A pill is a fixed label, so it is never the part of a row that gives. Both
+   declarations are load-bearing and neither works alone: `nowrap` because a
+   Chinese label has no min-content floor — it breaks between characters, so a
+   flex row that runs short turns 手动添加 into two lines instead of overflowing —
+   and `flex-shrink: 0` because nowrap alone would let the fill shrink out from
+   under text that no longer wraps. Stated here rather than at a call site: the
+   label beside a field or a truncating id is the same shape everywhere it
+   appears, and the field or the id is what should absorb the shortfall. */
 .model-hub-source-pill {
   --model-hub-source-pill-size: 10px;
   font-size: var(--model-hub-source-pill-size);
   line-height: 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .model-hub-source-tier { font-size: var(--model-hub-source-tier-size); }
 .model-hub-source-tier-chip {

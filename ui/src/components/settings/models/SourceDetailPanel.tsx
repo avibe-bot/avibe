@@ -1009,14 +1009,14 @@ export const SourceDetailPanel: React.FC<{
           <div
             data-manual-model-draft
             data-source-dialog-local-escape
-            className="model-hub-source-table-draft grid gap-3 border-y border-mint/20 bg-mint/[0.05] md:items-center md:gap-y-0"
+            className="model-hub-source-table-draft grid gap-3 border-y border-mint/20 bg-mint/[0.05] md:items-center"
             onKeyDown={(event) => {
               if (event.key !== 'Escape') return;
               event.preventDefault();
               if (!busy) setManualDraft(null);
             }}
           >
-            <span className="flex min-w-0 items-center gap-2"><Input
+            <span className="model-hub-source-draft-line flex min-w-0 items-center gap-2"><Input
                 autoFocus
                 value={manualDraft.modelId}
                 onChange={(event) => setManualDraft((current) => current ? { ...current, modelId: event.target.value, failed: false, retryRead: false } : current)}
@@ -1028,7 +1028,7 @@ export const SourceDetailPanel: React.FC<{
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
               <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>
             </div>
-            {manualDraft.failed && <p className="text-[11px] text-destructive-ink md:col-span-3">{t('settings.models.sourceDetail.fail.addModel')}</p>}
+            {manualDraft.failed && <p className="model-hub-source-draft-line text-[11px] text-destructive-ink">{t('settings.models.sourceDetail.fail.addModel')}</p>}
           </div>
         )}
         </div>
