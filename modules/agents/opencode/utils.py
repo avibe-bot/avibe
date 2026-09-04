@@ -304,10 +304,9 @@ def resolve_opencode_reasoning_effort(
 
 
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:
-    target_provider, target_model_id = _parse_model_key(target_model)
     if not isinstance(opencode_models, dict):
         return {}
-    if not target_provider and isinstance(target_model, str) and target_model:
+    if isinstance(target_model, str) and target_model:
         matches = []
         for provider in opencode_models.get("providers", []) or []:
             if not isinstance(provider, dict):
@@ -319,10 +318,13 @@ def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> 
             )
             if opencode_model_is_hub_projected(model_info):
                 matches.append(model_info)
-        if len(matches) != 1:
+        if len(matches) == 1:
+            variants = matches[0].get("variants", {})
+            return variants if isinstance(variants, dict) else {}
+        if matches:
             return {}
-        variants = matches[0].get("variants", {})
-        return variants if isinstance(variants, dict) else {}
+
+    target_provider, target_model_id = _parse_model_key(target_model)
     if not target_provider or not target_model_id:
         return {}
     model_info = find_opencode_model_info(opencode_models, target_provider, target_model_id)

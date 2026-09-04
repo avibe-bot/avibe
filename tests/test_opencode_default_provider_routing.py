@@ -50,6 +50,34 @@ def test_model_hub_picker_keeps_bare_identity_and_hides_transport_provider() -> 
     ]
 
 
+def test_model_hub_picker_keeps_slash_bearing_id_whole_for_variants() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "avibe-openai",
+                "name": "Avibe · OpenAI",
+                "models": {
+                    "moonshotai/kimi-k2": {
+                        "id": "moonshotai/kimi-k2",
+                        "name": "Kimi K2",
+                        "variants": {"xhigh": {"reasoningEffort": "xhigh"}},
+                        "vibe_remote": {"model_hub_projected": True},
+                    }
+                },
+            }
+        ],
+        "default": {},
+    }
+
+    assert build_opencode_model_option_items(catalog, 10) == [
+        {"label": "Kimi K2", "value": "moonshotai/kimi-k2"}
+    ]
+    assert build_reasoning_effort_options(catalog, "moonshotai/kimi-k2") == [
+        {"value": "__default__", "label": "(Default)"},
+        {"value": "xhigh", "label": "Extra High"},
+    ]
+
+
 def test_opencode_config_default_provider_is_unset_by_default() -> None:
     cfg = OpenCodeConfig()
     assert cfg.default_provider is None

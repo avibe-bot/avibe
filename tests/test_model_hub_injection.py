@@ -27,6 +27,7 @@ from modules.agents.model_hub import (
     opencode_requested_model_for_overlay,
     persisted_launch_identity,
 )
+from modules.agents.opencode.agent import resolve_opencode_model_dict
 
 
 def hub_launch(**overrides) -> ModelHubLaunch:
@@ -217,15 +218,22 @@ def test_opencode_overlay_addresses_bare_ids_through_their_native_provider():
         model_provider_ids=(
             ("gpt-5", "avibe-openai"),
             ("claude-opus-5", "avibe-anthropic"),
+            ("moonshotai/kimi-k2", "avibe-openai"),
         ),
-        checked_identifiers=("gpt-5", "claude-opus-5"),
-        available_identifiers=("gpt-5", "claude-opus-5"),
+        checked_identifiers=("gpt-5", "claude-opus-5", "moonshotai/kimi-k2"),
+        available_identifiers=("gpt-5", "claude-opus-5", "moonshotai/kimi-k2"),
     )
     assert opencode_requested_model_for_overlay("gpt-5", overlay) == "gpt-5"
     assert opencode_model_for_overlay("gpt-5", overlay) == "avibe-openai/gpt-5"
     assert opencode_model_for_overlay("claude-opus-5", overlay) == (
         "avibe-anthropic/claude-opus-5"
     )
+    slash_model = opencode_model_for_overlay("moonshotai/kimi-k2", overlay)
+    assert slash_model == "avibe-openai/moonshotai/kimi-k2"
+    assert resolve_opencode_model_dict(slash_model, default_provider=None) == {
+        "providerID": "avibe-openai",
+        "modelID": "moonshotai/kimi-k2",
+    }
     with pytest.raises(ModelHubError):
         opencode_model_for_overlay("missing", overlay)
 
