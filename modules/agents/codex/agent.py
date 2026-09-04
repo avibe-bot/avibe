@@ -168,8 +168,10 @@ class CodexAgent(BaseAgent):
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, collaboration | fallback |
-        # fallback_pending_clear | unavailable)
+        # fallback_pending_clear | injected_pending_persist | unavailable)
         self._thread_prompt_strategies: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, developer_instructions, target_strategy)
+        self._thread_unpersisted_prompts: Dict[str, tuple[str, str, str]] = {}
         # base_session_id → (thread_id, active model, active reasoning effort)
         self._thread_model_settings: Dict[str, tuple[str, str, Optional[str]]] = {}
         # base_session_id → (thread_id, AVIBE_* caller env)
@@ -2015,6 +2017,17 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
+        if source_prompt_strategy is None and callable(
+            getattr(
+                getattr(self, "sessions", None),
+                "get_agent_session_runtime_marker",
+                None,
+            )
+        ):
+            # Threads created before Turn-bound prompt delivery stored Avibe's
+            # prompt as native thread configuration. Do not copy that legacy
+            # configuration into a fork alongside the new delivery strategy.
+            params["developerInstructions"] = None
         if effective_model:
             params["model"] = effective_model
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
@@ -2247,6 +2260,21 @@ class CodexAgent(BaseAgent):
                 resume_params: Dict[str, Any] = {
                     "threadId": persisted,
                 }
+                marker_getter = getattr(
+                    getattr(self, "sessions", None),
+                    "get_agent_session_runtime_marker",
+                    None,
+                )
+                if callable(marker_getter):
+                    marker = self._read_persisted_prompt_strategy_marker(
+                        persisted,
+                        agent_session_id=self._prompt_state_agent_session_id(request),
+                    )
+                    if marker is None:
+                        # Older Avibe releases persisted their prompt as thread
+                        # configuration. Clear it before the first Turn selects
+                        # one of the new prompt-delivery strategies.
+                        resume_params["developerInstructions"] = None
                 git_path_state, git_path_managed = self._inject_caller_env_config(
                     resume_params,
                     request,
@@ -2270,6 +2298,8 @@ class CodexAgent(BaseAgent):
                     if isinstance(thread_obj, dict):
                         thread_id = thread_obj.get("id", "")
             except Exception as e:
+                if isinstance(e, CodexPromptRefreshUnavailableError):
+                    raise
                 if self._is_recoverable_transport_error(e):
                     # Transient: reconnect the SAME thread (handled by the outer
                     # retry) — not context loss, keep.
@@ -2623,6 +2653,8 @@ class CodexAgent(BaseAgent):
             self._thread_developer_instructions.pop(base_session_id, None)
         if hasattr(self, "_thread_prompt_strategies"):
             self._thread_prompt_strategies.pop(base_session_id, None)
+        if hasattr(self, "_thread_unpersisted_prompts"):
+            self._thread_unpersisted_prompts.pop(base_session_id, None)
         if hasattr(self, "_thread_model_settings"):
             self._thread_model_settings.pop(base_session_id, None)
         if hasattr(self, "_thread_caller_env_configs"):
@@ -2672,6 +2704,22 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Fallback for Codex builds without Turn collaboration settings."""
 
+        if not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            developer_instructions,
+            strategy="fallback_pending_injection",
+            agent_session_id=agent_session_id,
+        ):
+            # No native mutation happened, so volatile strategy selection can
+            # be discarded and resolved again on a later retry.
+            getattr(self, "_thread_prompt_strategies", {}).pop(
+                request.base_session_id,
+                None,
+            )
+            raise CodexPromptRefreshUnavailableError(
+                "Could not prepare the fallback prompt strategy before injection"
+            )
         await transport.send_request(
             "thread/inject_items",
             {
@@ -2697,17 +2745,30 @@ class CodexAgent(BaseAgent):
             strategy=strategy,
             agent_session_id=agent_session_id,
         ):
-            getattr(self, "_thread_developer_instructions", {}).pop(
+            self._remember_thread_developer_instructions(
                 request.base_session_id,
-                None,
+                thread_id,
+                developer_instructions,
             )
-            getattr(self, "_thread_prompt_strategies", {}).pop(
+            self._remember_thread_prompt_strategy(
                 request.base_session_id,
-                None,
+                thread_id,
+                "injected_pending_persist",
+            )
+            if not hasattr(self, "_thread_unpersisted_prompts"):
+                self._thread_unpersisted_prompts = {}
+            self._thread_unpersisted_prompts[request.base_session_id] = (
+                thread_id,
+                developer_instructions,
+                strategy,
             )
             raise CodexPromptRefreshUnavailableError(
                 "Could not persist the fallback prompt strategy after injection"
             )
+        getattr(self, "_thread_unpersisted_prompts", {}).pop(
+            request.base_session_id,
+            None,
+        )
         self._remember_thread_developer_instructions(
             request.base_session_id,
             thread_id,
@@ -2746,7 +2807,9 @@ class CodexAgent(BaseAgent):
                 key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
             )
         except Exception as exc:
-            raise RuntimeError("Could not resolve the Codex prompt strategy") from exc
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex prompt strategy"
+            ) from exc
         if marker is None:
             return None
         marker_thread_id = marker.get("thread_id") if isinstance(marker, dict) else None
@@ -2764,9 +2827,14 @@ class CodexAgent(BaseAgent):
                 "collaboration",
                 "fallback",
                 "fallback_pending_clear",
+                "fallback_pending_injection",
                 "unavailable",
             }
             or (marker_strategy == "fallback" and not marker_sha256_valid)
+            or (
+                marker_strategy == "fallback_pending_injection"
+                and not marker_sha256_valid
+            )
             or (
                 marker_strategy
                 in {"collaboration", "fallback_pending_clear"}
@@ -2779,6 +2847,13 @@ class CodexAgent(BaseAgent):
             logger.warning(
                 "Stored Codex prompt strategy marker is invalid for thread %s; "
                 "continuing without prompt refresh",
+                thread_id,
+            )
+            return {"thread_id": thread_id, "strategy": "unavailable"}
+        if marker_strategy == "fallback_pending_injection":
+            logger.warning(
+                "Codex fallback prompt injection has an unknown outcome for thread %s; "
+                "continuing without further prompt refresh",
                 thread_id,
             )
             return {"thread_id": thread_id, "strategy": "unavailable"}
@@ -2809,7 +2884,9 @@ class CodexAgent(BaseAgent):
             None,
         )
         if not callable(getter):
-            raise RuntimeError("Could not resolve the Codex backend session binding")
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex backend session binding"
+            )
         try:
             backend_session_id = getter(
                 request.session_key,
@@ -2817,9 +2894,13 @@ class CodexAgent(BaseAgent):
                 self.name,
             )
         except Exception as exc:
-            raise RuntimeError("Could not resolve the Codex backend session binding") from exc
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex backend session binding"
+            ) from exc
         if not backend_session_id:
-            raise RuntimeError("Could not resolve the Codex backend session binding")
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex backend session binding"
+            )
         return str(backend_session_id)
 
     def _persist_prompt_strategy(
@@ -2835,6 +2916,7 @@ class CodexAgent(BaseAgent):
             "collaboration",
             "fallback",
             "fallback_pending_clear",
+            "fallback_pending_injection",
             "unavailable",
         }:
             raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
@@ -2873,6 +2955,39 @@ class CodexAgent(BaseAgent):
             )
             return False
         return True
+
+    def _repair_unpersisted_prompt_strategy(
+        self,
+        request: AgentRequest,
+        thread_id: str,
+        *,
+        agent_session_id: Optional[str],
+    ) -> str:
+        pending = getattr(self, "_thread_unpersisted_prompts", {}).get(
+            request.base_session_id
+        )
+        if not pending or pending[0] != thread_id:
+            raise CodexPromptRefreshUnavailableError(
+                "The injected Codex prompt strategy cannot be recovered"
+            )
+        _, injected_instructions, target_strategy = pending
+        if not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            injected_instructions,
+            strategy=target_strategy,
+            agent_session_id=agent_session_id,
+        ):
+            raise CodexPromptRefreshUnavailableError(
+                "Could not persist the injected Codex prompt strategy"
+            )
+        self._remember_thread_prompt_strategy(
+            request.base_session_id,
+            thread_id,
+            target_strategy,
+        )
+        self._thread_unpersisted_prompts.pop(request.base_session_id, None)
+        return target_strategy
 
     @staticmethod
     async def _confirm_collaboration_mode_capability(transport: CodexTransport) -> None:
@@ -2925,6 +3040,12 @@ class CodexAgent(BaseAgent):
         prompt_changed = cached_instructions != (thread_id, developer_instructions)
         cached_strategy = getattr(self, "_thread_prompt_strategies", {}).get(request.base_session_id)
         prompt_strategy = cached_strategy[1] if cached_strategy and cached_strategy[0] == thread_id else None
+        if prompt_strategy == "injected_pending_persist":
+            prompt_strategy = self._repair_unpersisted_prompt_strategy(
+                request,
+                thread_id,
+                agent_session_id=agent_session_id,
+            )
         persisted_prompt_marker = None
         if developer_instructions and prompt_strategy is None:
             persisted_prompt_marker = self._read_persisted_prompt_strategy_marker(

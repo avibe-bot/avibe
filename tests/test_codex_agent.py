@@ -3302,7 +3302,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, "thread/resume")
         self.assertNotIn("modelProvider", params)
 
-    async def test_resume_thread_keeps_system_prompt_injection_when_quick_replies_are_disabled(self):
+    async def test_resume_thread_clears_legacy_thread_prompt_before_turn_strategy(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3310,7 +3310,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(
             get_agent_session_id=Mock(return_value="thread-existing"),
             ensure_agent_session_id=Mock(return_value="sesk8m4q2p7x"),
+            get_agent_session_runtime_marker=Mock(return_value=None),
         )
+        agent._prompt_state_agent_session_id = Mock(return_value="sesk8m4q2p7x")
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(
@@ -3333,7 +3335,34 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-existing")
         method, params = transport.send_request.await_args.args
         self.assertEqual(method, "thread/resume")
-        self.assertNotIn("developerInstructions", params)
+        self.assertIsNone(params["developerInstructions"])
+
+    async def test_resume_thread_routes_prompt_marker_read_failure_through_i18n(self):
+        agent = object.__new__(CodexAgent)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value="thread-existing"),
+            get_agent_session_runtime_marker=Mock(
+                side_effect=OSError("database busy")
+            ),
+        )
+        agent.bind_agent_session_id = Mock()
+        agent._prompt_state_agent_session_id = Mock(return_value="ses-runtime")
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(platform_specific={}),
+            base_session_id="session-1",
+            session_key="channel-1",
+            subagent_name=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock())
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not resolve the Codex prompt strategy",
+        ):
+            await agent._start_or_resume_thread(transport, request)
+
+        transport.send_request.assert_not_awaited()
 
     def test_thread_developer_instructions_follow_live_memory_enabled_state(self):
         agent = object.__new__(CodexAgent)
@@ -3805,7 +3834,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             CodexPromptRefreshUnavailableError,
-            "Could not persist the fallback prompt strategy",
+            "Could not prepare the fallback prompt strategy",
         ):
             await agent._start_turn(
                 transport,
@@ -3817,10 +3846,74 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         calls = transport.send_request.await_args_list
         self.assertEqual(
             [call.args[0] for call in calls],
-            ["thread/inject_items"],
+            [],
         )
         self.assertNotIn("session-1", agent._thread_prompt_strategies)
         self.assertNotIn("session-1", getattr(agent, "_thread_developer_instructions", {}))
+
+    async def test_start_turn_repairs_marker_without_reinjecting_known_prompt(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(
+                side_effect=[True, False, True]
+            ),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not persist the fallback prompt strategy",
+        ):
+            await agent._start_turn(
+                transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        self.assertEqual(
+            [rpc.args[0] for rpc in transport.send_request.await_args_list],
+            ["thread/inject_items", "turn/start"],
+        )
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+        self.assertNotIn("session-1", agent._thread_unpersisted_prompts)
 
     async def test_start_turn_reuses_persisted_fallback_prompt_after_process_restart(self):
         agent = object.__new__(CodexAgent)
@@ -3945,6 +4038,21 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             agent._thread_prompt_strategies["session-1"],
             ("thread-1", "unavailable"),
         )
+
+    def test_prompt_marker_read_failure_uses_localized_error_path(self):
+        agent = object.__new__(CodexAgent)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(side_effect=OSError("database busy"))
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not resolve the Codex prompt strategy",
+        ):
+            agent._read_persisted_prompt_strategy_marker(
+                "thread-1",
+                agent_session_id="ses-runtime",
+            )
 
     async def test_start_turn_reuses_persisted_collaboration_after_inconclusive_probe(self):
         agent = object.__new__(CodexAgent)
@@ -4313,16 +4421,32 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in transport.send_request.await_args_list],
             ["thread/inject_items", "turn/start"],
         )
-        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
-            "ses-runtime",
-            backend="codex",
-            native_session_id="thread-1",
-            key="codex_prompt_strategy",
-            value={
-                "thread_id": "thread-1",
-                "strategy": "fallback",
-                "sha256": agent._prompt_fingerprint("changed prompt"),
-            },
+        prompt_sha = agent._prompt_fingerprint("changed prompt")
+        agent.sessions.set_agent_session_runtime_marker.assert_has_calls(
+            [
+                call(
+                    "ses-runtime",
+                    backend="codex",
+                    native_session_id="thread-1",
+                    key="codex_prompt_strategy",
+                    value={
+                        "thread_id": "thread-1",
+                        "strategy": "fallback_pending_injection",
+                        "sha256": prompt_sha,
+                    },
+                ),
+                call(
+                    "ses-runtime",
+                    backend="codex",
+                    native_session_id="thread-1",
+                    key="codex_prompt_strategy",
+                    value={
+                        "thread_id": "thread-1",
+                        "strategy": "fallback",
+                        "sha256": prompt_sha,
+                    },
+                ),
+            ]
         )
 
     async def test_start_turn_does_not_reuse_cached_effort_for_an_explicit_model_change(self):
