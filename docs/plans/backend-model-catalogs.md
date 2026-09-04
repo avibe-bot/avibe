@@ -513,8 +513,11 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
 ### Contract deltas (normative; lanes cite these by number)
 
 - **C8 — `BackendModel.native_protocol`** (`openai_responses | anthropic`; `gemini` reserved,
-  refused) is required on OpenCode rows, absent on other backends; `from_payload` refuses an
-  OpenCode row without it and any row with an unknown value.
+  refused) is required on persisted OpenCode rows and absent on other backends. The models
+  `PUT` derives it from the id's vendor family when a submitted OpenCode row omits it — the
+  picker's `Add models` submits candidates as today, unchanged `Candidate` shape — and accepts
+  the editor's explicit value; `from_payload` refuses a persisted OpenCode row without it and
+  any row with an unknown value. Row projections carry it so the editor can show it.
 - **C9 — OpenCode ids are bare.** Every schema, pattern, and validator that required
   `^[a-z0-9_-]+/.+$` for an OpenCode id now applies the canonical-id rule; the
   `standard_vendors` projection of agent-supply is removed (no consumer remains).
@@ -544,8 +547,9 @@ No new string anywhere else; nothing explains the mechanism.
 ### Acceptance (properties)
 
 1. For every OpenCode menu row with a nonempty Route chain, the overlay holds exactly one
-   model entry, under the provider named by its `native_protocol`; the overlay holds no other
-   provider, and `enabled_providers` equals the set of generated provider ids.
+   model entry, under the provider named by its `native_protocol`; every generated provider
+   holds at least one entry, the overlay holds no other provider, and `enabled_providers`
+   equals the set of generated provider ids.
 2. A menu id is byte-identical across Gateway⇄Direct switches, Source add/remove/reorder,
    failover, route edits, and engine restarts; it changes only when the user renames the row.
 3. When the serving hop's Source protocol equals the row's `native_protocol`, the body the

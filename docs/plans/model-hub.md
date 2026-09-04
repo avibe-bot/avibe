@@ -530,9 +530,9 @@ for each configuration-eligible Source added in this transaction:
 
 `native_claude_alias` is the literal former resolver rule: dated requests are literal;
 undated version requests require an equal version tuple; bare aliases match a family;
-the total order is `(version_tuple, date_or_zero, model_id)`. `exact_checked_identifier`
-and the unique suffix rule are the OpenCode overlay rule. No other backend gets an
-alias family, and explicit user-authored Route edits remain literal configuration.
+the total order is `(version_tuple, date_or_zero, model_id)`. No other backend gets an
+alias family — OpenCode menu ids match literally (v4, 2026-09-04) — and explicit
+user-authored Route edits remain literal configuration.
 
 **Routing configuration is per backend and per model; health is Source-global.** Quota
 and reachability belong to the Source, not the Agent that touched it. §4.3 reads the
