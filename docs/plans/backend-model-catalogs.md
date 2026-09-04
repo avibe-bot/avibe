@@ -495,8 +495,10 @@ read and the admission predicate.
 
 A user who puts OpenCode on the Gateway sees, in OpenCode, exactly the models they composed in
 the Model Hub and nothing else; each is addressed as `avibe-openai/<id>` or
-`avibe-anthropic/<id>`; requests reach a same-protocol upstream unchanged. In Avibe the
-OpenCode list looks like the Codex list: bare ids, display names, no protocol chatter.
+`avibe-anthropic/<id>`; an Anthropic request reaches a same-protocol upstream with an
+identical body, a Responses request keeps its input and reasoning (the engine's Codex executor
+edits the envelope, S3). In Avibe the OpenCode list looks like the Codex list: bare ids,
+display names, no protocol chatter.
 
 ### Product model deltas
 
@@ -520,7 +522,11 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
   `PUT` derives it from the id's vendor family when a submitted OpenCode row omits it — the
   picker's `Add models` submits candidates as today, unchanged `Candidate` shape — and accepts
   the editor's explicit value; `from_payload` refuses a persisted OpenCode row without it and
-  any row with an unknown value. Row projections carry it so the editor can show it.
+  any row with an unknown value. Row projections carry it so the editor can show it. Artifact
+  change: `backend-model.schema.json` (closed shape) gains the optional `native_protocol`
+  property with the closed enum, required exactly when the row belongs to the `opencode`
+  backend; the `types.ts` `BackendModel` mirror and the response registry follow (see the
+  artifact checklist below).
 - **C9 — OpenCode ids are bare.** Every schema, pattern, and validator that required
   `^[a-z0-9_-]+/.+$` for an OpenCode id now applies the canonical-id rule; the
   `standard_vendors` projection of agent-supply is removed (no consumer remains).
@@ -538,9 +544,21 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
   `model_hub.contract_version` (absent = 7), the loader discards pre-v8 OpenCode menu state
   (rows, routes, removed markers, `menu`) and touches nothing else; no migration, no
   cross-store write; the reset fixture is a required test.
-- **C13 — `contract_version` 7 → 8**, now also persisted as `model_hub.contract_version` in the
-  config payload, with the version closure in `model-hub-contracts/README.md` extended to that
-  location and to `config/v2_config.py`.
+- **C13 — `contract_version` 7 → 8 (prospective).** This spec pre-bumps nothing: every
+  registered version location still reads 7 on this head, and the implementation change moves
+  all of them to 8 in one tested head, adding the persisted `model_hub.contract_version` and
+  `config/v2_config.py` to the closure list in `model-hub-contracts/README.md`.
+
+### Contract artifact changes (v3; the contracts lane's checklist)
+
+| Artifact | Change |
+| --- | --- |
+| `backend-model.schema.json`, `ui/src/components/settings/models/types.ts` | `native_protocol` property (closed enum `openai_responses | anthropic`), required exactly for `opencode` rows, absent otherwise (C8). |
+| `agent-supply.schema.json` | `menu.checked` items follow the canonical-id rule (no `/` requirement); the `standard_vendors` projection is removed (C9). |
+| `mirror-registry.json` | registers the `native_protocol` enum and the fixed provider-id mapping (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`). |
+| `api.md` | identifier rule (done in this revision); response-registry rows for the models `PUT`/read carrying `native_protocol`. |
+| `opencode-overlay.md` | v4 (done in this revision). |
+| `README.md` version closure + every registered location (`service.py`, `provenance.py`, `types.ts`, tests) | 7 → 8 in the implementation head, plus `model_hub.contract_version` and `config/v2_config.py` (C13). |
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
@@ -561,7 +579,8 @@ No new string anywhere else; nothing explains the mechanism.
    failover, route edits, and engine restarts; it changes only when the user renames the row.
 3. When the serving hop's Source protocol equals the row's `native_protocol`, an Anthropic
    request body reaches the upstream JSON-identical apart from the `model` field rewritten to
-   the stored hop's model id, and a Responses request keeps its `input` and `reasoning`; when
+   the stored hop's model id; a Responses request keeps its `input`, `reasoning`, and
+   `prompt_cache_key` while the engine's Codex executor edits the envelope as S3 records; when
    the protocols differ, a Responses `reasoning.effort` reaches an `anthropic` upstream as
    `output_config.effort` (S4). Known and accepted: an Anthropic-native row served through an
    `openai_chat` hop loses its effort.

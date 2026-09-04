@@ -65,11 +65,14 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   `thinking: {type, effort}` silently becomes a 1024-token budget. A row with
   `supports_reasoning: false` has no variants.
 - The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
-  normalizes a provider, matches inventory, or substitutes a model. When the hop's Source
-  protocol equals the row's `native_protocol` the Gateway passes the request through
-  unchanged apart from credentials, host, and the `model` field, which it rewrites to the
-  stored hop's model id — a user-configured substitution (`model-hub.md` §4.5) is invoked as
-  written. "Unchanged" is a body-level guarantee (S3): with the engine flags
+  normalizes a provider, matches inventory, or substitutes a model. The same-protocol
+  guarantee is protocol-specific: **Anthropic** — when the hop's Source protocol is
+  `anthropic`, the request body reaches the upstream unchanged apart from the `model` field,
+  which the Gateway rewrites to the stored hop's model id (a user-configured substitution,
+  `model-hub.md` §4.5, is invoked as written); **Responses** — when the hop's Source protocol
+  is `openai_responses`, `input`, `reasoning`, and `prompt_cache_key` reach the upstream intact
+  while the engine's Codex executor edits the envelope (below). The Anthropic guarantee is
+  body-level (S3): with the engine flags
   `disable-claude-cloak-mode: true`, credential `cloak.mode: never`, and
   `rebuild-mid-system-message: false`, an Anthropic-frontend body reaches an `anthropic`
   upstream byte-identical; the engine's transport headers remain its own (a Claude-CLI
