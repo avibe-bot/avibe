@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -730,6 +731,103 @@ def test_cloud_bundle_refresh_failure_does_not_apply_settings_transition(
     assert persisted.cloud.model_access_key == original.cloud.model_access_key
     assert persisted.cloud.rerank_access_key == original.cloud.rerank_access_key
     assert persisted.cloud.access_key_revision == 1
+
+
+@pytest.mark.parametrize(
+    ("downstream_outcome", "expected_status", "expected_events"),
+    [
+        ("preflight_failed", 409, ["ensure", "preflight"]),
+        ("reconfigure_failed", 500, ["ensure", "preflight", "reconfigure"]),
+        ("reconfigure_busy", 409, ["ensure", "preflight", "reconfigure"]),
+    ],
+)
+def test_ensured_active_bundle_remains_pending_when_settings_completion_fails(
+    downstream_outcome: str,
+    expected_status: int,
+    expected_events: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    memory = _custom_memory_with_cloud_bundle(
+        access_key_revision=1,
+        transition_notice_pending=True,
+    )
+    memory.mode = "platform"
+    _save_config(memory)
+    events: list[str] = []
+
+    def ensure(config: V2Config) -> V2Config:
+        events.append("ensure")
+        candidate = deepcopy(config.memory)
+        candidate.cloud.rerank_access_key = "mak_rr_dashscope_opaque"
+        candidate.cloud.access_key_revision = 2
+        return model_service._persist_candidate(  # noqa: SLF001
+            config.memory,
+            candidate,
+        )
+
+    async def preflight(**_kwargs):
+        events.append("preflight")
+        if downstream_outcome == "preflight_failed":
+            return {
+                "status_code": 409,
+                "body": {"ok": False, "error": "memory_processing_failed"},
+            }
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def reconfigure(**_kwargs):
+        events.append("reconfigure")
+        if downstream_outcome == "reconfigure_busy":
+            return {
+                "status_code": 409,
+                "body": {
+                    "ok": False,
+                    "operation": "reconfigure",
+                    "state": "busy",
+                    "result": "unchanged",
+                    "error": "memory_operation_in_progress",
+                },
+            }
+        return {
+            "status_code": 500,
+            "body": {
+                "ok": False,
+                "operation": "reconfigure",
+                "state": "failed",
+                "result": "failed",
+                "error": "memory_reconfigure_failed",
+            },
+        }
+
+    async def unexpected_reconcile():
+        pytest.fail("failed settings completion issued reconciliation")
+
+    monkeypatch.setattr(model_service, "ensure_model_access_key", ensure)
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "memory_reconfigure", reconfigure)
+    monkeypatch.setattr(internal_client, "reconcile_memory", unexpected_reconcile)
+    client = app.test_client()
+
+    response = client.patch(
+        "/api/memory/settings",
+        json={"acknowledge_transition": True, "confirm_loss": True},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == expected_status
+    assert events == expected_events
+    persisted = V2Config.load().memory
+    assert persisted.mode == "platform"
+    assert persisted.cloud.transition_notice_pending is True
+    assert persisted.cloud.applied_embedding_identity == "cloud-emb-v1"
+    assert persisted.cloud.revision == persisted.cloud.access_key_revision == 2
+    assert persisted.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert persisted.cloud.runtime_apply_pending is True
+    rerank = persisted.runtime_processing().rerank
+    assert rerank is not None
+    assert rerank.api_key == "mak_rr_dashscope_opaque"
 
 
 def test_confirmed_embedding_identity_change_uses_unified_reconfigure(

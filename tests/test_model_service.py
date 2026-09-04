@@ -11,7 +11,9 @@ from config.v2_config import (
     MemoryConfig,
     MemoryEndpointConfig,
     MemoryProcessingConfig,
+    V2Config,
 )
+from vibe import internal_client
 from vibe import model_service
 from vibe import ui_memory_routes
 
@@ -126,6 +128,31 @@ def _active_cloud_memory(
     )
 
 
+def _save_memory_config(
+    memory: MemoryConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.default()
+    config.memory = memory
+    config.save()
+
+
+def _paired_model_service_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        remote_access=SimpleNamespace(
+            vibe_cloud=SimpleNamespace(
+                runtime_credentials=lambda: (
+                    "https://backend.example.test",
+                    "instance-1",
+                    "device-secret",
+                )
+            )
+        )
+    )
+
+
 def test_model_access_key_parser_accepts_legacy_and_typed_responses() -> None:
     legacy = model_service._mint_from_payload(  # noqa: SLF001
         _key_payload("mak_opaque")
@@ -167,6 +194,164 @@ def test_model_access_key_parser_keeps_base_key_for_any_unusable_typed_shape(
 
     assert minted.key == "mak_opaque"
     assert minted.rerank_access_key is None
+
+
+@pytest.mark.parametrize(
+    ("existing_pending", "runtime_changed", "expected_pending"),
+    [
+        (False, False, False),
+        (False, True, True),
+        (True, False, True),
+        (True, True, True),
+    ],
+)
+def test_model_service_persistence_derives_pending_from_runtime_signature(
+    existing_pending: bool,
+    runtime_changed: bool,
+    expected_pending: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current = _active_cloud_memory()
+    current.cloud.runtime_apply_pending = existing_pending
+    _save_memory_config(current, monkeypatch, tmp_path)
+    candidate = deepcopy(current)
+    candidate.cloud.runtime_apply_pending = False
+    if runtime_changed:
+        candidate.enabled = not current.enabled
+
+    assert (
+        model_service._runtime_state_signature(candidate)  # noqa: SLF001
+        != model_service._runtime_state_signature(current)  # noqa: SLF001
+    ) is runtime_changed
+
+    saved = model_service._persist_candidate(current, candidate)  # noqa: SLF001
+
+    assert candidate.cloud.runtime_apply_pending is False
+    assert saved.memory.cloud.runtime_apply_pending is expected_pending
+    assert V2Config.load().memory.cloud.runtime_apply_pending is expected_pending
+
+
+def test_ensure_active_bundle_stays_pending_until_one_later_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current = _active_cloud_memory(
+        rerank_access_key="mak_rr_deepinfra_opaque",
+        access_key_revision=1,
+        revision=2,
+    )
+    previous_processing = current.runtime_processing()
+    previous_identity = current.runtime_embedding_identity()
+    _save_memory_config(current, monkeypatch, tmp_path)
+    requests: list[tuple[str, str]] = []
+    reconciled: list[MemoryConfig] = []
+
+    def request(_config, _credentials, method, suffix):
+        requests.append((method, suffix))
+        if suffix == model_service.MODEL_ACCESS_KEY_SUFFIX:
+            return _key_payload(
+                "mak_opaque",
+                rerank_access_key="mak_rr_dashscope_opaque",
+                include_typed_keys=True,
+            )
+        assert suffix == "model-service"
+        return _status(revision=2)
+
+    async def reconcile_memory():
+        reconciled.append(deepcopy(V2Config.load().memory))
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(model_service, "_paired_device_request", request)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_memory)
+    config = _paired_model_service_config()
+
+    ensured = model_service.ensure_model_access_key(config).memory
+
+    assert requests == [("POST", model_service.MODEL_ACCESS_KEY_SUFFIX)]
+    assert reconciled == []
+    assert ensured.cloud.access_key_revision == ensured.cloud.revision == 2
+    assert ensured.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert ensured.cloud.runtime_apply_pending is True
+    assert ensured.runtime_processing() != previous_processing
+    assert ensured.runtime_embedding_identity() == previous_identity
+
+    result = model_service.sync_model_service_once(config)
+
+    applied = V2Config.load().memory
+    assert result["ok"] is True
+    assert result["changed"] is False
+    assert result["apply_pending"] is False
+    assert requests == [
+        ("POST", model_service.MODEL_ACCESS_KEY_SUFFIX),
+        ("GET", "model-service"),
+    ]
+    assert len(reconciled) == 1
+    assert reconciled[0].cloud.runtime_apply_pending is True
+    assert applied.cloud.runtime_apply_pending is False
+    assert applied.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert applied.runtime_embedding_identity() == previous_identity
+
+
+@pytest.mark.parametrize("existing_pending", [False, True])
+def test_ensure_custom_bundle_preparation_only_preserves_existing_pending(
+    existing_pending: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current = _active_cloud_memory(
+        rerank_access_key="mak_rr_deepinfra_opaque",
+        access_key_revision=1,
+        revision=2,
+    )
+    current.mode = "custom"
+    current.processing = _manual_memory().processing
+    current.cloud.runtime_apply_pending = existing_pending
+    previous_signature = model_service._runtime_state_signature(current)  # noqa: SLF001
+    _save_memory_config(current, monkeypatch, tmp_path)
+
+    def request(_config, _credentials, method, suffix):
+        assert (method, suffix) == ("POST", model_service.MODEL_ACCESS_KEY_SUFFIX)
+        return _key_payload(
+            "mak_opaque",
+            rerank_access_key="mak_rr_dashscope_opaque",
+            include_typed_keys=True,
+        )
+
+    monkeypatch.setattr(model_service, "_paired_device_request", request)
+
+    ensured = model_service.ensure_model_access_key(
+        _paired_model_service_config()
+    ).memory
+
+    assert ensured.cloud.access_key_revision == ensured.cloud.revision == 2
+    assert ensured.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    assert ensured.cloud.runtime_apply_pending is existing_pending
+    assert model_service._runtime_state_signature(ensured) == previous_signature  # noqa: SLF001
+
+
+def test_ensure_current_bundle_is_a_persistence_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current = _active_cloud_memory(
+        rerank_access_key="mak_rr_deepinfra_opaque",
+        access_key_revision=2,
+        revision=2,
+    )
+    _save_memory_config(current, monkeypatch, tmp_path)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("current bundle performed network or persistence work")
+
+    monkeypatch.setattr(model_service, "_paired_device_request", unexpected)
+    monkeypatch.setattr(model_service, "_persist_candidate", unexpected)
+
+    ensured = model_service.ensure_model_access_key(
+        _paired_model_service_config()
+    ).memory
+
+    assert ensured == current
 
 
 @pytest.mark.parametrize(

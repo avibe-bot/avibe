@@ -416,8 +416,15 @@ def _paired_device_request(
 
 
 def _persist_candidate(current: MemoryConfig, candidate: MemoryConfig) -> V2Config:
+    """Persist a candidate with any required sidecar apply durably marked."""
+
     from vibe import api
 
+    candidate = deepcopy(candidate)
+    candidate.cloud.runtime_apply_pending = (
+        current.cloud.runtime_apply_pending
+        or _runtime_state_signature(candidate) != _runtime_state_signature(current)
+    )
     return api.save_memory_config(
         memory_config_to_payload(candidate, include_secrets=True),
         expected=current,
