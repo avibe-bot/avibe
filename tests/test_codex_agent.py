@@ -2267,6 +2267,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ensure_agent_session_id=Mock(return_value="ses-target"),
             bind_agent_session=Mock(return_value="ses-target"),
             get_agent_session_runtime_marker=marker_getter,
+            set_agent_session_runtime_marker=Mock(return_value=True),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent._fork_correction_pending_base_sessions = set()
@@ -2305,9 +2306,20 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         thread_id = await agent._start_or_resume_thread(transport, request)
 
         self.assertEqual(thread_id, "thread-fork")
-        self.assertEqual(
-            agent._thread_prompt_strategies["ses-target"],
-            ("thread-fork", "fallback"),
+        self.assertNotIn(
+            "ses-target",
+            getattr(agent, "_thread_prompt_strategies", {}),
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+            "ses-target",
+            backend="codex",
+            native_session_id="thread-fork",
+            key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+            value={
+                "thread_id": "thread-fork",
+                "strategy": "fallback",
+                "sha256": "a" * 64,
+            },
         )
         marker_getter.assert_called_once_with(
             "ses-source",
@@ -2319,8 +2331,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_fork_finalizes_a_source_prompt_with_pending_marker_persistence(self):
         agent = object.__new__(CodexAgent)
         agent.ensure_agent_session_id = Mock(return_value="ses-target")
-        agent._fork_source_prompt_strategy = Mock(
-            return_value="injected_pending_persist"
+        agent._fork_source_prompt_state = Mock(
+            return_value=("injected_pending_persist", None, None)
         )
         agent._thread_unpersisted_prompts = {
             "ses-source": ("thread-source", "stable prompt", "fallback")
@@ -2374,7 +2386,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_fork_persists_carried_collaboration_strategy_for_target(self):
         agent = object.__new__(CodexAgent)
         agent.ensure_agent_session_id = Mock(return_value="ses-target")
-        agent._fork_source_prompt_strategy = Mock(return_value="collaboration")
+        agent._fork_source_prompt_state = Mock(
+            return_value=("collaboration", None, None)
+        )
         agent._resolve_codex_agent_settings = Mock(
             return_value=(None, "gpt-5.4", "high", None)
         )
@@ -2417,7 +2431,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_fork_does_not_cache_unpersisted_collaboration_strategy(self):
         agent = object.__new__(CodexAgent)
         agent.ensure_agent_session_id = Mock(return_value="ses-target")
-        agent._fork_source_prompt_strategy = Mock(return_value="collaboration")
+        agent._fork_source_prompt_state = Mock(
+            return_value=("collaboration", None, None)
+        )
         agent._resolve_codex_agent_settings = Mock(
             return_value=(None, "gpt-5.4", "high", None)
         )

@@ -2009,8 +2009,11 @@ class CodexAgent(BaseAgent):
     ) -> str:
         """Fork an existing Codex thread and bind the new thread id."""
         target_agent_session_id = self.ensure_agent_session_id(request)
-        source_prompt_strategy = self._fork_source_prompt_strategy(fork)
-        source_prompt_instructions: Optional[str] = None
+        (
+            source_prompt_strategy,
+            source_prompt_sha256,
+            source_prompt_instructions,
+        ) = self._fork_source_prompt_state(fork)
         if source_prompt_strategy == "injected_pending_persist":
             source_session_id = str(fork.get("source_session_id") or "").strip()
             source_thread_id = str(fork.get("source_native_session_id") or "").strip()
@@ -2023,14 +2026,19 @@ class CodexAgent(BaseAgent):
                 and pending[2] in {"fallback", "fallback_pending_clear"}
             ):
                 _, source_prompt_instructions, source_prompt_strategy = pending
+                source_prompt_sha256 = self._prompt_fingerprint(
+                    source_prompt_instructions
+                )
             else:
                 # This process cannot prove which prompt bytes the source
                 # injected, so a fork must not inherit an unrepairable state.
                 source_prompt_strategy = "unavailable"
+                source_prompt_sha256 = None
         elif source_prompt_strategy == "fallback_pending_injection":
             # The source injection outcome is ambiguous. The fork already
             # carries whatever native history exists; never append it again.
             source_prompt_strategy = "unavailable"
+            source_prompt_sha256 = None
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
@@ -2075,6 +2083,7 @@ class CodexAgent(BaseAgent):
         target_agent_session_id = (
             self.bind_agent_session_id(request, thread_id) or target_agent_session_id
         )
+        cache_source_prompt_strategy = True
         if source_prompt_instructions is not None:
             persisted_prompt_strategy = self._persist_prompt_strategy(
                 request,
@@ -2089,6 +2098,22 @@ class CodexAgent(BaseAgent):
                     thread_id,
                     source_prompt_instructions,
                 )
+        elif source_prompt_sha256 is not None and source_prompt_strategy in {
+            "fallback",
+            "fallback_pending_clear",
+            "fallback_pending_clear_injection",
+        }:
+            persisted_prompt_strategy = self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=source_prompt_strategy,
+                agent_session_id=target_agent_session_id,
+                prompt_sha256=source_prompt_sha256,
+            )
+            # Let the first target Turn read and compare the carried fingerprint.
+            # Caching only the strategy would make unchanged bytes look changed.
+            cache_source_prompt_strategy = False
         elif source_prompt_strategy in {
             "collaboration",
             "fallback_pending_clear",
@@ -2107,7 +2132,7 @@ class CodexAgent(BaseAgent):
             raise CodexPromptRefreshUnavailableError(
                 "Could not persist the forked Codex prompt strategy"
             )
-        if source_prompt_strategy:
+        if source_prompt_strategy and cache_source_prompt_strategy:
             self._remember_thread_prompt_strategy(
                 request.base_session_id,
                 thread_id,
@@ -2621,23 +2646,53 @@ class CodexAgent(BaseAgent):
             self._thread_prompt_strategies = {}
         self._thread_prompt_strategies[base_session_id] = (thread_id, strategy)
 
-    def _fork_source_prompt_strategy(self, fork: dict[str, Any]) -> Optional[str]:
+    def _fork_source_prompt_state(
+        self,
+        fork: dict[str, Any],
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         source_session_id = str(fork.get("source_session_id") or "").strip()
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         if not source_session_id or not source_thread_id:
-            return None
+            return None, None, None
 
         cached_strategy = getattr(self, "_thread_prompt_strategies", {}).get(
             source_session_id
         )
+        cached_instructions = getattr(
+            self,
+            "_thread_developer_instructions",
+            {},
+        ).get(source_session_id)
+        instructions = (
+            cached_instructions[1]
+            if cached_instructions and cached_instructions[0] == source_thread_id
+            else None
+        )
         if cached_strategy and cached_strategy[0] == source_thread_id:
-            return cached_strategy[1]
+            strategy = cached_strategy[1]
+            prompt_sha256 = (
+                self._prompt_fingerprint(instructions) if instructions else None
+            )
+            if prompt_sha256 is None and strategy in {
+                "fallback",
+                "fallback_pending_clear",
+                "fallback_pending_clear_injection",
+            }:
+                marker = self._read_persisted_prompt_strategy_marker(
+                    source_thread_id,
+                    agent_session_id=source_session_id,
+                )
+                if marker is not None and marker["strategy"] == strategy:
+                    prompt_sha256 = marker.get("sha256")
+            return strategy, prompt_sha256, instructions
 
         marker = self._read_persisted_prompt_strategy_marker(
             source_thread_id,
             agent_session_id=source_session_id,
         )
-        return marker["strategy"] if marker is not None else None
+        if marker is None:
+            return None, None, None
+        return marker["strategy"], marker.get("sha256"), instructions
 
     def _remember_thread_model_settings_from_response(
         self,
@@ -2969,6 +3024,7 @@ class CodexAgent(BaseAgent):
         *,
         strategy: str,
         agent_session_id: Optional[str],
+        prompt_sha256: Optional[str] = None,
     ) -> bool:
         if strategy not in {
             "collaboration",
@@ -2979,7 +3035,12 @@ class CodexAgent(BaseAgent):
             "unavailable",
         }:
             raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
-        if strategy == "fallback" and not developer_instructions:
+        if prompt_sha256 is not None and (
+            len(prompt_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in prompt_sha256)
+        ):
+            raise ValueError("Codex prompt fingerprint must be lowercase SHA-256")
+        if strategy == "fallback" and not developer_instructions and not prompt_sha256:
             raise ValueError("Fallback prompt strategy requires developer instructions")
         if not agent_session_id:
             return True
@@ -2995,7 +3056,13 @@ class CodexAgent(BaseAgent):
             "strategy": strategy,
         }
         if developer_instructions:
-            marker["sha256"] = self._prompt_fingerprint(developer_instructions)
+            computed_sha256 = self._prompt_fingerprint(developer_instructions)
+            if prompt_sha256 is not None and prompt_sha256 != computed_sha256:
+                raise ValueError("Codex prompt fingerprint does not match prompt bytes")
+            marker["sha256"] = computed_sha256
+        elif prompt_sha256 is not None:
+            marker["sha256"] = prompt_sha256
+
         def _set_marker(target_session_id: str) -> bool:
             return bool(
                 setter(
