@@ -370,18 +370,25 @@ export const labelledButton = (scope: Locator, name: string): Locator =>
  * here for the same reason: a spec that does not care about the label should
  * not have to invent one.
  *
- * `vendor` is a catalog id and goes FIRST, because choosing one rewrites the
- * Base URL and retires whatever interface was selected — filling those before it
- * would fill them into a form the next click resets. It also removes the manual
- * disclosure, so `vendor` and `protocol` are alternatives, not a pair: the pin IS
- * the interface, and there is no control left for `protocol` to press.
+ * `vendor` is the label a vendor is offered under and goes FIRST, because
+ * choosing one rewrites the Base URL and retires whatever interface was selected
+ * — filling those before it would fill them into a form the next click resets.
+ * It also removes the manual disclosure, so `vendor` and `protocol` are
+ * alternatives, not a pair: the pin IS the interface, and there is no control
+ * left for `protocol` to press.
+ *
+ * It is a label rather than the catalog id it sends, because the picker carries
+ * each vendor's mark and so cannot be a `<select>`: there are no option values
+ * left to name, only the row a user would point at. The panel is anchored, not
+ * nested, so the rows are looked up on the page rather than inside the dialog.
  */
 export const fillApiKeyForm = async (
   dialog: Locator,
   values: { vendor?: string; name?: string; baseUrl: string; apiKey: string; protocol?: string },
 ): Promise<void> => {
   if (values.vendor) {
-    await dialog.getByLabel(hub('addKey.field.vendor'), { exact: true }).selectOption(values.vendor);
+    await dialog.getByLabel(hub('addKey.field.vendor'), { exact: true }).click();
+    await dialog.page().getByRole('option', { name: values.vendor, exact: true }).click();
   }
   if (values.name !== undefined) {
     await dialog.getByLabel(hub('addKey.field.name'), { exact: true }).fill(values.name);

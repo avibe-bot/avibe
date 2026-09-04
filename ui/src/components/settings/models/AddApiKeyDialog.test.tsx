@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
-import { API_KEY_VENDOR_PRESETS } from './apiKeyVendors';
+import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
@@ -145,7 +145,7 @@ const fillCredentials = async () => {
   return user;
 };
 
-const vendorSelect = () => screen.getByRole('combobox', { name: /^Vendor$|^服务商$/ }) as HTMLSelectElement;
+const vendorField = () => screen.getByRole('combobox', { name: /^Vendor$|^服务商$/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
 const disclosure = () => screen.queryByRole('button', { name: /Manually specify interface type|手动指定接口类型/i });
 
@@ -158,8 +158,14 @@ const preset = (protocol: string) => {
   return entry;
 };
 
+/** What a row of the picker reads as — the only handle a user, or a spec, has on it. */
+const vendorOptionName = (id: string) => (id === CUSTOM_VENDOR
+  ? i18n.t('settings.models.addKey.field.vendor.custom')
+  : apiKeyVendorPreset(id)?.label ?? id);
+
 const selectVendor = async (user: ReturnType<typeof userEvent.setup>, id: string) => {
-  await user.selectOptions(vendorSelect(), id);
+  await user.click(vendorField());
+  await user.click(await screen.findByRole('option', { name: vendorOptionName(id) }));
 };
 
 const openManualProtocol = async (user: ReturnType<typeof userEvent.setup>) => {
@@ -176,6 +182,14 @@ const clickConfirm = async (user: ReturnType<typeof userEvent.setup>) => {
 
 beforeEach(async () => {
   await i18n.changeLanguage('en');
+  // The 服务商 picker anchors a popover over its trigger and scrolls the
+  // highlighted row into view; jsdom implements neither measurement.
+  vi.stubGlobal('ResizeObserver', class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+  Element.prototype.scrollIntoView = vi.fn();
 });
 
 afterEach(() => {
@@ -1031,6 +1045,46 @@ describe('AddApiKeyDialog · vendor', () => {
     expect(observe.mock.calls[0][0].vendor).toBe('custom');
     expect(observe.mock.calls[0][0].protocol).toBeUndefined();
     expect(create.mock.calls[0][0].vendor).toBe('custom');
+  });
+
+  // A vendor is recognised by its mark before its name is read, so the mark has
+  // to be on the row AND on the field that shows what was chosen — the second is
+  // the half a `<select>` could never carry.
+  it('puts a mark on every row and on the field once a vendor is chosen', async () => {
+    const entry = preset('anthropic');
+    renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(vendorField());
+    const rows = await screen.findAllByRole('option');
+    // The shipped catalog in file order, after the one entry that is not a vendor.
+    const offered = [CUSTOM_VENDOR, ...API_KEY_VENDOR_PRESETS.map((row) => row.id)];
+    expect(rows).toHaveLength(offered.length);
+    expect(offered.map((id) => rows.indexOf(screen.getByRole('option', { name: vendorOptionName(id) }))))
+      .toEqual(offered.map((_, position) => position));
+    for (const row of rows) {
+      expect(row.querySelector('.model-hub-add-key-vendor-glyph'), row.textContent ?? '').toBeTruthy();
+    }
+
+    await user.click(screen.getByRole('option', { name: entry.label }));
+    expect(screen.queryAllByRole('option')).toEqual([]);
+    expect(vendorField().textContent).toContain(entry.label);
+    expect(vendorField().querySelector('.model-hub-add-key-vendor-glyph')).toBeTruthy();
+  });
+
+  it('opens on the vendor already chosen and takes a keyboard all the way to the next one', async () => {
+    const [first, second] = API_KEY_VENDOR_PRESETS;
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, first.id);
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(screen.getByRole('option', { name: first.label }).getAttribute('aria-selected'))
+      .toBe('true'));
+
+    await user.keyboard('{ArrowDown}{Enter}');
+    await waitFor(() => expect(vendorField().textContent).toContain(second.label));
+    expect(baseUrlInput().value).toBe(second.official_base_url);
   });
 
   it('prefills the official address and sends the catalog id with its pinned interface', async () => {

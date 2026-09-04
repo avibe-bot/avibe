@@ -622,13 +622,6 @@
   padding-inline: var(--model-hub-add-key-input-padding);
   font-size: var(--model-hub-add-key-input-size);
 }
-/* Same field surface, one exception: `Select` lays its chevron over the trailing
-   edge, so the shared inline padding has to leave that side room. Qualified by
-   element rather than by a second class, which would make every future select
-   here a call site that can forget it. */
-.model-hub-add-key-input:is(select) {
-  padding-inline-end: calc(var(--model-hub-add-key-input-padding) + 20px);
-}
 .model-hub-add-key-secret { width: 100%; }
 .model-hub-add-key-hint {
   color: var(--model-hub-muted-b3);
@@ -709,7 +702,11 @@
   font-size: var(--model-hub-add-key-hint-size);
   font-weight: 600;
 }
-.model-hub-add-key-protocol-glyph {
+/* Interface glyphs and vendor marks are one visual family at one size, so they
+   share the rule rather than each declaring 14px and drifting apart. Two names
+   because a vendor's logo is not a statement about its interface. */
+.model-hub-add-key-protocol-glyph,
+.model-hub-add-key-vendor-glyph {
   width: 14px;
   height: 14px;
   flex-shrink: 0;

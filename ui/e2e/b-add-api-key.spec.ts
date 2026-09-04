@@ -135,7 +135,9 @@ test.describe('B · add an API-key source', () => {
     await hub.addApiKeyButton.click();
     await expect(hub.addKeyDialog).toBeVisible();
     await fillApiKeyForm(hub.addKeyDialog, {
-      vendor: preset.id,
+      // Picked the way a user picks it, by the name on the row; the id below is
+      // what that click has to end up sending.
+      vendor: preset.label,
       name,
       baseUrl: mockBaseUrl(),
       apiKey: 'e2e-add',
