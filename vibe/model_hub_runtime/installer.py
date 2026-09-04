@@ -42,7 +42,22 @@ _INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {*_INSTALL_STATE_RELEASED_SCHEMA_VERSIONS, _INSTALL_STATE_SCHEMA_VERSION}
 )
 _INSTALL_FAILURE_KEY = "settings.models.install.fail.detail"
-_INSTALL_CLAIM_INVALID_REASON = "model_hub_engine_install_claim_invalid"
+INSTALL_ALREADY_RUNNING_REASON = "model_hub_engine_install_already_running"
+INSTALL_PLATFORM_UNSUPPORTED_REASON = "model_hub_engine_platform_unsupported"
+INSTALL_CLAIM_INVALID_REASON = "model_hub_engine_install_claim_invalid"
+INSTALL_RECOVERY_TIMEOUT_REASON = "model_hub_engine_install_lock_timeout"
+INSTALL_RECOVERY_ABANDONED_REASON = "model_hub_engine_install_abandoned"
+INSTALL_RECOVERY_SCHEDULE_FAILED_REASON = "model_hub_engine_install_schedule_failed"
+INSTALL_INSPECTION_FAILED_REASON = "model_hub_engine_install_inspection_failed"
+_DEPENDENCY_LIFECYCLE_FAILURE_REASONS = frozenset(
+    {
+        INSTALL_CLAIM_INVALID_REASON,
+        INSTALL_RECOVERY_TIMEOUT_REASON,
+        INSTALL_RECOVERY_ABANDONED_REASON,
+        INSTALL_RECOVERY_SCHEDULE_FAILED_REASON,
+        INSTALL_INSPECTION_FAILED_REASON,
+    }
+)
 _INSTALL_GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 _INSTALL_TARGET_FIELDS = frozenset(
     {
@@ -160,8 +175,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             if result.get("ok") and previous_state is not None:
                 self._clear_superseded_install_state(previous_state)
             elif not result.get("ok") and reason not in {
-                "model_hub_engine_install_already_running",
-                "model_hub_engine_platform_unsupported",
+                INSTALL_ALREADY_RUNNING_REASON,
+                INSTALL_PLATFORM_UNSUPPORTED_REASON,
             }:
                 self.transition_install_claim(
                     InstallClaimTransition.ADMISSION_FAILURE,
@@ -209,6 +224,17 @@ class EngineRuntimeManager(ManagedRuntimeManager):
     def host_platform(self) -> str:
         return self._normalize_engine_platform(managed_runtime.runtime_platform_tag())
 
+    def supports_host_platform(self) -> bool:
+        """Return whether Avibe's fixed CPA target has an asset for this host."""
+
+        if self.host_platform() not in _ENGINE_ASSET_PLATFORMS:
+            return False
+        manifest = self._load_manifest(allow_network=False)
+        if manifest is None:
+            return True
+        resolution, _archive = self._resolve_manifest_state(manifest)
+        return resolution is not ManifestResolution.UNSUPPORTED
+
     @staticmethod
     def _normalize_engine_platform(platform_tag: str) -> str:
         return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
@@ -217,6 +243,11 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         """Return every admission failure emitted by the shared installer."""
 
         return self._base_install_failure_reasons()
+
+    def dependency_failure_reasons(self) -> frozenset[str]:
+        """Return every CPA failure token exposed by Dependencies."""
+
+        return self.install_failure_reasons() | _DEPENDENCY_LIFECYCLE_FAILURE_REASONS
 
     def install_state(self) -> dict[str, Any] | None:
         with self._install_state_lock:
@@ -357,7 +388,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             return self._failed_install_state(
                 generation=generation,
                 target=None,
-                reason=_INSTALL_CLAIM_INVALID_REASON,
+                reason=INSTALL_CLAIM_INVALID_REASON,
             )
         payload["target"] = target
         payload["generation"] = generation
@@ -554,7 +585,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             self._install_reason = "model_hub_engine_manifest_invalid"
             return None
         if resolution is ManifestResolution.UNSUPPORTED:
-            self._install_reason = "model_hub_engine_platform_unsupported"
+            self._install_reason = INSTALL_PLATFORM_UNSUPPORTED_REASON
             return None
         return archive
 

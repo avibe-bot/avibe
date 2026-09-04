@@ -1349,7 +1349,7 @@ def test_dependencies_status_shape(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("managed", "expected"),
+    ("managed", "platform_supported", "expected"),
     (
         pytest.param(
             {
@@ -1360,6 +1360,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "ready",
                 "reason": None,
             },
+            True,
             ("ready", "none", False),
             id="pinned-target-ready",
         ),
@@ -1372,6 +1373,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "ready",
                 "reason": None,
             },
+            True,
             ("upgrade_required", "repairable", True),
             id="older-avibe-pin-installed",
         ),
@@ -1384,6 +1386,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "missing",
                 "reason": None,
             },
+            True,
             ("missing", "repairable", False),
             id="not-installed",
         ),
@@ -1396,6 +1399,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "missing",
                 "reason": "model_hub_engine_platform_unsupported",
             },
+            False,
             ("unsupported", "none", False),
             id="unsupported-platform",
         ),
@@ -1408,8 +1412,22 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "error",
                 "reason": "model_hub_engine_install_inspection_failed",
             },
+            True,
             ("error", "repairable", False),
             id="repairable-inspection-failure",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_install_inspection_failed",
+            },
+            False,
+            ("unsupported", "none", False),
+            id="foreign-pointer-cannot-hide-unsupported-host",
         ),
         pytest.param(
             {
@@ -1420,6 +1438,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "error",
                 "reason": "model_hub_engine_archive_download_failed",
             },
+            True,
             ("error", "repairable", True),
             id="failed-upgrade-preserves-installed-version",
         ),
@@ -1432,6 +1451,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "status": "error",
                 "reason": "model_hub_engine_manifest_invalid",
             },
+            True,
             ("error", "operator_only", False),
             id="unresolved-target",
         ),
@@ -1440,6 +1460,7 @@ def test_dependencies_status_shape(monkeypatch):
 def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
     monkeypatch,
     managed,
+    platform_supported,
     expected,
 ):
     class Manager:
@@ -1449,6 +1470,9 @@ def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
         def status(self):
             return managed
 
+        def supports_host_platform(self):
+            return platform_supported
+
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
         Manager,
@@ -1457,11 +1481,30 @@ def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
     dependency = api._model_hub_engine_dependency_status()
 
     status, action_class, has_update = expected
-    assert dependency["required"] is (status != "unsupported")
+    assert dependency["required"] is platform_supported
     assert dependency["latest_version"] == managed["selected_version"]
     assert dependency["status"] == status
     assert dependency["action_class"] == action_class
     assert dependency["has_update"] is has_update
+
+
+@pytest.mark.parametrize("locale", ("en", "zh"))
+def test_every_model_hub_dependency_failure_reason_is_localized(
+    tmp_path,
+    locale,
+):
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    translations = json.loads(
+        (Path("ui/src/i18n") / f"{locale}.json").read_text(encoding="utf-8")
+    )["errors"]
+    reasons = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+    ).dependency_failure_reasons()
+
+    missing = sorted(reason for reason in reasons if not translations.get(reason))
+    assert missing == []
 
 
 def test_model_hub_engine_ensure_uses_direct_manager_without_a_controller(
@@ -1522,6 +1565,7 @@ def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
         "vibe.runtime.resolve_service_owner_pid",
         lambda *, include_starting: 314,
     )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1564,6 +1608,7 @@ def test_model_hub_engine_ensure_does_not_bypass_a_live_older_controller(
         "vibe.runtime.resolve_service_owner_pid",
         lambda *, include_starting: 314,
     )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1598,6 +1643,7 @@ def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
         "vibe.runtime.resolve_service_owner_pid",
         lambda *, include_starting: 314,
     )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1634,6 +1680,10 @@ def test_model_hub_engine_ensure_waits_for_a_starting_controller(
         lambda *, include_starting: 314,
     )
     monkeypatch.setattr(
+        "vibe.internal_client.health_sync",
+        lambda path, **_kwargs: path.exists(),
+    )
+    monkeypatch.setattr(
         api.time,
         "sleep",
         lambda _seconds: socket_path.touch(),
@@ -1648,6 +1698,48 @@ def test_model_hub_engine_ensure_waits_for_a_starting_controller(
 
     assert result["ok"] is True
     assert calls == [(False, False)]
+
+
+def test_model_hub_engine_ensure_waits_past_a_stale_socket(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "stale-controller.sock"
+    socket_path.touch()
+    readiness = iter((False, True))
+    probes = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            return {
+                "changed": False,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                },
+            }
+
+    def probe(path, **_kwargs):
+        probes.append(path)
+        return next(readiness)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", probe)
+    monkeypatch.setattr(api.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("the starting controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is True
+    assert probes == [socket_path, socket_path]
 
 
 def test_model_hub_engine_ensure_never_falls_back_while_controller_owns_runtime(
@@ -1671,6 +1763,7 @@ def test_model_hub_engine_ensure_never_falls_back_while_controller_owns_runtime(
         "vibe.runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS",
         0,
     )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",
@@ -1746,6 +1839,7 @@ def test_model_hub_engine_ensure_treats_controller_unsupported_as_nonfatal(
         "vibe.runtime.resolve_service_owner_pid",
         lambda *, include_starting: 314,
     )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
     monkeypatch.setattr(
         "vibe.model_hub_runtime.installer.EngineRuntimeManager",

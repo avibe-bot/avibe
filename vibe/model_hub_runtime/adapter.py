@@ -44,7 +44,14 @@ from vibe.model_hub_runtime.client import (
     upstream_api_url,
 )
 from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
-from vibe.model_hub_runtime.installer import InstallClaimTransition
+from vibe.model_hub_runtime.installer import (
+    INSTALL_ALREADY_RUNNING_REASON,
+    INSTALL_PLATFORM_UNSUPPORTED_REASON,
+    INSTALL_RECOVERY_ABANDONED_REASON,
+    INSTALL_RECOVERY_SCHEDULE_FAILED_REASON,
+    INSTALL_RECOVERY_TIMEOUT_REASON,
+    InstallClaimTransition,
+)
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
     EngineSupervisor,
@@ -59,11 +66,6 @@ _OAUTH_ENDPOINTS = {
     "codex": ("/codex-auth-url", "codex", "codex"),
 }
 _WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
-_INSTALL_ALREADY_RUNNING_REASON = "model_hub_engine_install_already_running"
-_INSTALL_PLATFORM_UNSUPPORTED_REASON = "model_hub_engine_platform_unsupported"
-_INSTALL_RECOVERY_TIMEOUT_REASON = "model_hub_engine_install_lock_timeout"
-_INSTALL_RECOVERY_ABANDONED_REASON = "model_hub_engine_install_abandoned"
-_INSTALL_RECOVERY_SCHEDULE_FAILED_REASON = "model_hub_engine_install_schedule_failed"
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
@@ -984,7 +986,7 @@ class CLIProxyEngineAdapter:
                 await self._abandon_install_claim(
                     generation=generation,
                     target=install_state["target"],
-                    reason=_INSTALL_RECOVERY_SCHEDULE_FAILED_REASON,
+                    reason=INSTALL_RECOVERY_SCHEDULE_FAILED_REASON,
                 )
             return await self.status()
 
@@ -1097,7 +1099,7 @@ class CLIProxyEngineAdapter:
                 except EngineUnavailableError as exc:
                     if (
                         expected_target is None
-                        or exc.reason != _INSTALL_ALREADY_RUNNING_REASON
+                        or exc.reason != INSTALL_ALREADY_RUNNING_REASON
                     ):
                         raise
                     if self._installation_stopping:
@@ -1120,7 +1122,7 @@ class CLIProxyEngineAdapter:
                         )
                         raise EngineUnavailableError(
                             "models.engine.install_failed",
-                            reason=_INSTALL_RECOVERY_TIMEOUT_REASON,
+                            reason=INSTALL_RECOVERY_TIMEOUT_REASON,
                         )
                     await asyncio.sleep(min(recovery_delay, remaining))
                     recovery_delay = min(
@@ -1157,7 +1159,7 @@ class CLIProxyEngineAdapter:
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("Failed to persist Model Hub runtime install failure")
-            elif admission is not None and reason != _INSTALL_PLATFORM_UNSUPPORTED_REASON:
+            elif admission is not None and reason != INSTALL_PLATFORM_UNSUPPORTED_REASON:
                 try:
                     await asyncio.to_thread(
                         self.supervisor.installer.transition_install_claim,
@@ -1175,7 +1177,7 @@ class CLIProxyEngineAdapter:
         *,
         generation: str,
         target: Mapping[str, str] | None,
-        reason: str = _INSTALL_RECOVERY_ABANDONED_REASON,
+        reason: str = INSTALL_RECOVERY_ABANDONED_REASON,
     ) -> None:
         self._install_owner_active = False
         try:
@@ -1208,14 +1210,14 @@ class CLIProxyEngineAdapter:
     @staticmethod
     def _install_failure_reason(error: Exception) -> str:
         if isinstance(error, RuntimePlatformUnsupportedError):
-            return _INSTALL_PLATFORM_UNSUPPORTED_REASON
+            return INSTALL_PLATFORM_UNSUPPORTED_REASON
         if isinstance(error, EngineUnavailableError) and error.reason:
             return error.reason
         return "model_hub_engine_install_failed"
 
     @staticmethod
     def _install_failure(reason: str) -> Exception:
-        if reason == _INSTALL_PLATFORM_UNSUPPORTED_REASON:
+        if reason == INSTALL_PLATFORM_UNSUPPORTED_REASON:
             return RuntimePlatformUnsupportedError()
         return EngineUnavailableError("models.engine.install_failed", reason=reason)
 

@@ -3523,7 +3523,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const jobId = typeof started?.job_id === 'string' ? started.job_id : null;
     if (!jobId) return started;
 
-    const deadline = Date.now() + 310_000;
+    // Covers the 120s controller readiness bound plus the 300s CPA RPC bound.
+    const deadline = Date.now() + 430_000;
     let last = started;
     while (Date.now() < deadline) {
       await sleep(1000);

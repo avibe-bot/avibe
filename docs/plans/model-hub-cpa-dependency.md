@@ -25,22 +25,26 @@ Installation and execution remain separate lifecycle decisions:
 - Installing or upgrading CPA does not enable Model Hub or start a stopped CPA
   process. When the controller already owns a running process, replacement goes
   through that owner so the process restarts on the verified target. A UI-side
-  reconcile waits for a starting controller's internal endpoint rather than
-  treating an unbound socket as permission to install concurrently.
+  reconcile probes the starting controller's health endpoint rather than
+  treating a Unix-socket pathname, including a stale one, as readiness. The
+  install-job poll budget outlasts the complete controller-readiness and CPA RPC
+  bounds.
 - Every Model Hub demand path verifies the packaged target before starting CPA,
   so a stale pointer cannot be started after a failed or skipped background
   reconcile.
 - CPA remains visible on hosts for which Avibe publishes no compatible asset,
-  but that `unsupported` capability state is nonfatal and offers no repair that
-  cannot succeed.
+  but that `unsupported` capability state is derived from Avibe's fixed host
+  matrix and the selected manifest's asset set, not mutable install or pointer
+  state. It is nonfatal and offers no repair that cannot succeed.
 
 ## Failure Policy
 
 CPA installation is atomic. A failed download, verification, or candidate
 preparation leaves the prior verified install and current pointer intact. It is
 reported in Dependencies and Doctor and can be retried manually or by the next
-startup reconcile. CPA failure does not roll back or fail an otherwise
-successful Avibe upgrade.
+startup reconcile. Every CPA failure token exposed by Dependencies has English
+and Chinese copy enforced by a backend-to-locale contract test. CPA failure does
+not roll back or fail an otherwise successful Avibe upgrade.
 
 A synchronous dependency ensure settles only the exact durable install state it
 observed on entry. Success clears an unchanged prior failure or orphaned install

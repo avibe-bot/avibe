@@ -9077,7 +9077,9 @@ def _model_hub_engine_dependency_status() -> dict:
     try:
         from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
-        managed = EngineRuntimeManager(offline=True).status()
+        manager = EngineRuntimeManager(offline=True)
+        managed = manager.status()
+        platform_supported = manager.supports_host_platform()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not inspect the Model Hub engine dependency", exc_info=True)
         return {
@@ -9098,7 +9100,6 @@ def _model_hub_engine_dependency_status() -> dict:
     selected_version = managed.get("selected_version")
     matches_manifest = managed.get("matches_manifest")
     reason = managed.get("reason")
-    platform_supported = reason != _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON
     if not platform_supported:
         status = "unsupported"
         action_class = "none"
@@ -9150,14 +9151,21 @@ def _model_hub_controller_owns_engine(socket_path: Path) -> bool:
         return False
 
     deadline = time.monotonic() + runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
-    while not socket_path.exists():
+    from vibe.internal_client import health_sync
+
+    while True:
         owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
         if owner_pid is None:
             return False
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if health_sync(
+            socket_path,
+            timeout=min(1.0, max(0.05, remaining)),
+        ):
             return True
-        time.sleep(_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS)
-    return True
+        if remaining <= 0:
+            return True
+        time.sleep(min(_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS, remaining))
 
 
 def _model_hub_engine_ensure_result(result: dict) -> dict:

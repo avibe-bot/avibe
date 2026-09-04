@@ -12,7 +12,7 @@ from vibe.internal_client import default_socket_path
 
 
 _TRANSPORT_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
-_RPC_TIMEOUT_SECONDS = 300.0
+MODEL_HUB_RPC_TIMEOUT_SECONDS = 300.0
 _REORDER_ORDER_UNSET = object()
 
 
@@ -47,7 +47,7 @@ def _rpc_sync(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
         with httpx.Client(
             transport=transport,
             base_url="http://localhost",
-            timeout=httpx.Timeout(_RPC_TIMEOUT_SECONDS, connect=2.0),
+            timeout=httpx.Timeout(MODEL_HUB_RPC_TIMEOUT_SECONDS, connect=2.0),
         ) as client:
             response = client.post(
                 "/internal/model-hub",
@@ -67,7 +67,7 @@ async def _rpc(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://localhost",
-            timeout=httpx.Timeout(_RPC_TIMEOUT_SECONDS, connect=2.0),
+            timeout=httpx.Timeout(MODEL_HUB_RPC_TIMEOUT_SECONDS, connect=2.0),
         ) as client:
             response = await client.post(
                 "/internal/model-hub",

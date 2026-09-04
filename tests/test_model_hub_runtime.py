@@ -839,9 +839,56 @@ def test_contract_manifest_filters_unsupported_override_assets(
     assert "win32-x64" not in {asset["platform"] for asset in manager.contract_manifest()["assets"]}
 
     monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    assert manager.supports_host_platform() is False
     unsupported = manager.ensure()
     assert unsupported["ok"] is False
     assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
+
+
+def test_host_support_requires_an_asset_in_the_selected_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
+    payload = json.loads(
+        Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "probe", offline=True)
+    host_platform = manager.host_platform()
+    payload["assets"] = [
+        asset for asset in payload["assets"] if asset["platform"] != host_platform
+    ]
+    manifest_path = tmp_path / "missing-host-asset.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    manager = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+        offline=True,
+    )
+
+    assert manager.supports_host_platform() is False
+
+
+def test_foreign_pointer_inspection_cannot_hide_an_unsupported_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "current.json").write_text(
+        json.dumps({"platform": "linux-amd64"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    manager = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+
+    status = manager.status()
+
+    assert status["reason"] == "model_hub_engine_install_inspection_failed"
+    assert manager.supports_host_platform() is False
 
 
 def test_install_admission_fetches_an_uncached_remote_manifest(tmp_path: Path) -> None:
