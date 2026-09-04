@@ -1276,7 +1276,11 @@ class ModelHubService:
     ) -> tuple[str, ...]:
         pinned_protocol = pinned_api_key_protocol(vendor)
         if "protocol" not in payload:
-            return (pinned_protocol,) if pinned_protocol is not None else SOURCE_PROTOCOLS
+            if pinned_protocol is not None:
+                return (pinned_protocol,)
+            if vendor == "custom":
+                return SOURCE_PROTOCOLS
+            raise ModelHubError("discovery_failed")
         requested = payload.get("protocol")
         if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS:
             raise ModelHubError("discovery_failed")

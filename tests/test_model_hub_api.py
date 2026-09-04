@@ -4580,6 +4580,33 @@ def test_unsaved_observation_route_rejects_wrong_protocol_for_a_catalog_vendor(
     assert adapter.revoked == []
 
 
+def test_unsaved_observation_route_rejects_omitted_protocol_for_an_uncataloged_vendor(
+    monkeypatch,
+    tmp_path,
+):
+    service, _, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/sources/observe",
+        json={
+            "vendor": "deepsek",
+            "base_url": "https://relay.example/v1",
+            "key": "sk-test-observation-unknown-vendor",
+        },
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "discovery_failed"
+    assert adapter.secret_lengths == []
+    assert adapter.observed_protocol_orders == []
+    assert adapter.revoked == []
+
+
 def test_create_source_defaults_a_catalog_vendor_to_its_pinned_protocol(tmp_path):
     service, store, adapter = _service(tmp_path)
 
@@ -4646,6 +4673,28 @@ def test_create_source_rejects_wrong_protocol_for_a_catalog_vendor(tmp_path):
                     "vendor": "deepseek",
                     "key": "sk-test-create-wrong-protocol",
                     "protocol": "anthropic",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources == []
+    assert adapter.secret_lengths == []
+    assert adapter.observed_protocol_orders == []
+    assert adapter.revoked == []
+
+
+def test_create_source_rejects_omitted_protocol_for_an_uncataloged_vendor(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "deepsek",
+                    "base_url": "https://relay.example/v1",
+                    "key": "sk-test-create-unknown-vendor",
                 }
             )
         )
