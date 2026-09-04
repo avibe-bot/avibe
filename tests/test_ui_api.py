@@ -2453,7 +2453,12 @@ def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tm
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    assert result["models"][:4] == [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
     assert result["models"].index("gpt-5.4") < result["models"].index("gpt-5.4-mini")
     assert "gpt-5.3-codex-spark" in result["models"]
     assert "gpt-5.1-codex-mini" in result["models"]
@@ -2482,7 +2487,12 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    assert result["models"][:4] == [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
     assert "custom-codex-model" in result["models"]
     assert "legacy-codex" in result["models"]
     assert "gpt-5.1-codex-max" in result["models"]

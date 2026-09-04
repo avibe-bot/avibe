@@ -357,6 +357,48 @@ def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
     assert payload["models"][0]["auto_compact_token_limit"] == 180_000
 
 
+def test_codex_hub_catalog_promotes_a_configured_hidden_native_model():
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "priority": 1,
+                    "visibility": "hide",
+                    "supported_in_api": True,
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Low"},
+                        {"effort": "ultra", "description": "Ultra"},
+                    ],
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [
+                {
+                    "id": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "reasoning_efforts": ["low", "ultra"],
+                }
+            ],
+        )
+    )
+
+    assert payload["models"][0]["slug"] == "gpt-6-astra"
+    assert payload["models"][0]["visibility"] == "list"
+    assert payload["models"][0]["supported_in_api"] is True
+    assert payload["models"][0]["supported_reasoning_levels"] == [
+        {"effort": "low", "description": "Low"},
+        {"effort": "ultra", "description": "Ultra"},
+    ]
+
+
 def test_codex_hub_catalog_retires_native_compaction_limit_after_context_override():
     raw = json.dumps(
         {
@@ -1053,11 +1095,15 @@ def test_fetch_remote_catalog_rejects_unknown_backend(monkeypatch):
         backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
 
 
-def test_bundled_codex_56_efforts_include_ultra():
+def test_bundled_codex_astra_is_first_with_native_reasoning_efforts():
     snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
 
-    values = {entry["value"] for entry in snapshot["reasoning_options"]["gpt-5.6-terra"]}
-    assert "ultra" in values
+    assert snapshot["models"][0] == "gpt-6-astra"
+    assert snapshot["model_labels"]["gpt-6-astra"] == "GPT-6-Astra"
+    assert [
+        entry["value"]
+        for entry in snapshot["reasoning_options"]["gpt-6-astra"]
+    ] == ["__default__", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):
