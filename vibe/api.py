@@ -8649,6 +8649,7 @@ def reconcile_askill_auto_update() -> dict:
 _ALLOWED_DEP_INSTALLS = {
     "askill",
     "avault",
+    "model-hub-engine",
     "show-runtime",
     "memory-package",
     "memory-runtime",
@@ -9066,6 +9067,115 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
     )
 
 
+def _model_hub_engine_dependency_status() -> dict:
+    """Project the pinned CPA runtime into the shared dependency contract."""
+
+    try:
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        managed = EngineRuntimeManager(offline=True).status()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not inspect the Model Hub engine dependency", exc_info=True)
+        return {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": None,
+            "version": None,
+            "latest_version": None,
+            "has_update": False,
+            "status": "error",
+            "action_class": "operator_only",
+            "reason": "model_hub_engine_install_inspection_failed",
+            "inspection_error": {"kind": type(exc).__name__, "message": str(exc)},
+        }
+
+    installed = bool(managed.get("installed"))
+    selected_version = managed.get("selected_version")
+    matches_manifest = managed.get("matches_manifest")
+    reason = managed.get("reason")
+    if reason == "model_hub_engine_platform_unsupported":
+        status = "unsupported"
+        action_class = "none"
+    elif not selected_version:
+        status = "error"
+        action_class = "operator_only"
+    elif installed and matches_manifest is True:
+        status = "ready"
+        action_class = "none"
+    elif installed:
+        status = "upgrade_required"
+        action_class = "repairable"
+    elif managed.get("status") == "error":
+        status = "error"
+        action_class = "repairable"
+    else:
+        status = "missing"
+        action_class = "repairable"
+    return {
+        "id": "model-hub-engine",
+        "kind": "runtime",
+        "required": True,
+        "installed": installed,
+        "version": managed.get("version"),
+        "latest_version": selected_version,
+        "has_update": bool(installed and matches_manifest is False),
+        "status": status,
+        "action_class": action_class,
+        "reason": reason,
+        "download_error": managed.get("download_error"),
+    }
+
+
+def ensure_model_hub_engine_installed(
+    *,
+    force: bool = False,
+    offline: bool | None = None,
+) -> dict:
+    """Converge CPA to this Avibe release's pin without changing run intent."""
+
+    from core.handlers.model_hub import ModelHubError
+    from vibe.internal_client import default_socket_path
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    def ensure_directly() -> dict:
+        return EngineRuntimeManager(offline=offline).ensure(force=force)
+
+    if offline is True:
+        return ensure_directly()
+    if not default_socket_path().expanduser().resolve().exists():
+        return ensure_directly()
+
+    try:
+        from vibe.model_hub_client import ModelHubRemoteService
+
+        runtime = ModelHubRemoteService().ensure_runtime_dependency(force=force)
+    except ModelHubError as exc:
+        dependency_reason = exc.data.get("reason")
+        if not dependency_reason and exc.code in {
+            "engine_down",
+            "feature_disabled",
+            "source_not_found",
+        }:
+            return ensure_directly()
+        return {
+            "ok": False,
+            "reason": dependency_reason or exc.code,
+            "message": exc.detail,
+        }
+
+    status = runtime.get("status") if isinstance(runtime.get("status"), dict) else {}
+    installed = bool(status.get("verified"))
+    return {
+        "ok": installed,
+        "installed": installed,
+        "changed": bool(runtime.get("changed")),
+        "version": status.get("installed_version"),
+        "status": status,
+        "reason": None if installed else status.get("error_key") or "model_hub_engine_install_failed",
+    }
+
+
 def dependencies_status(*, offline: bool = False) -> dict:
     """Status of the required local runtime dependencies for the Dependencies
     settings page: askill, local managed runtimes, and the shared Node.js
@@ -9136,6 +9246,8 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "inspection_error": srt.get("inspection_error"),
         }
     )
+
+    deps.append(_model_hub_engine_dependency_status())
 
     memory_package, memory_runtime = _memory_dependencies_status(offline=offline)
     deps.extend((memory_package, memory_runtime))
@@ -9810,6 +9922,7 @@ def reconcile_startup_dependencies() -> dict:
         "node": {"ok": False, "status": "unknown"},
         "askill": {"ok": False, "status": "unknown"},
         "avault": {"ok": False, "status": "unknown"},
+        "model_hub_engine": {"ok": False, "status": "unknown"},
         "show_runtime": {"ok": False, "status": "unknown"},
         "tmux": {"ok": False, "status": "unknown"},
     }
@@ -9830,6 +9943,17 @@ def reconcile_startup_dependencies() -> dict:
             logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
             avault = {"ok": False, "message": str(exc)}
         result["avault"] = avault
+
+        try:
+            model_hub_engine = ensure_model_hub_engine_installed(force=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Startup dependency reconcile failed to ensure the Model Hub engine: %s",
+                exc,
+                exc_info=True,
+            )
+            model_hub_engine = {"ok": False, "message": str(exc)}
+        result["model_hub_engine"] = model_hub_engine
 
         try:
             from core.show_runtime import ShowRuntimeAvailability, get_show_runtime_manager
@@ -9893,6 +10017,7 @@ def reconcile_startup_dependencies() -> dict:
             bool(result["memory_package"].get("ok"))
             and bool(result["askill"].get("ok"))
             and bool(result["avault"].get("ok"))
+            and bool(result["model_hub_engine"].get("ok"))
             and bool(result["show_runtime"].get("ok"))
         )
         return result
@@ -9943,6 +10068,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_askill_installed(force=True)
             elif dep == "avault":
                 result = ensure_avault_installed(force=True)
+            elif dep == "model-hub-engine":
+                result = ensure_model_hub_engine_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
             elif dep == "memory-package":

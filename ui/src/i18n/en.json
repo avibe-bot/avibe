@@ -389,8 +389,10 @@
       "statusNotRequired": "Not required",
       "statusUpgradeRequired": "Upgrade required",
       "install": "Install",
+      "update": "Update",
       "reinstall": "Reinstall",
       "repair": "Repair",
+      "targetVersion": "Target v{{version}}",
       "installing": "Installing…",
       "installed": "{{name}} is ready.",
       "installFailed": "Install failed.",
@@ -406,6 +408,10 @@
         "avault": {
           "label": "avault",
           "detail": "Vault custody core — required for local Vault operations."
+        },
+        "model-hub-engine": {
+          "label": "Model Hub engine (CPA)",
+          "detail": "Pinned CLIProxyAPI runtime used by Model Hub."
         },
         "show-runtime": {
           "label": "Show Page runtime",

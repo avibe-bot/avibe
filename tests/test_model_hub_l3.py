@@ -1128,6 +1128,9 @@ class ProbeAdapter:
         self.refreshable_credential_refs: set[str] = set()
         self.capability_queries: list[str] = []
 
+    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
+        return await self.status()
+
     async def sync_sources(self, _bindings) -> None:
         return None
 

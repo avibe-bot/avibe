@@ -3,6 +3,7 @@ import type { DependencyItem, MemoryStatusResult } from '@/context/ApiContext';
 const INSTALLABLE_DEPENDENCIES = new Set([
   'askill',
   'avault',
+  'model-hub-engine',
   'show-runtime',
   'memory-package',
   'memory-runtime',

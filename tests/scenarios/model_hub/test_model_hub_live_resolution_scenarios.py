@@ -122,6 +122,9 @@ class AdapterBoundaryFake:
         self.requests: list[object] = []
         self.refreshable_credential_refs = frozenset(refreshable_credential_refs)
 
+    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
+        return await self.start()
+
     async def start(self) -> EngineStatus:
         return EngineStatus(EngineHealth.OK, "test", True, "127.0.0.1", 18443, None)
 

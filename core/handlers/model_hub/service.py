@@ -288,7 +288,7 @@ class UnavailableEngineAdapter:
     async def recover_installation(self) -> EngineStatus:
         return await self.status()
 
-    async def ensure_installed(self) -> EngineStatus:
+    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
         return await self.status()
 
     async def start(self) -> EngineStatus:
@@ -1098,6 +1098,7 @@ class ModelHubService:
 
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
+            await self._ensure_runtime_dependency()
             if already_synced:
                 self._engine_preparation_failed = False
                 return
@@ -1137,6 +1138,37 @@ class ModelHubService:
                 return
             await self._prepare_engine_for_demand()
             await self._engine_call(self.adapter.start())
+
+    async def _ensure_runtime_dependency(self, *, force: bool = False) -> EngineStatus:
+        ensure = getattr(self.adapter, "ensure_installed", None)
+        if not callable(ensure):
+            raise ModelHubError("engine_down", status=503)
+        try:
+            awaitable = ensure(force=True) if force else ensure()
+            return await awaitable
+        except RuntimePlatformUnsupportedError:
+            raise ModelHubError("runtime_platform_unsupported", status=422) from None
+        except EngineUnavailableError as exc:
+            reason = getattr(exc, "reason", None)
+            raise ModelHubError(
+                "engine_down",
+                status=503,
+                data={"reason": reason} if isinstance(reason, str) and reason else None,
+            ) from None
+        except ModelHubError:
+            raise
+        except Exception as exc:
+            reason = getattr(exc, "reason", None)
+            safe_reason = (
+                reason
+                if isinstance(reason, str) and reason.startswith("model_hub_engine_")
+                else None
+            )
+            raise ModelHubError(
+                "engine_down",
+                status=503,
+                data={"reason": safe_reason} if safe_reason else None,
+            ) from None
 
     async def stop(self) -> None:
         async with self._runtime_lifecycle_lock:
@@ -5776,6 +5808,19 @@ class ModelHubService:
                 await self._engine_call(install()),
                 enabled=enabled,
             )
+
+    async def runtime_ensure_dependency(self, *, force: bool = False) -> dict:
+        """Converge the pinned engine without changing persisted run intent."""
+
+        async with self._runtime_lifecycle_lock:
+            status = await self.reconcile_runtime_installation()
+            if status is None:
+                status = await self._engine_call(self.adapter.status())
+            previous_version = status.installed_version if status.verified else None
+            status = await self._ensure_runtime_dependency(force=force)
+            payload = _runtime_payload(status, enabled=self.store.load().enabled)
+            payload["changed"] = previous_version != status.installed_version or not status.verified
+            return payload
 
     async def runtime_start(self) -> dict:
         async with self._runtime_lifecycle_lock:

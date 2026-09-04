@@ -21,6 +21,7 @@ describe('dependencyHasInstallAction', () => {
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'ready', action_class: 'repairable' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'ready' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'missing', action_class: 'repairable' })).toBe(true);
+    expect(dependencyHasInstallAction({ id: 'model-hub-engine', status: 'upgrade_required', action_class: 'repairable' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'node', status: 'missing' })).toBe(false);
   });
 });

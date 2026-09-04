@@ -1426,6 +1426,7 @@
       "dryStaleRestart": "Would remove stale restart metadata and refresh runtime status.",
       "dryAskill": "Would install or refresh askill with the official installer.",
       "dryAvault": "Would install or refresh the manifest-pinned avault release.",
+      "dryModelHubEngine": "Would install or refresh the Avibe-pinned Model Hub engine (CPA).",
       "dryGitRuntime": "Would install or refresh the manifest-pinned Git Runtime.",
       "dryShowRuntime": "Would prepare the manifest-pinned Show Runtime archive when it is missing or invalid.",
       "dryTmux": "Would install or refresh the manifest-pinned tmux runtime."

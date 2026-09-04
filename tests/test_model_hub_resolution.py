@@ -179,7 +179,7 @@ class FakeAdapter:
         self.refreshable_credential_refs: set[str] = set()
         self.capability_queries: list[str] = []
 
-    async def ensure_installed(self):
+    async def ensure_installed(self, *, force=False):
         return await self.status()
 
     async def start(self):

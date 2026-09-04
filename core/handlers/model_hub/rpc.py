@@ -220,6 +220,10 @@ async def dispatch_model_hub_rpc(
         return await service.runtime_status()
     if operation == "runtime_install":
         return await service.runtime_install()
+    if operation == "runtime_ensure_dependency":
+        return await service.runtime_ensure_dependency(
+            force=payload.get("force") is True,
+        )
     if operation == "runtime_start":
         return await service.runtime_start()
     if operation == "runtime_stop":

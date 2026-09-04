@@ -1892,6 +1892,13 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
             "deps": [
                 {"id": "askill", "required": True, "installed": False, "status": "missing"},
                 {"id": "avault", "required": True, "installed": True, "status": "ready", "version": "0.1.6"},
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": False,
+                    "status": "upgrade_required",
+                    "version": "v7.2.105",
+                },
                 {"id": "show-runtime", "required": True, "installed": False, "status": "missing"},
                 {"id": "tmux", "required": False, "installed": False, "status": "missing"},
                 {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
@@ -1907,6 +1914,9 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert offline_calls == [True]
     assert next(item for item in items if item.get("code") == "dependencies.askill.not_ready")["repair"]["target"] == "askill"
     assert next(item for item in items if item.get("code") == "dependencies.avault.ready")["status"] == "pass"
+    assert next(
+        item for item in items if item.get("code") == "dependencies.model-hub-engine.not_ready"
+    )["repair"]["target"] == "model-hub-engine"
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
@@ -2008,6 +2018,47 @@ def test_managed_dependencies_doctor_reports_memory_runtime_states(
     assert (runtime_item.get("repair") or {}).get("target") == (
         "memory-runtime" if expected_repair else None
     )
+
+
+def test_managed_dependencies_doctor_probes_model_hub_engine_archive(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": False,
+                    "status": "missing",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+    probes = []
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda: SimpleNamespace(
+            probe_archive_reachability=lambda: probes.append(True)
+            or {"ok": True, "checked": True}
+        ),
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    missing = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.model-hub-engine.not_ready"
+    )
+    assert missing["repair"]["target"] == "model-hub-engine"
+    assert probes == [True]
 
 
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
@@ -2584,6 +2635,7 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
     exit_code = cli.cmd_runtime(
         SimpleNamespace(
@@ -2599,6 +2651,56 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     assert exit_code == 1
     assert "Show Runtime ready" not in captured.out
     assert "VIBE_INSTALL_SKIP_SHOW_RUNTIME" in captured.err
+
+
+def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
+    monkeypatch,
+    capsys,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {
+                "install": {
+                    "state": "installed",
+                    "install_dir": "/runtime/show",
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "_ensure_model_hub_engine_during_prepare",
+        lambda **_kwargs: {
+            "ok": False,
+            "reason": "model_hub_engine_archive_download_failed",
+        },
+    )
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=False,
+            json=True,
+            strict=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["model_hub_engine"] == {
+        "ok": False,
+        "reason": "model_hub_engine_archive_download_failed",
+    }
 
 
 def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
@@ -2620,6 +2722,7 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
     exit_code = cli.cmd_runtime(
         SimpleNamespace(

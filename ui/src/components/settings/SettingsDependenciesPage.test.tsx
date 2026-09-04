@@ -24,7 +24,11 @@ vi.mock('@/context/ToastContext', () => ({
 }));
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, values?: Record<string, unknown>) => (
+      values?.version ? `${key}:${String(values.version)}` : key
+    ),
+  }),
 }));
 
 vi.mock('./SettingsPageShell', () => ({
@@ -105,6 +109,31 @@ describe('SettingsDependenciesPage Show Runtime status', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.install' }));
 
     await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('show-runtime'));
+  });
+});
+
+describe('SettingsDependenciesPage Model Hub engine', () => {
+  it('shows the installed and pinned CPA versions and offers the update action', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'model-hub-engine',
+        required: true,
+        installed: true,
+        version: 'v7.2.105',
+        latest_version: 'v7.2.149',
+        has_update: true,
+        status: 'upgrade_required',
+        action_class: 'repairable',
+      })],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('settings.dependencies.targetVersion:7.2.149')).toBeTruthy();
+    expect(screen.getByText('settings.dependencies.statusUpgradeRequired · v7.2.105')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'settings.dependencies.update' }));
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('model-hub-engine'));
   });
 });
 

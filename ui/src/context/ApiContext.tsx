@@ -1887,6 +1887,8 @@ export type DependencyItem = {
   required: boolean | null;
   installed: boolean | null;
   version: string | null;
+  latest_version?: string | null;
+  has_update?: boolean;
   status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
   readiness?: 'ready' | 'not_required' | 'not_ready' | 'memory_requirement_unreadable';
   action_class?: 'none' | 'repairable' | 'operator_only';

@@ -131,7 +131,7 @@ class ModelHubScenarioAdapter:
         self.invocations: list[tuple[str, str, str]] = []
         self.requests: list[Mapping[str, object]] = []
 
-    async def ensure_installed(self) -> EngineStatus:
+    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
         return await self.status()
 
     async def start(self) -> EngineStatus:

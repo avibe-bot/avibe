@@ -1221,17 +1221,29 @@ class CLIProxyEngineAdapter:
     async def ensure_installed(
         self,
         *,
+        force: bool = False,
         expected_target: Mapping[str, str] | None = None,
         on_resolved: Callable[[dict[str, str]], None] | None = None,
     ) -> EngineStatus:
         async with self._routing_lock:
             if expected_target is None and on_resolved is None:
-                install = await asyncio.to_thread(self.supervisor.installer.ensure)
+                if force:
+                    install = await asyncio.to_thread(
+                        self.supervisor.installer.ensure,
+                        force=True,
+                    )
+                else:
+                    install = await asyncio.to_thread(self.supervisor.installer.ensure)
             else:
+                ensure_kwargs: dict[str, Any] = {
+                    "expected_target": expected_target,
+                    "on_resolved": on_resolved,
+                }
+                if force:
+                    ensure_kwargs["force"] = True
                 install = await asyncio.to_thread(
                     self.supervisor.installer.ensure,
-                    expected_target=expected_target,
-                    on_resolved=on_resolved,
+                    **ensure_kwargs,
                 )
             if not install.get("ok"):
                 reason = str(install.get("reason") or "engine_install_failed")

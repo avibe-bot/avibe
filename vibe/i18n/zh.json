@@ -1426,6 +1426,7 @@
       "dryStaleRestart": "将移除过期重启元数据并刷新运行时状态。",
       "dryAskill": "将使用官方安装器安装或刷新 askill。",
       "dryAvault": "将安装或刷新清单固定的 avault 版本。",
+      "dryModelHubEngine": "将安装或刷新 Avibe 固定的 Model Hub 引擎（CPA）版本。",
       "dryGitRuntime": "将安装或刷新清单固定的 Git Runtime。",
       "dryShowRuntime": "当清单固定的 Show Runtime 归档缺失或无效时准备它。",
       "dryTmux": "将安装或刷新清单固定的 tmux runtime。"
