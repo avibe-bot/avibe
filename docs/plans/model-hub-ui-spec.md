@@ -3395,11 +3395,32 @@ the element that sizes it, which is why the two-scale idle row sizes each child
 instead of the row, and why a row added later is measured by the rule rather than by
 whether it appears in the Metrics list below.
 
+**2026-09-04 owner ruling — wherever this dialog states the interface, it states why
+it is settled** `[derived]`. ① Default above registers 「内置目录」
+(`addKey.protocol.catalogPinned`) as the badge on a catalog pin. Two keys extend that
+rule to the cases ① does not cover, and neither introduces a new state:
+
+- `addKey.protocol.declared` — 「手动指定」, the same badge shape on the other answer
+  that is not "the response proved it": a concrete interface chosen from the 自定义
+  disclosure. It rides the ready row and both result strips, exactly where
+  `catalogPinned` does. 自动探测 carries no badge, because there the response shape
+  IS the evidence and the identified strip already names what it found.
+- `addKey.protocol.catalogPinned.hint` — what 检测 still establishes under a pin
+  (authenticate the key, fetch the model list), replacing `addKey.protocol.idleHint`
+  on the ready row. The two cannot share one string: `idleHint` promises the
+  interface will be identified automatically, which under a pin is neither true nor
+  still in question.
+
+Stated as the property rather than as three call sites: **an interface this dialog did
+not detect says where it came from, and the row that says it also says what detection
+is still for.**
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | head sub-line | that Add detects the connection and interface first, then confirms | static | no | — |
+| 服务商 + hint | 自定义 · 兼容端点 first, then one option per shipped catalog row in file order, by its label; the hint says a catalog pick prefills the official address and pins the interface | `vibe/data/api_key_vendors.json`, read by this dialog and the server from the one tracked file | yes | Select a catalog vendor → Base URL becomes its `official_base_url` (still editable), 接口类型 locks to its protocol and the disclosure is gone, any observation is retired. Select 自定义 → Base URL clears and the disclosure returns |
 | `f7Ao1U` 名称(可选) | free text | user | yes | — |
 | `cXsiv` Base URL + hint | free text; the hint names an API root, and says a bare host uses the standard `/v1` path | user | yes | — |
 | `mZBBw` API Key | masked value, reveal icon | user | yes | Toggle reveal |

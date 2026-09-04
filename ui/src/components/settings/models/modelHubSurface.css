@@ -562,6 +562,7 @@
   --model-hub-add-key-strip-gap: 10px;
   --model-hub-add-key-strip-radius: 9px;
   --model-hub-add-key-inventory-height: 59px;
+  --model-hub-add-key-badge-size: 10px;
   --model-hub-add-key-strip-title-size: 12px;
   --model-hub-add-key-strip-detail-size: 10.5px;
   --model-hub-add-key-strip-detail-line: 16px;
@@ -621,6 +622,13 @@
   padding-inline: var(--model-hub-add-key-input-padding);
   font-size: var(--model-hub-add-key-input-size);
 }
+/* Same field surface, one exception: `Select` lays its chevron over the trailing
+   edge, so the shared inline padding has to leave that side room. Qualified by
+   element rather than by a second class, which would make every future select
+   here a call site that can forget it. */
+.model-hub-add-key-input:is(select) {
+  padding-inline-end: calc(var(--model-hub-add-key-input-padding) + 20px);
+}
 .model-hub-add-key-secret { width: 100%; }
 .model-hub-add-key-hint {
   color: var(--model-hub-muted-b3);
@@ -657,6 +665,26 @@
   gap: 6px;
   font-size: var(--model-hub-add-key-strip-title-size);
   font-weight: 600;
+}
+/* Why the interface beside it is settled, on the idle row and on both result
+   strips. It declares its own size for the same reason the statement does, and
+   takes both border and ink from `currentColor` so it annotates whatever it sits
+   in -- mint inside ①″ -- rather than introducing an ink of its own. On a strip
+   it goes to the trailing edge, out of the way of text that wraps; on the idle
+   row it stays in the reading order, between the statement and its hint. */
+.model-hub-add-key-protocol-badge {
+  flex-shrink: 0;
+  align-self: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 7px;
+  opacity: 0.75;
+  font-size: var(--model-hub-add-key-badge-size);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.model-hub-add-key-strip .model-hub-add-key-protocol-badge {
+  margin-inline-start: auto;
 }
 .model-hub-add-key-protocol-manual {
   flex-direction: column;

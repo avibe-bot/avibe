@@ -6,11 +6,14 @@ FROM node:20-slim AS ui-builder
 WORKDIR /app/ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --ignore-scripts
-# ``ui/src/lib/messageTypes.ts`` imports the repo-root message-type policy catalog so
-# the Web UI and the Python readers share one declaration. This stage copies only
-# ``ui/``, so the catalog has to be placed at the repository-relative path the import
+# Two repo-root catalogs are imported from ``ui/src`` so the Web UI and the Python
+# readers share one declaration: the message-type policy catalog
+# (``ui/src/lib/messageTypes.ts``) and the API-key vendor catalog
+# (``ui/src/components/settings/models/apiKeyVendors.ts``). This stage copies only
+# ``ui/``, so each has to be placed at the repository-relative path its import
 # expects, or ``npm run build`` fails to resolve it.
 COPY vibe/message_types.json /app/vibe/message_types.json
+COPY vibe/data/api_key_vendors.json /app/vibe/data/api_key_vendors.json
 COPY ui/ .
 RUN npm run build
 

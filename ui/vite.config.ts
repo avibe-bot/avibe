@@ -45,16 +45,20 @@ export default defineConfig({
   },
   server: {
     fs: {
-      // ``src/lib/messageTypes.ts`` imports the repo-root ``vibe/message_types.json``
-      // policy catalog so the Web UI and the Python readers share one declaration.
+      // Two shipped catalogs are read by both the Web UI and a Python module, from
+      // one tracked file each rather than from a copy per reader:
+      // ``src/lib/messageTypes.ts`` imports ``vibe/message_types.json``, and
+      // ``src/components/settings/models/apiKeyVendors.ts`` imports
+      // ``vibe/data/api_key_vendors.json``.
       // ``ui/package-lock.json`` makes Vite infer ``ui/`` as the workspace root, which
-      // would put that file outside the dev server's default allow list; production
-      // builds inline the JSON and are unaffected. Allow the UI root plus that one
-      // file — not their common ancestor, which would serve the rest of the checkout
+      // would put both files outside the dev server's default allow list; production
+      // builds inline the JSON and are unaffected. Allow the UI root plus those exact
+      // files — not their common ancestor, which would serve the rest of the checkout
       // over ``/@fs/`` to anything that can reach the dev server.
       allow: [
         fileURLToPath(new URL('.', import.meta.url)),
         fileURLToPath(new URL('../vibe/message_types.json', import.meta.url)),
+        fileURLToPath(new URL('../vibe/data/api_key_vendors.json', import.meta.url)),
       ],
     },
     proxy: {

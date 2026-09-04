@@ -22,6 +22,10 @@ import { expect, test } from './support/gateway';
 import { fillApiKeyForm } from './support/hub';
 import { anthropicInventory } from './support/mock';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
+// The shipped vendor catalog, read from the same tracked file the dialog and the
+// server read. A spec that named an id and its pinned interface by hand would
+// keep passing after the catalog moved underneath it.
+import { CATALOG_VENDORS } from './support/vendors';
 
 /**
  * Runs the routed dry run until the source has settled on a verdict about its
@@ -112,8 +116,49 @@ test.describe('B · add an API-key source', () => {
 
       const created = (await api.sources()).find((source) => source.display_name === name);
       expect(created?.protocol).toBe(protocol.id);
+      expect(created?.vendor).toBe('custom');
     });
   }
+
+  // B1 · the other rung of the same scenario. A vendor picked from the shipped
+  // catalog is not asked to prove its interface by shape — the catalog row is the
+  // proof, so detection only has to authenticate and fetch. The address is then
+  // pointed at the mock, which is both the only way this suite can reach a real
+  // upstream AND the state a user behind a gateway is actually in: it proves the
+  // pin belongs to the VENDOR and not to the URL it proposed.
+  test('B1 · a catalog vendor is added under its own id, with its interface pinned', async ({ hub, mock, api }) => {
+    const preset = CATALOG_VENDORS[0];
+    await mock.configure({ auth: 'ok', protocol: preset.protocol, models_endpoint: 'ok' });
+    const name = `${E2E_SOURCE_PREFIX}catalog-${preset.id}`;
+
+    await hub.goto();
+    await hub.addApiKeyButton.click();
+    await expect(hub.addKeyDialog).toBeVisible();
+    await fillApiKeyForm(hub.addKeyDialog, {
+      vendor: preset.id,
+      name,
+      baseUrl: mockBaseUrl(),
+      apiKey: 'e2e-add',
+    });
+
+    // The interface is stated, not asked: the pinned name is on screen with the
+    // badge that says where it came from, and the control that would offer a
+    // different one is gone rather than merely disabled.
+    await expect(hub.addKeyDialog).toContainText(copy('addKey.protocol.catalogPinned'));
+    await expect(
+      hub.addKeyDialog.getByRole('button', { name: copy('addKey.protocol.manual'), exact: true }),
+    ).toHaveCount(0);
+
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click({ timeout: 30_000 });
+
+    await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
+    await expect(hub.sourceDetailDialog).toBeVisible();
+
+    const created = (await api.sources()).find((source) => source.display_name === name);
+    expect(created?.vendor).toBe(preset.id);
+    expect(created?.protocol).toBe(preset.protocol);
+  });
 
   test('B1 · a rejected credential is named as a credential problem', async ({ hub, mock }) => {
     await mock.configure({ auth: '401', protocol: 'anthropic', models_endpoint: 'ok' });
