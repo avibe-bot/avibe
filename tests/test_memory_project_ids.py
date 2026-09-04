@@ -78,10 +78,11 @@ def test_named_slug_rejects_p_prefix() -> None:
 def test_prompt_exclusions_are_rejected_by_parsers() -> None:
     """Scenario: MEMORY-SEARCH-004. Prompt examples must fail the shared parser."""
 
-    from core.system_prompt_injection import _MEMORY_CLI_PROMPT
+    from core.prompt_registry import prompt_text
 
-    assert "cannot be `all`, `personal`" in _MEMORY_CLI_PROMPT
-    assert "start with `p-` / `u-`" in _MEMORY_CLI_PROMPT
+    memory_prompt = prompt_text("memory-context-prompt")
+    assert "cannot be `all`, `personal`" in memory_prompt
+    assert "start with `p-` / `u-`" in memory_prompt
     for value in ("all", "personal", "p-deadbeef", "u-" + "1" * 32, "Billing", ""):
         with pytest.raises(ValueError):
             parse_writable_memory_project(value)

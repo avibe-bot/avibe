@@ -738,9 +738,11 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
     active_registrations = []
     released_reservations = []
     prompt_skill_cwds = []
+    prompt_memory_modes = []
 
     def build_prompt(**kwargs):
         prompt_skill_cwds.append(kwargs.get("skills_cwd"))
+        prompt_memory_modes.append(kwargs.get("memory_enabled"))
         return "system prompt"
 
     monkeypatch.setattr(
@@ -920,6 +922,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
         "opencode_managed_skill_builtin_snapshot"
     ] == {"id": snapshot_id, "root": snapshot_root}
     assert prompt_skill_cwds == ["/tmp/work"]
+    assert prompt_memory_modes == [True]
 
     binding_failures = []
 

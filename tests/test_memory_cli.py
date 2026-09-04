@@ -11,8 +11,11 @@ import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
 from avibe_memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
-from core.system_prompt_injection import _MEMORY_CLI_PROMPT
+from core.prompt_registry import prompt_text
 from vibe import cli, internal_client
+
+
+_MEMORY_PROMPT = prompt_text("memory-context-prompt")
 
 
 _MEMORY_HELP_BY_LANGUAGE = {
@@ -332,12 +335,12 @@ def test_memory_list_all_rejection_comes_from_controller(monkeypatch, capsys) ->
 
 
 def test_memory_list_is_not_added_to_the_injected_personal_memory_prompt() -> None:
-    assert "vibe memory list" not in _MEMORY_CLI_PROMPT
+    assert "vibe memory list" not in _MEMORY_PROMPT
 
 
 def test_injected_agentic_memory_example_is_accepted_by_the_live_parser() -> None:
     example = 'vibe memory search "<query>" --mode agentic --json'
-    assert f"`{example}`" in _MEMORY_CLI_PROMPT
+    assert f"`{example}`" in _MEMORY_PROMPT
 
     args = cli.build_parser().parse_args(shlex.split(example)[1:])
 
@@ -546,8 +549,8 @@ def test_memory_cli_human_labels_origins_and_preserves_legacy_items(capsys) -> N
 
 
 def test_memory_prompt_explains_owner_labels_and_profile_separation() -> None:
-    assert "label `origin` as `user`, `agent`, or `both`" in _MEMORY_CLI_PROMPT
-    assert "never merge them into one attributed profile" in _MEMORY_CLI_PROMPT
+    assert "label `origin` as `user`, `agent`, or `both`" in _MEMORY_PROMPT
+    assert "never merge them into one attributed profile" in _MEMORY_PROMPT
 
 
 def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(

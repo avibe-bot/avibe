@@ -40,7 +40,6 @@ from core.agent_tool_policy import (
     check_tool_call,
     session_only_background_tool_names,
 )
-from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.managed_skills import (
@@ -48,6 +47,7 @@ from core.managed_skills import (
     managed_skill_environment,
     managed_skill_project_base,
 )
+from core.memory_cli_access import configure_memory_cli_access
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -55,7 +55,6 @@ from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
 )
 from vibe import backend_model_catalog
 
@@ -1754,18 +1753,16 @@ class SessionHandler(BaseHandler):
         # Resolve admission once: it associates or clears this turn's Memory CLI
         # session scope as a side effect, so a second call per turn would repeat
         # that write.
-        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, context)
+        configure_memory_cli_access(self.controller, context)
 
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
             include_quick_replies=quick_replies_on and platform != "wechat",
             include_show_pages=getattr(self.config, "show_pages_prompt", True),
-            include_memory_cli=memory_cli_admitted,
-            avibe_cloud_connected=avibe_cloud_url_available(self.config),
+            memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
-            current_agent_backend="claude",
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
             skills_claude_cli_path=managed_skill_claude_cli_path(self.config),

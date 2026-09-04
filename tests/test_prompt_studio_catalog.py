@@ -30,18 +30,14 @@ def test_every_prompt_markdown_file_has_one_stably_ordered_registry_entry() -> N
 
 def test_prompt_rendering_replaces_only_declared_placeholders() -> None:
     rendered = render_prompt(
-        "user-preferences-prompt",
-        user_context_routing="route containing {platform}",
+        "preferences-context-prompt",
         preferences_path="`/tmp/preferences.md`",
-        preferences_usage="usage",
-        update_guidance="guidance",
         platform="avibe",
     )
 
-    assert "route containing {platform}; project lessons" in rendered
     assert "`/tmp/preferences.md`" in rendered
     assert "`avibe/<user_id>`" in rendered
-    assert prompt_module("memory-cli-prompt").source().find("{0,62}") >= 0
+    assert prompt_module("memory-context-prompt").source().find("{0,62}") >= 0
 
 
 def test_prompt_catalog_export_is_deterministic_and_source_addressable() -> None:

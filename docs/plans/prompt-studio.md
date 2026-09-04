@@ -31,8 +31,15 @@ leave the composed System Prompt byte-for-byte unchanged so the migration does
 not invalidate backend prompt caches.
 
 Dynamic values remain runtime-owned. The registry declares their placeholders,
-while the existing prompt builder supplies Session IDs, paths, Agent tables,
-capability routing, and policy variants in their established call path.
+while the prompt builder supplies stable Session IDs, paths, and deterministically
+ordered Agent tables in their established call path. Required built-in Skill
+routing is authored directly and is not conditioned on catalog discovery.
+
+The System Prompt describes current capabilities and their positive behavior.
+Disabled, missing, or degraded capabilities are omitted; installation, recovery,
+and compatibility guidance is loaded only when the task requires it. Stable
+configuration selects complete prompt modules, while turn-scoped authorization
+affects runtime access only and never selects prompt content.
 
 ## Translation and drafts
 

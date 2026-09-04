@@ -697,7 +697,6 @@ def test_system_prompt_catalog_is_backend_neutral_for_remote_sessions(
         backend: build_system_prompt_injection(
             context=context,
             fallback_platform="avibe",
-            current_agent_backend=backend,
             skills_cwd=cwd,
         )
         for backend in ("claude", "codex", "opencode")

@@ -35,10 +35,9 @@ For more usage details, run `vibe show --help` or a subcommand help such as `vib
 - After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
 - Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`.
 
-Avibe injects the current Cloud-availability guidance and the one active history
-contract separately because both depend on live runtime state. Follow that
-contract for the current Session; do not infer another history mode from this
-Skill.
+Follow the History contract in the current System Prompt when Avibe supplies
+one. For live runtime, visibility, and URL availability, treat
+`vibe show status` and the relevant command output as authoritative.
 
 Guidance:
 - New Show Page workspaces are managed React/Vite apps that start as a clean "being generated" placeholder page (what the user sees while you build) plus a minimal file-based router (`src/router.tsx`) and one example page. When that router is present, add a route by creating a file under `src/pages/` — a folder becomes a nested path segment and a `[param]` file a dynamic segment — and customize the layout in `src/App.tsx`, styles in `src/styles.css`, and optional `api/*.ts` handlers. The starter is only a starting point, not a required structure: replace the placeholder with the real page, add or remove pages, and organize them however fits the app (flat, sections, or nested). Built-in UI is available to import, e.g. `@/components/ui/card`, `@/components/ui/button`, `@/components/ui/badge`.

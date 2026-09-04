@@ -727,7 +727,7 @@ def test_agent_contract_uses_startup_latched_checkpoint_service_state(resolved_g
     active_status = json.loads(paths.get_show_git_runtime_status_path().read_text(encoding="utf-8"))
     active_service.stop()
 
-    assert "Automatic Show Page history is unavailable" in unavailable
+    assert unavailable == ""
     assert unavailable_status["active"] is False
     assert "History is saved automatically around each turn" in available
     assert active_status["active"] is True
