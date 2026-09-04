@@ -429,35 +429,75 @@ def test_upsert_custom_provider_refuses_existing_builtin_block(tmp_path: Path) -
         )
 
 
-def test_upsert_custom_provider_keeps_exact_pattern_legacy_id(
+@pytest.mark.parametrize(
+    "provider_id",
+    (
+        "avibe-openai",
+        "avibe-model-hub-0123456789abcdef01234567",
+        "avibe-model-hub-relay",
+    ),
+)
+def test_upsert_custom_provider_refuses_new_avibe_prefix(
     tmp_path: Path,
+    provider_id: str,
 ) -> None:
-    provider_id = "avibe-model-hub-0123456789abcdef01234567"
+    with pytest.raises(ValueError, match="provider_id already exists"):
+        upsert_opencode_custom_provider(
+            provider_id,
+            "Reserved Relay",
+            "openai-compatible",
+            "https://relay.example/v1",
+            home=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    (
+        "avibe-model-hub-0123456789abcdef01234567",
+        "avibe-model-hub-relay",
+    ),
+)
+def test_upsert_custom_provider_keeps_existing_avibe_prefix_id_editable(
+    tmp_path: Path,
+    provider_id: str,
+) -> None:
+    config_path = get_opencode_config_paths(tmp_path)[0]
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    provider_id: {
+                        "name": "Existing Relay",
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {"baseURL": "https://old.example/v1"},
+                        "vibe_remote": {
+                            "custom": True,
+                            "adapter": "openai-compatible",
+                            "adapter_label": "OpenAI compatible",
+                        },
+                        "models": {},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
     upsert_opencode_custom_provider(
         provider_id,
-        "Legacy Exact Relay",
+        "Updated Relay",
         "openai-compatible",
         "https://relay.example/v1",
         home=tmp_path,
     )
 
-    config = _read_config(get_opencode_config_paths(tmp_path)[0])
-    assert config["provider"][provider_id]["name"] == "Legacy Exact Relay"
-
-
-def test_upsert_custom_provider_keeps_legacy_model_hub_prefix_id(
-    tmp_path: Path,
-) -> None:
-    upsert_opencode_custom_provider(
-        "avibe-model-hub-relay",
-        "Legacy Relay",
-        "openai-compatible",
-        "https://relay.example/v1",
-        home=tmp_path,
+    config = _read_config(config_path)
+    assert config["provider"][provider_id]["name"] == "Updated Relay"
+    assert config["provider"][provider_id]["options"]["baseURL"] == (
+        "https://relay.example/v1"
     )
-
-    config = _read_config(get_opencode_config_paths(tmp_path)[0])
-    assert config["provider"]["avibe-model-hub-relay"]["name"] == "Legacy Relay"
 
 
 def test_remove_custom_provider_deletes_only_custom_block(tmp_path: Path) -> None:

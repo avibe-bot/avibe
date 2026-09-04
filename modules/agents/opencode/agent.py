@@ -61,6 +61,7 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
     memory_cli_prompt_admitted,
 )
+from core.handlers.model_hub.service import ModelHubError
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
     ModelHubLaunch,
@@ -1154,6 +1155,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         steer_state: _OpenCodeSteerState | None = None
         poll_server: _SteeringAwareOpenCodeServer | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
+        model_hub_turn_mode: str | None = None
         model_hub_launch: ModelHubLaunch | None = None
         model_hub_overlay_reservation: object | None = None
         server = None
@@ -1182,9 +1184,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
             if callable(turn_mode):
+                model_hub_turn_mode = turn_mode("opencode")
                 bind_turn_mode(
                     request.context,
-                    turn_mode("opencode"),
+                    model_hub_turn_mode,
                 )
             prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
             if callable(prepare_overlay):
@@ -1195,6 +1198,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation = await configure_overlay(
                     model_hub_overlay
                 )
+            if model_hub_turn_mode == "hub" and model_hub_overlay is None:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
+                model_hub_overlay_reservation = None
+                stop_empty = getattr(server, "stop_for_empty_model_hub_menu", None)
+                if callable(stop_empty):
+                    await stop_empty()
+                raise ModelHubError("mapping_target_unavailable", status=409)
             await server.ensure_running()
             caller_context_binding_path = _caller_context_path_for_server(server)
             activation_identity = self._attach_server_activation(server)
@@ -1379,7 +1392,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
             # routing for legacy installs.
-            default_provider = getattr(opencode_cfg, "default_provider", None)
+            default_provider = (
+                None
+                if model_hub_overlay is not None
+                else getattr(opencode_cfg, "default_provider", None)
+            )
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
             display_model_dict = resolve_opencode_model_dict(
                 requested_model_str,

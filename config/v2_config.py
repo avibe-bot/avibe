@@ -268,25 +268,6 @@ def normalize_model_hub_vendor_id(value: object) -> str:
     return vendor
 
 
-def canonical_opencode_menu_identity(identifier: object) -> tuple[str, str]:
-    """Validate and split one persisted OpenCode ``provider/model`` identity."""
-
-    from core.handlers.model_hub.identifiers import parse_opencode_model_id
-
-    if not isinstance(identifier, str) or identifier != identifier.strip():
-        raise ValueError("Invalid OpenCode model identifier")
-    provider_id, model_id = parse_opencode_model_id(identifier)
-    if (
-        re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", provider_id) is None
-        or provider_id != provider_id.strip()
-        or model_id != model_id.strip()
-    ):
-        raise ValueError("Invalid OpenCode model identifier")
-    if _contains_model_hub_credential_material(identifier):
-        raise ValueError("OpenCode model identifier contains credential material")
-    return provider_id, model_id
-
-
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     """Return the bundled fixed-menu ids used by persisted Hub routes."""
 
@@ -529,16 +510,7 @@ def _legacy_route_hops(
     backend: str,
     target_model_id: str,
 ) -> list[dict[str, str]]:
-    provider: Optional[str] = None
-    bare_target = backend == "opencode" and "/" not in target_model_id
-    if backend == "opencode":
-        if not bare_target:
-            try:
-                provider, target_model_id = canonical_opencode_menu_identity(target_model_id)
-            except ValueError:
-                return []
     hops: list[dict[str, str]] = []
-    bare_matches: list[dict[str, str]] = []
     for source_id in source_order:
         source = sources[source_id]
         legacy_claude_model_id = (
@@ -553,43 +525,8 @@ def _legacy_route_hops(
             if not isinstance(model, dict) or not isinstance(model.get("id"), str):
                 continue
             model_id = model["id"]
-            if provider is not None:
-                try:
-                    source_provider, source_model_id = canonical_opencode_menu_identity(
-                        f"{source.get('vendor') or ''}/{model_id}"
-                    )
-                except ValueError:
-                    try:
-                        source_provider, source_model_id = canonical_opencode_menu_identity(
-                            f"custom/{model_id}"
-                        )
-                    except ValueError:
-                        continue
-                if (source_provider, source_model_id) != (provider, target_model_id):
-                    continue
-                hops.append({"source_id": source_id, "model_id": model_id})
-                continue
-            if bare_target:
-                try:
-                    _, source_model_id = canonical_opencode_menu_identity(
-                        f"{source.get('vendor') or ''}/{model_id}"
-                    )
-                except ValueError:
-                    try:
-                        _, source_model_id = canonical_opencode_menu_identity(
-                            f"custom/{model_id}"
-                        )
-                    except ValueError:
-                        continue
-                if source_model_id == target_model_id or source_model_id.endswith(
-                    f"/{target_model_id}"
-                ):
-                    bare_matches.append({"source_id": source_id, "model_id": model_id})
-                continue
             if model_id == target_model_id:
                 hops.append({"source_id": source_id, "model_id": model_id})
-    if bare_target and len(bare_matches) == 1:
-        return bare_matches
     return hops
 
 
@@ -657,7 +594,10 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 )
             except (TypeError, ValueError):
                 return payload, False, ()
-    for backend, agent in agents.items():
+    for backend in ("claude", "codex"):
+        agent = agents.get(backend)
+        if agent is None:
+            continue
         if not isinstance(agent, dict):
             return payload, False, ()
         if set(agent) - {
@@ -672,8 +612,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             "removed_model_ids",
         }:
             return payload, False, ()
-        expected_menu_kind = "open" if backend == "opencode" else "fixed"
-        if agent.get("backend") != backend or agent.get("menu_kind") != expected_menu_kind:
+        if agent.get("backend") != backend or agent.get("menu_kind") != "fixed":
             return payload, False, ()
         if "mode" in agent:
             mode = agent["mode"]
@@ -686,13 +625,12 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             not _legacy_mapping_is_valid(mapping) for mapping in mappings
         ):
             return payload, False, ()
-        if backend in {"claude", "codex"}:
-            fixed_menu_ids = set(model_hub_fixed_menu_ids(backend))
-            if any(
-                mapping["enabled"] and mapping["builtin_id"] not in fixed_menu_ids
-                for mapping in mappings or []
-            ):
-                return payload, False, ()
+        fixed_menu_ids = set(model_hub_fixed_menu_ids(backend))
+        if any(
+            mapping["enabled"] and mapping["builtin_id"] not in fixed_menu_ids
+            for mapping in mappings or []
+        ):
+            return payload, False, ()
         if "routes" in agent and not isinstance(agent["routes"], dict):
             return payload, False, ()
         menu = agent.get("menu")
@@ -722,7 +660,11 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 return payload, False, ()
     has_legacy_shape = bool(
         {"priority_order", "subscription_hub_experimental"} & set(model_hub)
-        or any(isinstance(agent, dict) and "mappings" in agent for agent in agents.values())
+        or any(
+            isinstance(agents.get(backend), dict)
+            and "mappings" in agents[backend]
+            for backend in ("claude", "codex")
+        )
         or any(
             isinstance(source, dict)
             and "experimental_consent_at" in source
@@ -766,8 +708,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             sources_by_id[source_id] = source
 
     warnings: list[str] = []
-    migrated_agents: dict[str, object] = {}
-    for backend in MODEL_HUB_BACKENDS:
+    migrated_agents: dict[str, object] = copy.deepcopy(agents)
+    for backend in ("claude", "codex"):
         raw_agent = agents.get(backend)
         if not isinstance(raw_agent, dict):
             continue
@@ -775,13 +717,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         agent = copy.deepcopy(raw_agent)
         source_order = _legacy_source_order(migrated_model_hub, sources_by_id, agent, backend)
         source_settings = {"order": source_order}
-        route_ids: list[str]
-        if backend in {"claude", "codex"}:
-            route_ids = list(model_hub_fixed_menu_ids(backend))
-        else:
-            menu = agent.get("menu")
-            checked = menu.get("checked") if isinstance(menu, dict) else []
-            route_ids = [item for item in checked if isinstance(item, str)]
+        route_ids = list(model_hub_fixed_menu_ids(backend))
 
         if isinstance(agent.get("routes"), dict):
             routes = copy.deepcopy(agent["routes"])
@@ -797,12 +733,6 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 builtin_id = item.get("builtin_id")
                 if isinstance(builtin_id, str) and builtin_id not in mapping_by_menu:
                     mapping_by_menu[builtin_id] = item
-            if backend == "opencode":
-                route_ids.extend(
-                    builtin_id
-                    for builtin_id, mapping in mapping_by_menu.items()
-                    if builtin_id not in route_ids and mapping.get("enabled") is True
-                )
             routes = {}
             for model_id in route_ids:
                 mapping = mapping_by_menu.get(model_id)
@@ -831,7 +761,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         allowed_agent["backend"] = backend
         agent_mode = agent.get("mode")
         allowed_agent["mode"] = agent_mode if isinstance(agent_mode, str) and agent_mode in {"hub", "direct"} else "direct"
-        allowed_agent["menu_kind"] = "open" if backend == "opencode" else "fixed"
+        allowed_agent["menu_kind"] = "fixed"
         allowed_agent["sources"] = source_settings
         allowed_agent["routes"] = routes
         migrated_agents[backend] = allowed_agent
@@ -3208,6 +3138,7 @@ class ModelHubBackendModelConfig:
     supports_tools: Optional[bool] = None
     supports_reasoning: Optional[bool] = None
     reasoning_efforts: list[str] = field(default_factory=list)
+    native_protocol: Optional[Literal["openai_responses", "anthropic"]] = None
 
     @classmethod
     def from_payload(cls, payload: object) -> "ModelHubBackendModelConfig":
@@ -3225,6 +3156,7 @@ class ModelHubBackendModelConfig:
             "supports_tools",
             "supports_reasoning",
             "reasoning_efforts",
+            "native_protocol",
             # These are read-only API projection fields. Accepting and dropping
             # them lets a client submit the list it observed without turning
             # server-owned policy into persisted state.
@@ -3244,6 +3176,7 @@ class ModelHubBackendModelConfig:
         supports_tools = payload.get("supports_tools")
         supports_reasoning = payload.get("supports_reasoning")
         reasoning_efforts = payload.get("reasoning_efforts", [])
+        native_protocol = payload.get("native_protocol")
 
         if (
             not isinstance(model_id, str)
@@ -3313,6 +3246,13 @@ class ModelHubBackendModelConfig:
             raise ValueError(
                 "Config 'model_hub.agents.models.reasoning_efforts' is invalid"
             )
+        if native_protocol is not None and native_protocol not in {
+            "openai_responses",
+            "anthropic",
+        }:
+            raise ValueError(
+                "Config 'model_hub.agents.models.native_protocol' is invalid"
+            )
         return cls(
             id=model_id.strip(),
             origin=origin,
@@ -3325,10 +3265,11 @@ class ModelHubBackendModelConfig:
             supports_tools=supports_tools,
             supports_reasoning=supports_reasoning,
             reasoning_efforts=list(reasoning_efforts),
+            native_protocol=native_protocol,
         )
 
     def to_payload(self) -> dict:
-        return {
+        payload = {
             "id": self.id,
             "display_name": self.display_name,
             "origin": self.origin,
@@ -3341,6 +3282,9 @@ class ModelHubBackendModelConfig:
             "supports_reasoning": self.supports_reasoning,
             "reasoning_efforts": list(self.reasoning_efforts),
         }
+        if self.native_protocol is not None:
+            payload["native_protocol"] = self.native_protocol
+        return payload
 
 
 def normalize_storable_backend_model_text(
@@ -3477,7 +3421,7 @@ class ModelHubAgentSupplyConfig:
         menu_payload = payload.get("menu")
         sources_payload = payload.get("sources")
         if backend == "opencode" and menu_payload is None:
-            menu_payload = {"view": "featured", "checked": []}
+            raise ValueError("Config 'model_hub.agents.menu' is required for opencode")
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
         routes = {
@@ -3502,14 +3446,7 @@ class ModelHubAgentSupplyConfig:
             )
         if models_payload is None:
             if backend == "opencode":
-                legacy_ids = list(menu.checked if menu else ())
-                legacy_ids.extend(
-                    model_id for model_id in routes if model_id not in legacy_ids
-                )
-                models = [
-                    ModelHubBackendModelConfig(id=model_id, origin="manual")
-                    for model_id in legacy_ids
-                ]
+                raise ValueError("Config 'model_hub.agents.models' is required for opencode")
             else:
                 models = _default_backend_models(backend)
                 known = {model.id for model in models}
@@ -3530,11 +3467,25 @@ class ModelHubAgentSupplyConfig:
         if any(_contains_model_hub_credential_material(model_id) for model_id in routes):
             raise ValueError("Config 'model_hub.agents.routes' contains an invalid model id")
         if backend == "opencode":
+            from core.handlers.model_hub.identifiers import canonical_model_id
+
             for identifier in (*routes, *(model.id for model in models)):
-                canonical_opencode_menu_identity(identifier)
+                if canonical_model_id(identifier) != identifier:
+                    raise ValueError("Config 'model_hub.agents.models.id' is invalid")
+            if any(model.native_protocol is None for model in models):
+                raise ValueError(
+                    "Config 'model_hub.agents.models.native_protocol' is required for opencode"
+                )
             menu = ModelHubMenuConfig(
                 view=menu.view if menu else "featured",
                 checked=[model.id for model in models],
+            )
+        elif any(
+            isinstance(item, dict) and "native_protocol" in item
+            for item in models_payload or ()
+        ):
+            raise ValueError(
+                "Config 'model_hub.agents.models.native_protocol' is only valid for opencode"
             )
         return cls(
             backend=backend,

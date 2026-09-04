@@ -11,7 +11,6 @@
 // model the Agent may select; which supplier serves it stays with the Route, and
 // mixing the two here is what the contract's 「no Source id, no upstream model
 // id, no priority, no fallback」 rule exists to prevent.
-import { buildIdentifier, type StandardVendors } from './menus/identifiers';
 import type { ModelsApi } from './modelsApi';
 import type {
   AgentBackend,
@@ -153,6 +152,7 @@ export const candidateBackendModel = (candidate: ModelCandidate): BackendModel =
   display_name: candidate.display_name,
   origin: candidate.origin,
   reasoning_efforts: [...candidate.reasoning_efforts],
+  ...(candidate.native_protocol ? { native_protocol: candidate.native_protocol } : {}),
 });
 
 /**
@@ -311,89 +311,8 @@ export const pickerGroups = (
   return groups;
 };
 
-/** The provider segment `canonical_opencode_menu_identity` accepts, verbatim. */
-const OPENCODE_PROVIDER_SEGMENT = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
-
-/**
- * Whether an id is a whole OpenCode menu identity, or only looks like one.
- *
- * `canonical_opencode_menu_identity` is the authority and stays the authority:
- * this decides nothing the server does not, it just decides it early enough for
- * the id field to say what is wrong while the user is still typing. Without it
- * the dialog calls `openai/` valid, saves, and the `PUT` rejects the whole list
- * for a row the user was told was fine.
- *
- * Both halves or neither. A provider prefix proves only that the left half is
- * admissible — `openai/` has no right half at all, and `custom/` is the same
- * hole behind the fallback prefix this file adds itself. This is the only rule
- * that judges admissibility, which is why `backendModelId` can hand a malformed
- * identity straight back instead of inventing a well-formed one. Splitting on
- * the FIRST separator is what the backend does, so a reseller id keeps its own
- * slashes (`openrouter/anthropic/claude-…` is provider `openrouter`, model
- * `anthropic/claude-…`).
- *
- * The credential-material rule is deliberately not mirrored. It is a heuristic
- * over secret shapes that the server can revise whenever it learns a new one,
- * and a copy here would be a second opinion about what a secret looks like,
- * drifting silently in whichever direction it was last edited. A row it catches
- * is refused by the `PUT` with its own message.
- */
-export const opencodeMenuIdentity = (id: string, backend: AgentBackend): boolean => {
-  if (backend !== 'opencode') return true;
-  if (id !== id.trim()) return false;
-  const separator = id.indexOf('/');
-  if (separator <= 0) return false;
-  const model = id.slice(separator + 1);
-  return OPENCODE_PROVIDER_SEGMENT.test(id.slice(0, separator))
-    && model !== ''
-    && model === model.trim();
-};
-
-/**
- * An id the backend will accept, whoever proposed it.
- *
- * Every id this UI *produces* comes through here — the models.dev suggestion the
- * user chose and the 「use what I typed」 escape alike. That is the whole point of
- * one function: an id the backend rejects is discovered at save time, long after
- * the row was built, so the two places that mint one cannot each carry their own
- * rule. An id the user types character by character is not produced here; it is
- * theirs, and the id field validates it rather than rewriting it underneath them.
- *
- * OpenCode identifiers are `provider/model`, and what this function contributes
- * is the provider segment an id does not have. So the question it asks is
- * whether one is there at all, never whether the backend recognizes it:
- * `canonical_opencode_menu_identity` admits any segment matching its grammar,
- * `standard_vendors` membership included and not required, so `acme/model` is a
- * public identity the server accepts, and rewriting it to `custom/acme/model`
- * saves a different model than the user asked for — one the server accepts too,
- * because it splits on the first separator, so nothing downstream would notice.
- *
- * The vendor list answers a different question, and only that one: which
- * provider segment a SOURCE's vendor maps to, which has to byte-match
- * `opencode_model_id(source.vendor, model.id)` or the menu rejects the checked
- * value. That is what `vendor` is normalized through here — the proposing
- * provider when there is one, and nothing when there is not, which
- * `buildIdentifier` answers with `custom` for the same reason the backend does.
- * Every other backend takes the id verbatim, because its ids have no segment to
- * satisfy.
- *
- * An id that carries a provider segment is therefore taken as typed even when
- * the whole identity is malformed. `openai/` is not a bare model id, and
- * prefixing it would mint `custom/openai/` — a typo the server then accepts as
- * the model `openai/`. Admissibility is `opencodeMenuIdentity`'s question, asked
- * of this function's output at the field, and the only honest answer to a broken
- * identity is to refuse it rather than to complete it into a different one.
- */
-export const backendModelId = (
-  id: string,
-  backend: AgentBackend,
-  standardVendors: StandardVendors,
-  vendor = '',
-): string => {
-  if (backend !== 'opencode' || id === '') return id;
-  if (id.includes('/')) return id;
-  return buildIdentifier(vendor, id, standardVendors);
-};
+/** Canonicalize one user-proposed model identity without adding transport state. */
+export const backendModelId = (id: string): string => id.trim();
 
 /**
  * The one write that gives a draft row its id.
@@ -415,9 +334,13 @@ export const draftWithId = (
   draft: BackendModel,
   id: string,
   backend: AgentBackend,
-  standardVendors: StandardVendors,
-  vendor = '',
-): BackendModel => ({ ...draft, id: backendModelId(id, backend, standardVendors, vendor) });
+): BackendModel => ({
+  ...draft,
+  id: backendModelId(id),
+  ...(backend === 'opencode'
+    ? { native_protocol: draft.native_protocol ?? 'openai_responses' }
+    : {}),
+});
 
 /**
  * A models.dev match, poured into a draft — the id included.
@@ -439,7 +362,6 @@ export const applyModelsDevMatch = (
   match: ModelsDevMatch,
   origin: BackendModelOrigin,
   backend: AgentBackend,
-  standardVendors: StandardVendors,
 ): BackendModel => draftWithId(
   {
     ...draft,
@@ -453,11 +375,10 @@ export const applyModelsDevMatch = (
     supports_tools: match.supports_tools,
     supports_reasoning: match.supports_reasoning,
     reasoning_efforts: [...match.reasoning_efforts],
+    ...(backend === 'opencode' ? { native_protocol: match.native_protocol } : {}),
   },
   match.model_id,
   backend,
-  standardVendors,
-  match.provider_id,
 );
 
 const sameList = (left: readonly unknown[], right: readonly unknown[]): boolean =>
@@ -481,6 +402,7 @@ export const MODELS_DEV_FIELDS = [
   'supports_tools',
   'supports_reasoning',
   'reasoning_efforts',
+  'native_protocol',
 ] as const satisfies readonly (keyof BackendModel)[];
 
 /**
@@ -505,7 +427,9 @@ export const retireModelsDevMatch = (
   const blank = blankBackendModel();
   const next: BackendModel = { ...draft, id };
   for (const field of MODELS_DEV_FIELDS) {
-    if (sameValue(draft[field], filled[field])) Object.assign(next, { [field]: blank[field] });
+    if (!sameValue(draft[field], filled[field])) continue;
+    if (blank[field] === undefined) delete (next as Partial<BackendModel>)[field];
+    else Object.assign(next, { [field]: blank[field] });
   }
   return next;
 };
@@ -524,7 +448,8 @@ export const sameBackendModel = (left: BackendModel, right: BackendModel): boole
   && sameList(left.output_modalities, right.output_modalities)
   && left.supports_tools === right.supports_tools
   && left.supports_reasoning === right.supports_reasoning
-  && sameList(left.reasoning_efforts, right.reasoning_efforts);
+  && sameList(left.reasoning_efforts, right.reasoning_efforts)
+  && left.native_protocol === right.native_protocol;
 
 export const sameCatalog = (left: readonly BackendModel[], right: readonly BackendModel[]): boolean =>
   left.length === right.length && left.every((model, index) => sameBackendModel(model, right[index]));

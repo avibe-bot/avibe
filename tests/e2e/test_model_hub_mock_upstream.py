@@ -16,7 +16,11 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
 
-from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
+from tests.e2e.drivers.mock_llm_upstream import (
+    MockLLMUpstream,
+    OPENCODE_V4_S3_PASSTHROUGH_FIXTURES,
+    OPENCODE_V4_S4_VARIANT_FIXTURES,
+)
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -111,6 +115,85 @@ def _configure(base_url: str, **config: object) -> dict[str, Any]:
     assert status == 200
     assert payload["ok"] is True
     return payload["config"]
+
+
+def _top_level_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "added": {key: after[key] for key in after.keys() - before.keys()},
+        "removed": sorted(before.keys() - after.keys()),
+        "changed": {
+            key: [before[key], after[key]]
+            for key in before.keys() & after.keys()
+            if before[key] != after[key]
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    OPENCODE_V4_S3_PASSTHROUGH_FIXTURES.values(),
+    ids=OPENCODE_V4_S3_PASSTHROUGH_FIXTURES,
+)
+def test_opencode_v4_s3_engine_diffs_are_frozen_against_mock_capture(
+    mock_llm_upstream,
+    fixture: dict[str, Any],
+) -> None:
+    _configure(mock_llm_upstream.url, protocol=fixture["protocol"])
+    path = f"/v1/{'messages' if fixture['protocol'] == 'anthropic' else 'responses'}"
+
+    status, _, _ = _json_request(
+        mock_llm_upstream.url,
+        path,
+        method="POST",
+        body=fixture["upstream_body"],
+    )
+
+    assert status == 200
+    [captured] = mock_llm_upstream.requests()
+    assert captured["body"] == fixture["upstream_body"]
+    assert _top_level_diff(
+        fixture["frontend_body"],
+        captured["body"],
+    ) == fixture["expected_top_level_diff"]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    OPENCODE_V4_S4_VARIANT_FIXTURES.values(),
+    ids=OPENCODE_V4_S4_VARIANT_FIXTURES,
+)
+def test_opencode_v4_s4_variant_shapes_are_frozen_against_mock_capture(
+    mock_llm_upstream,
+    fixture: dict[str, Any],
+) -> None:
+    protocol = fixture["protocol"]
+    _configure(mock_llm_upstream.url, protocol=protocol)
+    body = {
+        "model": "stored-hop-model",
+        **(
+            {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 128}
+            if protocol == "anthropic"
+            else {"input": "hello"}
+        ),
+        **fixture["upstream_fragment"],
+    }
+    path = f"/v1/{'messages' if protocol == 'anthropic' else 'responses'}"
+
+    status, _, _ = _json_request(
+        mock_llm_upstream.url,
+        path,
+        method="POST",
+        body=body,
+    )
+
+    assert status == 200
+    [captured] = mock_llm_upstream.requests()
+    assert fixture["variant"] in (
+        {"reasoningEffort": "high"},
+        {"effort": "high"},
+    )
+    for key, value in fixture["upstream_fragment"].items():
+        assert captured["body"][key] == value
 
 
 @pytest.mark.parametrize("protocol", PROTOCOL_CASES)

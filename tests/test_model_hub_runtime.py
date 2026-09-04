@@ -1161,7 +1161,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 7, **supervisor.status()}
+    projected = {"contract_version": 8, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1479,6 +1479,78 @@ def test_config_generation_is_private_and_never_logs_secrets(
     secrets_path.chmod(0o644)
     with pytest.raises(EngineStateError, match="runtime secret permissions are unsafe"):
         store.prepare_instance("install-1")
+
+
+def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
+    tmp_path: Path,
+) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    api_key_ref = store.store_api_key(
+        "api-key-fixture",
+        vendor="anthropic",
+        protocol="anthropic",
+    )
+    oauth_auth_name = "claude-oauth.json"
+    oauth_ref = store.bind_oauth_credential(
+        "src_oauth0001",
+        "anthropic",
+        oauth_auth_name,
+    )
+    oauth_path = store.auth_dir / oauth_auth_name
+    oauth_content = b'{"type":"claude","access_token":"oauth-fixture"}\n'
+    oauth_path.write_bytes(oauth_content)
+    oauth_path.chmod(0o600)
+    store.sync_sources(
+        [
+            _binding(
+                api_key_ref,
+                source_id="src_apikey001",
+                vendor="anthropic",
+                protocol="anthropic",
+                base_url=None,
+                model_ids=("claude-api-model",),
+            ),
+            _binding(
+                oauth_ref,
+                source_id="src_oauth0001",
+                vendor="anthropic",
+                protocol="anthropic",
+                base_url=None,
+                allowed_origins=("claude",),
+                model_ids=("claude-oauth-model",),
+            ),
+        ]
+    )
+
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path,
+        host="127.0.0.1",
+        port=18231,
+        auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets,
+        sources=store.list_sources(),
+        state_store=store,
+    )
+
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert payload["disable-claude-cloak-mode"] is True
+    assert payload["claude-api-key"] == [
+        {
+            "api-key": "api-key-fixture",
+            "prefix": store.get_source("src_apikey001").prefix,
+            "base-url": "https://api.anthropic.com",
+            "cloak": {"mode": "never"},
+            "rebuild-mid-system-message": False,
+            "models": [
+                {"name": "claude-api-model", "alias": "claude-api-model"}
+            ],
+        }
+    ]
+    assert oauth_path.read_bytes() == oauth_content
+    assert "cloak" not in store.credential_metadata(oauth_ref)
+    assert "rebuild-mid-system-message" not in store.credential_metadata(oauth_ref)
 
 
 def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> None:

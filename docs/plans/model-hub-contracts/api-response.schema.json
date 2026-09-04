@@ -61,7 +61,7 @@
       "allOf": [
         {"$ref": "model-hub/agent-supply.schema.json"},
         {
-          "required": ["backend", "cli_present", "mode", "menu_kind", "catalog_models", "selected_by_agent", "selected_model_id", "selected_model_explicit", "sources", "routes", "supply_status", "menu", "model_supply", "named_agents", "builtin_models", "standard_vendors"],
+          "required": ["backend", "cli_present", "mode", "menu_kind", "catalog_models", "selected_by_agent", "selected_model_id", "selected_model_explicit", "sources", "routes", "supply_status", "menu", "model_supply", "named_agents", "builtin_models"],
           "properties": {
             "sources": {
               "oneOf": [
@@ -139,7 +139,7 @@
     "SuccessCore": {
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7}
+        "contract_version": {"const": 8}
       }
     },
     "SourceListResponse": {
@@ -148,7 +148,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}}
       }
     },
@@ -158,7 +158,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "observation": {"$ref": "model-hub/observation-result.schema.json"}
       }
     },
@@ -168,7 +168,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "source": {"$ref": "#/definitions/SourceApi"},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
         "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
@@ -180,7 +180,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "source": {"$ref": "#/definitions/SourceApi"}
       }
     },
@@ -190,7 +190,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "source": {"$ref": "#/definitions/SourceApi"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -202,7 +202,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
       }
@@ -213,7 +213,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "agents": {"type": "array", "items": {"$ref": "#/definitions/AgentSupplyApi"}}
       }
     },
@@ -223,7 +223,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "agent": {"$ref": "#/definitions/AgentSupplyApi"}
       }
     },
@@ -236,7 +236,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 7},
+            "contract_version": {"const": 8},
             "agent": {"$ref": "#/definitions/AgentSupplyApi"},
             "removed_hops": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/RouteHopRef"}, "uniqueItems": true},
             "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}, "uniqueItems": true}
@@ -261,7 +261,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": false},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "error": {"const": "candidate_suppliers_changed"},
         "detail": {"type": "string", "minLength": 1},
         "changed": {
@@ -281,11 +281,40 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "agent": {
           "type": "object",
           "required": ["backend", "mode", "catalog_models"],
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": { "properties": { "backend": { "const": "opencode" } }, "required": ["backend"] },
+              "then": {
+                "properties": {
+                  "catalog_models": {
+                    "items": {
+                      "allOf": [
+                        { "$ref": "model-hub/backend-model.schema.json" },
+                        { "required": ["native_protocol"] }
+                      ]
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "catalog_models": {
+                    "items": {
+                      "allOf": [
+                        { "$ref": "model-hub/backend-model.schema.json" },
+                        { "not": { "required": ["native_protocol"] } }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          ],
           "properties": {
             "backend": {"enum": ["claude", "codex", "opencode"]},
             "mode": {"enum": ["hub", "direct"]},
@@ -317,6 +346,7 @@
         "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true},
         "suppliers": {"type": "array", "items": {"$ref": "#/definitions/CandidateSupplier"}, "uniqueItems": true},
         "origin": {"enum": ["builtin", "provider", "models_dev", "manual"]},
+        "native_protocol": {"enum": ["openai_responses", "anthropic"]},
         "group_if_removed": {"anyOf": [{"enum": ["builtin", "providers"]}, {"type": "null"}]}
       }
     },
@@ -332,7 +362,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "candidates": {
           "type": "object",
           "required": ["builtin", "providers", "in_list"],
@@ -351,13 +381,13 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "matches": {
           "type": "array",
           "maxItems": 8,
           "items": {
             "type": "object",
-            "required": ["provider_id", "provider_name", "first_party", "model_id", "models_dev_id", "display_name", "context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning", "reasoning_efforts"],
+            "required": ["provider_id", "provider_name", "first_party", "model_id", "models_dev_id", "display_name", "context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning", "reasoning_efforts", "native_protocol"],
             "additionalProperties": false,
             "properties": {
               "provider_id": {"type": "string", "minLength": 1},
@@ -372,7 +402,8 @@
               "output_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video"]}, "uniqueItems": true},
               "supports_tools": {"type": ["boolean", "null"]},
               "supports_reasoning": {"type": ["boolean", "null"]},
-              "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true}
+              "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true},
+              "native_protocol": {"enum": ["openai_responses", "anthropic"]}
             }
           }
         }
@@ -384,7 +415,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"}
       }
     },
@@ -394,7 +425,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "chains": {"type": "array", "items": {"$ref": "model-hub/agent-chain.schema.json"}}
       }
     },
@@ -404,7 +435,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -416,7 +447,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "probe": {"$ref": "model-hub/probe-result.schema.json"}
       }
     },
@@ -426,7 +457,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "events": {"type": "array", "items": {"$ref": "model-hub/resolution-event.schema.json"}}
       }
     },
@@ -436,7 +467,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "usage": {"$ref": "model-hub/usage-summary.schema.json"}
       }
     },
@@ -446,7 +477,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "flow": {
           "allOf": [
             {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -468,7 +499,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 7},
+            "contract_version": {"const": 8},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -491,7 +522,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 7},
+            "contract_version": {"const": 8},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -516,7 +547,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7}
+        "contract_version": {"const": 8}
       }
     },
     "RuntimeApi": {
@@ -538,7 +569,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "scan": {"$ref": "model-hub/migration-scan.schema.json"}
       }
     },
@@ -548,7 +579,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "applied": {"type": "integer", "minimum": 0},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}}
@@ -560,7 +591,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "provenance": {"$ref": "model-hub/turn-provenance.schema.json"}
       }
     },
@@ -570,7 +601,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 7},
+        "contract_version": {"const": 8},
         "runtime": {"$ref": "#/definitions/RuntimeApi"}
       }
     }

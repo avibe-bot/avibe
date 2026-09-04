@@ -144,8 +144,8 @@
         "view": { "enum": ["featured", "full"] },
         "checked": {
           "type": "array",
-          "description": "prefixed identifiers, e.g. zhipuai/glm-5.2 (see opencode-overlay.md)",
-          "items": { "type": "string", "pattern": "^[a-z0-9_-]+/.+$" },
+          "description": "Bare canonical model identifiers, stored exactly as the backend emits them.",
+          "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:[\\s\\S]*\\S)?$" },
           "uniqueItems": true
         }
       }
@@ -160,7 +160,7 @@
         "properties": {
           "model_id": {
             "type": "string",
-            "description": "The identifier this backend's menu uses: the built-in id for fixed menus, the prefixed identifier (vendor/model) for open menus."
+            "description": "The exact canonical identifier this backend's menu uses."
           },
           "chain_length": {
             "type": "integer",
@@ -222,8 +222,7 @@
         ]
       }
     },
-    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Compatibility projection for older clients. New clients consume catalog_models." },
-    "standard_vendors": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): opencode only — server-populated mirror of STANDARD_OPENCODE_VENDOR_IDS (core/handlers/model_hub/identifiers.py) so the UI never hand-mirrors vendor lists; null otherwise." }
+    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Compatibility projection for older clients. New clients consume catalog_models." }
   },
   "allOf": [
     {
@@ -324,12 +323,11 @@
       }
     },
     {
-      "$comment": "Fixed-menu backends expose their built-in model catalog; open-menu state and provider metadata are null.",
+      "$comment": "Fixed-menu backends expose their built-in model catalog; open-menu state is null.",
       "if": { "properties": { "menu_kind": { "const": "fixed" } }, "required": ["menu_kind"] },
       "then": {
         "properties": {
-          "menu": { "type": "null" },
-          "standard_vendors": { "type": "null" }
+          "menu": { "type": "null" }
         }
       }
     },
@@ -349,6 +347,34 @@
     {
       "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
       "then": { "properties": { "menu_kind": { "const": "fixed" } } }
+    },
+    {
+      "$comment": "BackendModel has no discriminator, so the containing catalog owns native_protocol presence.",
+      "if": { "properties": { "backend": { "const": "opencode" } }, "required": ["backend"] },
+      "then": {
+        "properties": {
+          "catalog_models": {
+            "items": {
+              "allOf": [
+                { "$ref": "backend-model.schema.json" },
+                { "required": ["native_protocol"] }
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "catalog_models": {
+            "items": {
+              "allOf": [
+                { "$ref": "backend-model.schema.json" },
+                { "not": { "required": ["native_protocol"] } }
+              ]
+            }
+          }
+        }
+      }
     },
     {
       "$comment": "A non-null sources object always carries a real eligibility array. The API guard enforces one row per existing Source and requires every id in order to have eligible=true; draft-07 cannot compare the two arrays directly.",
@@ -371,16 +397,14 @@
       "mode": "hub",
       "menu_kind": "fixed",
       "menu": null,
-      "builtin_models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-      "standard_vendors": null
+      "builtin_models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
     },
     {
       "backend": "opencode",
       "mode": "hub",
       "menu_kind": "open",
-      "menu": { "view": "featured", "checked": ["anthropic/claude-opus-4-6", "openai/gpt-5.6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air"] },
-      "builtin_models": null,
-      "standard_vendors": ["anthropic", "deepseek", "github-copilot", "google", "groq", "kimi", "minimax", "mistral", "moonshot", "openai", "openrouter", "together", "xai", "zhipuai"]
+      "menu": { "view": "featured", "checked": ["claude-opus-4-6", "gpt-5.6", "glm-5.2", "glm-5.2-air"] },
+      "builtin_models": null
     }
   ]
 }

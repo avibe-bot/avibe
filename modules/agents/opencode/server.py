@@ -32,8 +32,10 @@ from modules.agents.opencode.caller_context import ensure_plugin_installed, serv
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
 from vibe.opencode_config import (
+    OpenCodeRuntimeConfigInvalidError,
     get_opencode_custom_provider_adapter,
     load_first_opencode_user_config,
+    managed_opencode_runtime_config_content as _managed_runtime_config_content,
     parse_jsonc_object,
     read_opencode_provider_auth_entries,
 )
@@ -53,51 +55,6 @@ _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 # Bump whenever the process-level Avibe policy applied in ``_start_server``
 # changes so an adopted process cannot silently keep the previous behavior.
 _MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v2"
-
-
-class OpenCodeRuntimeConfigInvalidError(RuntimeError):
-    """The inherited OpenCode runtime override cannot be safely managed."""
-
-
-def _managed_runtime_config_content(raw: str | bytes | None) -> str:
-    """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
-
-    if raw is None:
-        payload: Any = {}
-    else:
-        try:
-            content = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
-            if not isinstance(content, str):
-                raise TypeError("runtime config override must be text")
-            payload = parse_jsonc_object(content)
-        except (TypeError, UnicodeDecodeError, ValueError) as exc:
-            raise OpenCodeRuntimeConfigInvalidError(
-                "OpenCode runtime config override is invalid JSONC"
-            ) from exc
-    if not isinstance(payload, dict):
-        raise OpenCodeRuntimeConfigInvalidError(
-            "OpenCode runtime config override must be a JSON object"
-        )
-
-    tools = payload.get("tools")
-    managed_tools = dict(tools) if isinstance(tools, dict) else {}
-    managed_tools["skill"] = False
-    payload["tools"] = managed_tools
-
-    permission = payload.get("permission")
-    if permission is None:
-        managed_permission: dict[str, Any] = {}
-    elif isinstance(permission, str):
-        managed_permission = {"*": permission}
-    elif isinstance(permission, dict):
-        managed_permission = dict(permission)
-    else:
-        raise OpenCodeRuntimeConfigInvalidError(
-            "OpenCode runtime permission override must be a string or object"
-        )
-    managed_permission["skill"] = "deny"
-    payload["permission"] = managed_permission
-    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def _percent_encode_path(path: str) -> str:
@@ -167,7 +124,7 @@ def _project_model_hub_models(
 def _public_opencode_catalog(
     payload: Any,
     *,
-    runtime_provider_id: str | None,
+    runtime_provider_ids: tuple[str, ...],
     model_hub_models: dict[str, Any] | None = None,
 ) -> Any:
     """Remove private transport state and merge the desired public projection."""
@@ -187,15 +144,13 @@ def _public_opencode_catalog(
             projected[key] = [
                 entry
                 for entry in value
-                if runtime_provider_id is None
-                or _provider_id(entry) != runtime_provider_id
+                if _provider_id(entry) not in runtime_provider_ids
             ]
         elif isinstance(value, dict):
             projected[key] = {
                 provider_id: entry
                 for provider_id, entry in value.items()
-                if runtime_provider_id is None
-                or provider_id != runtime_provider_id
+                if provider_id not in runtime_provider_ids
             }
 
     connected = projected.get("connected")
@@ -203,7 +158,7 @@ def _public_opencode_catalog(
         projected["connected"] = [
             provider_id
             for provider_id in connected
-            if runtime_provider_id is None or provider_id != runtime_provider_id
+            if provider_id not in runtime_provider_ids
         ]
 
     for key in ("default", "provider"):
@@ -212,8 +167,7 @@ def _public_opencode_catalog(
             projected[key] = {
                 provider_id: entry
                 for provider_id, entry in value.items()
-                if runtime_provider_id is None
-                or provider_id != runtime_provider_id
+                if provider_id not in runtime_provider_ids
             }
 
     providers = projected.get("providers")
@@ -225,9 +179,8 @@ def _public_opencode_catalog(
 
     model = projected.get("model")
     if (
-        runtime_provider_id is not None
-        and isinstance(model, str)
-        and model.split("/", 1)[0] == runtime_provider_id
+        isinstance(model, str)
+        and model.split("/", 1)[0] in runtime_provider_ids
     ):
         projected.pop("model", None)
     return projected
@@ -306,7 +259,7 @@ class OpenCodeServerManager:
         self._model_hub_overlay_path: Optional[str] = None
         self._model_hub_overlay_hash: Optional[str] = None
         self._model_hub_overlay_content: Optional[str] = None
-        self._model_hub_overlay_provider_id: Optional[str] = None
+        self._model_hub_overlay_provider_ids: tuple[str, ...] = ()
         self._model_hub_overlay_transition: tuple[
             Optional[str], Optional[str], object
         ] | None = None
@@ -706,34 +659,52 @@ class OpenCodeServerManager:
         active = info.get("active_run_sessions") if isinstance(info, dict) else None
         return isinstance(active, list) and bool(active)
 
-    def _active_model_hub_provider_id(self) -> str | None:
-        if self._model_hub_overlay_provider_id:
-            return self._model_hub_overlay_provider_id
+    def _active_model_hub_provider_ids(self) -> tuple[str, ...]:
+        if self._model_hub_overlay_provider_ids:
+            return self._model_hub_overlay_provider_ids
         info = self._read_pid_file()
         if not self._pid_file_references_current_server(info):
-            return None
-        provider_id = (
-            info.get("model_hub_overlay_provider_id")
+            return ()
+        provider_ids = (
+            info.get("model_hub_overlay_provider_ids")
             if isinstance(info, dict)
-            else None
+            else ()
         )
-        return provider_id if isinstance(provider_id, str) and provider_id else None
+        if not isinstance(provider_ids, list) or any(
+            not isinstance(provider_id, str) or not provider_id
+            for provider_id in provider_ids
+        ):
+            return ()
+        return tuple(dict.fromkeys(provider_ids))
 
     async def configure_model_hub_overlay(self, overlay: Any | None) -> object:
         """Select an overlay and reserve it until the caller registers its run."""
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
-        desired_provider_id = getattr(overlay, "provider_id", None)
-        if overlay is not None and not isinstance(desired_provider_id, str):
-            raise RuntimeError("Model Hub OpenCode overlay provider is unavailable")
+        desired_provider_ids = getattr(overlay, "provider_ids", ())
+        if overlay is not None and (
+            not isinstance(desired_provider_ids, tuple)
+            or not desired_provider_ids
+            or any(
+                not isinstance(provider_id, str) or not provider_id
+                for provider_id in desired_provider_ids
+            )
+            or len(set(desired_provider_ids)) != len(desired_provider_ids)
+        ):
+            raise RuntimeError("Model Hub OpenCode overlay providers are unavailable")
         desired_content = None
         if overlay is not None:
             content = getattr(overlay, "content", None)
             if isinstance(content, bytes):
-                desired_content = content.decode("utf-8")
+                desired_content = _managed_runtime_config_content(content)
             elif isinstance(content, str):
-                desired_content = content
+                desired_content = _managed_runtime_config_content(content)
+            if desired_content is None:
+                raise RuntimeError("Model Hub OpenCode overlay content is unavailable")
+            composed_hash = hashlib.sha256(desired_content.encode()).hexdigest()
+            if composed_hash != desired_hash:
+                raise RuntimeError("Model Hub OpenCode overlay content hash changed")
         drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
         transition_owner = object()
         owns_transition = False
@@ -770,7 +741,7 @@ class OpenCodeServerManager:
                             self._model_hub_overlay_path = desired_path
                             self._model_hub_overlay_hash = desired_hash
                             self._model_hub_overlay_content = desired_content
-                            self._model_hub_overlay_provider_id = desired_provider_id
+                            self._model_hub_overlay_provider_ids = desired_provider_ids
                             self._model_hub_overlay_reservations[transition_owner] = (
                                 desired_path,
                                 desired_hash,
@@ -806,7 +777,7 @@ class OpenCodeServerManager:
                                 self._model_hub_overlay_path = desired_path
                                 self._model_hub_overlay_hash = desired_hash
                                 self._model_hub_overlay_content = desired_content
-                                self._model_hub_overlay_provider_id = desired_provider_id
+                                self._model_hub_overlay_provider_ids = desired_provider_ids
                                 if await self._is_healthy():
                                     logger.info(
                                         "Restarting OpenCode server after Model Hub overlay change"
@@ -828,6 +799,27 @@ class OpenCodeServerManager:
                     transition = self._model_hub_overlay_transition
                     if transition is not None and transition[2] is transition_owner:
                         self._model_hub_overlay_transition = None
+
+    async def stop_for_empty_model_hub_menu(self) -> None:
+        """Drain and stop the shared server when Hub has no selectable model."""
+
+        while True:
+            async with self._get_lock():
+                if (
+                    self._active_requests > 0
+                    or self._has_active_run_sessions()
+                    or self._model_hub_overlay_reservations
+                ):
+                    should_wait = True
+                else:
+                    should_wait = False
+                    if await self._is_healthy():
+                        await self._restart_for_auth_refresh_locked(
+                            native_turns_drained=True,
+                        )
+            if not should_wait:
+                return
+            await asyncio.sleep(0.05)
 
     async def release_model_hub_overlay_reservation(
         self,
@@ -938,8 +930,10 @@ class OpenCodeServerManager:
             if self._model_hub_overlay_path and self._model_hub_overlay_hash:
                 payload["model_hub_overlay_path"] = self._model_hub_overlay_path
                 payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
-            if self._model_hub_overlay_provider_id:
-                payload["model_hub_overlay_provider_id"] = self._model_hub_overlay_provider_id
+            if self._model_hub_overlay_provider_ids:
+                payload["model_hub_overlay_provider_ids"] = list(
+                    self._model_hub_overlay_provider_ids
+                )
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
@@ -1779,9 +1773,9 @@ class OpenCodeServerManager:
                     raw_content = Path(self._model_hub_overlay_path).read_bytes()
                 except OSError as exc:
                     raise RuntimeError("Model Hub OpenCode overlay is unavailable") from exc
-                if hashlib.sha256(raw_content).hexdigest() != self._model_hub_overlay_hash:
-                    raise RuntimeError("Model Hub OpenCode overlay content hash changed")
-                content = raw_content.decode("utf-8")
+                content = _managed_runtime_config_content(raw_content)
+            if hashlib.sha256(content.encode()).hexdigest() != self._model_hub_overlay_hash:
+                raise RuntimeError("Model Hub OpenCode overlay content hash changed")
             # Inline config is OpenCode's runtime-override tier, loaded after
             # project config. Reasserting the exact overlay here prevents a
             # checked-in opencode.json from replacing Hub provider transport.
@@ -2228,7 +2222,7 @@ class OpenCodeServerManager:
                     if resp.status == 200:
                         return _public_opencode_catalog(
                             await resp.json(),
-                            runtime_provider_id=self._active_model_hub_provider_id(),
+                            runtime_provider_ids=self._active_model_hub_provider_ids(),
                             model_hub_models=model_hub_models,
                         )
                     return {"providers": [], "default": {}}
@@ -2278,7 +2272,7 @@ class OpenCodeServerManager:
                     if resp.status == 200:
                         return _public_opencode_catalog(
                             await resp.json(),
-                            runtime_provider_id=self._active_model_hub_provider_id(),
+                            runtime_provider_ids=self._active_model_hub_provider_ids(),
                         )
                     return {}
             except Exception as e:
@@ -2341,7 +2335,7 @@ class OpenCodeServerManager:
                     if resp.status == 200:
                         return _public_opencode_catalog(
                             await resp.json(),
-                            runtime_provider_id=self._active_model_hub_provider_id(),
+                            runtime_provider_ids=self._active_model_hub_provider_ids(),
                         )
                     return {}
             except Exception as e:

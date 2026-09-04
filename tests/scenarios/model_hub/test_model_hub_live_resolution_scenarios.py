@@ -60,7 +60,7 @@ class MemoryStore:
 
 def _requested_model(backend: str) -> str:
     if backend == "opencode":
-        return "anthropic/model-live"
+        return "model-live"
     return model_hub_fixed_menu_ids(backend)[0]
 
 
@@ -205,7 +205,10 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
         )
         if backend == "opencode":
             agent.models = [
-                ModelHubBackendModelConfig(id=_requested_model(backend))
+                ModelHubBackendModelConfig(
+                    id=_requested_model(backend),
+                    native_protocol="anthropic",
+                )
             ]
             assert agent.menu is not None
             agent.menu.checked = [_requested_model(backend)]

@@ -235,21 +235,15 @@ describe('BackendModelCatalogDialog', () => {
 
   it('asks which row a typed ID names as the ID it would be saved as', async () => {
     const user = userEvent.setup();
-    // The id the user types is not yet the id the row is saved under: on OpenCode
-    // an unrecognized provider resolves to `custom/`, and the editor applies that
-    // rule when it commits. So the lookup behind this door has to be asked about
-    // the resolved id. Asked about the raw one it misses the row the user already
-    // has and opens a blank one, which then commits over that same saved id and
-    // drops everything they had described about it.
-    const FOO = model('custom/foo', {
+    const FOO = model('foo', {
+      native_protocol: 'openai_responses',
       display_name: 'Foo Air',
       context_window: 180000,
       origin: 'manual',
     });
-    const catalog = [model('zai/glm-4.7'), FOO];
+    const catalog = [model('glm-4.7', { native_protocol: 'openai_responses' }), FOO];
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, {
       backend: 'opencode',
-      standard_vendors: ['zai'],
     }));
     // Nothing offered under this query, which is the only state that offers the
     // typed id as a custom model at all.
@@ -265,7 +259,7 @@ describe('BackendModelCatalogDialog', () => {
 
     // Their own row, opened as itself: the id fixed, and the description they
     // wrote still in it. The button is the tell — this is an edit, not an add.
-    expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('custom/foo');
+    expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('foo');
     expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Foo Air');
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
     await user.type(screen.getByLabelText('Maximum output'), '8000');
@@ -277,7 +271,7 @@ describe('BackendModelCatalogDialog', () => {
     // window gone — the write is what the user would have to undo by hand.
     await waitFor(() => expect(write).toHaveBeenCalledWith('opencode', {
       baseline: catalog,
-      models: [model('zai/glm-4.7'), { ...FOO, max_output_tokens: 8000 }],
+      models: [model('glm-4.7', { native_protocol: 'openai_responses' }), { ...FOO, max_output_tokens: 8000 }],
     }));
   });
 

@@ -1,5 +1,5 @@
 {
-  "contract_version": 7,
+  "contract_version": 8,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -356,6 +356,41 @@
       "mapping": {
         "builtin": "builtin",
         "providers": "provider"
+      }
+    },
+    {
+      "id": "M11",
+      "vocabulary": "OpenCode native protocol",
+      "rule": "equality",
+      "sets": [
+        {
+          "schema": "backend-model.schema.json",
+          "paths": ["/properties/native_protocol"]
+        },
+        {
+          "schema": "api-response.schema.json",
+          "paths": [
+            "/definitions/ModelCandidate/properties/native_protocol",
+            "/definitions/ModelsDevResponse/properties/matches/items/properties/native_protocol"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "M12",
+      "vocabulary": "OpenCode native protocol provider ids",
+      "rule": "mapping",
+      "home": {
+        "schema": "backend-model.schema.json",
+        "path": "/properties/native_protocol"
+      },
+      "target": {
+        "schema": "backend-model.schema.json",
+        "path": "/definitions/OpenCodeOverlayProviderId"
+      },
+      "mapping": {
+        "openai_responses": "avibe-openai",
+        "anthropic": "avibe-anthropic"
       }
     }
   ],

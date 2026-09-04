@@ -12,10 +12,6 @@ from config.v2_config import (
     ModelHubConfig,
     ModelHubRouteHopConfig,
     ModelHubSourceConfig,
-    canonical_opencode_menu_identity,
-)
-from core.handlers.model_hub.identifiers import (
-    opencode_model_id,
 )
 
 
@@ -32,8 +28,6 @@ class ExactHopInspection:
     menu_model: str
     source_id: str | None
     model_id: str | None
-    menu_provider_id: str | None
-    menu_model_id: str
     source: ModelHubSourceConfig | None
     configuration_eligible: bool
     inventory_member: bool
@@ -64,8 +58,6 @@ class ModelHubTurnResolution:
     unsupported_source_ids: tuple[str, ...] = ()
     route_unconfigured: bool = False
     route_reason: str | None = None
-    menu_provider_id: str | None = None
-    menu_model_id: str | None = None
     provider: str | None = None
     recoverable_source_ids: tuple[str, ...] = ()
     supply_status: SupplyStatus | None = None
@@ -98,32 +90,6 @@ def allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
 
 def source_eligible_for_backend(source: ModelHubSourceConfig, backend: str) -> bool:
     return ModelHubConfig.source_eligible_for_backend(source, backend)
-
-
-def opencode_source_model_identity(
-    source: ModelHubSourceConfig,
-    model_id: str,
-) -> str:
-    return opencode_model_id(source.vendor, model_id)
-
-
-def opencode_inventory_menu_ids(config: ModelHubConfig) -> frozenset[str]:
-    """Return OpenCode identities backed by current eligible inventory."""
-
-    identities = {
-        opencode_source_model_identity(source, model.id)
-        for source in config.sources
-        if source_eligible_for_backend(source, "opencode")
-        for model in source.models
-        if not model.retired
-    }
-    for menu_model, route in config.agents["opencode"].routes.items():
-        if any(
-            inspect_exact_hop(config, "opencode", menu_model, hop).supply_eligible
-            for hop in route.hops
-        ):
-            identities.add(menu_model)
-    return frozenset(identities)
 
 
 def source_retry_ready(source: ModelHubSourceConfig, now: datetime | None) -> bool:
@@ -169,21 +135,6 @@ def source_runnable(
     return source_retry_ready(source, now)
 
 
-def normalize_opencode_requested_model(
-    requested_model: str,
-    checked_identifiers: tuple[str, ...],
-) -> str | None:
-    """Normalize a bare OpenCode selection to one exact checked menu id."""
-
-    candidate = str(requested_model or "").strip()
-    if not candidate:
-        return None
-    if candidate in checked_identifiers:
-        return candidate
-    matches = [identifier for identifier in checked_identifiers if identifier.endswith(f"/{candidate}")]
-    return matches[0] if len(matches) == 1 else None
-
-
 _CLAUDE_FAMILY_ALIASES = {
     "opus": "opus",
     "opus[1m]": "opus",
@@ -212,7 +163,6 @@ def matching_v1_model_id(
     backend: BackendName,
     requested_model: str,
     source: ModelHubSourceConfig,
-    checked_models: tuple[str, ...] = (),
     include_manual: bool = False,
 ) -> str | None:
     """Return one concrete observed model for the frozen add-time matching-v1."""
@@ -222,20 +172,6 @@ def matching_v1_model_id(
         for model in source.models
         if (include_manual or model.provenance == "discovered") and not model.retired
     )
-
-    if backend == "opencode":
-        requested_model = normalize_opencode_requested_model(
-            requested_model,
-            checked_models,
-        ) or ""
-        if not requested_model:
-            return None
-        exact = [
-            model.id
-            for model in observed_models
-            if opencode_source_model_identity(source, model.id) == requested_model
-        ]
-        return exact[0] if len(exact) == 1 else None
 
     if (
         backend == "claude"
@@ -284,19 +220,12 @@ def inspect_exact_hop(
 ) -> ExactHopInspection:
     """Inspect one stored hop without matching, substituting, or reordering it."""
 
-    menu_provider_id: str | None = None
-    menu_model_id = menu_model
-    if backend == "opencode":
-        menu_provider_id, menu_model_id = canonical_opencode_menu_identity(menu_model)
-
     if hop is None:
         return ExactHopInspection(
             backend=backend,
             menu_model=menu_model,
             source_id=None,
             model_id=None,
-            menu_provider_id=menu_provider_id,
-            menu_model_id=menu_model_id,
             source=None,
             configuration_eligible=False,
             inventory_member=False,
@@ -314,8 +243,6 @@ def inspect_exact_hop(
             menu_model=menu_model,
             source_id=hop.source_id,
             model_id=hop.model_id,
-            menu_provider_id=menu_provider_id,
-            menu_model_id=menu_model_id,
             source=None,
             configuration_eligible=False,
             inventory_member=False,
@@ -354,8 +281,6 @@ def inspect_exact_hop(
         menu_model=menu_model,
         source_id=source.id,
         model_id=hop.model_id,
-        menu_provider_id=menu_provider_id,
-        menu_model_id=menu_model_id,
         source=source,
         configuration_eligible=configuration_eligible,
         inventory_member=inventory_member,
@@ -442,13 +367,6 @@ def resolve_model_hub_turn(
             supply_status="interrupted",
             route_unconfigured=True,
             route_reason="route_unconfigured",
-        )
-
-    menu_provider_id: str | None = None
-    menu_model_id: str | None = None
-    if backend == "opencode":
-        menu_provider_id, menu_model_id = canonical_opencode_menu_identity(
-            requested_model
         )
 
     inspected_hops = tuple(
@@ -551,8 +469,6 @@ def resolve_model_hub_turn(
         unsupported_source_ids=tuple(unsupported_source_ids),
         route_unconfigured=route_reason == "route_unconfigured",
         route_reason=route_reason,
-        menu_provider_id=menu_provider_id,
-        menu_model_id=menu_model_id,
         recoverable_source_ids=recoverable,
         supply_status=_supply_status(
             inspected_hops,

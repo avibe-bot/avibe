@@ -81,6 +81,7 @@ def test_models_dev_search_normalizes_editable_metadata(monkeypatch, tmp_path):
             "supports_tools": True,
             "supports_reasoning": True,
             "reasoning_efforts": ["low", "high"],
+            "native_protocol": "openai_responses",
         }
     ]
     cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -191,6 +192,22 @@ def test_model_vendor_map_is_versioned_unambiguous_and_ordered():
     assert aggregators
     assert len(set(aggregators)) == len(aggregators)
     assert all(isinstance(provider_id, str) and provider_id for provider_id in aggregators)
+
+
+def test_native_protocol_derivation_uses_every_vendor_family_on_the_last_segment():
+    vendor_map = models_dev_catalog.load_model_vendor_map()
+
+    for family in vendor_map["families"]:
+        model_id = f"aggregator/nested/{family['prefix']}fixture"
+        expected = (
+            "anthropic"
+            if family["vendor_id"] == "anthropic"
+            else "openai_responses"
+        )
+        assert models_dev_catalog.native_protocol_for_model_id(
+            model_id,
+            vendor_map=vendor_map,
+        ) == expected
 
 
 def test_models_dev_deduplicates_by_model_id_and_ranks_first_party_then_match(

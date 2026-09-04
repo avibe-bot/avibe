@@ -18,7 +18,6 @@ import {
   echoableRefusal,
   heldRowFor,
   offeredCandidates,
-  opencodeMenuIdentity,
   orderWithRestored,
   MODELS_DEV_FIELDS,
   pickerGroups,
@@ -27,7 +26,6 @@ import {
   sameBackendModel,
   samePlanContents,
 } from './backendCatalog';
-import { inferProvider, type StandardVendors } from './menus/identifiers';
 import type {
   AgentSupply,
   BackendModel,
@@ -67,6 +65,7 @@ const match: ModelsDevMatch = {
   supports_tools: true,
   supports_reasoning: true,
   reasoning_efforts: ['low', 'high'],
+  native_protocol: 'anthropic',
 };
 
 describe('catalogModelIds', () => {
@@ -102,14 +101,10 @@ describe('catalogModelIds', () => {
 });
 
 describe('applyModelsDevMatch', () => {
-  /** These cases are about the fields a match fills, so they use a backend
-   *  whose ids carry no provider segment; the id rule has its own describe. */
-  const NO_VENDORS: ReadonlySet<string> = new Set();
-
   it('names the row after the model that was picked and fills the rest from it', () => {
     const draft = model('half-typed-anthro', { locked: true, routeable: false });
 
-    const filled = applyModelsDevMatch(draft, match, 'models_dev', 'codex', NO_VENDORS);
+    const filled = applyModelsDevMatch(draft, match, 'models_dev', 'codex');
 
     // Choosing a suggestion is choosing a model, not decorating one, so the row
     // carries that model's own id — the one a backend accepts, not the
@@ -139,12 +134,12 @@ describe('applyModelsDevMatch', () => {
   });
 
   it('takes the origin from the caller so a re-fill never rewrites how the row was created', () => {
-    expect(applyModelsDevMatch(model('m', { origin: 'manual' }), match, 'manual', 'codex', NO_VENDORS).origin).toBe('manual');
-    expect(applyModelsDevMatch(blankBackendModel(), match, 'models_dev', 'codex', NO_VENDORS).origin).toBe('models_dev');
+    expect(applyModelsDevMatch(model('m', { origin: 'manual' }), match, 'manual', 'codex').origin).toBe('manual');
+    expect(applyModelsDevMatch(blankBackendModel(), match, 'models_dev', 'codex').origin).toBe('models_dev');
   });
 
   it('copies the match lists instead of aliasing them', () => {
-    const filled = applyModelsDevMatch(model('m'), match, 'models_dev', 'codex', NO_VENDORS);
+    const filled = applyModelsDevMatch(model('m'), match, 'models_dev', 'codex');
     filled.reasoning_efforts.push('mutated');
 
     expect(match.reasoning_efforts).toEqual(['low', 'high']);
@@ -162,7 +157,6 @@ describe('applyModelsDevMatch', () => {
  * and a field added to `applyModelsDevMatch` alone fails the first case.
  */
 describe('retireModelsDevMatch', () => {
-  const NO_VENDORS: ReadonlySet<string> = new Set();
   /** A match differing from the blank row in every field it fills, so 「the fill
    *  set this」 is never indistinguishable from 「it was already blank」. */
   const sentinel: ModelsDevMatch = {
@@ -177,7 +171,7 @@ describe('retireModelsDevMatch', () => {
     supports_reasoning: true,
     reasoning_efforts: ['sentinel'],
   };
-  const fill = () => applyModelsDevMatch(blankBackendModel(), sentinel, 'models_dev', 'codex', NO_VENDORS);
+  const fill = () => applyModelsDevMatch(blankBackendModel(), sentinel, 'models_dev', 'opencode');
 
   const same = (left: unknown, right: unknown): boolean =>
     Array.isArray(left) && Array.isArray(right)
@@ -234,187 +228,36 @@ describe('retireModelsDevMatch', () => {
   }
 });
 
-/**
- * The id rule, asserted where ids are written instead of at each writer.
- *
- * This started as a table of producers, and the table is what kept failing. The
- * rule was written for the 「use what I typed」 escape; choosing a models.dev
- * suggestion then shipped with a bare id OpenCode rejects; the picker's seed did
- * it again. A list of producers cannot state this property, because the producer
- * that is missing from the list is exactly the one nobody checked — and the list
- * reads complete either way.
- *
- * So the property belongs to `draftWithId`, the one write that gives a draft row
- * its id, and it is stated over arbitrary input rather than over known callers:
- * whatever this function is handed, what it writes is admissible. A producer
- * added later inherits it by calling the only function that can write the field,
- * and the boundary test below is what keeps 「the only」 true.
- */
-describe('the id chokepoint', () => {
-  const VENDORS: StandardVendors = new Set(['anthropic', 'zhipuai']);
-  /** Not a list of cases that must pass — a spread of shapes the field can hold:
-   *  no vendor, a standard one, an unknown one, the escape hatch, extra
-   *  separators, and separators in the positions that parse to nothing. */
-  const HANDED = [
-    'glm-5.2',
-    'zhipuai/glm-5.2',
-    'anthropic/claude',
-    'nosuchvendor/glm-5.2',
-    'custom/glm-5.2',
-    'a/b/c',
-    '/leading',
-    'trailing/',
-  ];
-  /** Who offered the model, when anyone did: the picker and the escape name no
-   *  vendor, a models.dev match names its provider, standard or not. */
-  const OFFERED_BY = ['', 'zhipuai', 'nosuchvendor'];
-
-  /** Admissible as the backend decides it, not as this test decides it. This
-   *  used to ask the vendor list — whether OpenCode's own normalization agreed
-   *  the segment was that segment — and that was the defect, stated as the
-   *  property: `canonical_opencode_menu_identity` admits any segment matching
-   *  its grammar and never consults `standard_vendors`, so the test called
-   *  `nosuchvendor/glm-5.2` inadmissible and locked in a rewrite the server had
-   *  no objection to. The one mirror of that rule is the authority here too. */
-  const admissible = (id: string): boolean => opencodeMenuIdentity(id, 'opencode');
-  /** Each bucket asserted below, and asserted to be inhabited: a filter that
-   *  matches nothing states its property vacuously forever. */
-  const bucket = (of: (id: string) => boolean): string[] => {
-    const ids = HANDED.filter(of);
-    expect(ids.length).toBeGreaterThan(0);
-    return ids;
-  };
-
-  it('round-trips an identity that already names a provider, standard or not', () => {
-    for (const handed of bucket(admissible)) {
-      for (const vendor of OFFERED_BY) {
-        // Byte-identical, `nosuchvendor/…` included. An id the user gave is the
-        // public model they asked for, and the server splits on the first
-        // separator, so `custom/nosuchvendor/glm-5.2` would be accepted as a
-        // different model with nothing downstream to notice the substitution.
-        expect(draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id).toBe(handed);
-      }
+describe('the bare id chokepoint', () => {
+  it('applies the same canonical spelling to OpenCode and Codex', () => {
+    for (const id of ['glm-5.2', 'namespace/model', 'a/b/c']) {
+      expect(backendModelId(` ${id} `)).toBe(id);
+      expect(draftWithId(blankBackendModel(), id, 'opencode').id).toBe(id);
+      expect(draftWithId(blankBackendModel(), id, 'codex').id).toBe(id);
     }
   });
 
-  it('gives an id that names no provider exactly one, from whoever offered it', () => {
-    for (const handed of bucket((id) => !id.includes('/'))) {
-      for (const vendor of OFFERED_BY) {
-        const written = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id;
-        // The vendor list's one job: which segment a SOURCE's vendor maps to,
-        // byte-matching `opencode_model_id(source.vendor, model.id)`.
-        expect(written).toBe(`${inferProvider(vendor, VENDORS)}/${handed}`);
-        expect(admissible(written), `${handed} from ${vendor || 'nobody'} was written as ${written}`).toBe(true);
-      }
-    }
+  it('defaults only a typed OpenCode row to Responses', () => {
+    const row = model('kept', { display_name: 'Kept', context_window: 200_000, origin: 'manual' });
+
+    expect(draftWithId(row, 'glm-5.2', 'opencode')).toEqual({
+      ...row,
+      id: 'glm-5.2',
+      native_protocol: 'openai_responses',
+    });
+    expect(draftWithId(row, 'glm-5.2', 'codex')).toEqual({ ...row, id: 'glm-5.2' });
   });
 
-  it('leaves a malformed identity malformed instead of completing it into another one', () => {
-    for (const handed of bucket((id) => id.includes('/') && !admissible(id))) {
-      for (const vendor of OFFERED_BY) {
-        const written = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor).id;
-        // The prefix is for an id that names no provider, and these name a
-        // broken one. `custom//leading` and `custom/trailing/` are both
-        // admissible to the server and neither is what was typed, so a typo
-        // would be saved as a row instead of refused at the field — which is
-        // where admissibility is asked, of this write's own output.
-        expect(written).toBe(handed);
-        expect(admissible(written)).toBe(false);
-      }
-    }
-  });
-
-  it('is settled by one pass, so resolving an already-resolved id changes nothing', () => {
-    for (const handed of HANDED) {
-      for (const vendor of OFFERED_BY) {
-        const once = draftWithId(blankBackendModel(), handed, 'opencode', VENDORS, vendor);
-        // Why a producer may route a value through here twice — an editor that
-        // resolves at commit what the escape already resolved — without the
-        // prefix accumulating.
-        expect(draftWithId(once, once.id, 'opencode', VENDORS, vendor).id).toBe(once.id);
-      }
-    }
-  });
-
-  it('has nothing to prefix the blank floor with', () => {
-    // The one id that is not admissible and must still pass: a draft opens with
-    // no id at all, and 「required」 is the editor's answer to that, not a vendor.
-    expect(draftWithId(blankBackendModel(), '', 'opencode', VENDORS).id).toBe('');
-  });
-
-  it('leaves a backend without provider segments alone', () => {
-    for (const handed of HANDED) {
-      expect(draftWithId(blankBackendModel(), handed, 'codex', VENDORS).id).toBe(handed);
-    }
-  });
-
-  it('writes the id and nothing else', () => {
-    const row = model('kept', { display_name: 'Kept', context_window: 200_000, origin: 'models_dev' });
-    expect(draftWithId(row, 'glm-5.2', 'opencode', VENDORS)).toEqual({ ...row, id: 'custom/glm-5.2' });
-  });
-
-  it('takes the offering provider when it is standard and falls back to custom when it is not', () => {
-    const from = (providerId: string, vendors: StandardVendors) => applyModelsDevMatch(
+  it('takes both the bare id and native protocol from a models.dev match', () => {
+    const filled = applyModelsDevMatch(
       blankBackendModel(),
-      { ...match, model_id: 'glm-5.2', provider_id: providerId },
+      { ...match, model_id: 'glm-5.2', native_protocol: 'anthropic' },
       'models_dev',
       'opencode',
-      vendors,
-    ).id;
+    );
 
-    expect(from('zhipuai', VENDORS)).toBe('zhipuai/glm-5.2');
-    // Not `zhipuai/…`: an unrecognized vendor is one provider called `custom`
-    // there, so naming it would produce an id the menu rejects.
-    expect(from('zhipuai', new Set())).toBe('custom/glm-5.2');
-  });
-
-  it('gives an id that names no vendor a custom provider', () => {
-    expect(backendModelId('glm-5.2', 'opencode', VENDORS)).toBe('custom/glm-5.2');
-  });
-});
-
-describe('the OpenCode identity rule', () => {
-  // One clause of `canonical_opencode_menu_identity` (config/v2_config.py) each,
-  // named by what the server checks, so a rule that moves there is findable
-  // here. The server is still the authority; this only decides early enough for
-  // the id field to say what is wrong before the `PUT` rejects the whole list.
-  it.each([
-    // `not separator`: nothing splits the halves.
-    ['glm-5.2', false],
-    // `not model_id`: the hole this closes. Any provider prefix is taken as
-    // given by the chokepoint, which hands `openai/` straight back — and
-    // `custom/` is the same hole behind the fallback prefix it adds itself.
-    ['openai/', false],
-    ['custom/', false],
-    // `not provider`: a leading separator names no provider.
-    ['/glm-5.2', false],
-    // The provider segment's own shape: lowercase alphanumeric runs, joined by
-    // single `.`, `_` or `-`.
-    ['OpenAI/glm-5.2', false],
-    ['-openai/glm-5.2', false],
-    ['open_ai/glm-5.2', true],
-    ['relay.example/glm-5.2', true],
-    // `identifier != identifier.strip()`, then `model_id != model_id.strip()`.
-    [' openai/glm-5.2', false],
-    ['openai/glm-5.2 ', false],
-    ['openai/ glm-5.2', false],
-    // Split on the FIRST separator, so a reseller keeps its own: this is
-    // provider `openrouter` serving the model `anthropic/claude-x`.
-    ['openrouter/anthropic/claude-x', true],
-    ['custom/glm-5.2-air', true],
-  ])('mirrors the server rule for %s', (id, admissible) => {
-    expect(opencodeMenuIdentity(id, 'opencode')).toBe(admissible);
-  });
-
-  it('judges nothing for a backend whose ids have no segments to satisfy', () => {
-    // claude and codex ids are flat, and their admission rules stay the
-    // server's alone: a copy here would be a second authority over admission
-    // that drifts silently (Known-by-design 22).
-    for (const backend of ['claude', 'codex'] as const) {
-      for (const id of ['openai/', 'claude-sonnet-4-5', 'anything at all']) {
-        expect(opencodeMenuIdentity(id, backend)).toBe(true);
-      }
-    }
+    expect(filled.id).toBe('glm-5.2');
+    expect(filled.native_protocol).toBe('anthropic');
   });
 });
 

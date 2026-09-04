@@ -3,6 +3,11 @@
   "$id": "model-hub/backend-model.schema.json",
   "title": "BackendModel",
   "description": "One model exposed by a backend Agent. This is backend menu metadata, not upstream inventory and not a Route.",
+  "definitions": {
+    "OpenCodeOverlayProviderId": {
+      "enum": ["avibe-openai", "avibe-anthropic"]
+    }
+  },
   "type": "object",
   "required": [
     "id",
@@ -24,7 +29,7 @@
     "id": {
       "type": "string",
       "minLength": 1,
-      "description": "The exact identifier shown to and emitted by the backend Agent. OpenCode identifiers use provider/model form. Responses may echo longer identifiers persisted by older releases; mutation admission limits newly added identifiers to 256 characters."
+      "description": "The exact canonical identifier shown to and emitted by the backend Agent. OpenCode stores this bare id without an overlay provider prefix. Mutation admission limits newly added identifiers to 256 characters."
     },
     "display_name": {
       "type": ["string", "null"],
@@ -73,6 +78,10 @@
       "items": { "type": "string", "minLength": 1, "maxLength": 64 },
       "uniqueItems": true,
       "description": "Effort values are sent verbatim unless supports_reasoning is false. False suppresses their runtime projection without deleting the list, so returning the capability to null is lossless. An empty array means the backend omits the effort parameter."
+    },
+    "native_protocol": {
+      "enum": ["openai_responses", "anthropic"],
+      "description": "OpenCode only. The frontend protocol used by its generated provider; containing catalog arrays require it for OpenCode and forbid it for other backends."
     },
     "locked": {
       "type": "boolean",

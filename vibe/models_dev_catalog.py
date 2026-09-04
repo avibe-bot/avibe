@@ -62,6 +62,22 @@ def _first_party_vendor(
     return max(matches, key=lambda item: len(item["prefix"]))["vendor_id"]
 
 
+def native_protocol_for_model_id(
+    model_id: str,
+    *,
+    vendor_map: dict[str, Any] | None = None,
+) -> str:
+    """Derive the OpenCode-facing protocol from the model family authority."""
+
+    family_id = model_id.rsplit("/", 1)[-1]
+    resolved_map = vendor_map if vendor_map is not None else load_model_vendor_map()
+    return (
+        "anthropic"
+        if _first_party_vendor(family_id, resolved_map) == "anthropic"
+        else "openai_responses"
+    )
+
+
 def _vendor_rank(
     vendor_id: str,
     *,
@@ -347,6 +363,10 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                     else None
                 ),
                 "reasoning_efforts": reasoning_efforts,
+                "native_protocol": native_protocol_for_model_id(
+                    model_id,
+                    vendor_map=vendor_map,
+                ),
             }
             admitted = admissible_backend_model(
                 None,
@@ -362,6 +382,7 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                     "supports_tools": row["supports_tools"],
                     "supports_reasoning": row["supports_reasoning"],
                     "reasoning_efforts": row["reasoning_efforts"],
+                    "native_protocol": row["native_protocol"],
                 },
             )
             if admitted is None:
@@ -378,6 +399,7 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                     "supports_tools": admitted.supports_tools,
                     "supports_reasoning": admitted.supports_reasoning,
                     "reasoning_efforts": admitted.reasoning_efforts,
+                    "native_protocol": admitted.native_protocol,
                 }
             )
             candidates.setdefault(admitted.id, []).append((score, provider_id, row))

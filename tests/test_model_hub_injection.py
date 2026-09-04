@@ -212,30 +212,32 @@ def test_codex_hub_launch_uses_toml_safe_catalog_path(tmp_path):
     assert tomllib.loads(f"path = {encoded_path}\n")["path"] == str(catalog_path)
 
 
-def test_opencode_overlay_requires_exact_checked_identifier():
+def test_opencode_overlay_addresses_bare_ids_through_their_native_provider():
     overlay = SimpleNamespace(
-        provider_id="avibe-model-hub-runtime",
-        checked_identifiers=("openai/gpt-5", "custom/gpt-5"),
-        available_identifiers=("openai/gpt-5", "custom/gpt-5"),
+        model_provider_ids=(
+            ("gpt-5", "avibe-openai"),
+            ("claude-opus-5", "avibe-anthropic"),
+        ),
+        checked_identifiers=("gpt-5", "claude-opus-5"),
+        available_identifiers=("gpt-5", "claude-opus-5"),
     )
-    assert opencode_requested_model_for_overlay("openai/gpt-5", overlay) == (
-        "openai/gpt-5"
-    )
-    assert opencode_model_for_overlay("openai/gpt-5", overlay) == (
-        "avibe-model-hub-runtime/openai/gpt-5"
+    assert opencode_requested_model_for_overlay("gpt-5", overlay) == "gpt-5"
+    assert opencode_model_for_overlay("gpt-5", overlay) == "avibe-openai/gpt-5"
+    assert opencode_model_for_overlay("claude-opus-5", overlay) == (
+        "avibe-anthropic/claude-opus-5"
     )
     with pytest.raises(ModelHubError):
-        opencode_model_for_overlay("gpt-5", overlay)
+        opencode_model_for_overlay("missing", overlay)
 
 
-def test_opencode_overlay_never_repeats_add_time_bare_identifier_matching():
+def test_opencode_overlay_never_repairs_a_prefixed_identifier():
     overlay = SimpleNamespace(
-        provider_id="avibe-model-hub-runtime",
-        checked_identifiers=("openai/gpt-5",),
-        available_identifiers=("openai/gpt-5",),
+        model_provider_ids=(("gpt-5", "avibe-openai"),),
+        checked_identifiers=("gpt-5",),
+        available_identifiers=("gpt-5",),
     )
     with pytest.raises(ModelHubError):
-        opencode_model_for_overlay("gpt-5", overlay)
+        opencode_model_for_overlay("openai/gpt-5", overlay)
 
 
 def test_fallback_launch_identity_is_stable_for_same_route():

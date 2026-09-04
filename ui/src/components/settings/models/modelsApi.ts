@@ -26,6 +26,7 @@ import type {
   ModelCandidate,
   ModelCandidateSupplier,
   ModelsDevMatch,
+  NativeProtocol,
   OAuthFlow,
   ProbeResult,
   ResolutionEvent,
@@ -295,6 +296,7 @@ export const CANDIDATE_ORIGINS: readonly CandidateOrigin[] = ['builtin', 'provid
 /** The groups the server names as a removed row's way back (C4). A value it
  *  does not state is not a group, and `null` is a value it states. */
 const REENTRY_GROUPS: readonly ('builtin' | 'providers')[] = ['builtin', 'providers'];
+const NATIVE_PROTOCOLS: readonly NativeProtocol[] = ['openai_responses', 'anthropic'];
 
 /** What the server says would offer this id again if it left the menu, read
  *  only when the server says it. Absent stays absent rather than becoming
@@ -332,6 +334,9 @@ const modelCandidates = (raw: unknown, fallbackOrigin: CandidateOrigin): ModelCa
           origin: CANDIDATE_ORIGINS.includes(row.origin as CandidateOrigin)
             ? row.origin as CandidateOrigin
             : fallbackOrigin,
+          ...(NATIVE_PROTOCOLS.includes(row.native_protocol as NativeProtocol)
+            ? { native_protocol: row.native_protocol as NativeProtocol }
+            : {}),
           ...reentryGroup(row),
         }];
       })

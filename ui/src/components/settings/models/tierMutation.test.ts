@@ -21,7 +21,7 @@ const source = (tiers: string[], provenance?: ReasoningEffortsSource | null): So
     reasoning_efforts: tiers,
     // `undefined` here means the key is absent, which is the payload a server
     // that predates the field sends and the parser is expected to tolerate. The
-    // v7 type has no shape for that, so the omission is asserted at the one key
+    // v8 type has no shape for that, so the omission is asserted at the one key
     // it concerns rather than by loosening the whole fixture.
     ...(provenance === undefined
       ? ({} as Pick<SuppliedModel, 'reasoning_efforts_source'>)

@@ -78,6 +78,85 @@ def test_opencode_runtime_config_failure_is_localized() -> None:
     assert "internal diagnostic" not in display
 
 
+def test_opencode_hub_turn_with_empty_menu_stops_server_before_launch(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    reservation = object()
+
+    class _Runtime:
+        @staticmethod
+        def turn_mode(_backend):
+            return "hub"
+
+        @staticmethod
+        async def prepare_opencode_overlay():
+            return None
+
+    class _Server:
+        async def configure_model_hub_overlay(self, overlay):
+            assert overlay is None
+            calls.append("configure")
+            return reservation
+
+        async def release_model_hub_overlay_reservation(self, value):
+            assert value is reservation
+            calls.append("release")
+
+        async def stop_for_empty_model_hub_menu(self):
+            calls.append("stop")
+
+        async def ensure_running(self):
+            raise AssertionError("empty Hub menu must not launch OpenCode")
+
+    server = _Server()
+
+    async def _get_server():
+        return server
+
+    async def _emit_failure(*_args, **_kwargs):
+        calls.append("failure")
+
+    async def _remove_ack(_request):
+        calls.append("ack")
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        _emit_failure,
+    )
+    controller = type(
+        "Controller",
+        (),
+        {
+            "config": type("Config", (), {"language": "en"})(),
+            "model_hub_runtime": _Runtime(),
+        },
+    )()
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent._get_server = _get_server
+    agent._remove_ack_reaction = _remove_ack
+    request = AgentRequest(
+        context=MessageContext(
+            user_id="user",
+            channel_id="channel",
+            platform="slack",
+            platform_specific={},
+        ),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::channel",
+    )
+
+    asyncio.run(agent._process_message(request))
+
+    assert calls == ["configure", "release", "stop", "failure", "ack"]
+
+
 class _StubClient(BaseIMClient):
     def __init__(self, name: str, *, supports_editing: bool = True, run_until_stopped: bool = False):
         super().__init__(_StubConfig())

@@ -23,6 +23,7 @@ const match = (overrides: Partial<ModelsDevMatch> = {}): ModelsDevMatch => ({
   supports_tools: true,
   supports_reasoning: true,
   reasoning_efforts: ['low', 'high'],
+  native_protocol: 'anthropic',
   ...overrides,
 });
 
@@ -37,7 +38,6 @@ const renderEditor = (overrides: Partial<React.ComponentProps<typeof BackendMode
         model={null}
         takenIds={new Set()}
         effortSuggestions={[]}
-        standardVendors={new Set()}
         onCancel={onCancel}
         onCommit={onCommit}
         {...overrides}
@@ -267,32 +267,20 @@ describe('BackendModelEditorDialog', () => {
     expect(screen.queryByRole('listbox')).toBeNull();
   });
 
-  it('takes the query as the ID and, on OpenCode, as one OpenCode accepts', async () => {
+  it('takes an OpenCode query as the bare model ID', async () => {
     const user = userEvent.setup();
-    // The one id rule this dialog owns: OpenCode addresses `provider/model`, so
-    // the escape supplies the provider a query does not name and offers the id
-    // the backend will accept rather than the one it would reject after saving.
-    const { onCommit } = renderEditor({ backend: 'opencode', standardVendors: new Set(['zai']) });
+    const { onCommit } = renderEditor({ backend: 'opencode' });
 
     await user.type(modelField(), 'glm-4.7');
-    expect(await screen.findByRole('option', { name: 'Use "custom/glm-4.7" as the model ID' })).toBeTruthy();
+    await user.click(await screen.findByRole('option', { name: 'Use "glm-4.7" as the model ID' }));
 
-    await user.clear(modelField());
-    await user.type(modelField(), 'zai/glm-4.7');
-    // A query that already names a provider is taken as typed.
-    expect(await screen.findByRole('option', { name: 'Use "zai/glm-4.7" as the model ID' })).toBeTruthy();
-
-    await user.clear(modelField());
-    await user.type(modelField(), 'acme/glm-4.7');
-    // Including a provider the standard vendor list does not know. The server
-    // admits any provider segment its grammar accepts, so offering
-    // `custom/acme/glm-4.7` would save a different public model id than the one
-    // that was typed — and save it silently, because the server accepts that too.
-    await user.click(await screen.findByRole('option', { name: 'Use "acme/glm-4.7" as the model ID' }));
-
-    expect(modelField().value).toBe('acme/glm-4.7');
+    expect(modelField().value).toBe('glm-4.7');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'acme/glm-4.7', origin: 'manual' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'glm-4.7',
+      origin: 'manual',
+      native_protocol: 'openai_responses',
+    }));
   });
 
   it('takes the query verbatim on a backend whose IDs have no provider segment', async () => {

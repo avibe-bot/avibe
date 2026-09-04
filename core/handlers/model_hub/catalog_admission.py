@@ -5,10 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, Literal
 
-from config.v2_config import (
-    ModelHubBackendModelConfig,
-    canonical_opencode_menu_identity,
-)
+from config.v2_config import ModelHubBackendModelConfig
 
 from .identifiers import canonical_model_id
 from .resolver import BackendName
@@ -25,11 +22,6 @@ def backend_model_admission_error(
     canonical = canonical_model_id(model_id)
     if canonical is None or canonical != model_id:
         return "backend_model_id_invalid"
-    if backend == "opencode":
-        try:
-            canonical_opencode_menu_identity(canonical)
-        except ValueError:
-            return "backend_model_id_invalid"
     if (
         backend == "claude"
         and canonical not in set(claude_builtin_ids)

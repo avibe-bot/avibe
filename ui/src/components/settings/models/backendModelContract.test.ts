@@ -72,7 +72,7 @@ const MODEL: BackendModel = {
 
 const HOP_REF: RouteHopRef = {
   backend: 'opencode',
-  menu_model: 'custom/glm-5.2',
+  menu_model: 'glm-5.2',
   source_id: 'src_relay0001',
   model_id: 'glm-5.2-air',
   position: 2,
@@ -87,6 +87,7 @@ const CANDIDATE: Required<ModelCandidate> = {
   suppliers: [{ source_id: 'src_relay0001', source_name: 'relay.example', model_id: 'glm-5.2-air' }],
   origin: 'provider',
   group_if_removed: 'providers',
+  native_protocol: 'openai_responses',
 };
 
 const MATCH: ModelsDevMatch = {
@@ -102,6 +103,7 @@ const MATCH: ModelsDevMatch = {
   supports_tools: true,
   supports_reasoning: null,
   reasoning_efforts: ['low'],
+  native_protocol: 'openai_responses',
   first_party: true,
 };
 
@@ -112,7 +114,7 @@ const PUT: BackendModelsPut = {
   models: [MODEL, { ...MODEL, id: 'glm-5.2', models_dev_id: null, origin: 'manual' }],
   force: true,
   would_remove_hops: [HOP_REF],
-  would_interrupt: [{ backend: 'opencode', model_id: 'custom/glm-5.2', agents: ['pm'] }],
+  would_interrupt: [{ backend: 'opencode', model_id: 'glm-5.2', agents: ['pm'] }],
   expected_suppliers: { 'glm-5.2': [{ source_id: 'src_relay0001', model_id: 'glm-5.2-air' }] },
 };
 
@@ -170,7 +172,9 @@ describe('backend model catalog contract', () => {
     // And what the mirror calls optional is what the schema leaves out of
     // `required`, rather than a second opinion about the same field.
     expect(new Set(candidate.required))
-      .toEqual(new Set(Object.keys(CANDIDATE).filter((field) => field !== 'group_if_removed')));
+      .toEqual(new Set(Object.keys(CANDIDATE).filter(
+        (field) => !['group_if_removed', 'native_protocol'].includes(field),
+      )));
 
     // The re-entry vocabulary, and the reason it is a separate field: the schema
     // forbids it on the two addable groups, because a candidate not in the list
@@ -273,7 +277,7 @@ describe('backend model catalog contract', () => {
       contract_version: CONTRACT_VERSION,
       error: 'backend_model_in_route',
       would_remove_hops: [HOP_REF],
-      would_interrupt: [{ backend: 'opencode', model_id: 'custom/glm-5.2', agents: ['pm'] }],
+      would_interrupt: [{ backend: 'opencode', model_id: 'glm-5.2', agents: ['pm'] }],
     });
 
     expect(guarded.code).toBe('backend_model_in_route');

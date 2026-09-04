@@ -32,6 +32,88 @@ PROTOCOL_PATHS = {
     "openai_responses": "/v1/responses",
     "openai_chat": "/v1/chat/completions",
 }
+# Frozen from opencode-overlay.md S3/S4. These are engine observations, not
+# behavior the mock synthesizes: E2E cases send each recorded upstream body to
+# this server and assert the capture against the corresponding frontend body or
+# OpenCode variant shape.
+OPENCODE_V4_S3_PASSTHROUGH_FIXTURES = {
+    "anthropic_api_key": {
+        "protocol": "anthropic",
+        "frontend_body": {
+            "model": "menu-model",
+            "max_tokens": 128,
+            "system": "System fixture",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        "upstream_body": {
+            "model": "stored-hop-model",
+            "max_tokens": 128,
+            "system": "System fixture",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        "expected_top_level_diff": {
+            "added": {},
+            "removed": [],
+            "changed": {
+                "model": ["menu-model", "stored-hop-model"],
+            },
+        },
+    },
+    "responses_api_key": {
+        "protocol": "openai_responses",
+        "frontend_body": {
+            "model": "menu-model",
+            "input": "hello",
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "prompt_cache_key": "cache-fixture",
+            "max_output_tokens": 128,
+        },
+        "upstream_body": {
+            "model": "stored-hop-model",
+            "input": "hello",
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "prompt_cache_key": "cache-fixture",
+            "parallel_tool_calls": True,
+            "instructions": "",
+            "tools": [{"type": "image_generation"}],
+        },
+        "expected_top_level_diff": {
+            "added": {
+                "instructions": "",
+                "parallel_tool_calls": True,
+                "tools": [{"type": "image_generation"}],
+            },
+            "removed": ["max_output_tokens"],
+            "changed": {
+                "model": ["menu-model", "stored-hop-model"],
+            },
+        },
+    },
+}
+OPENCODE_V4_S4_VARIANT_FIXTURES = {
+    "openai_same_protocol": {
+        "protocol": "openai_responses",
+        "variant": {"reasoningEffort": "high"},
+        "upstream_fragment": {
+            "reasoning": {"effort": "high", "summary": "auto"},
+        },
+    },
+    "anthropic_same_protocol": {
+        "protocol": "anthropic",
+        "variant": {"effort": "high"},
+        "upstream_fragment": {
+            "output_config": {"effort": "high"},
+        },
+    },
+    "responses_to_anthropic": {
+        "protocol": "anthropic",
+        "variant": {"reasoningEffort": "high"},
+        "upstream_fragment": {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+        },
+    },
+}
 CAPTURED_HEADER_NAMES = (
     "accept",
     "anthropic-beta",
