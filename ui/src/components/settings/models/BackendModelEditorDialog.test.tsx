@@ -61,6 +61,12 @@ const answered = (name: 'Tool calling' | 'Reasoning'): string | null =>
   capability(name).getAllByRole('radio').find((radio) => radio.getAttribute('aria-checked') === 'true')?.textContent
     ?? null;
 
+/** The one surface anywhere that names the protocol. */
+const protocol = () => within(screen.getByRole('radiogroup', { name: 'API' }));
+
+const protocolAnswer = (): string | null =>
+  protocol().getAllByRole('radio').find((radio) => radio.getAttribute('aria-checked') === 'true')?.textContent ?? null;
+
 const modelField = () => screen.getByLabelText('Model') as HTMLInputElement;
 
 const spy = () => vi.spyOn(modelsApi, 'searchModelsDev');
@@ -275,10 +281,76 @@ describe('BackendModelEditorDialog', () => {
     await user.click(await screen.findByRole('option', { name: 'Use "glm-4.7" as the model ID' }));
 
     expect(modelField().value).toBe('glm-4.7');
+    // An id nobody published says nothing about how it is spoken to, and the two
+    // answers are not equally likely: OpenAI Responses is what a self-hosted or
+    // proxied endpoint almost always is.
+    expect(protocolAnswer()).toBe('OpenAI Responses');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
       id: 'glm-4.7',
       origin: 'manual',
+      native_protocol: 'openai_responses',
+    }));
+  });
+
+  it('asks for the API only where there is a choice, and asks for it last', () => {
+    // The protocol is how Avibe answers OpenCode for this model, not a fact
+    // about the model — so it is the one thing on this form that is about the
+    // backend, and the only backend that has two of them is the one that is
+    // asked. On the others the question has no answer to offer.
+    for (const backend of ['claude', 'codex'] as const) {
+      renderEditor({ backend });
+      expect(screen.queryByRole('radiogroup', { name: 'API' })).toBeNull();
+      cleanup();
+    }
+
+    renderEditor({ backend: 'opencode' });
+    // Last, because it is the only field the user is not expected to touch: the
+    // form reads as the model first and the wiring after it.
+    const fields = Array.from(document.querySelectorAll('[role="group"],[role="radiogroup"]'));
+    expect(fields.at(-1)?.getAttribute('aria-label')).toBe('API');
+  });
+
+  it('takes the API from the model that was picked, and commits the one the user changes it to', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match({ model_id: 'glm-4.7', display_name: 'GLM 4.7' })]);
+    const { onCommit } = renderEditor({ backend: 'opencode' });
+
+    await user.type(modelField(), 'glm');
+    await user.click(await screen.findByRole('option', { name: /GLM 4\.7/ }));
+
+    // models.dev knows whose model this is, and the vendor family is what the
+    // protocol follows from — so a picked model arrives already answered.
+    expect(protocolAnswer()).toBe('Anthropic Messages');
+
+    // And the answer is still the user's: an endpoint that serves someone else's
+    // model over the other API is exactly the case this field exists for.
+    await user.click(protocol().getByRole('radio', { name: 'OpenAI Responses' }));
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'glm-4.7',
+      origin: 'models_dev',
+      native_protocol: 'openai_responses',
+    }));
+  });
+
+  it('opens a saved OpenCode row on the API it is stored with', async () => {
+    const user = userEvent.setup();
+    const saved: BackendModel = {
+      ...blankBackendModel(),
+      id: 'glm-4.7',
+      display_name: 'GLM 4.7',
+      native_protocol: 'anthropic',
+    };
+    const { onCommit } = renderEditor({ backend: 'opencode', model: saved, takenIds: new Set([saved.id]) });
+
+    expect(protocolAnswer()).toBe('Anthropic Messages');
+    await user.click(protocol().getByRole('radio', { name: 'OpenAI Responses' }));
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'glm-4.7',
       native_protocol: 'openai_responses',
     }));
   });

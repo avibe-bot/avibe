@@ -69,6 +69,23 @@ export type Agent = {
   [key: string]: unknown;
 };
 
+/**
+ * One row of a backend's saved model list, as the server projects it back.
+ *
+ * Loose on purpose: the row carries the whole editor form, and a spec that
+ * named every field would have to be revised by every change to it. What is
+ * spelled out is the pair a projection assertion is about — the id the row is
+ * stored under, and, on an OpenCode row, which of the two APIs Avibe answers
+ * that model on. `native_protocol` is REQUIRED on an OpenCode row (C8) and
+ * absent on every other backend's, so `undefined` here is a real answer about
+ * the row, not a gap in this type.
+ */
+export type CatalogModel = {
+  id: string;
+  native_protocol?: string;
+  [key: string]: unknown;
+};
+
 export type Probe = {
   reachable: boolean;
   source_id?: string | null;
@@ -339,6 +356,60 @@ export class HubApi {
     }
     const candidates = (payload as { candidates?: unknown }).candidates;
     return typeof candidates === 'object' && candidates !== null;
+  }
+
+  /**
+   * A backend's saved model list, read where the product reads it.
+   *
+   * The list is not on `/api/models/agents`: the catalog dialog loads its
+   * baseline from this backend-scoped read, and `catalog_models` is the
+   * server's own projection of the rows — the same object a save echoes back.
+   * Asking here rather than reconstructing the list from `model_supply` is what
+   * makes a projection assertion an assertion about what was STORED; the supply
+   * carries ids and routability, and none of the row's own fields.
+   *
+   * `null` when the payload carried no `catalog_models` — a server that
+   * predates the catalog, which is a fact about the instance and a skip, not a
+   * read that failed.
+   */
+  async catalogModels(backend: string): Promise<CatalogModel[] | null> {
+    const payload = await this.read<{ agent?: { catalog_models?: CatalogModel[] | null } }>(
+      `/api/models/agents/${backend}/sources`,
+    );
+    return payload.agent?.catalog_models ?? null;
+  }
+
+  /**
+   * Puts a backend's model list back to `models`, and THROWS if it did not land.
+   *
+   * The baseline is re-read HERE rather than taken from the caller, because the
+   * server checks the PUT against the list it currently holds and the caller is
+   * teardown — which asks for this precisely when the spec that ran in between
+   * has changed that list. A restore sent against a stale baseline is refused,
+   * and a refusal a teardown swallows leaves the suite's rows on the instance
+   * for every spec after it.
+   *
+   * Removing a row can take a route with it, which the server guards; teardown
+   * is exactly the caller that means it, so the refusal's own plan is echoed
+   * back the way `deleteSource` does.
+   */
+  async restoreCatalogModels(backend: string, models: CatalogModel[]): Promise<void> {
+    const path = `/api/models/agents/${backend}/models`;
+    const baseline = (await this.catalogModels(backend)) ?? [];
+    const first = await this.mutate('put', path, { baseline, models });
+    if (first.ok) return;
+    const forced = await this.mutate('put', path, {
+      baseline,
+      models,
+      force: true,
+      ...refusedPlan(first.body),
+    });
+    if (forced.ok) return;
+    throw new Error(
+      `Could not restore backend ${backend}'s model list: first attempt ${first.status}, forced attempt `
+        + `${forced.status} ${JSON.stringify(forced.body)}. The list this spec left is still on the `
+        + 'instance, and every spec after this one inherits it.',
+    );
   }
 
   /** `null` here means the payload carried no `runtime` — an answered read with

@@ -1011,8 +1011,7 @@
             "placeholder": "搜索 models.dev 或输入模型 ID",
             "required": "请填写 Backend 模型 ID。",
             "tooLong": "模型 ID 最多 256 个字符。",
-            "invalid": "OpenCode 模型 ID 的格式是 provider/model，两段都不能为空。",
-          "duplicate": "列表中已存在相同 ID 的模型。"
+            "duplicate": "列表中已存在相同 ID 的模型。"
           },
           "displayName": {
             "label": "显示名称",
@@ -1046,6 +1045,11 @@
           "customEffort": "自定义档位",
           "customEffortPlaceholder": "如 medium",
           "effortNote": "档位按原样发送给供应商；不选则请求不带 effort 参数。",
+          "nativeProtocol": {
+            "label": "API",
+            "openai_responses": "OpenAI Responses",
+            "anthropic": "Anthropic Messages"
+          },
           "cancel": "取消",
           "add": "添加模型",
           "apply": "保存模型"
