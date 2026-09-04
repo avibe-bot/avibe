@@ -544,14 +544,13 @@ display names, no protocol chatter.
   subscription (OAuth credential) keeps the engine's cloaking: the vendor accepts those tokens
   only from the Claude Code identity the cloak reproduces, so rows served by a subscription
   get the reasoning-preserving path of S4, not the body-identical guarantee.
-- **C12 — No compatibility (owner ruling 2026-09-05).** Keyed on the persisted
-  `model_hub.contract_version` (absent = 7), the loader drops pre-v8 OpenCode menu state and
-  touches nothing else; no migration, parking, notice, or compatibility fixture (AGENTS.md
-  persisted-shape rule, pre-release exception).
+- **C12 — No upgrade handling (owner ruling 2026-09-05).** Per `model-hub-contracts/README.md`
+  no bump converts anything: a pre-v4 OpenCode section is invalid input under C8/C9 and takes
+  the existing invalid-config path. No migration, parking, notice, discriminator, or
+  compatibility fixture exists.
 - **C13 — `contract_version` 7 → 8 (prospective).** This spec pre-bumps nothing: every
   registered version location still reads 7 on this head, and the implementation change moves
-  all of them to 8 in one tested head, adding the persisted `model_hub.contract_version` and
-  `config/v2_config.py` to the closure list in `model-hub-contracts/README.md`.
+  all of them to 8 in one tested head under the existing version closure.
 
 ### Contract artifact changes (v3; the contracts lane's checklist)
 
@@ -563,7 +562,23 @@ display names, no protocol chatter.
 | `mirror-registry.json` | registers the `native_protocol` enum and the fixed provider-id mapping (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`). |
 | `api.md` | identifier rule (done in this revision); response-registry rows for the models `PUT`/read carrying `native_protocol`. |
 | `opencode-overlay.md` | v4 (done in this revision). |
-| `README.md` version closure + every registered location (`service.py`, `provenance.py`, `types.ts`, tests) | 7 → 8 in the implementation head, plus `model_hub.contract_version` and `config/v2_config.py` (C13). |
+| `README.md` version closure + every registered location (`service.py`, `provenance.py`, `types.ts`, tests) | 7 → 8 in the implementation head (C13). |
+
+### Deletions (the lanes remove these outright; no shim, alias, or fallback stays)
+
+- `core/handlers/model_hub/identifiers.py`: `STANDARD_OPENCODE_VENDOR_IDS`,
+  `opencode_provider_id`, `opencode_model_id`, `parse_opencode_model_id`, and their consumers
+  in `resolver.py` (`opencode_model_id` use, `opencode_inventory_menu_ids` projection) and
+  `service.py` (`standard_vendors` projection).
+- `config/v2_config.py`: `canonical_opencode_menu_identity` and every prefixed-id branch in
+  route/hop handling.
+- `modules/agents/model_hub.py`: `OpenCodeOverlay.provider_id` (singular) and
+  `_source_prefix`-composed runtime model ids; `vibe/opencode_config.py`:
+  `MODEL_HUB_RUNTIME_PROVIDER_PREFIX` and `model_hub_runtime_provider_id` (the digest id).
+- `modules/agents/opencode/server.py`: single-provider overlay state and its catalog filter.
+- `ui/src/components/settings/models/menus/identifiers.ts` (`inferProvider`,
+  `buildIdentifier`) and the editor's OpenCode "three buckets" repair; every unit/e2e fixture
+  that carries a prefixed OpenCode id.
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
@@ -592,9 +607,8 @@ No new string anywhere else; nothing explains the mechanism.
    `openai_chat` hop loses its effort.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
-5. Loading a pre-v8 config yields an empty OpenCode menu with Sources, mode, other backends,
-   Agent definitions, and sessions untouched; saving persists `model_hub.contract_version` 8,
-   and loading it again changes nothing. A user config declaring an Avibe provider id is
+5. No compatibility path exists: a pre-v4 OpenCode section is rejected as invalid input, and
+   no code reads, converts, or parks it. A user config declaring an Avibe provider id is
    refused at launch with `opencode_overlay_collision`, never merged.
 6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
    only place it appears, for OpenCode rows only.

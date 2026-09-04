@@ -6,6 +6,8 @@ Design source: `../avibe-docs/design.pen`. The V6 frames remain the visual basel
 the v3 interaction draft for the two-module information architecture is owner-approved
 as the implementation baseline (2026-08-07 afternoon). The design lane still owes
 production-complete desktop/mobile states.
+Pre-release (owner, 2026-09-05): Model Hub has not shipped; no revision of its persisted
+state or contracts carries migration or compatibility handling (see `model-hub-contracts/README.md`).
 Contracts: `model-hub-contracts/` remain unchanged by this docs-only revision.
 `model-hub-implementation.md` records the exhaustive final-shape handoff. Its mechanical
 closure must coexist on one tested PR head; all remaining consumers and evidence must

@@ -113,16 +113,12 @@ keep the chain nonempty, engine restarts, and gateway token rotation apart from
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
 
-## Upgrade (pre-release: no compatibility)
+## Upgrade — none
 
-Owner ruling 2026-09-05 (AGENTS.md persisted-shape rule, exception): the Model Hub is
-pre-release, so v4 carries no migration, degradation, parking, or compatibility reader. The
-persisted Model Hub config carries `model_hub.contract_version` (absent = 7); when it is below
-8 the loader does not load the OpenCode agent's `models`, `routes`, `removed_model_ids`, or
-`menu` — they are dropped — and writes 8 on the next save. Sources, mode, other backends,
-Vibe Agent definitions, and sessions are untouched; a selector naming a pre-v8 id takes the
-existing no-menu-row path until the user selects again. One test: a v7-shaped config loads
-with an empty OpenCode menu and loads identically a second time.
+Model Hub is pre-release (owner, 2026-09-05; `README.md`: no bump carries a migration,
+compatibility reader, conversion, or version discriminator). A stored OpenCode section in the
+pre-v4 shape is invalid input under the v4 schema and is handled by the existing invalid-config
+path; nothing converts it.
 
 ## Spike record (S1–S6; evidence captured 2026-09-04 on OpenCode 1.18.18 and CLIProxyAPI 7.2.105 `4a2eb54d`, the binary Avibe's manifest pins, with the repo mock upstream recording path/headers/body)
 
