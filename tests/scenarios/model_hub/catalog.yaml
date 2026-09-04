@@ -17,6 +17,7 @@ capability:
     - ui/src/components/settings/models/UsageTab.test.tsx
     - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
     - ui/src/components/settings/models/RouteChainDialog.test.tsx
+    - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
@@ -118,6 +119,22 @@ scenarios:
     kind: mutation
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_menu_add_001_seeds_overlapping_suppliers_in_source_order
+  # The client half of MH-MENU-ADD-001: the server seeds a route from whatever
+  # supply exists at commit time, and this is what makes that supply the one the
+  # user was shown. The picker's other two doors — an id the list already holds,
+  # and one no provider offers, reached through the models.dev lookup — are each
+  # a case of their own, named under related_tests because a row resolves through
+  # evidence named for itself and a citation reaching two cases identifies
+  # neither.
+  - id: MH-MENU-COMPOSE-001
+    name: A backend's list is composed from its providers, and the save request carries exactly the suppliers the picker displayed for what was added
+    status: covered
+    kind: mutation
+    layer: unit
+    test: ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::MH-MENU-COMPOSE-001
+    related_tests:
+      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::finds an already-added model by its supplier and shows it as already added
+      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::asks which row a typed ID names as the ID it would be saved as
   - id: MH-SRC-DELETE-001
     name: Source deletion removes every reference while preserving survivor order
     status: covered

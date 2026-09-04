@@ -36,14 +36,27 @@ over its own HTTP control plane.
 
 ### The mock upstream
 
-The driver the repo's own instructions reference (`tests/e2e/drivers/
-mock_llm_upstream.py`) ships with the pytest lane and is not in this PR, so a
-clean checkout has no bundled copy. Any server implementing the §5a control
-plane will do: `POST /__control/config` with `auth`, `protocol`,
-`models_endpoint`, `stream`, and `models`; `GET /__control/requests` returning
-`{"requests": [...]}`; `DELETE /__control/requests` to reset; plus the
-Anthropic/OpenAI protocol endpoints under `/v1/*`. Until the pytest lane lands
-its driver, run the suite with a mock you provide on that contract.
+The repo bundles one: `tests/e2e/drivers/mock_llm_upstream.py`, the driver the
+pytest lane uses. It runs standalone on a port you pick, so a checkout needs
+nothing else —
+
+```
+python3 -m tests.e2e.drivers.mock_llm_upstream --port 9931
+```
+
+— and `VIBE_E2E_MOCK_UPSTREAM_URL=http://127.0.0.1:9931`, the port both runnable
+examples below already pass, is what the specs then steer. It binds loopback unless `--host` says otherwise, which is the same
+reachability caveat below: the instance is what dials the mock, so a remote
+target needs an address that resolves from there. Nothing about the driver is
+privileged, though: the suite talks to it over HTTP alone, so any server
+implementing the §5a control plane will do in its place — `POST
+/__control/config` with `auth`, `protocol`, `models_endpoint`, `stream`, and
+`models`; `GET /__control/requests` returning `{"requests": [...]}`; `DELETE
+/__control/requests` to reset; `GET /v1/models`, which serves the configured
+`models` when `models_endpoint` is `ok` and otherwise produces the failure it
+names — `http_404`, `http_500`, `timeout`, or `malformed_json`; plus the
+protocol endpoint each `protocol` names, `/v1/messages`, `/v1/responses`, or
+`/v1/chat/completions`.
 
 ## Preconditions, and why they skip instead of fail
 

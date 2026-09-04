@@ -193,7 +193,10 @@ reads `aihub → deepseek-v3.2`. Nothing was typed except the search.
       model ID` for an id models.dev does not know (for OpenCode it offers `custom/<query>`
       unless the query is already an admissible `vendor/model` id). The old `Fill from models.dev` button is
       retired — the typeahead is the same capability, offered before typing instead of after.
-      For OpenCode the filled id follows C7's provider rule.
+      For OpenCode the filled id follows C7's provider rule; the manual path applies three
+      buckets — a bare model id gains exactly one `custom/` prefix, a complete valid
+      `provider/model` identity (any syntactically valid provider) is kept verbatim, and a
+      malformed identity (`openai/`, `/model`) is rejected, never repaired into another id.
    Rules that hold across all groups: a provider chip on any row — built-in included — means
    exactly "one of your providers supplies this id", in Source order, and nothing else ever
    renders as a chip. With an empty query the list shows only what can be added; with a
@@ -273,8 +276,12 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   nonempty `would_remove_hops` (`RouteHopRef` = `{backend, menu_model, source_id, model_id,
   position}`); a retry with `force: true` echoing the plan removes the rows and their routes in
   one transaction and returns `{agent, removed_hops, interrupted}`; rows with empty routes are
-  removed without confirmation and return `{agent}`. The confirmation shows both the hops and
-  any interrupted Agents with the existing guard-impact surface and echoes both arrays. Property: every response this route
+  removed without confirmation and return `{agent}`. The client never constructs a plan it
+  sends: the in-row confirmation may preview the consequence from the routes it already holds,
+  but the arrays it echoes with `force` are always the server's own refusal arrays, verbatim
+  and in the server's order; when the server's plan equals the previewed one as a set the retry
+  is automatic, otherwise the server's plan is shown and confirmed. The confirmation shows both
+  the hops and any interrupted Agents with the existing guard-impact surface. Property: every response this route
   emits — the plain success, the forced success with `removed_hops` and `interrupted`, and
   the refusal — validates against the response registry after the artifact changes below,
   the 409 refusal alone also validates against `guard-refusal.schema.json`, and the response
@@ -284,7 +291,10 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   `GET /api/models/agents/<backend>/models/candidates`, returns
   `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` where `Candidate` is
   `{id, display_name, reasoning_efforts, suppliers: [{source_id, source_name, model_id}],
-  origin}`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
+  origin, group_if_removed?: "builtin" | "providers" | null}` — `group_if_removed` is set on
+  `in_list` candidates only and names where the server would offer the id if it left the menu
+  (in the current built-in snapshot → `builtin`; else supplied → `providers`; else `null`), so
+  the client never infers current availability from `origin`. `builtin` is the merged remote + bundled + local-CLI snapshot for the backend
   (served regardless of Gateway/Direct mode; empty for OpenCode) minus menu ids, removed ones
   included, and filtered by the backend's admission rule — configured or cache-only values the
   backend would not accept as menu ids (an `ANTHROPIC_MODEL` override, an over-long Codex id)
@@ -304,9 +314,17 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
 - **C6 — Removed ids never return on their own.** The backend catalog persists
   `agents.<backend>.removed_model_ids: string[]`. Every row the user removes leaves its id in
   the set, whatever the row's origin was and whether or not the backend lists the id right now;
-  adding a row with that id by any path clears it. Reconcile — on startup and before serving
-  any Model Hub agent read or mutation, controller-owned and pull-based on the built-in
-  snapshot's generation — adds each snapshot id that is neither in the menu nor in the set,
+  adding a row with that id by any path clears it. Reconcile is a controller-owned mutation
+  under the same lock every catalog write takes, comparing the snapshot's generation with the
+  last one reconciled inside that critical section. It runs at four moments and nowhere else:
+  controller startup; completion of a controller-side snapshot refresh; a controller periodic
+  tick (five minutes) that re-reads the snapshot inputs — the catch-all for refreshes another
+  process performed, so no IPC is needed and arrival lags a refresh by at most one tick; and,
+  as the one read that is defined as refresh-then-project (precedent: the agents read's
+  `refresh_cli_presence`), the picker's candidates read, which first runs that same locked
+  reconcile when the generation changed and then projects. Every other read is pure. Reconcile
+  tasks are tracked and gated on shutdown: Model Hub stop cancels or joins them before the
+  service stops, and a completion arriving during shutdown schedules nothing. It adds each snapshot id that is neither in the menu nor in the set,
   at the position question 9 defines, seeds it per C1 and C2, and invalidates the backend's
   runtime projection; it never removes a row, and it never persists or raises while the config
   store is not writable (recovery mode serves the stored configuration unchanged). A partial
@@ -401,9 +419,11 @@ No string explains mechanism.
 - Direct mode still hides the editor and preserves the catalog unchanged.
 - Removing a built-in row and reopening the picker shows that id under the built-in group;
   picking it restores the row. A built-in id that enters the backend snapshot after the menu
-  was saved is present in the menu on the next read unless a row with that id was removed
-  before — and an id the user removed never returns on its own, whatever the removed row's
-  origin was.
+  was saved is in the menu after the next reconcile trigger — startup, a snapshot refresh
+  completing, the periodic tick, or the picker's candidates read — unless a row with that id
+  was removed before; an ordinary read reconciles nothing and observes whichever of those ran
+  last. An id the user removed never returns on its own, whatever the removed row's origin
+  was.
 - The picker lists each candidate id exactly once across all groups.
 - A field the user cleared before the first Save is empty after Save.
 - Every supplier chip the picker shows for a candidate equals the hop set C1 seeds when that
@@ -413,6 +433,23 @@ No string explains mechanism.
 - A built-in removed while the backend had withdrawn it does not return when the backend
   lists it again.
 - No Model Hub read or mutation fails or writes while the config store is in recovery mode.
+- Reads never write, with the candidates read as the single defined exception: any other read
+  observed concurrently with a mutation leaves the stored configuration byte-identical to what
+  that mutation alone would have produced, and the candidates read's reconcile is serialized
+  by the mutation lock like every write.
+- While the config store is writable, a built-in that enters the snapshot through any
+  process's refresh is in the menu within one controller tick, and immediately when the
+  picker's candidates read runs. Recovery mode is the same guarantee under its own
+  precondition, not an exception to it: reconcile changes nothing, so the menu holds its
+  last reconciled state until the store is writable again, and the bound resumes there.
+- No reconcile task outlives Model Hub shutdown.
+- Every producer shares one admission predicate, and it is stricter than the persisted shape
+  alone: a proposal is admissible exactly when the backend's identity policy admits the id —
+  it equals its own canonical form, an OpenCode id is a valid menu identity, and a Claude id
+  is either a current built-in or `claude-`/`anthropic-` prefixed — and
+  `ModelHubBackendModelConfig.from_payload` then accepts the row it would create, with the id
+  it persists unchanged. The validator alone is the weaker half: it accepts ids that the
+  identity policy, and therefore the shipped API, refuses.
 - A catalog file without `removed_model_ids` loads with an empty set and reconciles normally.
 - In the editor, a models.dev suggestion fills every metadata field it knows and leaves each
   one editable; an id models.dev does not know can still be entered and saved.
@@ -425,3 +462,19 @@ No string explains mechanism.
 - Design PR avibe-docs #34 carries the earlier "Batch Add / Agent Model Picker" proposal
   frames; v2 frames are drawn on that branch with sparse copy and the proposal frames are
   renamed `Superseded —` rather than deleted.
+
+### Delivery record
+
+v2 shipped in four lanes off this spec: #1830 published it as the normative contract, #1837
+built the server side (candidates read, `removed_model_ids` with its reconcile, the guard
+plan the client echoes), #1839 built the UI (picker groups, the id and row chokepoints, the
+guard re-ask), and #1843 follows up with a distinct close label for the catalog dialog and
+the e2e allow-list for tier provenance — open at the time of writing, so it is the one lane
+this record does not describe as merged. The frames are avibe-docs #34 (v2 frames drawn over
+the superseded proposal set) and #35 (picker search grouping in-list matches). Two
+design-fidelity deltas found by #1839's render are ruled Known-by-design there and await an
+owner decision, because both belong to surfaces wider than this feature: `.model-hub-pill`
+renders 23px tall against the frame's 19px chip, which stacks a picker row to 60px where
+frame B‴ measures 52 — retuning the pill would move every pill in the Model Hub — and the
+narrow-viewport footer orders its two buttons the other way, which is the shared `Dialog`
+primitive's own narrow layout. Neither hides nor clips anything.
