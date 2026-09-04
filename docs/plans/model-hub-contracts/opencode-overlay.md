@@ -17,17 +17,6 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
 - `enabled_providers` lists exactly the provider ids the overlay generates, so providers from
   the user's own configuration or from environment keys are not loaded and their models never
   appear in `/config/providers`. In Direct mode no overlay exists.
-- **Same-id collision.** OpenCode deep-merges a user-authored provider that shares one of
-  Avibe's ids underneath the overlay, and `enabled_providers` cannot exclude it. After launch
-  Avibe therefore reads OpenCode's effective configuration (`GET /config`) and requires, for
-  each Avibe provider id, that the effective `provider[<id>]` entry equals the overlay's entry
-  under canonical JSON serialization — any extra option, model, or per-model setting is a
-  difference — and that no other provider is present in `/config/providers`; a difference is
-  a launch failure with the closed error `opencode_overlay_collision`, surfaced by the existing
-  runtime health state — never a silently merged catalog. A user declaration that changes
-  nothing effective (an empty block, or values equal to the overlay's) is harmless by
-  definition and passes. Required fixtures: a user config declaring `avibe-openai` with its
-  own model, and one declaring `avibe-openai` with the same model ids but an extra option.
 - **Addressing.** In Gateway mode Avibe addresses OpenCode with `providerID` = the fixed
   provider id of the selected row's `native_protocol` from the table below
   (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`) and `modelID` = the
@@ -64,6 +53,8 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   new id with that prefix (existing reserved-id error). An existing entry that already carries
   such an id stays readable and editable exactly as today — the reservation never hides or
   rejects released configuration.
+  Avibe does not detect a hand-authored collision: a user who declares an `avibe-*` provider
+  in their own OpenCode configuration gets OpenCode's merge behaviour, which is unsupported.
 - Provider ids are fixed strings — never derived from a token digest, a Source, or a hop.
 
 ## Menu projection

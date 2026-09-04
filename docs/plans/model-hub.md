@@ -1471,11 +1471,12 @@ and under v4 the two modes no longer share a namespace at all (§4.8.3).
 
 1. **Native protocol is a field, not a prefix.** Every OpenCode `BackendModel` row carries
    `native_protocol ∈ {openai_responses, anthropic}` (`gemini` is a reserved future value and is
-   not admissible until `avibe-gemini` ships). It is derived once at add time from the model
-   id's vendor family through the repo-owned vendor map, looked up on the id's last
-   `/`-separated segment so a namespaced id (`anthropic/claude-sonnet-4-6`) finds its family
-   (`anthropic` family → `anthropic`, everything else → `openai_responses`), and is editable
-   only in the model editor, as its last
+   not admissible until `avibe-gemini` ships). The server derives it from the model id's
+   vendor family through the repo-owned vendor map, looked up on the id's last `/`-separated
+   segment so a namespaced id (`anthropic/claude-sonnet-4-6`) finds its family (`anthropic`
+   family → `anthropic`, everything else → `openai_responses`), and proposes it with every
+   picker candidate and models.dev match; a typed id defaults to `openai_responses`; the save
+   stores what the client sends. It is editable only in the model editor, as its last
    field, shown for OpenCode rows only. It is never shown in a list, picker, row, chip, or
    badge: it is a mechanism of the product, not information the user acts on.
 2. **Canonical OpenCode reference = `<overlay provider id>/<menu id>`.** The overlay provider

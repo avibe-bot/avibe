@@ -490,7 +490,8 @@ these v2 sentences: question 1's `vendor/model` candidate identity, question 6's
 `<provider>/<model>` through the vendor normalization — under v3 the filled id is the selected
 match's model id as models.dev states it), and the `vendor/model` clauses of the candidates
 read and the admission predicate — and C5's unchanged-runtime guarantee, superseded for
-OpenCode row projections (C8) and the OpenCode overlay (C10) only.
+OpenCode row projections (C8), the removed `standard_vendors` projection (C9), and the
+OpenCode overlay (C10) only.
 
 ### Outcome
 
@@ -520,15 +521,15 @@ display names, no protocol chatter.
 ### Contract deltas (normative; lanes cite these by number)
 
 - **C8 — `BackendModel.native_protocol`** (`openai_responses | anthropic`; `gemini` reserved,
-  refused) is required on persisted OpenCode rows and absent on other backends. The models
-  `PUT` derives it from the id's vendor family when a submitted OpenCode row omits it — the
-  picker's `Add models` submits candidates as today, unchanged `Candidate` shape — and accepts
-  the editor's explicit value; `from_payload` refuses a persisted OpenCode row without it and
-  any row with an unknown value. Row projections carry it so the editor can show it. Artifact
-  change: `backend-model.schema.json` gains the optional `native_protocol` property with the
-  closed enum; because that row schema has no backend discriminator, `agent-supply.schema.json`
-  and the response wrapper enforce the backend condition on their `models` items; the
-  `types.ts` mirror follows (artifact checklist below).
+  refused) is required on OpenCode rows and absent on other backends. It travels like every
+  other proposed value (C2): the server derives it from the id's vendor family into every
+  picker `Candidate` (C4) and every models.dev match (C7); the editor defaults a typed id to
+  `openai_responses`; the `PUT` stores the request literally and refuses an OpenCode row
+  without it or with an unknown value. Row projections carry it so the editor can show it.
+  Artifact change: `backend-model.schema.json` gains the optional `native_protocol` property
+  with the closed enum; because that row schema has no backend discriminator, the containing
+  `catalog_models` arrays enforce the backend condition; the `types.ts` mirror follows
+  (artifact checklist below).
 - **C9 — OpenCode ids are bare.** Every schema, pattern, and validator that required
   `^[a-z0-9_-]+/.+$` for an OpenCode id now applies the canonical-id rule; the
   `standard_vendors` projection of agent-supply is removed (no consumer remains).
@@ -550,8 +551,7 @@ display names, no protocol chatter.
   entry, OAuth credential records left at the engine default (or given an explicit
   `cloak.mode: always` if a global flag turns out to be required for the API-key path). One
   test runs both credential classes in one engine process and asserts S3's diff is empty for
-  the API-key hop while the OAuth hop still carries the cloak; if the engine cannot express
-  both at once, the API-key passthrough yields and the follow-up is filed against the engine.
+  the API-key hop while the OAuth hop still carries the cloak.
 - **C12 — No upgrade handling (owner ruling 2026-09-05).** Per `model-hub-contracts/README.md`
   no bump converts anything: a pre-v4 OpenCode section is invalid input under C8/C9 and takes
   the existing invalid-config path. No migration, parking, notice, discriminator, or
@@ -565,7 +565,8 @@ display names, no protocol chatter.
 | Artifact | Change |
 | --- | --- |
 | `backend-model.schema.json`, `ui/src/components/settings/models/types.ts` | optional `native_protocol` property (closed enum `openai_responses | anthropic`) on the row shape (C8). |
-| `agent-supply.schema.json`, `api-response.schema.json` (picker-safe wrapper and the models `PUT`/read rows) | backend-conditional item constraints: `native_protocol` required for `opencode` rows and forbidden for `claude`/`codex` rows — the row schema has no backend discriminator, so the containing schemas enforce it (C8). |
+| `agent-supply.schema.json` (`catalog_models`), `api-response.schema.json` (`AgentCatalogResponse.catalog_models`) | backend-conditional item constraints on `catalog_models`: `native_protocol` required for `opencode` rows and forbidden for `claude`/`codex` rows — the row schema has no backend discriminator, so the containing arrays enforce it; invalid-backend fixtures for both (C8). |
+| candidates read (C4) and models.dev read (C7) response shapes | `Candidate` and each models.dev match carry the server-derived `native_protocol` (C8). |
 | `agent-supply.schema.json` | `menu.checked` items follow the canonical-id rule (no `/` requirement); the `standard_vendors` projection is removed (C9). |
 | `mirror-registry.json` | registers the `native_protocol` enum and the fixed provider-id mapping (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`). |
 | `api.md` | identifier rule (done in this revision); response-registry rows for the models `PUT`/read carrying `native_protocol`. |
@@ -616,12 +617,11 @@ No new string anywhere else; nothing explains the mechanism.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
 5. No compatibility path exists: a pre-v4 OpenCode section is rejected as invalid input, and
-   no code reads, converts, or parks it. A user config whose declaration of an Avibe provider
-   id changes the effective provider is refused at launch with `opencode_overlay_collision`,
-   never merged; a declaration that changes nothing is harmless.
+   no code reads, converts, or parks it.
 6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
    only place it appears, for OpenCode rows only.
-7. `avibe-*` is refused as a user custom-provider id.
+7. Creating a user custom provider with an `avibe-*` id is refused; an existing one stays
+   readable and editable.
 8. `contract_version` 8 satisfies the version closure test.
 
 ### Delivery plan
