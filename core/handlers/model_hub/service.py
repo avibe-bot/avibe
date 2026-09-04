@@ -715,6 +715,54 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
     }
 
 
+async def ensure_runtime_dependency(
+    adapter: EngineAdapter,
+    *,
+    force: bool = False,
+    offline: bool = False,
+) -> EngineEnsureResult:
+    """Converge the pinned engine through a controller-owned adapter."""
+
+    ensure = getattr(adapter, "ensure_installed", None)
+    if not callable(ensure):
+        raise ModelHubError("engine_down", status=503)
+    try:
+        return await ensure(force=force, offline=offline)
+    except RuntimePlatformUnsupportedError:
+        raise ModelHubError("runtime_platform_unsupported", status=422) from None
+    except EngineUnavailableError as exc:
+        reason = getattr(exc, "reason", None)
+        raise ModelHubError(
+            "engine_down",
+            status=503,
+            data={"reason": reason} if isinstance(reason, str) and reason else None,
+        ) from None
+    except ModelHubError:
+        raise
+    except Exception as exc:
+        reason = getattr(exc, "reason", None)
+        safe_reason = (
+            reason
+            if isinstance(reason, str) and reason.startswith("model_hub_engine_")
+            else None
+        )
+        raise ModelHubError(
+            "engine_down",
+            status=503,
+            data={"reason": safe_reason} if safe_reason else None,
+        ) from None
+
+
+def runtime_dependency_payload(
+    result: EngineEnsureResult,
+    *,
+    enabled: bool,
+) -> dict:
+    payload = _runtime_payload(result.status, enabled=enabled)
+    payload["changed"] = result.changed
+    return payload
+
+
 class ModelHubService:
     def __init__(
         self,
@@ -1151,34 +1199,11 @@ class ModelHubService:
         force: bool = False,
         offline: bool = False,
     ) -> EngineEnsureResult:
-        ensure = getattr(self.adapter, "ensure_installed", None)
-        if not callable(ensure):
-            raise ModelHubError("engine_down", status=503)
-        try:
-            return await ensure(force=force, offline=offline)
-        except RuntimePlatformUnsupportedError:
-            raise ModelHubError("runtime_platform_unsupported", status=422) from None
-        except EngineUnavailableError as exc:
-            reason = getattr(exc, "reason", None)
-            raise ModelHubError(
-                "engine_down",
-                status=503,
-                data={"reason": reason} if isinstance(reason, str) and reason else None,
-            ) from None
-        except ModelHubError:
-            raise
-        except Exception as exc:
-            reason = getattr(exc, "reason", None)
-            safe_reason = (
-                reason
-                if isinstance(reason, str) and reason.startswith("model_hub_engine_")
-                else None
-            )
-            raise ModelHubError(
-                "engine_down",
-                status=503,
-                data={"reason": safe_reason} if safe_reason else None,
-            ) from None
+        return await ensure_runtime_dependency(
+            self.adapter,
+            force=force,
+            offline=offline,
+        )
 
     async def stop(self) -> None:
         async with self._runtime_lifecycle_lock:
@@ -5833,12 +5858,10 @@ class ModelHubService:
                 force=force,
                 offline=offline,
             )
-            payload = _runtime_payload(
-                result.status,
+            return runtime_dependency_payload(
+                result,
                 enabled=self.store.load().enabled,
             )
-            payload["changed"] = result.changed
-            return payload
 
     async def runtime_start(self) -> dict:
         async with self._runtime_lifecycle_lock:

@@ -159,7 +159,10 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         try:
             if result.get("ok") and previous_failure is not None:
                 self.clear_install_failure(previous_failure)
-            elif not result.get("ok") and reason != "model_hub_engine_platform_unsupported":
+            elif not result.get("ok") and reason not in {
+                "model_hub_engine_install_already_running",
+                "model_hub_engine_platform_unsupported",
+            }:
                 self.transition_install_claim(
                     InstallClaimTransition.ADMISSION_FAILURE,
                     generation=generation,

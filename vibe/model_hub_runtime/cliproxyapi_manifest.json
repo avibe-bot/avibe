@@ -6,11 +6,12 @@
   "source_url": "https://github.com/router-for-me/CLIProxyAPI/tree/2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
   "source_sha": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
   "release_tag": "v7.2.149",
+  "asset_release_tag": "model-hub-engine-v7.2.149-1",
   "license": "MIT",
   "assets": [
     {
       "platform": "darwin-arm64",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
       "size_bytes": 19723285,
       "sha256": "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
       "binary_sha256": "048c0089aa53948af91249bb97f172b2392cce5968473a5a3dbb06f3d742c2e7",
@@ -18,7 +19,7 @@
     },
     {
       "platform": "darwin-x64",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
       "size_bytes": 21334889,
       "sha256": "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
       "binary_sha256": "05388e65f58493325aff1e2dfa33e727e7fa732b2d9eb651ec13315689e418e5",
@@ -26,7 +27,7 @@
     },
     {
       "platform": "linux-amd64",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
       "size_bytes": 21385633,
       "sha256": "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
       "binary_sha256": "b0f163bfd94e8cd64895000662f26f255d2a72b5c3f5009a97e8dc91ed9b8107",
@@ -34,7 +35,7 @@
     },
     {
       "platform": "linux-arm64",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
       "size_bytes": 19287559,
       "sha256": "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
       "binary_sha256": "24799863d478579ec3eef5ccc83769f79df749a30282ce1e2063708a03826e5b",

@@ -779,25 +779,25 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
                 "size_bytes": 19723285,
                 "sha256": "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
                 "size_bytes": 21334889,
                 "sha256": "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
                 "size_bytes": 21385633,
                 "sha256": "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.149/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
                 "size_bytes": 19287559,
                 "sha256": "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
             },
@@ -3046,6 +3046,29 @@ def test_direct_ensure_failure_is_durable_across_manager_reload(
 
     assert reloaded.ensure()["ok"] is True
     assert EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).install_state() is None
+
+
+def test_direct_ensure_lock_contention_is_transient(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def contend(_manager, **_kwargs):
+        return {
+            "ok": False,
+            "changed": False,
+            "reason": "model_hub_engine_install_already_running",
+            "skipped": True,
+        }
+
+    monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", contend)
+    runtime_dir = tmp_path / "runtime"
+
+    result = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).ensure()
+    reloaded = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+
+    assert result["reason"] == "model_hub_engine_install_already_running"
+    assert reloaded.install_state() is None
+    assert reloaded.status()["status"] != "error"
 
 
 def test_runtime_install_state_survives_adapter_reload_and_settles_once(

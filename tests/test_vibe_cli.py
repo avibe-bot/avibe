@@ -2061,6 +2061,56 @@ def test_managed_dependencies_doctor_probes_model_hub_engine_archive(monkeypatch
     assert probes == [True]
 
 
+@pytest.mark.parametrize(
+    ("language", "expected_label"),
+    [("en", "Model Hub engine (CPA)"), ("zh", "Model Hub 引擎（CPA）")],
+)
+@pytest.mark.parametrize(
+    ("status", "installed", "code"),
+    [("ready", True, "ready"), ("missing", False, "not_ready")],
+)
+def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
+    monkeypatch,
+    language,
+    expected_label,
+    status,
+    installed,
+    code,
+):
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": installed,
+                    "status": status,
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items()
+
+    item = next(
+        item
+        for item in items
+        if item.get("code") == f"dependencies.model-hub-engine.{code}"
+    )
+    assert expected_label in item["message"]
+    if language == "zh":
+        assert "Model Hub engine (CPA)" not in item["message"]
+
+
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
     monkeypatch.setattr(
         cli.api,

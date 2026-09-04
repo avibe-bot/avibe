@@ -1094,6 +1094,7 @@
       "unknownError": "未知错误",
       "missing": "缺失",
       "memoryRuntime": "Memory Runtime",
+      "modelHubEngine": "Model Hub 引擎（CPA）",
       "currentPlatform": "当前平台",
       "selectedDependencyUrl": "所选依赖 URL",
       "tunnelStateHealthy": "健康",

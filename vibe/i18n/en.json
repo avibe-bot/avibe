@@ -1094,6 +1094,7 @@
       "unknownError": "unknown error",
       "missing": "missing",
       "memoryRuntime": "Memory Runtime",
+      "modelHubEngine": "Model Hub engine (CPA)",
       "currentPlatform": "this platform",
       "selectedDependencyUrl": "the selected dependency URL",
       "tunnelStateHealthy": "healthy",

@@ -45,8 +45,11 @@ cleans older generations through the existing managed-runtime cleanup policy.
 Updating CPA for an Avibe release requires changing the packaged manifest in the
 same change as its frozen contract test. The release tag and source commit are
 fixed, and every supported archive records its published byte size, archive
-SHA-256, and extracted binary SHA-256. For this change, the reviewed target is
-CLIProxyAPI `v7.2.149` at source commit
+SHA-256, and extracted binary SHA-256. The verified upstream bytes are published
+under an Avibe-owned release tag before the manifest is pinned. A scheduled
+guard verifies that release and preserves a manifest-keyed backup that can
+restore missing assets without overwriting a mismatched asset. For this change,
+the reviewed target is CLIProxyAPI `v7.2.149` at source commit
 `2a6b87aca083a5bf498ac1f68a1b636c500d7aaa`.
 
 ## Acceptance Criteria

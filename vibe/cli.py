@@ -11162,7 +11162,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     labels = {
         "askill": "askill",
         "avault": "avault",
-        "model-hub-engine": "Model Hub engine (CPA)",
+        "model-hub-engine": i18n_t("doctor.value.modelHubEngine", language),
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
         "memory-runtime": i18n_t("doctor.value.memoryRuntime", language),
