@@ -50,6 +50,12 @@ class EngineStatus:
     error_key: str | None = None
 
 
+@dataclass(frozen=True)
+class EngineEnsureResult:
+    status: EngineStatus
+    changed: bool
+
+
 class RuntimePlatformUnsupportedError(RuntimeError):
     """The pinned managed runtime has no asset for the server host."""
 
@@ -381,7 +387,12 @@ class EngineAdapter(Protocol):
 
     async def recover_installation(self) -> EngineStatus: ...
 
-    async def ensure_installed(self, *, force: bool = False) -> EngineStatus: ...
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult: ...
 
     async def start(self) -> EngineStatus: ...
 

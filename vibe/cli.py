@@ -15252,17 +15252,35 @@ def cmd_runtime(args) -> int:
             else:
                 print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
             if model_hub_engine.get("skipped"):
-                print(f"Model Hub engine: skipped ({model_hub_engine.get('reason') or 'skipped'}).")
+                print(
+                    i18n_t(
+                        "runtime.prepare.modelHubEngineSkipped",
+                        language,
+                        reason=model_hub_engine.get("reason") or "skipped",
+                    )
+                )
             elif model_hub_engine.get("ok"):
                 print(
-                    "Model Hub engine installed."
-                    if model_hub_engine.get("changed")
-                    else "Model Hub engine ready."
+                    i18n_t(
+                        (
+                            "runtime.prepare.modelHubEngineInstalled"
+                            if model_hub_engine.get("changed")
+                            else "runtime.prepare.modelHubEngineReady"
+                        ),
+                        language,
+                    )
                 )
             else:
                 print(
-                    "Model Hub engine not ready: "
-                    f"{model_hub_engine.get('message') or model_hub_engine.get('reason') or 'install failed'}",
+                    i18n_t(
+                        "runtime.prepare.modelHubEngineNotReady",
+                        language,
+                        reason=(
+                            model_hub_engine.get("message")
+                            or model_hub_engine.get("reason")
+                            or "install failed"
+                        ),
+                    ),
                     file=sys.stderr,
                 )
             if tmux.get("skipped") or tmux.get("status") == "skipped":

@@ -223,6 +223,7 @@ async def dispatch_model_hub_rpc(
     if operation == "runtime_ensure_dependency":
         return await service.runtime_ensure_dependency(
             force=payload.get("force") is True,
+            offline=payload.get("offline") is True,
         )
     if operation == "runtime_start":
         return await service.runtime_start()

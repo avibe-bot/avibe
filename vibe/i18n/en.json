@@ -1031,7 +1031,11 @@
       "prepared": "Show Runtime prepared.",
       "skipped": "Show Runtime preparation skipped: {reason}",
       "failed": "Show Runtime preparation failed: {reason}",
-      "unsupportedSource": "Show Runtime preparation failed: {reason}. Remove VIBE_SHOW_RUNTIME_SOURCE and use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built."
+      "unsupportedSource": "Show Runtime preparation failed: {reason}. Remove VIBE_SHOW_RUNTIME_SOURCE and use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built.",
+      "modelHubEngineSkipped": "Model Hub engine: skipped ({reason}).",
+      "modelHubEngineInstalled": "Model Hub engine installed.",
+      "modelHubEngineReady": "Model Hub engine ready.",
+      "modelHubEngineNotReady": "Model Hub engine not ready: {reason}"
     },
     "clean": {
       "commandHelp": "Remove stale Show, Git, Memory, Model Hub, and tmux runtime installs and archives; exit nonzero if any cleanup fails.",

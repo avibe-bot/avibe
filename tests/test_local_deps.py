@@ -1413,6 +1413,18 @@ def test_dependencies_status_shape(monkeypatch):
         ),
         pytest.param(
             {
+                "installed": True,
+                "version": "v7.2.105",
+                "selected_version": "v7.2.149",
+                "matches_manifest": False,
+                "status": "error",
+                "reason": "model_hub_engine_archive_download_failed",
+            },
+            ("error", "repairable", True),
+            id="failed-upgrade-preserves-installed-version",
+        ),
+        pytest.param(
+            {
                 "installed": False,
                 "version": None,
                 "selected_version": None,
@@ -1490,8 +1502,8 @@ def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
     calls = []
 
     class Remote:
-        def ensure_runtime_dependency(self, *, force):
-            calls.append(force)
+        def ensure_runtime_dependency(self, *, force, offline):
+            calls.append((force, offline))
             return {
                 "changed": True,
                 "status": {
@@ -1508,7 +1520,7 @@ def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
         lambda **_kwargs: pytest.fail("a live controller owns engine replacement"),
     )
 
-    result = api.ensure_model_hub_engine_installed(force=True)
+    result = api.ensure_model_hub_engine_installed(force=True, offline=True)
 
     assert result == {
         "ok": True,
@@ -1522,11 +1534,11 @@ def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
         },
         "reason": None,
     }
-    assert calls == [True]
+    assert calls == [(True, True)]
 
 
 @pytest.mark.parametrize("controller_error", ("feature_disabled", "source_not_found"))
-def test_model_hub_engine_ensure_falls_back_for_a_controller_without_the_operation(
+def test_model_hub_engine_ensure_does_not_bypass_a_live_older_controller(
     monkeypatch,
     tmp_path,
     controller_error,
@@ -1535,28 +1547,21 @@ def test_model_hub_engine_ensure_falls_back_for_a_controller_without_the_operati
 
     socket_path = tmp_path / "controller.sock"
     socket_path.touch()
-    direct_calls = []
-
     class Remote:
-        def ensure_runtime_dependency(self, *, force):
+        def ensure_runtime_dependency(self, *, force, offline):
             raise ModelHubError(controller_error, status=404)
-
-    class Manager:
-        def __init__(self, *, offline):
-            direct_calls.append(("manager", offline))
-
-        def ensure(self, *, force):
-            direct_calls.append(("ensure", force))
-            return {"ok": True, "installed": True, "changed": True}
 
     monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
     monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
-    monkeypatch.setattr("vibe.model_hub_runtime.installer.EngineRuntimeManager", Manager)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns engine replacement"),
+    )
 
     result = api.ensure_model_hub_engine_installed(force=True)
 
-    assert result["ok"] is True
-    assert direct_calls == [("manager", None), ("ensure", True)]
+    assert result["ok"] is False
+    assert result["reason"] == controller_error
 
 
 def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
@@ -1569,7 +1574,7 @@ def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
     socket_path.touch()
 
     class Remote:
-        def ensure_runtime_dependency(self, *, force):
+        def ensure_runtime_dependency(self, *, force, offline):
             raise ModelHubError(
                 "engine_down",
                 status=503,

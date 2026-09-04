@@ -2703,6 +2703,69 @@ def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
     }
 
 
+@pytest.mark.parametrize(
+    ("cpa_result", "expected", "stream"),
+    (
+        ({"ok": True, "changed": True}, "Model Hub 引擎已安装。", "out"),
+        ({"ok": True, "changed": False}, "Model Hub 引擎已就绪。", "out"),
+        (
+            {"ok": False, "skipped": True, "reason": "offline"},
+            "Model Hub 引擎：已跳过（offline）。",
+            "out",
+        ),
+        (
+            {"ok": False, "reason": "download_failed"},
+            "Model Hub 引擎尚未就绪：download_failed",
+            "err",
+        ),
+    ),
+)
+def test_runtime_prepare_localizes_cpa_output(
+    monkeypatch,
+    capsys,
+    cpa_result,
+    expected,
+    stream,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"install": {"state": "installed", "install_dir": None}},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "_ensure_model_hub_engine_during_prepare",
+        lambda **_kwargs: cpa_result,
+    )
+
+    assert (
+        cli.cmd_runtime(
+            SimpleNamespace(
+                runtime_command="prepare",
+                offline=False,
+                force=False,
+                json=False,
+                strict=False,
+            )
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert expected in getattr(captured, stream)
+    assert "Model Hub engine" not in captured.out + captured.err
+
+
 def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {

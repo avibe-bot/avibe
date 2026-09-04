@@ -2956,13 +2956,96 @@ def test_adapter_applies_changed_install_to_running_engine(
             state_store=EngineStateStore(tmp_path / "state"),
         )
 
-        status = await adapter.ensure_installed()
+        result = await adapter.ensure_installed()
 
-        assert status.installed_version == "v7.2.95"
-        assert status.verified is True
+        assert result.status.installed_version == "v7.2.95"
+        assert result.status.verified is True
+        assert result.changed is changed
         assert supervisor.restarts == expected_restarts
 
     asyncio.run(run())
+
+
+def test_adapter_routes_offline_dependency_ensure_through_its_supervisor(
+    tmp_path: Path,
+) -> None:
+    calls: list[object] = []
+
+    class OfflineInstaller:
+        def ensure(self, *, force=False):
+            calls.append(("offline-ensure", force))
+            return {"ok": True, "changed": True}
+
+    class Installer:
+        def offline_copy(self):
+            calls.append("offline-copy")
+            return OfflineInstaller()
+
+        def ensure(self, *, force=False):
+            raise AssertionError("offline ensure must not use the online installer")
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.installer = Installer()
+
+        def restart_if_running(self) -> None:
+            calls.append("restart")
+
+        def status(self):
+            return {
+                "status": {
+                    "health": "not_started",
+                    "installed_version": "v7.2.149",
+                    "verified": True,
+                    "listening": None,
+                    "last_check": None,
+                }
+            }
+
+    async def run() -> None:
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=EngineStateStore(tmp_path / "state"),
+        )
+
+        result = await adapter.ensure_installed(force=True, offline=True)
+
+        assert result.changed is True
+        assert result.status.installed_version == "v7.2.149"
+        assert calls == ["offline-copy", ("offline-ensure", True), "restart"]
+
+    asyncio.run(run())
+
+
+def test_direct_ensure_failure_is_durable_across_manager_reload(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    reason = "model_hub_engine_archive_download_failed"
+
+    def fail_ensure(_manager, **kwargs):
+        kwargs["on_resolved"](RUNTIME_INSTALL_TARGET)
+        return {"ok": False, "reason": reason}
+
+    monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", fail_ensure)
+    runtime_dir = tmp_path / "runtime"
+
+    result = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).ensure()
+    reloaded = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+
+    assert result == {"ok": False, "reason": reason}
+    assert reloaded.install_state()["reason"] == reason
+    assert reloaded.status()["status"] == "error"
+    assert reloaded.status()["reason"] == reason
+
+    def succeed_ensure(_manager, **kwargs):
+        kwargs["on_resolved"](RUNTIME_INSTALL_TARGET)
+        return {"ok": True, "changed": False}
+
+    monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", succeed_ensure)
+
+    assert reloaded.ensure()["ok"] is True
+    assert EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).install_state() is None
 
 
 def test_runtime_install_state_survives_adapter_reload_and_settles_once(

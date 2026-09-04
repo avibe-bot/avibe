@@ -28,6 +28,7 @@ from config.v2_config import (
 from core.agent_auth_service import BackendLoginInProgressError
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -162,6 +163,7 @@ class FakeAdapter:
         self.stop_runtime_calls = 0
         self.install_calls = 0
         self.ensure_calls: list[bool] = []
+        self.ensure_offline_calls: list[bool] = []
         self.credential_count = 0
         self.observation: SourceObservation | None = None
         self.observed_protocol_orders: list[tuple[str, ...]] = []
@@ -169,9 +171,13 @@ class FakeAdapter:
         self.refreshable_credential_refs: set[str] = set()
         self.discovery_credential_refs: list[str] = []
 
-    async def ensure_installed(self, *, force=False):
+    async def ensure_installed(self, *, force=False, offline=False):
         self.ensure_calls.append(force)
-        return await self.status()
+        self.ensure_offline_calls.append(offline)
+        return EngineEnsureResult(
+            status=await self.status(),
+            changed=force,
+        )
 
     async def install(self):
         self.install_calls += 1
@@ -1188,10 +1194,15 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
 
     monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
 
-    runtime = ModelHubRemoteService().ensure_runtime_dependency(force=True)
+    runtime = ModelHubRemoteService().ensure_runtime_dependency(
+        force=True,
+        offline=True,
+    )
 
     assert runtime["changed"] is True
-    assert calls == [("runtime_ensure_dependency", {"force": True})]
+    assert calls == [
+        ("runtime_ensure_dependency", {"force": True, "offline": True})
+    ]
 
 
 def test_reorder_client_preserves_explicit_null_order(monkeypatch):
@@ -1279,10 +1290,9 @@ def test_runtime_dependency_ensure_is_allowlisted_without_starting_engine(tmp_pa
 
     class PinnedAdapter(FakeAdapter):
         async def status(self):
-            version = "v7.2.149" if self.ensure_calls else "v7.2.105"
             return EngineStatus(
                 health=EngineHealth.NOT_STARTED,
-                installed_version=version,
+                installed_version="v7.2.149",
                 verified=True,
                 listen_host="127.0.0.1",
                 listen_port=None,
@@ -1302,7 +1312,7 @@ def test_runtime_dependency_ensure_is_allowlisted_without_starting_engine(tmp_pa
         dispatch_model_hub_rpc(
             service,
             "runtime_ensure_dependency",
-            {"force": True},
+            {"force": True, "offline": True},
         )
     )
 
@@ -1310,6 +1320,7 @@ def test_runtime_dependency_ensure_is_allowlisted_without_starting_engine(tmp_pa
     assert runtime["enabled"] is False
     assert runtime["status"]["installed_version"] == "v7.2.149"
     assert adapter.ensure_calls == [True]
+    assert adapter.ensure_offline_calls == [True]
     assert adapter.start_calls == 0
 
 
@@ -1318,7 +1329,7 @@ def test_runtime_dependency_ensure_preserves_closed_install_failure_reason(tmp_p
         reason = "model_hub_engine_archive_download_failed"
 
     class FailingAdapter(FakeAdapter):
-        async def ensure_installed(self, *, force=False):
+        async def ensure_installed(self, *, force=False, offline=False):
             raise InstallFailure
 
     service, _store, _adapter = _service(tmp_path, adapter=FailingAdapter())

@@ -6,11 +6,12 @@ import os
 import re
 import subprocess
 import threading
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from config import paths
 from core import managed_runtime
@@ -112,6 +113,88 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         self._install_state_lock = threading.RLock()
         self._install_state_override: object | _InstallStateOverride = _INSTALL_STATE_UNSET
 
+    def offline_copy(self) -> EngineRuntimeManager:
+        """Return the same runtime target with network access disabled."""
+
+        if self.offline:
+            return self
+        return EngineRuntimeManager(
+            runtime_dir=self.runtime_dir,
+            manifest_path=self.manifest_path,
+            manifest_url=self.manifest_url,
+            offline=True,
+        )
+
+    def ensure(
+        self,
+        *,
+        force: bool = False,
+        expected_target: Mapping[str, str] | None = None,
+        on_resolved: Callable[[dict[str, str]], None] | None = None,
+        validate_candidate: Callable[[Path], str | None] | None = None,
+    ) -> dict[str, Any]:
+        if on_resolved is not None or expected_target is not None:
+            return super().ensure(
+                force=force,
+                expected_target=expected_target,
+                on_resolved=on_resolved,
+                validate_candidate=validate_candidate,
+            )
+
+        generation = uuid.uuid4().hex
+        resolved_target: dict[str, str] | None = None
+        previous_failure = self.install_state()
+
+        def capture_target(target: dict[str, str]) -> None:
+            nonlocal resolved_target
+            resolved_target = dict(target)
+
+        result = super().ensure(
+            force=force,
+            expected_target=expected_target,
+            on_resolved=capture_target,
+            validate_candidate=validate_candidate,
+        )
+        reason = str(result.get("reason") or "model_hub_engine_install_failed")
+        try:
+            if result.get("ok") and previous_failure is not None:
+                self.clear_install_failure(previous_failure)
+            elif not result.get("ok") and reason != "model_hub_engine_platform_unsupported":
+                self.transition_install_claim(
+                    InstallClaimTransition.ADMISSION_FAILURE,
+                    generation=generation,
+                    target=resolved_target,
+                    reason=reason,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to persist direct Model Hub runtime ensure outcome")
+        return result
+
+    def clear_install_failure(self, expected: Mapping[str, Any]) -> bool:
+        """Forget a superseded failure without disturbing an active claim."""
+
+        with self._install_state_lock:
+            with MigrationFileLock(self.install_state_lock_path):
+                current = self._read_install_state_file()
+                if current != expected or current.get("state") != "not_installed":
+                    return False
+                try:
+                    self.install_state_path.unlink()
+                except FileNotFoundError:
+                    pass
+                self._install_state_override = _INSTALL_STATE_UNSET
+                return True
+
+    def status(self) -> dict[str, Any]:
+        managed = super().status()
+        install_state = self.install_state()
+        if install_state and install_state.get("state") == "not_installed":
+            reason = install_state.get("reason")
+            if isinstance(reason, str) and reason:
+                managed["status"] = "error"
+                managed["reason"] = reason
+        return managed
+
     @property
     def install_state_path(self) -> Path:
         return self.runtime_dir / "install-state.json"
@@ -204,7 +287,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                     assert reason is not None
                     payload = self._failed_install_state(
                         generation=generation,
-                        target=None,
+                        target=resolved_target,
                         reason=reason,
                     )
                     self._write_owned_failure(generation, payload)

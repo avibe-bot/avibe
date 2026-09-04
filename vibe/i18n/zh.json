@@ -1031,7 +1031,11 @@
       "prepared": "Show Runtime 已准备完成。",
       "skipped": "Show Runtime 准备已跳过：{reason}",
       "failed": "Show Runtime 准备失败：{reason}",
-      "unsupportedSource": "Show Runtime 准备失败：{reason}。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。"
+      "unsupportedSource": "Show Runtime 准备失败：{reason}。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
+      "modelHubEngineSkipped": "Model Hub 引擎：已跳过（{reason}）。",
+      "modelHubEngineInstalled": "Model Hub 引擎已安装。",
+      "modelHubEngineReady": "Model Hub 引擎已就绪。",
+      "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}"
     },
     "clean": {
       "commandHelp": "清理过期的 Show、Git、Memory、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",

@@ -17,6 +17,7 @@ import aiohttp
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -1222,18 +1223,24 @@ class CLIProxyEngineAdapter:
         self,
         *,
         force: bool = False,
+        offline: bool = False,
         expected_target: Mapping[str, str] | None = None,
         on_resolved: Callable[[dict[str, str]], None] | None = None,
-    ) -> EngineStatus:
+    ) -> EngineEnsureResult:
         async with self._routing_lock:
+            installer = (
+                self.supervisor.installer.offline_copy()
+                if offline
+                else self.supervisor.installer
+            )
             if expected_target is None and on_resolved is None:
                 if force:
                     install = await asyncio.to_thread(
-                        self.supervisor.installer.ensure,
+                        installer.ensure,
                         force=True,
                     )
                 else:
-                    install = await asyncio.to_thread(self.supervisor.installer.ensure)
+                    install = await asyncio.to_thread(installer.ensure)
             else:
                 ensure_kwargs: dict[str, Any] = {
                     "expected_target": expected_target,
@@ -1242,7 +1249,7 @@ class CLIProxyEngineAdapter:
                 if force:
                     ensure_kwargs["force"] = True
                 install = await asyncio.to_thread(
-                    self.supervisor.installer.ensure,
+                    installer.ensure,
                     **ensure_kwargs,
                 )
             if not install.get("ok"):
@@ -1250,7 +1257,10 @@ class CLIProxyEngineAdapter:
                 raise self._install_failure(reason)
             if install.get("changed"):
                 await asyncio.to_thread(self.supervisor.restart_if_running)
-            return await self.status()
+            return EngineEnsureResult(
+                status=await self.status(),
+                changed=bool(install.get("changed")),
+            )
 
     async def start(self) -> EngineStatus:
         async with self._installation_lock:

@@ -35,6 +35,7 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     RawCallOutcome,
@@ -1128,8 +1129,13 @@ class ProbeAdapter:
         self.refreshable_credential_refs: set[str] = set()
         self.capability_queries: list[str] = []
 
-    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
-        return await self.status()
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
+        return EngineEnsureResult(status=await self.status(), changed=force)
 
     async def sync_sources(self, _bindings) -> None:
         return None

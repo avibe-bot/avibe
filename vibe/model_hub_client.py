@@ -296,8 +296,16 @@ class ModelHubRemoteService:
     async def runtime_install(self) -> dict:
         return await _rpc("runtime_install")
 
-    def ensure_runtime_dependency(self, *, force: bool = False) -> dict:
-        return _rpc_sync("runtime_ensure_dependency", {"force": force})
+    def ensure_runtime_dependency(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> dict:
+        return _rpc_sync(
+            "runtime_ensure_dependency",
+            {"force": force, "offline": offline},
+        )
 
     async def runtime_start(self) -> dict:
         return await _rpc("runtime_start")

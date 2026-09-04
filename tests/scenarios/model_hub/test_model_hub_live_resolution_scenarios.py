@@ -25,6 +25,7 @@ from config.v2_config import (
     model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     RawCallOutcome,
@@ -122,8 +123,13 @@ class AdapterBoundaryFake:
         self.requests: list[object] = []
         self.refreshable_credential_refs = frozenset(refreshable_credential_refs)
 
-    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
-        return await self.start()
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
+        return EngineEnsureResult(status=await self.start(), changed=force)
 
     async def start(self) -> EngineStatus:
         return EngineStatus(EngineHealth.OK, "test", True, "127.0.0.1", 18443, None)

@@ -50,6 +50,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
 from .adapter import (
     DiscoveredModel,
     EngineAdapter,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     InvokeHandle,
@@ -288,8 +289,13 @@ class UnavailableEngineAdapter:
     async def recover_installation(self) -> EngineStatus:
         return await self.status()
 
-    async def ensure_installed(self, *, force: bool = False) -> EngineStatus:
-        return await self.status()
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
+        return EngineEnsureResult(status=await self.status(), changed=False)
 
     async def start(self) -> EngineStatus:
         raise EngineUnavailableError
@@ -1139,13 +1145,17 @@ class ModelHubService:
             await self._prepare_engine_for_demand()
             await self._engine_call(self.adapter.start())
 
-    async def _ensure_runtime_dependency(self, *, force: bool = False) -> EngineStatus:
+    async def _ensure_runtime_dependency(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
         ensure = getattr(self.adapter, "ensure_installed", None)
         if not callable(ensure):
             raise ModelHubError("engine_down", status=503)
         try:
-            awaitable = ensure(force=True) if force else ensure()
-            return await awaitable
+            return await ensure(force=force, offline=offline)
         except RuntimePlatformUnsupportedError:
             raise ModelHubError("runtime_platform_unsupported", status=422) from None
         except EngineUnavailableError as exc:
@@ -5809,17 +5819,25 @@ class ModelHubService:
                 enabled=enabled,
             )
 
-    async def runtime_ensure_dependency(self, *, force: bool = False) -> dict:
+    async def runtime_ensure_dependency(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> dict:
         """Converge the pinned engine without changing persisted run intent."""
 
         async with self._runtime_lifecycle_lock:
-            status = await self.reconcile_runtime_installation()
-            if status is None:
-                status = await self._engine_call(self.adapter.status())
-            previous_version = status.installed_version if status.verified else None
-            status = await self._ensure_runtime_dependency(force=force)
-            payload = _runtime_payload(status, enabled=self.store.load().enabled)
-            payload["changed"] = previous_version != status.installed_version or not status.verified
+            await self.reconcile_runtime_installation()
+            result = await self._ensure_runtime_dependency(
+                force=force,
+                offline=offline,
+            )
+            payload = _runtime_payload(
+                result.status,
+                enabled=self.store.load().enabled,
+            )
+            payload["changed"] = result.changed
             return payload
 
     async def runtime_start(self) -> dict:

@@ -9100,14 +9100,14 @@ def _model_hub_engine_dependency_status() -> dict:
     elif not selected_version:
         status = "error"
         action_class = "operator_only"
+    elif managed.get("status") == "error":
+        status = "error"
+        action_class = "repairable"
     elif installed and matches_manifest is True:
         status = "ready"
         action_class = "none"
     elif installed:
         status = "upgrade_required"
-        action_class = "repairable"
-    elif managed.get("status") == "error":
-        status = "error"
         action_class = "repairable"
     else:
         status = "missing"
@@ -9141,23 +9141,18 @@ def ensure_model_hub_engine_installed(
     def ensure_directly() -> dict:
         return EngineRuntimeManager(offline=offline).ensure(force=force)
 
-    if offline is True:
-        return ensure_directly()
     if not default_socket_path().expanduser().resolve().exists():
         return ensure_directly()
 
     try:
         from vibe.model_hub_client import ModelHubRemoteService
 
-        runtime = ModelHubRemoteService().ensure_runtime_dependency(force=force)
+        runtime = ModelHubRemoteService().ensure_runtime_dependency(
+            force=force,
+            offline=offline is True,
+        )
     except ModelHubError as exc:
         dependency_reason = exc.data.get("reason")
-        if not dependency_reason and exc.code in {
-            "engine_down",
-            "feature_disabled",
-            "source_not_found",
-        }:
-            return ensure_directly()
         return {
             "ok": False,
             "reason": dependency_reason or exc.code,
