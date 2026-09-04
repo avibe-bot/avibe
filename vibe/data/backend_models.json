@@ -26,7 +26,7 @@
     },
     "codex": {
       "models": [
-        {"id": "gpt-6-astra", "label": "GPT-6-Astra", "priority": 1, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
+        {"id": "gpt-6-astra", "label": "GPT-6-Astra", "priority": 1, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
         {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "priority": 6, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
         {"id": "gpt-5.6-terra", "label": "GPT-5.6-Terra", "priority": 7, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
         {"id": "gpt-5.6-luna", "label": "GPT-5.6-Luna", "priority": 8, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},

@@ -40,8 +40,9 @@ CODEX_HUB_CATALOG_TIMEOUT_SECONDS = 15.0
 CODEX_HUB_CATALOG_MAX_BYTES = 8 * 1024 * 1024
 
 _HIDDEN_VISIBILITIES = {"hide", "hidden"}
+_VISIBLE_VISIBILITIES = {"visible", "list"}
 _SUPPORTED_BACKENDS = {"claude", "codex"}
-_SUPPORTED_VISIBILITIES = {"visible", "list", *_HIDDEN_VISIBILITIES}
+_SUPPORTED_VISIBILITIES = {*_VISIBLE_VISIBILITIES, *_HIDDEN_VISIBILITIES}
 _DEFAULT_REASONING_EFFORTS = {
     "claude": ["low", "medium", "high"],
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
@@ -231,11 +232,17 @@ def _codex_hub_catalog_bytes(
             else:
                 settled_efforts = None
             if settled_efforts is not None:
-                row["default_reasoning_level"] = (
-                    "medium"
-                    if "medium" in settled_efforts
-                    else settled_efforts[0]
-                )
+                native_default = row.get("default_reasoning_level")
+                if not (
+                    isinstance(native_default, str)
+                    and native_default in settled_efforts
+                ):
+                    native_default = (
+                        "medium"
+                        if "medium" in settled_efforts
+                        else settled_efforts[0]
+                    )
+                row["default_reasoning_level"] = native_default
                 row["supported_reasoning_levels"] = [
                     {
                         "effort": effort,
@@ -552,11 +559,11 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
     else:
         local_catalog = _read_codex_models_cache()
         remote_entries = backend_model_entries("codex", remote_catalog)
-        blocked = {
-            entry["id"]
-            for entry in [*local_catalog, *remote_entries]
-            if _model_hidden(entry)
-        }
+        blocked = _codex_blocked_model_ids(
+            remote_entries,
+            local_catalog,
+            bundled_catalog,
+        )
         sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)
 
     merged = merge_model_sources(sources, blocked_model_ids=blocked)
@@ -658,11 +665,11 @@ def backend_builtin_snapshot(
         local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
         local_complete = not cli_installed or local_catalog_read
         remote_entries = backend_model_entries("codex", remote_catalog)
-        blocked = {
-            entry["id"]
-            for entry in [*local_catalog, *remote_entries]
-            if _model_hidden(entry)
-        }
+        blocked = _codex_blocked_model_ids(
+            remote_entries,
+            local_catalog,
+            bundled_catalog,
+        )
         sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)[:-1]
 
     merged = merge_model_sources(sources, blocked_model_ids=blocked)
@@ -914,6 +921,31 @@ def _reasoning_option_items(efforts: Iterable[object]) -> list[dict[str, str]]:
 def _model_hidden(entry: dict[str, Any]) -> bool:
     visibility = entry.get("visibility")
     return isinstance(visibility, str) and visibility.strip().lower() in _HIDDEN_VISIBILITIES
+
+
+def _model_explicitly_visible(entry: dict[str, Any]) -> bool:
+    visibility = entry.get("visibility")
+    return isinstance(visibility, str) and visibility.strip().lower() in _VISIBLE_VISIBILITIES
+
+
+def _codex_blocked_model_ids(
+    remote_entries: Sequence[dict[str, Any]],
+    local_catalog: Sequence[dict[str, Any]],
+    bundled_catalog: dict[str, Any],
+) -> set[str]:
+    bundled_entries = backend_model_entries("codex", bundled_catalog)
+    explicit_catalog_models = {
+        entry["id"]
+        for entry in [*remote_entries, *bundled_entries]
+        if _model_explicitly_visible(entry)
+    }
+    return {
+        entry["id"] for entry in remote_entries if _model_hidden(entry)
+    } | {
+        entry["id"]
+        for entry in local_catalog
+        if _model_hidden(entry) and entry["id"] not in explicit_catalog_models
+    }
 
 
 def _ordered_entries(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
