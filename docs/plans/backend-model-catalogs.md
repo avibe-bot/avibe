@@ -543,7 +543,14 @@ display names, no protocol chatter.
   Source still serves such requests and files the engine follow-up. A Hub-held Claude
   subscription (OAuth credential) keeps the engine's cloaking: the vendor accepts those tokens
   only from the Claude Code identity the cloak reproduces, so rows served by a subscription
-  get the reasoning-preserving path of S4, not the body-identical guarantee.
+  get the reasoning-preserving path of S4, not the body-identical guarantee. The engine has one
+  process-wide configuration, so the controls are applied per credential, not globally:
+  `cloak.mode: never` and `rebuild-mid-system-message: false` on every API-key `claude-api-key`
+  entry, OAuth credential records left at the engine default (or given an explicit
+  `cloak.mode: always` if a global flag turns out to be required for the API-key path). One
+  test runs both credential classes in one engine process and asserts S3's diff is empty for
+  the API-key hop while the OAuth hop still carries the cloak; if the engine cannot express
+  both at once, the API-key passthrough yields and the follow-up is filed against the engine.
 - **C12 — No upgrade handling (owner ruling 2026-09-05).** Per `model-hub-contracts/README.md`
   no bump converts anything: a pre-v4 OpenCode section is invalid input under C8/C9 and takes
   the existing invalid-config path. No migration, parking, notice, discriminator, or
@@ -620,8 +627,9 @@ No new string anywhere else; nothing explains the mechanism.
 Spike done (S1–S6 recorded in opencode-overlay.md v4). Lanes: **backend** — identity,
 `native_protocol`, the overlay writer and the whole OpenCode launch seam it changes
 (`modules/agents/model_hub.py` provider set, `modules/agents/opencode/server.py` provider-set
-filtering, `modules/agents/opencode/agent.py` addressing), engine flags, the pre-GA reset,
-contract artifacts and version 8 · **UI** — bare-id rows, editor `API` field, retired prefixing
+filtering, `modules/agents/opencode/agent.py` addressing), the engine credential controls
+(C11), the C12 rejection of pre-v4 input, the deletions listed above, contract artifacts and
+version 8 · **UI** — bare-id rows, editor `API` field, retired prefixing
 and buckets, e2e fixtures · **docs mirror**. Gemini ships in its own later revision with a
 Gemini Source protocol.
 

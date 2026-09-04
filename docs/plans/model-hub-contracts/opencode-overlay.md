@@ -19,11 +19,14 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   appear in `/config/providers`. In Direct mode no overlay exists.
 - **Same-id collision.** OpenCode deep-merges a user-authored provider that shares one of
   Avibe's ids underneath the overlay, and `enabled_providers` cannot exclude it. After launch
-  Avibe therefore verifies `/config/providers`: for each Avibe provider the reported model set
-  must equal the projected set and no other provider may be present; a mismatch is a launch
-  failure with the closed error `opencode_overlay_collision`, surfaced by the existing runtime
-  health state — never a silently mixed catalog. A fixture with a user config declaring
-  `avibe-openai` with its own model is a required test.
+  Avibe therefore reads OpenCode's effective configuration (`GET /config`) and requires, for
+  each Avibe provider id, that the effective `provider[<id>]` entry equals the overlay's entry
+  under canonical JSON serialization — any extra option, model, or per-model setting is a
+  difference — and that no other provider is present in `/config/providers`; a difference is
+  a launch failure with the closed error `opencode_overlay_collision`, surfaced by the existing
+  runtime health state — never a silently merged catalog. Required fixtures: a user config
+  declaring `avibe-openai` with its own model, and one declaring `avibe-openai` with the same
+  model ids but an extra option.
 - **Addressing.** In Gateway mode Avibe addresses OpenCode with `providerID` = the fixed
   provider id of the selected row's `native_protocol` from the table below
   (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`) and `modelID` = the

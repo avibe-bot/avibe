@@ -1562,7 +1562,7 @@ Review round 12, P2, on `docs/plans/model-hub-implementation.md`, [thread](https
 
 **Disposition.** Repairs **AC-9's acceptance fixture**, applied above: one OpenCode backend with bare selections (`gpt-5.6` running, `glm-5.2` ticked-but-unassigned — v4 ids; they were `openai/gpt-5.6` and `zhipuai/glm-5.2` before 2026-09-04). The previous fixture asked a fixed-menu backend to own an OpenCode menu, which `api.md`'s identifier rules forbid, so Case B could not be reached at all. AC-9's criterion and the round-9/round-10 narrowing rulings are unchanged. Independent of the 10:54 push cut — it repairs the fixture, which the surviving grain half still needs.
 
-**Acceptance.** Contract/integration layer, owed by **L3** with the AC-9 tests it repairs. Every identifier in AC-9's fixture validates against `api.md`'s identifier rules for the backend that owns it, and Case B is constructible without changing backend or menu semantics mid-test. Failed before v4: `gpt-5.6` unprefixed on an OpenCode-menu backend was rejected by the prefixed identifier rules; under v4 the bare id is the only admissible form and the fixture is built as written.
+**Acceptance.** Contract/integration layer, owed by **L3** with the AC-9 tests it repairs. Every identifier in AC-9's fixture validates against `api.md`'s identifier rules for the backend that owns it, and Case B is constructible without changing backend or menu semantics mid-test. Under v4 the bare id is the only admissible OpenCode form — a prefixed id such as `openai/gpt-5.6` is rejected — so the fixture is built exactly as written.
 
 ### AC-16 — Remove the nonexistent Agent from AC-5's assertion
 
