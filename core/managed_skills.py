@@ -1169,6 +1169,8 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
                 "\n\n## Skills\n\n"
                 "If the user requests a skill by exact name, run "
                 "`vibe skill load -- <name>` before proceeding.\n"
+                "For Avibe-managed Skills, if the Skill content is already present in the current context, "
+                "use it without loading it again.\n"
                 "Otherwise, do not guess skill names."
             )
         return ""
@@ -1184,6 +1186,8 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
         "Skills provide specialized instructions and workflows for specific tasks.\n"
         "When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.\n"
         "If the user requests a skill by exact name, load that name directly.\n"
+        "For Avibe-managed Skills, if the Skill content is already present in the current context, "
+        "use it without loading it again.\n"
         "Otherwise, only load skill names listed here or returned by `vibe skill list`; do not guess names.\n\n"
         f"{later_page_guidance}"
         "### Available skills\n"
