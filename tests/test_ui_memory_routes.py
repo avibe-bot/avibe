@@ -17,9 +17,10 @@ from config.v2_config import (
     RuntimeConfig,
     SlackConfig,
     V2Config,
+    atomic_update_memory,
 )
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import internal_client, ui_memory_routes
+from vibe import internal_client, model_service, ui_memory_routes
 from vibe.ui_server import app
 
 
@@ -36,6 +37,48 @@ def _save_config(memory: MemoryConfig | None = None) -> None:
         agents=AgentsConfig(),
         memory=memory or MemoryConfig(),
     ).save()
+
+
+def _custom_memory_with_cloud_bundle(
+    *,
+    scope: str = "platform",
+    access_key_revision: int | None = 1,
+    transition_notice_pending: bool = False,
+) -> MemoryConfig:
+    return MemoryConfig(
+        enabled=True,
+        mode="custom",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                "https://llm.example.test/v1",
+                "chat",
+                "llm-key",
+            ),
+            embedding=MemoryEndpointConfig(
+                "https://embed.example.test/v1",
+                "embed-v1",
+                "embed-key",
+            ),
+        ),
+        cloud=MemoryCloudConfig(
+            scope=scope,
+            capabilities=MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="chat_fallback",
+            embedding_identity="cloud-emb-v2",
+            applied_embedding_identity="cloud-emb-v1",
+            revision=2,
+            model_access_key="mak_opaque",
+            rerank_access_key="mak_rr_deepinfra_opaque",
+            access_key_revision=access_key_revision,
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+            transition_notice_pending=transition_notice_pending,
+        ),
+    )
 
 
 def _local_headers() -> dict[str, str]:
@@ -477,6 +520,216 @@ def test_custom_rerank_candidate_failure_blocks_settings_persistence(
     assert rerank["has_api_key"] is True
     assert preflights[0]["user_key"] == "avibe:local"
     assert V2Config.load().memory.processing.rerank is None
+
+
+@pytest.mark.parametrize("access_key_revision", [None, 1])
+@pytest.mark.parametrize(
+    ("scope", "patch_payload"),
+    [
+        ("platform", {"mode": "platform", "confirm_loss": True}),
+        (
+            "organization",
+            {"acknowledge_transition": True, "confirm_loss": True},
+        ),
+    ],
+)
+def test_noncurrent_cloud_bundle_is_refreshed_before_settings_transition(
+    scope: str,
+    patch_payload: dict[str, object],
+    access_key_revision: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(
+        _custom_memory_with_cloud_bundle(
+            scope=scope,
+            access_key_revision=access_key_revision,
+            transition_notice_pending=scope == "organization",
+        )
+    )
+    events: list[str] = []
+    preflights: list[dict[str, object]] = []
+    reconfigures: list[dict[str, object]] = []
+
+    def ensure(config: V2Config) -> V2Config:
+        events.append("ensure")
+        assert config.memory.mode == "custom"
+        assert config.memory.cloud.access_key_revision == access_key_revision
+
+        def refresh_bundle(memory: MemoryConfig) -> MemoryConfig:
+            memory.cloud.rerank_access_key = "mak_rr_dashscope_opaque"
+            memory.cloud.access_key_revision = 2
+            return memory
+
+        return atomic_update_memory(refresh_bundle)
+
+    async def preflight(*, payload, user_key):
+        events.append("preflight")
+        preflights.append({"payload": payload, "user_key": user_key})
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def reconfigure(*, confirm_loss, memory, expected_memory, user_key):
+        events.append("reconfigure")
+        reconfigures.append(
+            {
+                "confirm_loss": confirm_loss,
+                "memory": memory,
+                "expected_memory": expected_memory,
+                "user_key": user_key,
+            }
+        )
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "operation": "reconfigure",
+                "state": "running",
+                "result": "completed",
+                "data_deleted": True,
+                "data_remaining": False,
+                "roots": [],
+            },
+        }
+
+    async def unexpected_reconcile():
+        pytest.fail("settings transition issued an extra reconciliation")
+
+    monkeypatch.setattr(model_service, "ensure_model_access_key", ensure)
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "memory_reconfigure", reconfigure)
+    monkeypatch.setattr(internal_client, "reconcile_memory", unexpected_reconcile)
+    client = app.test_client()
+
+    response = client.patch(
+        "/api/memory/settings",
+        json=patch_payload,
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert events == ["ensure", "preflight", "reconfigure"]
+    assert len(preflights) == len(reconfigures) == 1
+    candidate_payload = reconfigures[0]["memory"]
+    assert preflights[0]["payload"]["memory"] == candidate_payload
+    candidate = ui_memory_routes._memory_candidate_config(  # noqa: SLF001
+        V2Config.load(),
+        candidate_payload,
+    ).memory
+    assert candidate.cloud.revision == 2
+    assert candidate.cloud.access_key_revision == 2
+    assert candidate.cloud.model_access_key == "mak_opaque"
+    assert candidate.cloud.rerank_access_key == "mak_rr_dashscope_opaque"
+    rerank = candidate.runtime_processing().rerank
+    assert candidate.runtime_source() == "cloud"
+    assert rerank is not None
+    assert rerank.api_key == "mak_rr_dashscope_opaque"
+    assert candidate.runtime_embedding_identity() == ("cloud", "cloud-emb-v2", None)
+    assert reconfigures[0]["confirm_loss"] is True
+    assert reconfigures[0]["user_key"] == "avibe:local"
+
+
+def test_current_cloud_bundle_skips_refresh_during_settings_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(_custom_memory_with_cloud_bundle(access_key_revision=2))
+    events: list[str] = []
+    candidates: list[dict[str, object]] = []
+
+    def unexpected_ensure(_config: V2Config) -> V2Config:
+        raise AssertionError("current cloud bundle was refreshed")
+
+    async def preflight(*, payload, user_key):
+        events.append("preflight")
+        candidates.append(payload["memory"])
+        assert user_key == "avibe:local"
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def reconfigure(**_kwargs):
+        events.append("reconfigure")
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "operation": "reconfigure",
+                "state": "running",
+                "result": "completed",
+                "data_deleted": True,
+                "data_remaining": False,
+                "roots": [],
+            },
+        }
+
+    monkeypatch.setattr(model_service, "ensure_model_access_key", unexpected_ensure)
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "memory_reconfigure", reconfigure)
+    client = app.test_client()
+
+    response = client.patch(
+        "/api/memory/settings",
+        json={"mode": "platform", "confirm_loss": True},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert events == ["preflight", "reconfigure"]
+    assert len(candidates) == 1
+    candidate = ui_memory_routes._memory_candidate_config(  # noqa: SLF001
+        V2Config.load(),
+        candidates[0],
+    ).memory
+    rerank = candidate.runtime_processing().rerank
+    assert rerank is not None
+    assert rerank.api_key == "mak_rr_deepinfra_opaque"
+
+
+def test_cloud_bundle_refresh_failure_does_not_apply_settings_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    original = _custom_memory_with_cloud_bundle(access_key_revision=1)
+    _save_config(original)
+    downstream_calls: list[str] = []
+
+    def fail_ensure(_config: V2Config) -> V2Config:
+        raise model_service.ModelServiceResolutionError("cloud_request_failed")
+
+    async def preflight(**_kwargs):
+        downstream_calls.append("preflight")
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def reconfigure(**_kwargs):
+        downstream_calls.append("reconfigure")
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(model_service, "ensure_model_access_key", fail_ensure)
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "memory_reconfigure", reconfigure)
+    client = app.test_client()
+
+    response = client.patch(
+        "/api/memory/settings",
+        json={"mode": "platform", "confirm_loss": True},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_store_unavailable",
+    }
+    assert downstream_calls == []
+    persisted = V2Config.load().memory
+    assert persisted.mode == "custom"
+    assert persisted.cloud.model_access_key == original.cloud.model_access_key
+    assert persisted.cloud.rerank_access_key == original.cloud.rerank_access_key
+    assert persisted.cloud.access_key_revision == 1
 
 
 def test_confirmed_embedding_identity_change_uses_unified_reconfigure(

@@ -410,7 +410,12 @@ async def _apply_memory_settings_patch(
                     patch_payload.get("mode") == "platform"
                     or patch_payload.get("acknowledge_transition") is True
                 )
-                and not current.memory.cloud.model_access_key
+                and (
+                    not current.memory.cloud.model_access_key
+                    or current.memory.cloud.access_key_revision is None
+                    or current.memory.cloud.access_key_revision
+                    != current.memory.cloud.revision
+                )
             )
             if needs_cloud_key:
                 from vibe.model_service import ensure_model_access_key
