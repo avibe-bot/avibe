@@ -163,6 +163,17 @@ const vendorOptionName = (id: string) => (id === CUSTOM_VENDOR
   ? i18n.t('settings.models.addKey.field.vendor.custom')
   : apiKeyVendorPreset(id)?.label ?? id);
 
+/** The order the menu should read in: the shipped catalog A–Z by the name on the
+ *  row, then the entry that is not a vendor. Derived from the file rather than
+ *  listed, so a vendor added to the catalog is expected in its alphabetical
+ *  place instead of wherever the file happens to put it. */
+const offeredInOrder = (): string[] => [
+  ...API_KEY_VENDOR_PRESETS
+    .map((row) => row.id)
+    .sort((one, other) => vendorOptionName(one).localeCompare(vendorOptionName(other), 'en', { sensitivity: 'base' })),
+  CUSTOM_VENDOR,
+];
+
 const selectVendor = async (user: ReturnType<typeof userEvent.setup>, id: string) => {
   await user.click(vendorField());
   await user.click(await screen.findByRole('option', { name: vendorOptionName(id) }));
@@ -1057,8 +1068,9 @@ describe('AddApiKeyDialog · vendor', () => {
 
     await user.click(vendorField());
     const rows = await screen.findAllByRole('option');
-    // The shipped catalog in file order, after the one entry that is not a vendor.
-    const offered = [CUSTOM_VENDOR, ...API_KEY_VENDOR_PRESETS.map((row) => row.id)];
+    // A–Z by the name on the row, with 自定义 at the bottom: it is the absence of
+    // a vendor, so it belongs after them rather than sorted among them.
+    const offered = offeredInOrder();
     expect(rows).toHaveLength(offered.length);
     expect(offered.map((id) => rows.indexOf(screen.getByRole('option', { name: vendorOptionName(id) }))))
       .toEqual(offered.map((_, position) => position));
@@ -1072,19 +1084,75 @@ describe('AddApiKeyDialog · vendor', () => {
     expect(vendorField().querySelector('.model-hub-add-key-vendor-glyph')).toBeTruthy();
   });
 
-  it('opens on the vendor already chosen and takes a keyboard all the way to the next one', async () => {
-    const [first, second] = API_KEY_VENDOR_PRESETS;
+  // The highlight has to be readable, not merely visible: while the panel is
+  // open, focus sits on an element that IS a combobox and NAMES the row the
+  // arrow keys are on, so a screen reader announces each vendor as it is
+  // reached. A picker that consumed the arrow keys on a roleless container
+  // would pass the sighted half of this test and tell a screen-reader user
+  // nothing — which is what the shared control's search input is for.
+  it('announces the highlighted row and takes a keyboard to a vendor', async () => {
+    const [top, next] = offeredInOrder();
+    const reached = apiKeyVendorPreset(next);
     renderDialog();
     const user = userEvent.setup();
 
-    await selectVendor(user, first.id);
-    await user.keyboard('{Enter}');
-    await waitFor(() => expect(screen.getByRole('option', { name: first.label }).getAttribute('aria-selected'))
-      .toBe('true'));
+    await user.click(vendorField());
+    const rows = await screen.findAllByRole('option');
+    const focused = () => document.activeElement as HTMLElement;
+    expect(focused().getAttribute('role')).toBe('combobox');
+    expect(document.getElementById(focused().getAttribute('aria-controls') ?? '')?.getAttribute('role'))
+      .toBe('listbox');
+    expect(rows[0].getAttribute('aria-selected')).toBe('true');
+    expect(rows[0].textContent).toContain(vendorOptionName(top));
 
-    await user.keyboard('{ArrowDown}{Enter}');
-    await waitFor(() => expect(vendorField().textContent).toContain(second.label));
-    expect(baseUrlInput().value).toBe(second.official_base_url);
+    // Arrowing moves the highlight AND the focused combobox's pointer to it.
+    const highlighted = () => document.getElementById(focused().getAttribute('aria-activedescendant') ?? '');
+    await user.keyboard('{ArrowDown}');
+    await waitFor(() => expect(highlighted()?.textContent).toContain(vendorOptionName(next)));
+    expect(highlighted()?.getAttribute('role')).toBe('option');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(vendorField().textContent).toContain(vendorOptionName(next)));
+    expect(baseUrlInput().value).toBe(reached?.official_base_url);
+  });
+
+  it('treats picking the vendor already picked as no choice at all', async () => {
+    // The switch is destructive by design — it resets the address, drops the
+    // interface and retires the detection — so it must fire on a CHANGE, not on
+    // a click. Reopening the menu and confirming what is already there is how a
+    // user checks what they chose.
+    const entry = preset('openai_chat');
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, entry.id);
+    await user.type(baseUrlInput(), '/edge');
+    const edited = baseUrlInput().value;
+    expect(edited).not.toBe(entry.official_base_url);
+
+    await selectVendor(user, entry.id);
+
+    expect(baseUrlInput().value).toBe(edited);
+    expect(vendorField().textContent).toContain(entry.label);
+  });
+
+  it('narrows the catalog by name and offers nothing that is not in it', async () => {
+    const entry = preset('anthropic');
+    renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(vendorField());
+    const search = screen.getByPlaceholderText(/Search vendors|搜索服务商/);
+    await user.type(search, entry.label);
+    await waitFor(() => expect(screen.getAllByRole('option').map((row) => row.textContent))
+      .toEqual([expect.stringContaining(entry.label)]));
+
+    // A vendor is a catalog row and the request sends its id, so a typed name
+    // that matches none is a dead end rather than a value to adopt — the
+    // opposite of the model pickers this control also serves.
+    await user.clear(search);
+    await user.type(search, 'not-a-vendor');
+    await waitFor(() => expect(screen.queryAllByRole('option')).toEqual([]));
+    expect(screen.getByText(/No vendor by that name|没有同名的服务商/)).toBeTruthy();
   });
 
   it('prefills the official address and sends the catalog id with its pinned interface', async () => {

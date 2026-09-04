@@ -1,7 +1,6 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
-  Check,
   CheckCircle2,
   ChevronDown,
   CircleX,
@@ -15,15 +14,8 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import {
-  Command,
-  CommandGroup,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
-import { fieldBaseClass } from '@/components/ui/field';
+import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
@@ -135,117 +127,32 @@ const ProtocolSegments: React.FC<{
 };
 
 /**
- * The 服务商 field: the shipped catalog in file order, after the one entry that
- * is not a vendor at all.
+ * The 服务商 field's rows: the shipped catalog A–Z by label, then the one entry
+ * that is not a vendor at all, each carrying its mark.
  *
- * Not a `<select>`, because a vendor is recognised by its mark long before its
- * name is read and an `<option>` holds text only — the closed control then shows
- * whatever the option could hold, so the mark is missing exactly where the
- * choice is already made. The list is assembled from the two surfaces this app
- * already picks with, a `Popover` for the panel and `Command` for the arrow keys
- * and Enter, and stays `role="combobox"` over a `role="listbox"` panel so it is
- * the same control it was to a screen reader.
+ * A–Z because the file's order is the backend's business — whatever it means
+ * there, on screen it reads as arbitrary, and a name is what a user scans for.
+ * The comparison is base-sensitivity English so case and accents do not split
+ * the alphabet. 自定义 sorts nowhere: it is the absence of a vendor, so it sits
+ * at the end of the vendors rather than inside them, while staying the value the
+ * field opens on.
  *
- * `modal`, like every other combobox here: a non-modal popover opened inside a
- * Dialog has its wheel events cancelled by the Dialog's scroll lock, and the
- * catalog is longer than the list is tall.
+ * The mark is why the field is no longer a `<select>`. A vendor is recognised by
+ * its logo long before its name is read, and an `<option>` holds text only — so
+ * the closed control could only ever show what an option could hold, dropping
+ * the mark exactly where the choice has already been made. What replaces it is
+ * this app's one picker, `Combobox`, given a mark per row; a second local
+ * implementation of the same trigger, panel, and keyboard would only be a place
+ * for the two to diverge.
  */
-const VendorPicker: React.FC<{
-  id: string;
-  value: string;
-  disabled: boolean;
-  onSelect: (vendor: string) => void;
-}> = ({ id, value, disabled, onSelect }) => {
+const useVendorOptions = (): ComboboxOption[] => {
   const { t } = useTranslation();
-  const [open, setOpen] = React.useState(false);
-  // cmdk's highlight, seeded from the selection each time the panel opens: a
-  // keyboard user arrives where they left off rather than at the top of twelve.
-  const [highlighted, setHighlighted] = React.useState(value);
-  const listRef = React.useRef<HTMLDivElement>(null);
-  const naming = (vendor: string) => (vendor === CUSTOM_VENDOR
-    ? t('settings.models.addKey.field.vendor.custom')
-    : apiKeyVendorPreset(vendor)?.label ?? vendor);
-
-  return (
-    <Popover
-      modal
-      open={open}
-      onOpenChange={(next) => {
-        if (next) setHighlighted(value);
-        setOpen(next);
-      }}
-    >
-      <PopoverTrigger asChild>
-        <button
-          id={id}
-          type="button"
-          role="combobox"
-          aria-haspopup="listbox"
-          aria-expanded={open}
-          // The field still mints the id and its label element still points at
-          // this control, but a `for` association contributes nothing to a
-          // button's accessible name, so the label text is also given here. The
-          // chosen vendor stays the control's contents, which is where a
-          // combobox's value is read from.
-          aria-label={t('settings.models.addKey.field.vendor')}
-          disabled={disabled}
-          className={cn(
-            fieldBaseClass,
-            'model-hub-add-key-input flex cursor-pointer items-center justify-between gap-2 text-left',
-          )}
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            <VendorGlyph vendor={value} />
-            <span className="truncate">{naming(value)}</span>
-          </span>
-          <ChevronDown aria-hidden="true" className="size-4 shrink-0 opacity-60" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        className="w-[--radix-popover-trigger-width] p-0"
-        // Radix would focus the first option and paint a ring on a row nobody
-        // picked. The list takes focus instead — which is also where cmdk
-        // listens for the arrow keys and Enter.
-        onOpenAutoFocus={(event) => {
-          event.preventDefault();
-          listRef.current?.focus();
-        }}
-      >
-        <Command
-          ref={listRef}
-          tabIndex={-1}
-          shouldFilter={false}
-          value={highlighted}
-          onValueChange={setHighlighted}
-          className="outline-none"
-        >
-          <CommandList>
-            <CommandGroup>
-              {[CUSTOM_VENDOR, ...API_KEY_VENDOR_PRESETS.map((preset) => preset.id)].map((option) => (
-                <CommandItem
-                  key={option}
-                  value={option}
-                  className="cursor-pointer gap-2"
-                  onSelect={() => {
-                    onSelect(option);
-                    setOpen(false);
-                  }}
-                >
-                  <VendorGlyph vendor={option} />
-                  <span className="min-w-0 flex-1 truncate">{naming(option)}</span>
-                  <Check
-                    aria-hidden="true"
-                    className={cn('size-3.5 shrink-0', option === value ? 'opacity-100' : 'opacity-0')}
-                  />
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          </CommandList>
-        </Command>
-      </PopoverContent>
-    </Popover>
-  );
+  return React.useMemo(() => ([
+    ...API_KEY_VENDOR_PRESETS
+      .map((preset) => ({ value: preset.id, label: preset.label }))
+      .sort((one, other) => one.label.localeCompare(other.label, 'en', { sensitivity: 'base' })),
+    { value: CUSTOM_VENDOR, label: t('settings.models.addKey.field.vendor.custom') },
+  ].map((option) => ({ ...option, icon: <VendorGlyph vendor={option.value} /> }))), [t]);
 };
 
 type ReplaceOutcome =
@@ -378,6 +285,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const addOnAdded = replaceMode ? null : props.onAdded;
   const replaceSourceId = replaceMode ? props.source.id : null;
   const { t } = useTranslation();
+  const vendorOptions = useVendorOptions();
   const [vendor, setVendor] = React.useState<string>(CUSTOM_VENDOR);
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
@@ -744,7 +652,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   // `retireProvedEvidence` would have kept, and an ④/failure the new vendor may
   // simply not have. §1.5: switching resets the URL to the new vendor's official
   // one, drops the interface selection, and retires the observation outright.
+  // Picking the vendor that is already picked is not a switch, and everything
+  // below is destructive: it would throw away a hand-edited address, a declared
+  // interface, and a completed detection to arrive back where it started. The
+  // guard is here rather than in the picker because this function is what
+  // destroys that state — a caller that re-announces the same choice is not
+  // wrong, acting on it is.
   const editVendor = (value: string) => {
+    if (value === vendor) return;
     setVendor(value);
     setBaseUrl(apiKeyVendorPreset(value)?.official_base_url ?? '');
     setProtocolSelection('auto');
@@ -893,7 +808,25 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               hint={t('settings.models.addKey.field.vendor.hint')}
             >
               {(id) => (
-                <VendorPicker id={id} value={vendor} disabled={formLocked} onSelect={editVendor} />
+                <Combobox
+                  id={id}
+                  // The field mints the id and its label points here, but a `for`
+                  // association contributes nothing to a button's accessible
+                  // name, so the label text is given again. The chosen vendor
+                  // stays the control's contents — where a combobox's value is
+                  // read from — so the two do not collide.
+                  ariaLabel={t('settings.models.addKey.field.vendor')}
+                  className="model-hub-add-key-input"
+                  options={vendorOptions}
+                  value={vendor}
+                  onValueChange={editVendor}
+                  // A vendor is a catalog row, and the request sends its id: there
+                  // is no typed value this field could accept.
+                  allowCustomValue={false}
+                  disabled={formLocked}
+                  searchPlaceholder={t('settings.models.addKey.field.vendor.search')}
+                  emptyText={t('settings.models.addKey.field.vendor.empty')}
+                />
               )}
             </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
