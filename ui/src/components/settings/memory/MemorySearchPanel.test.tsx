@@ -142,7 +142,7 @@ describe('MemorySearchPanel browse and search modes', () => {
     expect(detailTimestamp?.textContent).toMatch(/^\d{4}-\d{2}-\d{2} · \d{2}:\d{2}$/);
   });
 
-  it('[MEMORY-LIST-004][MEMORY-LIST-006][MEMORY-LIST-008] browses a page boundary and copies the selected entry ID', async () => {
+  it('[MEMORY-LIST-004][MEMORY-LIST-008] browses a page boundary and copies the selected entry ID', async () => {
     const first = episode();
     const second = episode({ id: 'entry-021', subject: 'Follow-up', summary: '', body: 'Second page body.' });
     api.listMemoryEpisodes.mockImplementation((_project: string, options: { page: number }) =>
