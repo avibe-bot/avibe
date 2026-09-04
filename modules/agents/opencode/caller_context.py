@@ -1,9 +1,11 @@
-"""OpenCode caller-context bridge.
+"""OpenCode runtime bridge.
 
 OpenCode runs a shared ``opencode serve`` process, so per-Agent Avibe context
 cannot live in the server process environment. Instead Avibe installs a tiny
 OpenCode plugin that resolves each shell call's OpenCode session id through an
-Avibe-managed binding file and injects the AVIBE_* env vars for that call.
+Avibe-managed binding file and injects the AVIBE_* env vars for that call. The
+same process-scoped plugin removes OpenCode's native Skill Catalog after its
+system prompt is assembled; Avibe supplies the managed Catalog instead.
 """
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ PLUGIN_SOURCE = r"""
 import { readFileSync } from "node:fs"
 
 const bindingPath = process.env.AVIBE_OPENCODE_CALLER_CONTEXT_PATH
+const nativeSkillIntro = "Skills provide specialized instructions and workflows for specific tasks."
+const nativeSkillPrefix = "<available_skills>"
+const nativeSkillSuffix = "</available_skills>"
 
 function readBindings() {
   if (!bindingPath) return {}
@@ -50,6 +55,22 @@ function applyEnv(output, env) {
   }
 }
 
+function stripNativeSkillCatalog(text) {
+  let current = text
+  while (true) {
+    const catalog = current.indexOf(nativeSkillPrefix)
+    if (catalog < 0) return current
+    const intro = current.lastIndexOf(nativeSkillIntro, catalog)
+    const start = intro >= 0 && catalog - intro < 500 ? intro : catalog
+    const close = current.indexOf(nativeSkillSuffix, catalog + nativeSkillPrefix.length)
+    if (close < 0) return current
+    let before = current.slice(0, start)
+    let after = current.slice(close + nativeSkillSuffix.length)
+    if (before.endsWith("\n") && after.startsWith("\n")) after = after.slice(1)
+    current = before + after
+  }
+}
+
 export const AvibeCallerContextPlugin = async () => ({
   "shell.env": async (input, output) => {
     const sessionID = input && typeof input.sessionID === "string" ? input.sessionID : ""
@@ -59,6 +80,15 @@ export const AvibeCallerContextPlugin = async () => ({
     const expiresAt = typeof binding.expires_at === "string" ? Date.parse(binding.expires_at) : 0
     if (expiresAt && Date.now() > expiresAt) return
     applyEnv(output, binding.env)
+  },
+  "experimental.chat.system.transform": async (_input, output) => {
+    // The plugin is installed in the user's global OpenCode directory, but this
+    // policy belongs only to the Avibe-managed server process.
+    if (!bindingPath || !output || !Array.isArray(output.system)) return
+    const transformed = output.system
+      .map((text) => typeof text === "string" ? stripNativeSkillCatalog(text) : text)
+      .filter((text) => typeof text !== "string" || text.length > 0)
+    output.system.splice(0, output.system.length, ...transformed)
   },
 })
 """.lstrip()

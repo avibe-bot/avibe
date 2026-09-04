@@ -55,6 +55,11 @@ class _BaseAgent:
         return session_id or self.ensure_agent_session_id(request, session_anchor=anchor)
 
     @staticmethod
+    def _uses_namespaced_backend_session(context, *, subagent_name=None):
+        payload = getattr(context, "platform_specific", None) or {}
+        return bool(subagent_name or payload.get("routing_subagent"))
+
+    @staticmethod
     def _reserved_native_session_id(context, backend=None):
         # Mirrors the real BaseAgent helper: native session bound to the reserved
         # workbench row (by PK), carried in agent_session_target; gated by backend
@@ -143,9 +148,11 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 CodexAgent = _MODULE.CodexAgent
+CODEX_PROMPT_STRATEGY_METADATA_KEY = _MODULE.CODEX_PROMPT_STRATEGY_METADATA_KEY
 CodexConnectionProbeRuntimeMismatchError = (
     _MODULE.CodexConnectionProbeRuntimeMismatchError
 )
+CodexPromptRefreshUnavailableError = _MODULE.CodexPromptRefreshUnavailableError
 CodexResumeUnavailableError = _MODULE.CodexResumeUnavailableError
 
 for name, module in _saved_modules.items():
@@ -1422,6 +1429,13 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._get_or_create_transport = AsyncMock(return_value=transport)
         agent._touch_transport_activity = Mock()
+        agent.ensure_agent_session_id = Mock(
+            side_effect=lambda existing_request: events.append(
+                ("ensure", existing_request)
+            )
+            or "ses-visible"
+        )
+        agent._build_thread_developer_instructions = AsyncMock(return_value="stable prompt")
         agent._session_mgr = SimpleNamespace(
             set_session_key=Mock(),
             set_cwd=Mock(),
@@ -1431,7 +1445,8 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         async def refresh(existing_transport, existing_request, thread_id):
             events.append(("refresh", existing_transport, existing_request, thread_id))
 
-        async def start_turn(existing_transport, existing_request, thread_id):
+        async def start_turn(existing_transport, existing_request, thread_id, *, developer_instructions=None):
+            self.assertEqual(developer_instructions, "stable prompt")
             events.append(("turn", existing_transport, existing_request, thread_id))
             return thread_id
 
@@ -1444,11 +1459,25 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             events,
             [
+                ("ensure", request),
                 ("refresh", transport, request, "thread-cached"),
                 ("turn", transport, request, "thread-cached"),
             ],
         )
         agent._start_or_resume_thread.assert_not_awaited()
+
+    async def test_prompt_refresh_failure_display_is_localized(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(language="zh"))
+
+        display = agent._error_display_text(
+            CodexPromptRefreshUnavailableError("internal diagnostic")
+        )
+
+        self.assertEqual(
+            display,
+            "❌ Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
+        )
 
     async def test_handle_message_does_not_hide_turn_before_interrupt_succeeds(self):
         agent = object.__new__(CodexAgent)
@@ -1535,6 +1564,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = sessions
         agent._get_or_create_transport = AsyncMock(side_effect=[bad_transport, fresh_transport])
         agent._touch_transport_activity = Mock()
+        agent._build_thread_developer_instructions = AsyncMock(return_value="stable prompt")
         agent._start_or_resume_thread = AsyncMock(
             side_effect=[
                 ConnectionError("Codex app-server stdout closed"),
@@ -1555,7 +1585,12 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent._get_or_create_transport.assert_any_await("/tmp/work")
         self.assertEqual(agent._start_or_resume_thread.await_args_list[-1].args, (fresh_transport, request))
         agent._start_thread.assert_not_awaited()
-        agent._start_turn.assert_awaited_once_with(fresh_transport, request, "thread-new")
+        agent._start_turn.assert_awaited_once_with(
+            fresh_transport,
+            request,
+            "thread-new",
+            developer_instructions="stable prompt",
+        )
         agent.controller.emit_agent_message.assert_not_awaited()
         agent._remove_ack_reaction.assert_not_awaited()
 
@@ -1596,6 +1631,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
         agent._get_or_create_transport = AsyncMock(side_effect=[bad_transport, fresh_transport])
         agent._touch_transport_activity = Mock()
+        agent._build_thread_developer_instructions = AsyncMock(return_value="stable prompt")
         agent._start_or_resume_thread = AsyncMock(return_value="thread-new")
         agent._start_thread = AsyncMock(return_value="thread-new")
         agent._start_turn = AsyncMock(return_value="thread-new")
@@ -1806,7 +1842,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             working_path="/tmp/work",
             context=SimpleNamespace(
                 platform="slack",
-                platform_specific={},
+                platform_specific={"agent_session_id": "sesk8m4q2p7x"},
                 user_id="U1",
                 channel_id="C1",
                 thread_id=None,
@@ -1818,7 +1854,15 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             subagent_reasoning_effort=None,
         )
 
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-1"}}))
+        transport = SimpleNamespace(
+            send_request=AsyncMock(
+                return_value={
+                    "thread": {"id": "thread-1"},
+                    "model": "gpt-5.4",
+                    "reasoningEffort": "high",
+                }
+            )
+        )
 
         thread_id = await agent._start_thread(transport, request)
 
@@ -1828,9 +1872,11 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["cwd"], "/tmp/work")
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(params["sandbox"], "danger-full-access")
-        self.assertIn("# Avibe", params["developerInstructions"])
-        self.assertNotIn("## Quick-reply buttons", params["developerInstructions"])
-        self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
+        self.assertNotIn("developerInstructions", params)
+        self.assertEqual(
+            agent._thread_model_settings["session-1"],
+            ("thread-1", "gpt-5.4", "high"),
+        )
         agent.sessions.ensure_agent_session_id.assert_called_once_with("channel-1", "codex", "session-1")
         agent.sessions.bind_agent_session.assert_called_once_with("channel-1", "codex", "session-1", "thread-1")
 
@@ -1847,7 +1893,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             working_path="/tmp/work",
             context=SimpleNamespace(
                 platform="slack",
-                platform_specific={},
+                platform_specific={"agent_session_id": "sesk8m4q2p7x"},
                 user_id="U1",
                 channel_id="C1",
                 thread_id=None,
@@ -1869,18 +1915,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 reasoning_effort="high",
             ),
         ) as load_subagent:
-            await agent._start_thread(transport, request)
+            developer_instructions = await agent._build_thread_developer_instructions(request)
 
         load_subagent.assert_called_once_with("reviewer", project_root=Path("/tmp/work"))
-        method, params = transport.send_request.await_args.args
-        self.assertEqual(method, "thread/start")
-        self.assertEqual(params["cwd"], "/tmp/work")
-        self.assertEqual(params["approvalPolicy"], "never")
-        self.assertEqual(params["sandbox"], "danger-full-access")
-        self.assertIn("Focus on regressions.", params["developerInstructions"])
-        self.assertIn("# Avibe", params["developerInstructions"])
-        self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
-        self.assertNotIn("## Quick-reply buttons", params["developerInstructions"])
+        transport.send_request.assert_not_awaited()
+        self.assertIn("Focus on regressions.", developer_instructions)
+        self.assertIn("# Avibe", developer_instructions)
+        self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
+        self.assertNotIn("## Quick-reply buttons", developer_instructions)
 
     async def test_start_thread_adds_codex_generated_image_prompt_to_thread_instructions(self):
         agent = object.__new__(CodexAgent)
@@ -1895,7 +1937,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             working_path="/tmp/work",
             context=SimpleNamespace(
                 platform="slack",
-                platform_specific={},
+                platform_specific={"agent_session_id": "sesk8m4q2p7x"},
                 user_id="U1",
                 channel_id="C1",
                 thread_id=None,
@@ -1909,16 +1951,16 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-1"}}))
 
         with patch.dict(os.environ, {"CODEX_HOME": "/Users/test/.codex"}):
-            await agent._start_thread(transport, request)
+            developer_instructions = await agent._build_thread_developer_instructions(request)
 
-        params = transport.send_request.await_args.args[1]
-        self.assertIn("## Send files", params["developerInstructions"])
-        self.assertIn("### Codex-generated images", params["developerInstructions"])
-        self.assertIn("If you generate an image with Codex", params["developerInstructions"])
-        self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
+        transport.send_request.assert_not_awaited()
+        self.assertIn("## Send files", developer_instructions)
+        self.assertIn("### Codex-generated images", developer_instructions)
+        self.assertIn("If you generate an image with Codex", developer_instructions)
+        self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
         self.assertIn(
             "file:///Users/test/.codex/generated_images/thread-id/image-file.png",
-            params["developerInstructions"],
+            developer_instructions,
         )
 
     async def test_start_thread_omits_show_pages_prompt_when_disabled(self):
@@ -1936,7 +1978,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             working_path="/tmp/work",
             context=SimpleNamespace(
                 platform="slack",
-                platform_specific={},
+                platform_specific={"agent_session_id": "sesk8m4q2p7x"},
                 user_id="U1",
                 channel_id="C1",
                 thread_id=None,
@@ -1949,14 +1991,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-1"}}))
 
-        await agent._start_thread(transport, request)
+        developer_instructions = await agent._build_thread_developer_instructions(request)
 
-        params = transport.send_request.await_args.args[1]
-        self.assertIn("# Avibe", params["developerInstructions"])
-        self.assertIn("## Quick-reply buttons", params["developerInstructions"])
-        self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
-        self.assertNotIn("## Show Pages", params["developerInstructions"])
-        self.assertNotIn("vibe show path", params["developerInstructions"])
+        transport.send_request.assert_not_awaited()
+        self.assertIn("# Avibe", developer_instructions)
+        self.assertIn("## Quick-reply buttons", developer_instructions)
+        self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
+        self.assertNotIn("## Show Pages", developer_instructions)
+        self.assertNotIn("vibe show path", developer_instructions)
 
     async def test_resume_thread_refreshes_developer_instructions_without_appending(self):
         agent = object.__new__(CodexAgent)
@@ -2008,14 +2050,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         method, params = transport.send_request.await_args_list[2].args
         self.assertEqual(method, "thread/resume")
         self.assertEqual(params["threadId"], "thread-existing")
-        developer_instructions = params["developerInstructions"]
-        self.assertEqual(developer_instructions.count("Focus on regressions."), 1)
-        self.assertEqual(developer_instructions.count("Current session id:"), 2)
-        self.assertNotIn("Legacy session key:", developer_instructions)
-        self.assertNotIn("--session-key", developer_instructions)
-        self.assertEqual(developer_instructions.count("If you generate an image with Codex"), 1)
-        self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
-        self.assertNotIn("Channel-level session key:", developer_instructions)
+        self.assertNotIn("developerInstructions", params)
 
     async def test_resume_thread_rebinds_managed_provider_when_thread_id_matches_config(self):
         agent = object.__new__(CodexAgent)
@@ -2195,15 +2230,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["sandbox"], "danger-full-access")
         self.assertEqual(params["model"], "gpt-5.2")
         self.assertNotIn("effort", params)
-        developer_instructions = params["developerInstructions"]
-        self.assertIn("Current session id: `ses-target`", developer_instructions)
-        self.assertIn("This Agent Session was forked from `ses-source`.", developer_instructions)
-        self.assertIn(
-            "The authoritative Avibe session id for this fork is `ses-target`.",
-            developer_instructions,
-        )
-        self.assertIn("treat it as historical source-context only", developer_instructions)
-        self.assertNotIn("use `ses-target` for Show Pages", developer_instructions)
+        self.assertNotIn("developerInstructions", params)
         inject_method, inject_params = transport.send_request.await_args_list[1].args
         self.assertEqual(inject_method, "thread/inject_items")
         self.assertEqual(inject_params["threadId"], "thread-fork")
@@ -2220,6 +2247,222 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "codex",
             "ses-target",
             "thread-fork",
+        )
+
+    async def test_fork_carries_persisted_fallback_prompt_strategy(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", reply_enhancements=False)
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker_getter = Mock(
+            return_value={
+                "thread_id": "thread-source",
+                "strategy": "fallback",
+                "sha256": "a" * 64,
+            }
+        )
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+            get_agent_session_runtime_marker=marker_getter,
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model="gpt-5.2",
+            vibe_agent_reasoning_effort="high",
+        )
+        transport = SimpleNamespace(
+            send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}})
+        )
+
+        thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertNotIn(
+            "ses-target",
+            getattr(agent, "_thread_prompt_strategies", {}),
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+            "ses-target",
+            backend="codex",
+            native_session_id="thread-fork",
+            key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+            value={
+                "thread_id": "thread-fork",
+                "strategy": "fallback",
+                "sha256": "a" * 64,
+            },
+        )
+        marker_getter.assert_called_once_with(
+            "ses-source",
+            backend="codex",
+            native_session_id="thread-source",
+            key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+        )
+
+    async def test_fork_finalizes_a_source_prompt_with_pending_marker_persistence(self):
+        agent = object.__new__(CodexAgent)
+        agent.ensure_agent_session_id = Mock(return_value="ses-target")
+        agent._fork_source_prompt_state = Mock(
+            return_value=("injected_pending_persist", None, None)
+        )
+        agent._thread_unpersisted_prompts = {
+            "ses-source": ("thread-source", "stable prompt", "fallback")
+        }
+        agent._resolve_codex_agent_settings = Mock(
+            return_value=(None, "gpt-5.4", "high", None)
+        )
+        agent._inject_caller_env_config = Mock(return_value=("path-state", True))
+        agent._mark_fork_correction_pending = Mock()
+        agent._clear_fork_correction_pending = Mock()
+        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._inject_forked_session_correction = AsyncMock()
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent.bind_agent_session_id = Mock(return_value="ses-target")
+        agent._persist_prompt_strategy = Mock(return_value=True)
+        agent._remember_thread_model_settings_from_response = Mock()
+        agent._remember_thread_caller_env_config = Mock()
+        agent._remember_thread_git_path_config = Mock()
+        agent._caller_env_for_request = Mock(return_value={})
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            base_session_id="ses-target",
+        )
+        fork = {
+            "source_session_id": "ses-source",
+            "source_native_session_id": "thread-source",
+        }
+        transport = SimpleNamespace(
+            send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}})
+        )
+
+        thread_id = await agent._fork_thread(transport, request, fork)
+
+        self.assertEqual(thread_id, "thread-fork")
+        agent._persist_prompt_strategy.assert_called_once_with(
+            request,
+            "thread-fork",
+            "stable prompt",
+            strategy="fallback",
+            agent_session_id="ses-target",
+        )
+        self.assertEqual(
+            agent._thread_developer_instructions["ses-target"],
+            ("thread-fork", "stable prompt"),
+        )
+        self.assertEqual(
+            agent._thread_prompt_strategies["ses-target"],
+            ("thread-fork", "fallback"),
+        )
+
+    async def test_fork_persists_carried_collaboration_strategy_for_target(self):
+        agent = object.__new__(CodexAgent)
+        agent.ensure_agent_session_id = Mock(return_value="ses-target")
+        agent._fork_source_prompt_state = Mock(
+            return_value=("collaboration", None, None)
+        )
+        agent._resolve_codex_agent_settings = Mock(
+            return_value=(None, "gpt-5.4", "high", None)
+        )
+        agent._inject_caller_env_config = Mock(return_value=("path-state", True))
+        agent._mark_fork_correction_pending = Mock()
+        agent._clear_fork_correction_pending = Mock()
+        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._inject_forked_session_correction = AsyncMock()
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent.bind_agent_session_id = Mock(return_value="ses-target")
+        agent._persist_prompt_strategy = Mock(return_value=True)
+        agent._remember_thread_model_settings_from_response = Mock()
+        agent._remember_thread_caller_env_config = Mock()
+        agent._remember_thread_git_path_config = Mock()
+        agent._caller_env_for_request = Mock(return_value={})
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            base_session_id="ses-target",
+        )
+        fork = {"source_native_session_id": "thread-source"}
+        transport = SimpleNamespace(
+            send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}})
+        )
+
+        thread_id = await agent._fork_thread(transport, request, fork)
+
+        self.assertEqual(thread_id, "thread-fork")
+        agent._persist_prompt_strategy.assert_called_once_with(
+            request,
+            "thread-fork",
+            None,
+            strategy="collaboration",
+            agent_session_id="ses-target",
+        )
+        self.assertEqual(
+            agent._thread_prompt_strategies["ses-target"],
+            ("thread-fork", "collaboration"),
+        )
+
+    async def test_fork_does_not_cache_unpersisted_collaboration_strategy(self):
+        agent = object.__new__(CodexAgent)
+        agent.ensure_agent_session_id = Mock(return_value="ses-target")
+        agent._fork_source_prompt_state = Mock(
+            return_value=("collaboration", None, None)
+        )
+        agent._resolve_codex_agent_settings = Mock(
+            return_value=(None, "gpt-5.4", "high", None)
+        )
+        agent._inject_caller_env_config = Mock(return_value=("path-state", True))
+        agent._mark_fork_correction_pending = Mock()
+        agent._clear_fork_correction_pending = Mock()
+        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._inject_forked_session_correction = AsyncMock()
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent.bind_agent_session_id = Mock(return_value="ses-target")
+        agent._persist_prompt_strategy = Mock(return_value=False)
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            base_session_id="ses-target",
+        )
+        fork = {"source_native_session_id": "thread-source"}
+        transport = SimpleNamespace(
+            send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}})
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not persist the forked Codex prompt strategy",
+        ):
+            await agent._fork_thread(transport, request, fork)
+
+        self.assertNotIn(
+            "ses-target",
+            getattr(agent, "_thread_prompt_strategies", {}),
         )
 
     async def test_start_or_resume_thread_does_not_bind_failed_fork_correction(self):
@@ -3130,7 +3373,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, "thread/resume")
         self.assertNotIn("modelProvider", params)
 
-    async def test_resume_thread_keeps_system_prompt_injection_when_quick_replies_are_disabled(self):
+    async def test_resume_thread_clears_legacy_thread_prompt_before_turn_strategy(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3138,7 +3381,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(
             get_agent_session_id=Mock(return_value="thread-existing"),
             ensure_agent_session_id=Mock(return_value="sesk8m4q2p7x"),
+            get_agent_session_runtime_marker=Mock(return_value=None),
         )
+        agent._prompt_state_agent_session_id = Mock(return_value="sesk8m4q2p7x")
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(
@@ -3161,10 +3406,34 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-existing")
         method, params = transport.send_request.await_args.args
         self.assertEqual(method, "thread/resume")
-        self.assertIn("developerInstructions", params)
-        self.assertIn("# Avibe", params["developerInstructions"])
-        self.assertIn("If you generate an image with Codex", params["developerInstructions"])
-        self.assertNotIn("## Quick-reply buttons", params["developerInstructions"])
+        self.assertIsNone(params["developerInstructions"])
+
+    async def test_resume_thread_routes_prompt_marker_read_failure_through_i18n(self):
+        agent = object.__new__(CodexAgent)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value="thread-existing"),
+            get_agent_session_runtime_marker=Mock(
+                side_effect=OSError("database busy")
+            ),
+        )
+        agent.bind_agent_session_id = Mock()
+        agent._prompt_state_agent_session_id = Mock(return_value="ses-runtime")
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(platform_specific={}),
+            base_session_id="session-1",
+            session_key="channel-1",
+            subagent_name=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock())
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not resolve the Codex prompt strategy",
+        ):
+            await agent._start_or_resume_thread(transport, request)
+
+        transport.send_request.assert_not_awaited()
 
     def test_thread_developer_instructions_follow_live_memory_enabled_state(self):
         agent = object.__new__(CodexAgent)
@@ -3240,8 +3509,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, "thread/resume")
         self.assertEqual(params["threadId"], "thread-existing")
         self.assertNotIn("modelProvider", params)
-        self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
-        self.assertIn("# Avibe", params["developerInstructions"])
+        self.assertNotIn("developerInstructions", params)
 
     async def test_refresh_thread_developer_instructions_refreshes_caller_env_when_prompt_cached(self):
         agent = object.__new__(CodexAgent)
@@ -3282,7 +3550,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.send_request.await_count, 2)
         first_params = transport.send_request.await_args_list[0].args[1]
         second_params = transport.send_request.await_args_list[1].args[1]
-        self.assertIn("developerInstructions", first_params)
+        self.assertNotIn("developerInstructions", first_params)
         self.assertNotIn("developerInstructions", second_params)
         self.assertEqual(
             second_params["config"]["shell_environment_policy"]["set"]["AVIBE_RUN_ID"],
@@ -3417,7 +3685,1186 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, "thread/resume")
         self.assertEqual(params["threadId"], "thread-existing")
         self.assertEqual(params["modelProvider"], "openai-managed")
-        self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
+        self.assertNotIn("developerInstructions", params)
+
+    async def test_start_turn_applies_stable_developer_instructions_with_collaboration_mode(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        first = transport.send_request.await_args_list[0].args[1]
+        second = transport.send_request.await_args_list[1].args[1]
+        expected_mode = {
+            "mode": "default",
+            "settings": {
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "developer_instructions": "stable prompt",
+            },
+        }
+        self.assertEqual(first["collaborationMode"], expected_mode)
+        self.assertEqual(second["collaborationMode"], expected_mode)
+        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+            "ses-runtime",
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_prompt_strategy",
+            value={
+                "thread_id": "thread-1",
+                "strategy": "collaboration",
+                "sha256": agent._prompt_fingerprint("stable prompt"),
+            },
+        )
+        self.assertEqual(
+            agent._thread_developer_instructions["session-1"],
+            ("thread-1", "stable prompt"),
+        )
+
+    async def test_start_turn_persists_subagent_strategy_on_backend_session(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_row_id=Mock(return_value="ses-backend"),
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-visible")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="avibe::project::proj-1",
+            base_session_id="session-1:subagent:reviewer",
+            composite_session_id="avibe:session-1",
+            subagent_name="reviewer",
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-subagent",
+            developer_instructions="stable prompt",
+        )
+
+        agent.sessions.get_agent_session_row_id.assert_called_once_with(
+            "avibe::project::proj-1",
+            "session-1:subagent:reviewer",
+            "codex",
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+            "ses-backend",
+            backend="codex",
+            native_session_id="thread-subagent",
+            key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+            value={
+                "thread_id": "thread-subagent",
+                "strategy": "collaboration",
+                "sha256": agent._prompt_fingerprint("stable prompt"),
+            },
+        )
+
+    async def test_start_turn_honors_explicit_null_model_instead_of_cached_route(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "routing-model", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace()
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+            vibe_agent_model_explicit=True,
+            vibe_agent_reasoning_effort_explicit=True,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions=None,
+        )
+
+        params = transport.send_request.await_args.args[1]
+        self.assertIsNone(params["model"])
+        self.assertIsNone(params["effort"])
+        self.assertNotIn("collaborationMode", params)
+        self.assertNotIn("session-1", agent._thread_model_settings)
+
+    async def test_start_turn_fails_when_fallback_strategy_cannot_persist(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(return_value=False),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not prepare the fallback prompt strategy",
+        ):
+            await agent._start_turn(
+                transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            [],
+        )
+        self.assertNotIn("session-1", agent._thread_prompt_strategies)
+        self.assertNotIn("session-1", getattr(agent, "_thread_developer_instructions", {}))
+
+    async def test_start_turn_repairs_marker_without_reinjecting_known_prompt(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=None),
+            set_agent_session_runtime_marker=Mock(
+                side_effect=[True, False, False, True]
+            ),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not persist the fallback prompt strategy",
+        ):
+            await agent._start_turn(
+                transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        self.assertEqual(
+            [rpc.args[0] for rpc in transport.send_request.await_args_list],
+            ["thread/inject_items", "turn/start"],
+        )
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+        self.assertNotIn("session-1", agent._thread_unpersisted_prompts)
+
+    async def test_start_turn_reuses_persisted_fallback_prompt_after_process_restart(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "fallback",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+            set_agent_session_runtime_marker=Mock(),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["turn/start"],
+        )
+        agent.sessions.get_agent_session_runtime_marker.assert_called_once_with(
+            "ses-runtime",
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_prompt_strategy",
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_not_called()
+        self.assertEqual(
+            agent._thread_developer_instructions["session-1"],
+            ("thread-1", "stable prompt"),
+        )
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+
+    async def test_start_turn_disables_refresh_for_invalid_persisted_prompt_marker(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(
+                return_value={
+                    "thread_id": "thread-1",
+                    "strategy": "future-strategy",
+                }
+            ),
+            set_agent_session_runtime_marker=Mock(),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="current prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["turn/start"],
+        )
+        self.assertNotIn(
+            "collaborationMode",
+            transport.send_request.await_args_list[0].args[1],
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_not_called()
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "unavailable"),
+        )
+
+    def test_prompt_marker_read_failure_uses_localized_error_path(self):
+        agent = object.__new__(CodexAgent)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(side_effect=OSError("database busy"))
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "Could not resolve the Codex prompt strategy",
+        ):
+            agent._read_persisted_prompt_strategy_marker(
+                "thread-1",
+                agent_session_id="ses-runtime",
+            )
+
+    async def test_start_turn_reuses_persisted_collaboration_after_inconclusive_probe(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+            set_agent_session_runtime_marker=Mock(),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["collaborationMode/list", "turn/start"],
+        )
+        params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(
+            params["collaborationMode"]["settings"]["developer_instructions"],
+            "stable prompt",
+        )
+        agent.sessions.set_agent_session_runtime_marker.assert_not_called()
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "collaboration"),
+        )
+
+    async def test_start_turn_fails_closed_when_collaboration_reprobe_is_negative(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(side_effect=TimeoutError("probe unavailable")),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "did not confirm collaboration mode support",
+        ):
+            await agent._start_turn(
+                transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        transport.send_request.assert_awaited_once_with("collaborationMode/list", {})
+
+    async def test_start_turn_clears_sticky_collaboration_mode_with_explicit_null_model(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "routing-model", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent._thread_developer_instructions = {
+            "session-1": ("thread-1", "stable prompt"),
+        }
+        agent._thread_prompt_strategies = {
+            "session-1": ("thread-1", "collaboration"),
+        }
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+            vibe_agent_model_explicit=True,
+            vibe_agent_reasoning_effort_explicit=True,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual([call.args[0] for call in calls], ["thread/inject_items", "turn/start"])
+        turn_params = calls[1].args[1]
+        self.assertIsNone(turn_params["collaborationMode"])
+        self.assertIsNone(turn_params["model"])
+        self.assertIsNone(turn_params["effort"])
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+
+    async def test_start_turn_clears_persisted_collaboration_before_model_less_fallback(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(return_value=marker),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            ["collaborationMode/list", "thread/inject_items", "turn/start"],
+        )
+        self.assertIsNone(calls[2].args[1]["collaborationMode"])
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+
+    async def test_start_turn_retries_a_pending_collaboration_clear_after_restart(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+
+        def read_marker(*_args, **_kwargs):
+            return dict(marker)
+
+        def write_marker(*_args, **kwargs):
+            marker.clear()
+            marker.update(kwargs["value"])
+            return True
+
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(side_effect=read_marker),
+            set_agent_session_runtime_marker=Mock(side_effect=write_marker),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        failed_transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(side_effect=[{}, TimeoutError("connection lost")]),
+        )
+
+        with self.assertRaisesRegex(
+            CodexPromptRefreshUnavailableError,
+            "cleared the previous collaboration prompt",
+        ):
+            await agent._start_turn(
+                failed_transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        self.assertEqual(marker["strategy"], "fallback_pending_clear")
+        self.assertEqual(
+            marker["sha256"],
+            agent._prompt_fingerprint("stable prompt"),
+        )
+
+        # Simulate a controller restart: only the durable transitional marker remains.
+        agent._thread_prompt_strategies = {}
+        agent._thread_developer_instructions = {}
+        resumed_transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-2"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            resumed_transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        resumed_calls = resumed_transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in resumed_calls],
+            ["collaborationMode/list", "turn/start"],
+        )
+        self.assertIsNone(resumed_calls[1].args[1]["collaborationMode"])
+        self.assertEqual(marker["strategy"], "fallback")
+        self.assertNotIn("pending_collaboration_clear", marker)
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback"),
+        )
+
+    async def test_start_turn_clears_collaboration_without_reinjecting_after_unknown_injection(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+
+        def read_marker(*_args, **_kwargs):
+            return dict(marker)
+
+        def write_marker(*_args, **kwargs):
+            marker.clear()
+            marker.update(kwargs["value"])
+            return True
+
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(side_effect=read_marker),
+            set_agent_session_runtime_marker=Mock(side_effect=write_marker),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        failed_transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, TimeoutError("injection outcome unknown")],
+            ),
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "injection outcome unknown"):
+            await agent._start_turn(
+                failed_transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        self.assertEqual(marker["strategy"], "fallback_pending_clear_injection")
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback_pending_clear_injection"),
+        )
+
+        # Simulate a controller restart: recovery has only the write-ahead marker.
+        agent._thread_prompt_strategies = {}
+        agent._thread_developer_instructions = {}
+        resumed_transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-2"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            resumed_transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        resumed_calls = resumed_transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in resumed_calls],
+            ["collaborationMode/list", "turn/start"],
+        )
+        self.assertIsNone(resumed_calls[1].args[1]["collaborationMode"])
+        self.assertEqual(marker["strategy"], "unavailable")
+        self.assertNotIn("sha256", marker)
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "unavailable"),
+        )
+
+    def test_prompt_strategy_rebinds_a_stale_native_session_before_retry(self):
+        agent = object.__new__(CodexAgent)
+        agent.sessions = SimpleNamespace(
+            set_agent_session_runtime_marker=Mock(side_effect=[False, True]),
+        )
+        agent.bind_agent_session_id = Mock(return_value="ses-runtime")
+        request = SimpleNamespace(
+            base_session_id="session-1",
+            context=SimpleNamespace(platform_specific={}),
+        )
+
+        persisted = agent._persist_prompt_strategy(
+            request,
+            "thread-1",
+            "stable prompt",
+            strategy="collaboration",
+            agent_session_id="ses-runtime",
+        )
+
+        self.assertTrue(persisted)
+        agent.bind_agent_session_id.assert_called_once_with(request, "thread-1")
+        self.assertEqual(
+            agent.sessions.set_agent_session_runtime_marker.call_count,
+            2,
+        )
+
+    async def test_start_turn_persists_changed_fallback_prompt(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(
+                return_value={
+                    "thread_id": "thread-1",
+                    "strategy": "fallback",
+                    "sha256": agent._prompt_fingerprint("old prompt"),
+                }
+            ),
+            set_agent_session_runtime_marker=Mock(return_value=True),
+        )
+        agent._thread_developer_instructions = {}
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="changed prompt",
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["thread/inject_items", "turn/start"],
+        )
+        prompt_sha = agent._prompt_fingerprint("changed prompt")
+        agent.sessions.set_agent_session_runtime_marker.assert_has_calls(
+            [
+                call(
+                    "ses-runtime",
+                    backend="codex",
+                    native_session_id="thread-1",
+                    key="codex_prompt_strategy",
+                    value={
+                        "thread_id": "thread-1",
+                        "strategy": "fallback_pending_injection",
+                        "sha256": prompt_sha,
+                    },
+                ),
+                call(
+                    "ses-runtime",
+                    backend="codex",
+                    native_session_id="thread-1",
+                    key="codex_prompt_strategy",
+                    value={
+                        "thread_id": "thread-1",
+                        "strategy": "fallback",
+                        "sha256": prompt_sha,
+                    },
+                ),
+            ]
+        )
+
+    async def test_start_turn_does_not_reuse_cached_effort_for_an_explicit_model_change(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.5", None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        params = transport.send_request.await_args.args[1]
+        self.assertEqual(params["model"], "gpt-5.5")
+        self.assertNotIn("effort", params)
+        self.assertEqual(params["collaborationMode"]["settings"]["model"], "gpt-5.5")
+        self.assertIsNone(params["collaborationMode"]["settings"]["reasoning_effort"])
+
+    async def test_start_turn_preserves_explicit_effort_while_restoring_cached_model(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, "xhigh")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent._thread_model_settings = {
+            "session-1": ("thread-1", "gpt-5.4", "high"),
+        }
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        params = transport.send_request.await_args.args[1]
+        self.assertEqual(params["model"], "gpt-5.4")
+        self.assertEqual(params["effort"], "xhigh")
+        self.assertEqual(params["collaborationMode"]["settings"]["model"], "gpt-5.4")
+        self.assertEqual(params["collaborationMode"]["settings"]["reasoning_effort"], "xhigh")
+
+    async def test_start_turn_changes_only_collaboration_instructions_when_prompt_changes(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}),
+        )
+
+        for prompt in ("prompt one", "prompt two"):
+            await agent._start_turn(
+                transport,
+                request,
+                "thread-1",
+                developer_instructions=prompt,
+            )
+
+        first = transport.send_request.await_args_list[0].args[1]
+        second = transport.send_request.await_args_list[1].args[1]
+        first_mode = first.pop("collaborationMode")
+        second_mode = second.pop("collaborationMode")
+        self.assertEqual(first, second)
+        self.assertEqual(first_mode["settings"]["developer_instructions"], "prompt one")
+        self.assertEqual(second_mode["settings"]["developer_instructions"], "prompt two")
+
+    async def test_start_turn_falls_back_once_when_collaboration_mode_is_unsupported(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=True,
+            send_request=AsyncMock(
+                side_effect=[
+                    RuntimeError("unknown field collaborationMode: experimental API unsupported"),
+                    {},
+                    {"turn": {"id": "turn-1"}},
+                ]
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertIn("collaborationMode", calls[0].args[1])
+        self.assertEqual(calls[1].args[0], "thread/inject_items")
+        self.assertEqual(
+            calls[1].args[1]["items"][0]["content"][0]["text"],
+            "stable prompt",
+        )
+        self.assertNotIn("collaborationMode", calls[2].args[1])
+        self.assertFalse(transport.supports_turn_collaboration_mode)
+
+    async def test_start_turn_uses_injection_after_collaboration_probe_fails(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-1"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        calls = transport.send_request.await_args_list
+        self.assertEqual(calls[0].args[0], "thread/inject_items")
+        self.assertEqual(
+            calls[0].args[1]["items"][0]["content"][0]["text"],
+            "stable prompt",
+        )
+        self.assertNotIn("collaborationMode", calls[1].args[1])
 
     async def test_start_turn_uses_sandbox_policy_object(self):
         from core.native_dispatch_phase import (
@@ -3772,9 +5219,17 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         class _FakeStdin:
             def __init__(self):
                 self._closing = False
+                self._request_events = {
+                    1: asyncio.Event(),
+                    2: asyncio.Event(),
+                }
 
             def write(self, data):
                 writes.append(data.decode())
+                message = json.loads(data)
+                request_id = message.get("id")
+                if request_id in self._request_events:
+                    self._request_events[request_id].set()
 
             async def drain(self):
                 return None
@@ -3786,12 +5241,22 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
                 self._closing = True
 
         class _FakeStdout:
-            def __init__(self):
-                self._lines = [b'{"jsonrpc":"2.0","id":1,"result":{}}\n']
+            def __init__(self, stdin):
+                self._stdin = stdin
+                self._next_response_id = 1
 
             async def readline(self):
-                if self._lines:
-                    return self._lines.pop(0)
+                if self._next_response_id <= 2:
+                    response_id = self._next_response_id
+                    await self._stdin._request_events[response_id].wait()
+                    self._next_response_id += 1
+                    return json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": response_id,
+                            "result": {"data": []} if response_id == 2 else {},
+                        }
+                    ).encode() + b"\n"
                 await asyncio.Event().wait()
                 return b""
 
@@ -3802,7 +5267,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         class _FakeProcess:
             def __init__(self):
                 self.stdin = _FakeStdin()
-                self.stdout = _FakeStdout()
+                self.stdout = _FakeStdout(self.stdin)
                 self.stderr = _FakeStderr()
                 self.pid = 123
                 self.returncode = None
@@ -3833,7 +5298,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
                         "title": "Avibe",
                         "version": "1.0.0",
                     },
-                    "capabilities": {"experimentalApi": False},
+                    "capabilities": {"experimentalApi": True},
                 },
             )
             transport = Transport(
@@ -3910,6 +5375,51 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"approved": True})
         self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
         self.assertEqual(agent._session_last_activity, {})
+
+    async def test_request_user_input_returns_valid_empty_answers(self):
+        agent = self._agent()
+
+        result = await agent._on_server_request(
+            "/tmp/work",
+            8,
+            "item/tool/requestUserInput",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "isBlocking": True,
+                "questions": [],
+            },
+        )
+
+        self.assertEqual(result, {"answers": {}})
+
+    async def test_current_time_request_returns_protocol_shape(self):
+        agent = self._agent()
+
+        with patch.object(_MODULE.time, "time", return_value=1234.9):
+            result = await agent._on_server_request(
+                "/tmp/work",
+                9,
+                "currentTime/read",
+                {"threadId": "thread-1"},
+            )
+
+        self.assertEqual(result, {"currentTimeAt": 1234})
+
+    async def test_unhandled_experimental_server_request_is_rejected(self):
+        agent = self._agent()
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "Unsupported Codex server request: item/permissions/requestApproval",
+        ):
+            await agent._on_server_request(
+                "/tmp/work",
+                10,
+                "item/permissions/requestApproval",
+                {"itemId": "item-1"},
+            )
 
     def test_turn_start_refreshes_the_cwd_transport_clock(self):
         agent = self._agent()

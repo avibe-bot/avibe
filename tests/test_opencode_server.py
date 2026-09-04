@@ -42,6 +42,10 @@ def _load_server_module():
 
 
 SERVER_MODULE = _load_server_module()
+OpenCodeManagedPolicyRefreshPendingError = (
+    SERVER_MODULE.OpenCodeManagedPolicyRefreshPendingError
+)
+OpenCodeRuntimeConfigInvalidError = SERVER_MODULE.OpenCodeRuntimeConfigInvalidError
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
 
 
@@ -125,6 +129,29 @@ class _FakeSession:
 
 
 class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
+    def test_managed_runtime_config_accepts_jsonc_and_disables_native_skill(self):
+        content = SERVER_MODULE._managed_runtime_config_content(
+            b'''\xef\xbb\xbf{
+              // OpenCode accepts JSONC in this inherited override.
+              "permission": "ask",
+              "tools": {"bash": true,},
+            }'''
+        )
+
+        self.assertEqual(
+            json.loads(content),
+            {
+                "permission": {"*": "ask", "skill": "deny"},
+                "tools": {"bash": True, "skill": False},
+            },
+        )
+
+    def test_managed_runtime_config_uses_typed_validation_errors(self):
+        for content in ("{invalid", "[]", '{"permission":[]}'):
+            with self.subTest(content=content):
+                with self.assertRaises(OpenCodeRuntimeConfigInvalidError):
+                    SERVER_MODULE._managed_runtime_config_content(content)
+
     async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         process = types.SimpleNamespace(pid=4321, returncode=None)
@@ -160,7 +187,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._clear_pid_file.call_count, 2)
         self.assertIsNone(manager._process)
         self.assertIsNone(manager._process_loop)
-        self.assertEqual(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"], user_config)
+        self.assertEqual(
+            json.loads(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]),
+            {
+                "permission": {"*": "ask", "skill": "deny"},
+                "tools": {"skill": False},
+            },
+        )
+        self.assertEqual(
+            create_process.await_args.kwargs["env"]["OPENCODE_DISABLE_EXTERNAL_SKILLS"],
+            "1",
+        )
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -425,7 +462,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._restart_for_auth_refresh_locked = AsyncMock(side_effect=lambda: restarted.append(True))  # type: ignore[method-assign]
         manager._start_server = AsyncMock(side_effect=lambda: started.append(True))  # type: ignore[method-assign]
-        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID}  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID, "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION}  # type: ignore[method-assign]
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
 
         with patch.object(
@@ -447,7 +484,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
         manager._start_server = AsyncMock()  # type: ignore[method-assign]
-        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID}  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID, "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION}  # type: ignore[method-assign]
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
 
         with patch.object(
@@ -485,6 +522,128 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started, [True])
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
 
+    async def test_ensure_running_restarts_idle_adopted_server_with_stale_runtime_policy(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": manager._caller_context_path(),
+            "active_run_sessions": [],
+            "runtime_policy_revision": "previous-policy",
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        manager._restart_for_auth_refresh_locked.assert_awaited_once()
+        manager._start_server.assert_awaited_once()
+
+    async def test_ensure_running_reconciles_orphaned_adopted_run_before_policy_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._pid_file.write_text(
+                json.dumps(
+                    {
+                        "pid": 123,
+                        "port": 4096,
+                        "caller_context_path": manager._caller_context_path(),
+                        "active_run_sessions": ["ses-orphan"],
+                        "runtime_policy_revision": "previous-policy",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager.set_active_poll_session_ids_provider(set)
+            manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+            manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+            manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+            manager._start_server = AsyncMock()  # type: ignore[method-assign]
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+            with patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+            ):
+                base_url = await manager.ensure_running()
+
+            self.assertEqual(base_url, "http://127.0.0.1:4096")
+            manager._restart_for_auth_refresh_locked.assert_awaited_once()
+            manager._start_server.assert_awaited_once()
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], [])
+
+    async def test_ensure_running_keeps_adopted_run_with_durable_poll(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager.set_active_poll_session_ids_provider(lambda: {"ses-active"})
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": manager._caller_context_path(),
+            "active_run_sessions": ["ses-active"],
+            "runtime_policy_revision": "previous-policy",
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            with self.assertRaises(OpenCodeManagedPolicyRefreshPendingError):
+                await manager.ensure_running()
+
+        self.assertEqual(manager._active_run_sessions, {"ses-active"})
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+
+    async def test_ensure_running_keeps_adopted_run_when_poll_reconciliation_fails(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+        def unavailable_polls() -> set[str]:
+            raise OSError("sessions unavailable")
+
+        manager.set_active_poll_session_ids_provider(unavailable_polls)
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": manager._caller_context_path(),
+            "active_run_sessions": ["ses-unknown"],
+            "runtime_policy_revision": "previous-policy",
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            with self.assertRaises(OpenCodeManagedPolicyRefreshPendingError):
+                await manager.ensure_running()
+
+        self.assertEqual(manager._active_run_sessions, set())
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+
     async def test_ensure_running_defers_adopted_server_without_caller_context_env(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
@@ -499,7 +658,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "ensure_plugin_installed",
             return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
         ):
-            with self.assertRaisesRegex(RuntimeError, "adopted or active server"):
+            with self.assertRaisesRegex(
+                OpenCodeManagedPolicyRefreshPendingError,
+                "adopted or active server",
+            ):
                 await manager.ensure_running()
 
         manager._restart_for_auth_refresh_locked.assert_not_awaited()
@@ -539,6 +701,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "port": 4096,
             "caller_context_path": adopted_path,
             "active_run_sessions": ["ses-active"],
+            "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
         }
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
         manager._caller_context_path = lambda: "/new-avibe-home/runtime/opencode_caller_context.json"  # type: ignore[method-assign]
@@ -567,11 +730,70 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
             payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["active_run_sessions"], ["ses-active"])
+            self.assertEqual(
+                payload["runtime_policy_revision"],
+                SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
+            )
 
             await manager.mark_run_inactive("ses-active")
 
             payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["active_run_sessions"], [])
+
+    async def test_mark_run_inactive_preserves_active_state_when_pid_write_fails(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            await manager.mark_run_active("ses-active")
+
+            with patch.object(
+                Path,
+                "write_text",
+                side_effect=OSError("read-only pid file"),
+            ):
+                with self.assertRaisesRegex(OSError, "read-only pid file"):
+                    await manager.mark_run_inactive("ses-active")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-active"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], ["ses-active"])
+
+    async def test_mark_run_inactive_preserves_other_adopted_active_sessions(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            payload["active_run_sessions"] = ["ses-completed", "ses-other-platform"]
+            manager._pid_file.write_text(json.dumps(payload), encoding="utf-8")
+
+            await manager.mark_run_inactive("ses-completed")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-other-platform"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], ["ses-other-platform"])
+
+    async def test_mark_run_active_preserves_adopted_active_sessions(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            payload["active_run_sessions"] = ["ses-other-platform"]
+            manager._pid_file.write_text(json.dumps(payload), encoding="utf-8")
+
+            await manager.mark_run_active("ses-new")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-new", "ses-other-platform"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["active_run_sessions"],
+                ["ses-new", "ses-other-platform"],
+            )
 
     async def test_cleanup_stale_managed_pid_does_not_inherit_caller_context_for_new_pid(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
@@ -586,8 +808,9 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             *,
             caller_context_path=SERVER_MODULE._USE_CURRENT_CALLER_CONTEXT_PATH,
             owner_pid=SERVER_MODULE._CURRENT_OWNER_PID,
+            runtime_policy_revision=SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
         ):
-            writes.append((pid, caller_context_path, owner_pid))
+            writes.append((pid, caller_context_path, owner_pid, runtime_policy_revision))
             pid_info.clear()
             pid_info.update({"pid": pid, "port": 4096})
             if isinstance(caller_context_path, str) and caller_context_path:
@@ -597,7 +820,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         await manager._cleanup_orphaned_managed_server()
 
-        self.assertEqual(writes, [(222, None, None)])
+        self.assertEqual(writes, [(222, None, None, None)])
         self.assertNotIn("caller_context_path", pid_info)
 
     async def test_ensure_running_rejects_unmanaged_healthy_server(self):
@@ -663,6 +886,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "port": 4096,
             "started_at": 2.0,
             "caller_context_path": manager._caller_context_path(),
+            "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
         }
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
 

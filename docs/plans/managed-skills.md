@@ -309,11 +309,12 @@ consistency boundaries.
 | Backend | Native isolation | Avibe prompt application |
 | --- | --- | --- |
 | Claude Code | Configure the SDK with `skills=[]`. | Rebuild when the Skill Catalog changes and resume the same native Session. |
-| Codex | Set `skills.include_instructions=false`. | Render `developerInstructions` for each Turn while retaining the same thread. |
-| OpenCode | Send `tools.skill=false` in every prompt request. | Send the current system prompt on every new Turn. |
+| Codex | Set `skills.include_instructions=false`. | Apply the current developer instructions through `turn/start.collaborationMode` while retaining the same thread; use one developer-item fallback only when that API is unavailable. |
+| OpenCode | Send `tools.skill=false` in every prompt request and runtime config override. | Send the current system prompt on every new Turn. |
 
-For OpenCode, `tools.skill=false` is a request parameter, not prompt text, and
-Avibe does not rewrite the user's permission configuration.
+For OpenCode, `tools.skill=false` is transport and runtime configuration, not
+prompt text. Avibe applies the runtime override only to its managed server
+process and does not rewrite the user's configuration files.
 
 V1 does not block handwritten Codex `$skill` references, backend TUI or slash
 commands Avibe does not call, or ordinary filesystem access. The outcome is
@@ -363,7 +364,25 @@ system prompt. The kernel keeps only identity, interaction contracts,
 permissions, safety boundaries, and the short Skill routing instructions.
 
 Operational modules move incrementally into Avibe built-ins only after the
-replacement Skill has equivalent behavior and regression coverage.
+replacement Skill preserves the complete static source text and has regression
+coverage. Rewriting, consolidating, or deleting that content is a separate
+product decision after migration, never an implicit part of extraction.
+
+Catalogs and every other generated collection use a canonical order. Backends
+receive byte-identical prompt content when the effective inputs are unchanged:
+Claude reuses its current SDK client, OpenCode resends the same system prefix,
+and Codex's collaboration world state emits a new developer fragment only when
+the rendered instructions change. Model or reasoning changes remain explicit
+inputs to the Codex collaboration state so cache stability never leaves routing
+stale.
+
+The first extracted modules are Show Pages, Vault, and Harness, owned by
+`use-show-pages`, `use-avibe-vault`, and `use-avibe-harness` respectively. The
+always-on prompt retains their routing rules plus content that must reflect the
+current runtime: Show Page Cloud availability and active history mode,
+backend-specific safety boundaries, Session identity, the live Agent Catalog,
+and mention semantics. `use-avibe` remains the broader Avibe configuration and
+operations playbook; it is not the Harness module owner.
 
 ## 13. Ownership
 

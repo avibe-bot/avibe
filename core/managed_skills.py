@@ -1112,7 +1112,15 @@ def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
     pages: list[list[ManagedSkill]] = []
     current: list[ManagedSkill] = []
     current_bytes = 0
-    for skill in skills:
+    for skill in sorted(
+        skills,
+        key=lambda item: (
+            item.name.casefold(),
+            item.name,
+            item.description,
+            str(item.directory),
+        ),
+    ):
         if skill.disable_model_invocation:
             continue
         row = f"- {skill.name}: {skill.description}"

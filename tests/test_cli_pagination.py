@@ -4,12 +4,18 @@ import argparse
 import json
 import re
 import shlex
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from config import paths
 from core.system_prompt_injection import build_system_prompt_injection
 from modules.im.base import MessageContext
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import cli
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _command_parser(path: tuple[str, ...]):
@@ -95,7 +101,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         assert "--all" not in flags, path
 
 
-def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
+def test_injected_and_builtin_skill_commands_only_use_parser_supported_flags() -> None:
     context = MessageContext(
         user_id="user",
         channel_id="channel",
@@ -103,7 +109,11 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
         platform_specific={"agent_session_id": "ses-test"},
     )
     prompt = build_system_prompt_injection(context=context)
-    commands = re.findall(r"`(vibe [^`\n]+)`", prompt)
+    guidance = [prompt] + [
+        (ROOT / "skills" / name / "SKILL.md").read_text()
+        for name in ("use-avibe", "use-avibe-harness", "use-avibe-vault", "use-show-pages")
+    ]
+    commands = re.findall(r"`(vibe [^`\n]+)`", "\n".join(guidance))
     checked_commands = 0
 
     for command in commands:
@@ -121,14 +131,28 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
     assert checked_commands >= 20
 
 
-def test_injected_session_queue_commands_name_real_subcommands() -> None:
+def test_managed_harness_session_queue_commands_name_real_subcommands() -> None:
     context = MessageContext(
         user_id="user",
         channel_id="channel",
         platform="avibe",
         platform_specific={"agent_session_id": "ses-test"},
     )
-    prompt = build_system_prompt_injection(context=context)
+    with patch(
+        "core.managed_skills.resolve_skills",
+        return_value=[
+            SimpleNamespace(
+                name="use-avibe-harness",
+                description="Harness workflow",
+                directory=ROOT / "skills" / "use-avibe-harness",
+                disable_model_invocation=False,
+            )
+        ],
+    ):
+        prompt = build_system_prompt_injection(context=context, skills_cwd=ROOT)
+    harness_skill = (ROOT / "skills" / "use-avibe-harness" / "SKILL.md").read_text()
+
+    assert "load the `use-avibe-harness` Skill" in prompt
 
     for command, expected_path in (
         (
@@ -140,7 +164,7 @@ def test_injected_session_queue_commands_name_real_subcommands() -> None:
             ("session", "queue", "remove"),
         ),
     ):
-        assert f"`{command}`" in prompt
+        assert f"`{command}`" in harness_skill
         _, path = _prompt_command_parser(command)
         assert path == expected_path
 

@@ -94,6 +94,18 @@ class _StubAgent(BaseAgent):
         return None
 
 
+def _resolved_core_skills(*, manual_only: bool = False) -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(
+            name=name,
+            description=f"{name} workflow",
+            directory=Path("/tmp") / name,
+            disable_model_invocation=manual_only,
+        )
+        for name in ("use-show-pages", "use-avibe-vault", "use-avibe-harness")
+    ]
+
+
 class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_can_exclude_quick_replies(self):
         with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
@@ -147,67 +159,80 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("file:///Users/test/.codex/generated_images/thread-id/image-file.png", prompt)
         self.assertIn("Never emit variables, placeholder paths, or sandbox paths like `/mnt/data/...`", prompt)
 
-    def test_prompt_includes_vault_guidance(self):
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            prompt = build_system_prompt_injection(include_quick_replies=False)
+    def test_prompt_routes_vault_work_to_builtin_skill(self):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                skills_cwd=Path("/tmp/project"),
+            )
 
         self.assertIn("## Vault", prompt)
-        self.assertIn("prefer Avibe Vault: agents reference secrets by name, tag, or skill tag", prompt)
-        self.assertIn("Static secret: a regular secret value", prompt)
-        self.assertIn("Keypair secret: a signing key", prompt)
-        self.assertIn("Because protected secrets are end-to-end encrypted", prompt)
-        self.assertNotIn("irreversible operations", prompt)
-        self.assertIn("never run commands that may print env vars", prompt)
-        self.assertNotIn("With `vibe vault fetch` and `vibe vault sign`, the agent does not receive", prompt)
-        self.assertIn("Avibe automatically asks the user to decrypt and authorize access", prompt)
-        self.assertIn("it does not replay the command for you", prompt)
-        self.assertIn("run the same `run` / `fetch` command again", prompt)
-        self.assertIn("Avibe creates a browser signing request and returns immediately", prompt)
-        self.assertIn("Do not rerun `sign`", prompt)
-        self.assertIn("follow the callback instruction to read the completed request result", prompt)
-        self.assertIn("vibe vault request OPENAI_API_KEY", prompt)
-        self.assertIn("Request that the user add a missing static secret.", prompt)
-        self.assertIn("ask the user to create a keypair secret in the Vault UI", prompt)
-        self.assertIn("do not request or store private-key material as a static secret", prompt)
+        self.assertIn("load the `use-avibe-vault` Skill", prompt)
+        self.assertNotIn("vibe vault request OPENAI_API_KEY", prompt)
         self.assertNotIn("$<OPENAI_API_KEY>", prompt)
-        self.assertNotIn("clickable placeholder", prompt)
-        self.assertIn("vibe vault find --kind static --protection protected", prompt)
-        self.assertIn("vibe vault find openai --tag prod", prompt)
-        self.assertIn("vibe vault tags", prompt)
-        self.assertNotIn("vibe vault discover", prompt)
-        self.assertIn("vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN", prompt)
-        self.assertIn("vibe vault run --tag deploy", prompt)
-        self.assertIn("vibe vault fetch --auth GITHUB_PAT", prompt)
-        self.assertIn("vibe vault access PROD_DB_URL", prompt)
-        self.assertIn("Request approval before a protected `run`", prompt)
-        self.assertIn("For protected `fetch`, run `vibe vault fetch`", prompt)
-        self.assertIn("vibe vault sign WALLET_KEY", prompt)
-        self.assertNotIn("vibe vault await <request_id>", prompt)
-        self.assertNotIn("vibe vault sign WALLET_KEY --skill", prompt)
-        self.assertNotIn("vibe vault sign WALLET_KEY --tag", prompt)
 
-    def test_prompt_includes_vault_web_placeholder_only_for_web_chat(self):
-        web_context = MessageContext(
+        skill = (Path(__file__).resolve().parents[1] / "skills" / "use-avibe-vault" / "SKILL.md").read_text()
+        self.assertIn("vibe vault request OPENAI_API_KEY", skill)
+        self.assertIn("$<OPENAI_API_KEY>", skill)
+        self.assertIn("Do not rerun `sign`", skill)
+        self.assertIn("the child process receives static secrets as environment variables", skill)
+
+    def test_vault_routing_prompt_is_platform_independent(self):
+        contexts = [
+            MessageContext(
+                user_id="U1",
+                channel_id="C1",
+                platform=platform,
+                platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+            )
+            for platform in ("avibe", "slack")
+        ]
+
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
+            prompts = [
+                build_system_prompt_injection(
+                    include_quick_replies=False,
+                    context=context,
+                    skills_cwd=Path("/tmp/project"),
+                )
+                for context in contexts
+            ]
+
+        self.assertEqual(
+            prompts[0].split("## Vault", 1)[1].split("## Harness", 1)[0],
+            prompts[1].split("## Vault", 1)[1].split("## Harness", 1)[0],
+        )
+        self.assertNotIn("$<OPENAI_API_KEY>", prompts[0])
+
+    def test_prompt_does_not_route_extracted_skills_when_they_are_unavailable(self):
+        context = MessageContext(
             user_id="U1",
             channel_id="C1",
             platform="avibe",
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
-        slack_context = MessageContext(
-            user_id="U1",
-            channel_id="C1",
-            platform="slack",
-            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
-        )
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=[]),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+                skills_cwd=Path("/tmp/project"),
+            )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            web_prompt = build_system_prompt_injection(include_quick_replies=False, context=web_context)
-            slack_prompt = build_system_prompt_injection(include_quick_replies=False, context=slack_context)
-
-        self.assertIn("$<OPENAI_API_KEY>", web_prompt)
-        self.assertIn("clickable placeholder in your reply", web_prompt)
-        self.assertNotIn("$<OPENAI_API_KEY>", slack_prompt)
-        self.assertNotIn("clickable placeholder in your reply", slack_prompt)
+        self.assertNotIn("## Vault", prompt)
+        self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
+        self.assertNotIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-harness` Skill", prompt)
+        self.assertIn("History contract:", prompt)
+        self.assertIn("### Agents", prompt)
 
     def test_prompt_can_exclude_show_pages(self):
         context = MessageContext(
@@ -217,11 +242,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
             prompt = build_system_prompt_injection(
                 include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
             )
 
         self.assertNotIn("## Show Pages", prompt)
@@ -1747,7 +1776,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, "Done.")
         self.assertEqual([button.text for button in reply.buttons], ["Wiki", "Done"])
 
-    def test_prompt_includes_harness_architecture_and_memory_context(self):
+    def test_prompt_keeps_harness_routing_and_moves_operational_detail_to_skill(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1777,246 +1806,75 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.show_git.show_git_checkpointing_active", return_value=True),
-            # The tool-policy paragraphs vary with SDK hook support, so pin it
-            # rather than let the installed SDK decide what this test asserts.
-            # Pinned to True on purpose: a Codex prompt must not inherit the
-            # Claude enforcement claim just because that SDK happens to be
-            # installed alongside it.
             patch("core.system_prompt_injection._claude_sdk_hooks_available", return_value=True),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
         ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,
                 context=context,
                 enabled_agents=enabled_agents,
                 current_agent_backend="codex",
+                skills_cwd=Path("/tmp/project"),
             )
 
         self.assertIn("## Show Pages", prompt)
-        self.assertIn("`vibe show path`", prompt)
-        self.assertIn("`vibe show status`", prompt)
-        self.assertIn("`vibe show update --visibility private`", prompt)
-        self.assertIn("`Accept: text/markdown`", prompt)
-        self.assertIn("use headings for sections, lists for sequences or groups", prompt)
-        self.assertIn("`<table>` for genuinely tabular data", prompt)
-        self.assertIn("`data-agent-hidden`", prompt)
-        self.assertIn('`agent-note="..."`', prompt)
-        self.assertIn("History is saved automatically around each turn", prompt)
-        self.assertIn("`git -C <workspace> status / log / diff / show`", prompt)
-        self.assertIn("Restore only via `git restore --source=<ref> -- <path>`", prompt)
-        self.assertIn("Never move HEAD, switch branches, rewrite history, or run gc", prompt)
-        self.assertIn("Never add remotes, push, or publish the workspace anywhere", prompt)
-        self.assertNotIn("`vibe show path --session-id sesk8m4q2p7x`", prompt)
-        self.assertIn("Make the page work reasonably on mobile", prompt)
-        self.assertIn("managed React/Vite apps", prompt)
-        self.assertIn("Tailwind CSS v4 utility classes are built in", prompt)
-        self.assertIn("restyle the built-in `@/components/ui/*` components", prompt)
-        self.assertIn('must keep `@import "tailwindcss";` and `@import "@avibe/show-ui/theme.css";` at the top', prompt)
-        self.assertIn("Theme with standard shadcn variables", prompt)
-        self.assertIn("values are complete CSS colors usable directly through `var(...)`", prompt)
-        self.assertIn('under `.dark` or `[data-theme="dark"]` for dark mode', prompt)
-        self.assertIn("import `cn` from `@/lib/utils`", prompt)
-        self.assertNotIn("theme through the `@avibe/show-ui/theme` CSS variables", prompt)
-        self.assertNotIn("Ready to visualize", prompt)
-        self.assertIn("@/components/ui/progress", prompt)
-        self.assertNotIn("Excalidraw-style static SVG/PNG diagrams", prompt)
-        self.assertNotIn("Avibe Cloud is not connected", prompt)
+        self.assertIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("`vibe show status`", prompt)
         self.assertIn("## Harness", prompt)
-        self.assertNotIn("## Scheduled tasks, watches, and hooks", prompt)
-        self.assertIn("Avibe Harness turns user intent into durable Agent work", prompt)
-        self.assertIn("context, owner, trigger, session continuity, delivery target, and observable progress", prompt)
-        self.assertIn("Avibe Harness is the first-choice automation layer", prompt)
-        self.assertIn("route through `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents", prompt)
-        self.assertIn("native workflow tools, backend-native skills", prompt)
-        self.assertIn("Do not default to backend-native automation just because the backend exposes it", prompt)
-        self.assertIn("Use backend-native config, skills, subagents, or workflow tools only when the user explicitly asks for backend-native behavior", prompt)
-        # This is a Codex session, and only the Claude session handler installs
-        # the tool-layer gate, so the prompt must claim no enforcement here even
-        # though the Claude SDK is importable (pinned above).
+        self.assertIn("load the `use-avibe-harness` Skill", prompt)
         self.assertIn("Backend-native background work is not gated in this runtime", prompt)
-        self.assertNotIn("blocked at the tool layer", prompt)
-        self.assertNotIn("only partly blocked", prompt)
         self.assertIn("Route that work through the Harness instead", prompt)
-        self.assertIn("Never detach with `nohup` or a trailing `&` for work whose result you need", prompt)
-        self.assertIn("what outcome is the user trying to secure", prompt)
-        self.assertIn("If the answer is an operating loop, build a Harness instead of only doing the visible step", prompt)
-        self.assertIn("### Mental model", prompt)
-        self.assertIn("| Agent | Reusable role: backend, model, prompt, description, enabled state | Work needs a stable specialist identity |", prompt)
-        self.assertIn("| Session | Continuing context for one Agent work lineage | Work should continue or fork context |", prompt)
-        self.assertIn("Relationship: Scope routes work; Agent defines who acts; Session holds continuity", prompt)
-        self.assertIn("Current session id: `sesk8m4q2p7x`", prompt)
-        self.assertEqual(prompt.count("Current session id: `sesk8m4q2p7x`"), 2)
-        self.assertNotIn("Current Agent backend", prompt)
-        self.assertNotIn("copying `sesk8m4q2p7x` into the command", prompt)
-        self.assertNotIn("generic reply destination", prompt)
-        self.assertNotIn("delivery address", prompt)
-        self.assertNotIn("Legacy session key:", prompt)
-        self.assertNotIn("--session-key", prompt)
-        self.assertNotIn("Channel-level session key:", prompt)
-        self.assertIn("### Inspecting Harness state", prompt)
-        self.assertIn("Use `vibe harness status` first for active Runs", prompt)
-        self.assertIn(
-            "Use `vibe data query` for deeper guarded read-only SQL before changing a Harness",
-            prompt,
-        )
-        self.assertIn("select name from sqlite_master where type='table' order by name", prompt)
-        self.assertIn("schema discovery, current session lookup, existing task/watch inspection, Agent run history", prompt)
-        self.assertIn("### Choosing the right Harness shape", prompt)
-        self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
-        self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
-        self.assertIn(
-            "| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |",
-            prompt,
-        )
-        self.assertIn(
-            "| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |",
-            prompt,
-        )
-        self.assertIn(
-            "| Promote an existing queued Session head now | `vibe session send-now <session-id>` |",
-            prompt,
-        )
-        self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
-        self.assertIn("Tasks created from an Avibe Agent shell continue this conversation by default", prompt)
-        self.assertIn("`vibe task add` creates a time-triggered saved Agent message", prompt)
-        self.assertIn("Watches created from an Avibe Agent shell follow up in this conversation by default", prompt)
-        self.assertIn("`vibe watch add` creates a managed monitor", prompt)
-        self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
-        self.assertIn("exit `0` only for one NEW reportable event", prompt)
-        self.assertIn("default `75`) keeps either a once or forever Watch waiting", prompt)
-        self.assertIn("it retires a once Watch and re-arms a forever Watch", prompt)
-        self.assertIn("must therefore return an allowed retry code, not `64`", prompt)
-        self.assertIn("waits five seconds after a follow-up settles before re-arming", prompt)
-        self.assertIn("six successful events within 60 seconds", prompt)
-        delegate_guidance = (
-            "Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. "
-            "By default this creates a background Session in the caller's scope and returns immediately; when the run "
-            "completes, the final result is sent back to this conversation. Background Sessions stay out of the session "
-            "list and never deliver outward, but remain visible in the Agents run graph, where the user can open their "
-            "full chat history or promote them at any time. Pass `--visible` only when the new Session should be "
-            "user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass "
-            "`--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later; "
-            "pass `--callback-session-id <id>` only to route the final result elsewhere. Add `--scope-id <scopes.id>` "
-            "only when placing the new Session in a specific existing scope."
-        )
-        self.assertIn(delegate_guidance, prompt)
-        self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
-        self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
-        self.assertIn(
-            "That existing-Session send is a P1 delivery by default",
-            prompt,
-        )
-        self.assertIn(
-            "an explicit user request is one signal, not a prerequisite",
-            prompt,
-        )
-        self.assertIn(
-            "Both commands work for Workbench and IM Sessions",
-            prompt,
-        )
-        self.assertIn(
-            "vibe agent run --session-id <id> --send-now --message ...",
-            prompt,
-        )
-        self.assertIn(
-            "vibe session send-now <id>",
-            prompt,
-        )
-        self.assertIn(
-            "vibe session queue list <id>",
-            prompt,
-        )
-        self.assertIn(
-            "vibe session queue remove <id> <message-id>",
-            prompt,
-        )
-        self.assertIn(
-            "Always list first and use the returned stable message id",
-            prompt,
-        )
-        self.assertIn(
-            "explicitly selects that same content-bearing P1 behavior",
-            prompt,
-        )
-        self.assertIn(
-            "it does not promote an older queued message",
-            prompt,
-        )
-        self.assertIn(
-            "this content-free P1 promotes the exact existing FIFO head",
-            prompt,
-        )
-        self.assertIn(
-            "that head steers the same logical/native Turn",
-            prompt,
-        )
-        self.assertIn(
-            "if the Session is idle, it starts as a new Turn",
-            prompt,
-        )
-        self.assertNotIn(
-            "Both forms require a Web/Workbench Session, interrupt through the shared Stop path",
-            prompt,
-        )
-        self.assertNotIn("content-P0 admission", prompt)
-        self.assertIn(
-            "never falls back to Stop",
-            prompt,
-        )
-        self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)
-        self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
-        self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)
-        self.assertIn("It does not change that Session's cwd, scope, Agent, model, or reasoning settings", prompt)
-        self.assertNotIn("`--prefix` is legacy-compatible", prompt)
-        self.assertNotIn("`--post-to` is a delivery override", prompt)
-        self.assertIn("Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement", prompt)
-        self.assertNotIn("--deliver-key", prompt)
-        self.assertIn("Manage existing work with `vibe task <list|show|pause|resume|run|remove>`", prompt)
-        self.assertIn("`vibe watch <list|show|pause|resume|remove>`", prompt)
-        self.assertIn("`vibe runs <list|show|cancel>`", prompt)
-        self.assertIn("The CLI exposes more options than this prompt lists", prompt)
-        self.assertIn("`vibe <command> <subcommand> --help`", prompt)
-        self.assertIn("### Agents", prompt)
+        self.assertNotIn("### Mental model", prompt)
+        self.assertNotIn("Watch waiter contract", prompt)
+        self.assertEqual(prompt.count("Current session id: `sesk8m4q2p7x`"), 1)
         self.assertIn("| Agent Name | Backend | Agent Description |", prompt)
         self.assertIn("| codex | codex | Codex compatibility Agent for existing sessions |", prompt)
         self.assertIn(r"| release-auditor | claude | Review releases \| verify follow-up risk |", prompt)
         self.assertIn("| review-bot | codex | Name needs prompt-safe normalization |", prompt)
-        self.assertIn("generated from currently enabled Agents at prompt-injection time", prompt)
-        self.assertIn("The `Agent Name` column is command-safe", prompt)
-        self.assertNotIn("CLI Token", prompt)
-        self.assertIn("Use the `Agent Name` value exactly as listed in shell commands", prompt)
-        self.assertIn("`--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing", prompt)
-        self.assertIn("Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate background Session", prompt)
-        self.assertIn(
-            "Use `vibe session update --visible|--hidden` (`--visibility foreground|background`)",
-            prompt,
-        )
-        self.assertIn("`--fork-self` creates a new Agent Session from this current Session's native backend context", prompt)
-        self.assertIn("`--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context", prompt)
-        self.assertIn("vibe agent run --agent <agent-name> --message ...", prompt)
-        self.assertIn("vibe agent run --agent <agent-name> --session-id ... --message ...", prompt)
-        self.assertIn("Async callbacks return to this conversation by default", prompt)
-        self.assertNotIn("Reuse an existing Session only with Agents whose `Backend` matches", prompt)
-        self.assertIn("With `--fork-self` or `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides", prompt)
-        self.assertIn("`--sync` changes waiting behavior, not session identity", prompt)
-        self.assertIn("synchronous runs wait for the result and are still recorded in `vibe runs`", prompt)
-        self.assertNotIn("--create-session-per-run", prompt)
-        self.assertIn("Create or update Agents only when it captures a reusable role", prompt)
+        self.assertLess(prompt.index("| codex |"), prompt.index("| release-auditor |"))
+        self.assertLess(prompt.index("| release-auditor |"), prompt.index("| review-bot |"))
         self.assertIn("## Memory and Project Context", prompt)
-        self.assertIn("A shared user context and preferences file is available at ", prompt)
         self.assertIn("/tmp/user_preferences.md", prompt)
-        self.assertIn("Use the right memory surface", prompt)
-        self.assertIn("project lessons, conventions, architecture, workflows, and pointers go to the nearest relevant `AGENTS.md`", prompt)
-        self.assertIn("`AGENTS.md` is an index, not a log", prompt)
-        self.assertIn("update by consolidating and abstracting instead of merely appending", prompt)
-        self.assertIn("Use the current platform `slack`", prompt)
-        self.assertIn("`slack/<user_id>`", prompt)
-        self.assertNotIn("slack/U1", prompt)
-        self.assertIn("Only record durable, factual, reusable information there.", prompt)
-        self.assertIn("Keep entries short, deduplicated, and free of secrets unless the user explicitly asks.", prompt)
-        self.assertIn("use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history", prompt)
 
-    def test_show_pages_prompt_reports_history_unavailable_without_git(self):
+        skill = (Path(__file__).resolve().parents[1] / "skills" / "use-avibe-harness" / "SKILL.md").read_text()
+        self.assertIn("Avibe Harness turns user intent into durable Agent work", skill)
+        self.assertIn("### Mental model", skill)
+        self.assertIn("Watch waiter contract", skill)
+        self.assertIn("vibe harness status", skill)
+        self.assertIn("vibe watch add", skill)
+
+    def test_prompt_is_byte_stable_when_agent_input_order_changes(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+        enabled_agents = [
+            SimpleNamespace(name="zeta", normalized_name="zeta", backend="codex", description="Last"),
+            SimpleNamespace(name="Alpha", normalized_name="alpha", backend="claude", description="First"),
+            SimpleNamespace(name="beta", normalized_name="beta", backend="opencode", description="Middle"),
+        ]
+
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            forward = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+                enabled_agents=enabled_agents,
+                current_agent_backend="codex",
+            )
+            reverse = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+                enabled_agents=reversed(enabled_agents),
+                current_agent_backend="codex",
+            )
+
+        self.assertEqual(forward, reverse)
+        self.assertLess(forward.index("| alpha |"), forward.index("| beta |"))
+        self.assertLess(forward.index("| beta |"), forward.index("| zeta |"))
+
+    def test_show_page_runtime_state_selects_one_history_contract(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -2024,46 +1882,31 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.show_git.show_git_checkpointing_active", return_value=False),
-        ):
-            prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            with patch("core.show_git.show_git_checkpointing_active", return_value=False):
+                unavailable = build_system_prompt_injection(include_quick_replies=True, context=context)
+            with (
+                patch("core.show_git.show_git_checkpointing_active", return_value=True),
+                patch("core.show_git._workspace_is_self_managed", return_value=False),
+            ):
+                managed = build_system_prompt_injection(include_quick_replies=True, context=context)
+            with (
+                patch("core.show_git.show_git_checkpointing_active", return_value=True),
+                patch("core.show_git._workspace_is_self_managed", return_value=True),
+            ):
+                self_managed = build_system_prompt_injection(include_quick_replies=True, context=context)
 
-        self.assertIn("Automatic Show Page history is unavailable", prompt)
-        self.assertNotIn("History is saved automatically around each turn", prompt)
-        self.assertNotIn("git restore --source", prompt)
-
-    def test_show_pages_prompt_rechecks_mid_session_ownership_flip(self):
-        session_id = "sesk8m4q2p7x"
-        context = MessageContext(
-            user_id="U1",
-            channel_id="C1",
-            platform="slack",
-            platform_specific={"agent_session_id": session_id},
-        )
-        workspace = paths.get_show_page_dir(session_id)
-        workspace.mkdir(parents=True)
-
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.show_git.show_git_checkpointing_active", return_value=True),
-        ):
-            managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
-            (workspace / ".git").mkdir()
-            self_managed_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
-            (workspace / ".git").rmdir()
-            managed_again_prompt = build_system_prompt_injection(include_quick_replies=True, context=context)
-
-        self.assertIn("History is saved automatically around each turn", managed_prompt)
-        self.assertNotIn("shadow history continues automatically", managed_prompt)
-        self.assertIn("Avibe's shadow history continues automatically", self_managed_prompt)
-        self.assertIn("addresses the **user's repo**, not Avibe history", self_managed_prompt)
-        self.assertIn("Only if the user explicitly asks to recover from Avibe history", self_managed_prompt)
-        self.assertNotIn("Read freely: `git -C <workspace>", self_managed_prompt)
-        self.assertNotIn("Restore only via `git restore", self_managed_prompt)
-        self.assertIn("History is saved automatically around each turn", managed_again_prompt)
-        self.assertNotIn("shadow history continues automatically", managed_again_prompt)
+        self.assertIn("History is saved automatically around each turn", managed)
+        self.assertNotIn("Avibe's shadow history continues automatically", managed)
+        self.assertIn("Avibe's shadow history continues automatically", self_managed)
+        self.assertNotIn("History is saved automatically around each turn", self_managed)
+        self.assertIn("Automatic Show Page history is unavailable", unavailable)
+        self.assertNotIn("History is saved automatically around each turn", unavailable)
+        skill = (Path(__file__).resolve().parents[1] / "skills" / "use-show-pages" / "SKILL.md").read_text()
+        self.assertNotIn("History is saved automatically around each turn", skill)
+        self.assertNotIn("Avibe's shadow history continues automatically in the background", skill)
+        self.assertNotIn("Automatic Show Page history is unavailable", skill)
+        self.assertIn("one active history", skill)
 
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
         context = MessageContext(
@@ -2092,7 +1935,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("| (none) |", missing_store_prompt)
         self.assertNotIn("| (none) |", empty_store_prompt)
 
-    def test_show_pages_prompt_mentions_avibe_cloud_when_not_connected(self):
+    def test_show_page_detail_lives_in_skill_and_cloud_state_stays_in_prompt(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -2100,19 +1943,39 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            prompt = build_system_prompt_injection(
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
+        ):
+            disconnected = build_system_prompt_injection(
                 include_quick_replies=False,
                 avibe_cloud_connected=False,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
+            )
+            connected = build_system_prompt_injection(
+                include_quick_replies=False,
+                avibe_cloud_connected=True,
+                context=context,
+                skills_cwd=Path("/tmp/project"),
             )
 
-        self.assertIn("## Show Pages", prompt)
-        self.assertIn("⚠️ Avibe Cloud is not connected", prompt)
-        self.assertIn("register an avibe.bot account", prompt)
-        self.assertIn("`vibe remote pair`", prompt)
+        self.assertNotEqual(disconnected, connected)
+        self.assertIn("load the `use-show-pages` Skill", disconnected)
+        self.assertNotIn("`vibe show path`", disconnected)
+        self.assertIn("Avibe Cloud is not connected", disconnected)
+        self.assertNotIn("Avibe Cloud is not connected", connected)
 
-    def test_show_pages_prompt_allows_literal_typescript_braces(self):
+        skill = (Path(__file__).resolve().parents[1] / "skills" / "use-show-pages" / "SKILL.md").read_text()
+        self.assertIn("`vibe show path`", skill)
+        self.assertIn("`Accept: text/markdown`", skill)
+        self.assertIn("export async function GET(request)", skill)
+        self.assertIn("[show-annotation]", skill)
+        self.assertIn("vibe show mark", skill)
+        self.assertIn("They include Show Page motion for changed text", skill)
+        self.assertNotIn("Avibe Cloud is not connected", skill)
+
+    def test_disabled_show_pages_are_not_advertised_through_the_skill_catalog(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -2120,36 +1983,87 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        skills = [
+            SimpleNamespace(
+                name="use-show-pages",
+                description="Show Page workflow",
+                directory=Path("/tmp/show-pages"),
+                disable_model_invocation=False,
+            ),
+            SimpleNamespace(
+                name="use-avibe-vault",
+                description="Vault workflow",
+                directory=Path("/tmp/vault"),
+                disable_model_invocation=False,
+            ),
+        ]
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch("core.managed_skills.resolve_skills", return_value=skills),
+        ):
             prompt = build_system_prompt_injection(
+                include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
             )
 
-        self.assertIn("`vibe show path`", prompt)
-        self.assertNotIn("`vibe show path --session-id sesk8m4q2p7x`", prompt)
-        self.assertIn("export async function GET(request) { return Response.json({ ok: true }) }", prompt)
+        self.assertNotIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("- use-show-pages:", prompt)
+        self.assertIn("- use-avibe-vault:", prompt)
 
-    def test_show_pages_prompt_includes_annotation_capability_guidance(self):
+    def test_manual_only_core_skills_are_not_advertised_or_routed(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
-            platform="slack",
+            platform="avibe",
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
-
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+        with (
+            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
+            patch(
+                "core.managed_skills.resolve_skills",
+                return_value=_resolved_core_skills(manual_only=True),
+            ),
+        ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 context=context,
+                skills_cwd=Path("/tmp/project"),
             )
 
-        guidance = """### Show Page annotations & reverse marks
-- Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
-- After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
-- Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`."""
-        self.assertIn(guidance, prompt)
-        self.assertNotIn("prefer replying on the page", prompt)
+        self.assertNotIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-harness` Skill", prompt)
+        self.assertNotIn("- use-show-pages:", prompt)
+        self.assertNotIn("- use-avibe-vault:", prompt)
+        self.assertNotIn("- use-avibe-harness:", prompt)
+        self.assertIn("History contract:", prompt)
+        self.assertIn("### Agents", prompt)
+
+    def test_missing_skill_binding_does_not_advertise_routes(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+        with patch.object(
+            paths,
+            "get_user_preferences_path",
+            return_value=Path("/tmp/user_preferences.md"),
+        ):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                context=context,
+                skills_cwd=None,
+            )
+
+        self.assertNotIn("load the `use-show-pages` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
+        self.assertNotIn("load the `use-avibe-harness` Skill", prompt)
+        self.assertIn("History contract:", prompt)
+        self.assertIn("### Agents", prompt)
 
     def test_prompt_uses_fallback_platform_for_unannotated_context(self):
         context = MessageContext(

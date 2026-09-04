@@ -89,7 +89,9 @@ from .poll_loop import (
     restored_session_key_from_poll_info,
 )
 from .server import (
+    OpenCodeManagedPolicyRefreshPendingError,
     OpenCodePromptRejectedError,
+    OpenCodeRuntimeConfigInvalidError,
     OpenCodeServerManager,
     native_part_id_for_attempt,
 )
@@ -730,6 +732,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if restored_server is not None:
                 return restored_server
         server = await self._client_manager.get_server()
+        server.set_active_poll_session_ids_provider(
+            lambda: set(self.sessions.get_all_active_polls())
+        )
         self._attach_server_activation(server)
         return server
 
@@ -932,6 +937,20 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model=(model or {}).get("modelID") or default_label,
             variant=reasoning_effort or default_label,
         )
+
+    def _server_start_error_display_text(self, error: BaseException) -> str:
+        localized_key = None
+        if isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
+            localized_key = "error.opencodePolicyRefreshPending"
+        elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
+            localized_key = "error.opencodeRuntimeConfigInvalid"
+        if localized_key is not None:
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t(localized_key, language)}"
+        return f"Failed to start OpenCode server: {error}"
 
     async def prepare_runtime_restart(self) -> None:
         """Adopt persisted server state before the shared drain snapshot."""
@@ -1152,12 +1171,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         caller_context_binding_path: str | None = None
         caller_context_binding_renewal: asyncio.Task[None] | None = None
         active_poll_persisted = False
+        active_poll_removal_pending = False
 
         def remove_active_poll() -> None:
-            nonlocal active_poll_persisted
+            nonlocal active_poll_persisted, active_poll_removal_pending
             if session_id:
-                self.sessions.remove_active_poll(session_id)
                 active_poll_persisted = False
+                active_poll_removal_pending = True
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
@@ -1197,7 +1217,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 str(e),
-                display_text=f"Failed to start OpenCode server: {e}",
+                display_text=self._server_start_error_display_text(e),
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1810,6 +1830,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._stop_caller_context_binding_renewal(
                 caller_context_binding_renewal
             )
+            if steer_state is not None:
+                async with steer_state.lock:
+                    steer_state.closing = True
+                if self._steering_states.get(request.base_session_id) is steer_state:
+                    self._steering_states.pop(request.base_session_id, None)
+            if active_poll_removal_pending and run_registered:
+                active_poll_persisted = not await self._retire_active_poll(
+                    server,
+                    session_id,
+                )
+            elif active_poll_removal_pending and session_id:
+                self.sessions.remove_active_poll(session_id)
+                active_poll_persisted = False
             if (
                 caller_context_binding_session_id
                 and caller_context_binding_token
@@ -1828,13 +1861,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         caller_context_binding_session_id,
                         exc_info=True,
                     )
-            if steer_state is not None:
-                async with steer_state.lock:
-                    steer_state.closing = True
-                if self._steering_states.get(request.base_session_id) is steer_state:
-                    self._steering_states.pop(request.base_session_id, None)
-            if run_registered:
-                await server.mark_run_inactive(session_id)
             await self._release_model_hub_overlay_reservation(
                 server,
                 model_hub_overlay_reservation,
@@ -1857,6 +1883,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 "Failed to release OpenCode Model Hub overlay reservation",
                 exc_info=True,
             )
+
+    async def _retire_active_poll(
+        self,
+        server: Any,
+        session_id: str,
+    ) -> bool:
+        try:
+            await server.mark_run_inactive(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to clear OpenCode run marker for session=%s; preserving its active poll",
+                session_id,
+            )
+            return False
+        self.sessions.remove_active_poll(session_id)
+        return True
 
     async def _finish_prestart_cancellation(
         self,
@@ -2226,8 +2268,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 # past the handlers; a claimed intent is already gone.
                 self._user_stopped_sessions.discard(request.base_session_id)
 
-            if opencode_session_id:
-                self.sessions.remove_active_poll(opencode_session_id)
+            if opencode_session_id and self._active_poll_is_persisted(
+                opencode_session_id
+            ):
+                server = await self._get_server()
+                await self._retire_active_poll(server, opencode_session_id)
 
             # A user-initiated stop is terminal but intentional, so it carries NO
             # user-facing message: a single SILENT result settles the dot to idle +
@@ -2264,7 +2309,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     except asyncio.CancelledError:
                         pass
                     terminated += 1
-                self.sessions.remove_active_poll(opencode_session_id)
+                if self._active_poll_is_persisted(opencode_session_id):
+                    server = await self._get_server()
+                    await self._retire_active_poll(server, opencode_session_id)
         return terminated
 
     async def _abort_active_request(
@@ -2485,6 +2532,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         )
                         continue
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
+                try:
+                    await server.mark_run_inactive(poll_info.opencode_session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to clear OpenCode run marker for session=%s; "
+                        "preserving its active poll and continuing restoration",
+                        poll_info.opencode_session_id,
+                    )
+                    continue
                 await self._poll_loop.remove_restored_ack(poll_info)
                 stale_poll_ids.append(session_id)
                 continue
@@ -2667,6 +2723,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         steer_state = None
         server = None
         restoration_registered = False
+        terminal_poll_cleanup = False
         caller_context_binding_renewal = (
             asyncio.create_task(
                 self._maintain_caller_context_binding(
@@ -2779,7 +2836,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             if delivery_recovery_complete is not None:
                 await delivery_recovery_complete.wait()
-            await self._poll_loop.run_restored_poll_loop(poll_info)
+            terminal_poll_cleanup = bool(
+                await self._poll_loop.run_restored_poll_loop(poll_info)
+            )
         except Exception as err:
             if restoration_registered:
                 raise
@@ -2810,7 +2869,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                             logical_turn_id,
                         )
                 if terminal_persisted:
-                    self.sessions.remove_active_poll(poll_info.opencode_session_id)
+                    terminal_poll_cleanup = True
                 logger.error(
                     "OpenCode poll registration failed for session=%s: %s",
                     poll_info.opencode_session_id,
@@ -2820,6 +2879,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._stop_caller_context_binding_renewal(
                 caller_context_binding_renewal
             )
+            if current_task is not None:
+                self._restored_poll_servers.pop(current_task, None)
+            if steer_state is not None:
+                async with steer_state.lock:
+                    steer_state.closing = True
+                if self._steering_states.get(poll_info.base_session_id) is steer_state:
+                    self._steering_states.pop(poll_info.base_session_id, None)
+            if terminal_poll_cleanup and server is not None:
+                await self._retire_active_poll(
+                    server,
+                    poll_info.opencode_session_id,
+                )
             if caller_context_binding_token and not self._active_poll_is_persisted(
                 poll_info.opencode_session_id
             ):
@@ -2835,21 +2906,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         "Failed to clear restored OpenCode caller context for session %s",
                         poll_info.opencode_session_id,
                         exc_info=True,
-                    )
-            if current_task is not None:
-                self._restored_poll_servers.pop(current_task, None)
-            if steer_state is not None:
-                async with steer_state.lock:
-                    steer_state.closing = True
-                if self._steering_states.get(poll_info.base_session_id) is steer_state:
-                    self._steering_states.pop(poll_info.base_session_id, None)
-            if server is not None:
-                try:
-                    await server.mark_run_inactive(poll_info.opencode_session_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to clear restored OpenCode run marker for session=%s",
-                        poll_info.opencode_session_id,
                     )
             if self._active_requests.get(poll_info.base_session_id) is current_task:
                 self._active_requests.pop(poll_info.base_session_id, None)

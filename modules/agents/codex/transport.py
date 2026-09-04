@@ -51,6 +51,7 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.tool_call_mcp_elicitation=false",
     "features.tool_suggest=false",
     "features.workspace_dependencies=false",
+    "skills.include_instructions=false",
 )
 
 
@@ -89,6 +90,7 @@ class CodexTransport:
         self._pending: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
         self._write_lock = asyncio.Lock()
         self._initialized = False
+        self.supports_turn_collaboration_mode = False
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_task: Optional[asyncio.Task[None]] = None
 
@@ -161,13 +163,27 @@ class CodexTransport:
                         "title": "Avibe",
                         "version": "1.0.0",
                     },
-                    # Avibe intentionally consumes only the stable app-server
-                    # contract. Omitted server-request capabilities stay off.
-                    "capabilities": {"experimentalApi": False},
+                    # Dynamic developer instructions for an existing native
+                    # thread use turn/start.collaborationMode. Omitted
+                    # server-request capabilities remain disabled.
+                    "capabilities": {"experimentalApi": True},
                 },
             )
             logger.info("Codex app-server initialized: %s", resp)
             await self.send_notification("initialized")
+            try:
+                await self.send_request("collaborationMode/list", {})
+            except Exception as exc:
+                # Older app-servers accept unknown turn fields, so the catalog
+                # method is the capability probe. Fall back to item injection
+                # on any inconclusive result rather than risk dropping the
+                # developer instructions silently.
+                logger.info(
+                    "Codex turn collaboration mode is unavailable; using developer item injection: %s",
+                    exc,
+                )
+            else:
+                self.supports_turn_collaboration_mode = True
             self._initialized = True
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):

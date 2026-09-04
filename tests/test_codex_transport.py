@@ -51,9 +51,11 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        async def wait_for_initialize(_method, _params):
-            initialize_started.set()
-            await asyncio.Event().wait()
+        async def wait_for_initialize(method, _params):
+            if method == "initialize":
+                initialize_started.set()
+                await asyncio.Event().wait()
+            return {}
 
         async def stop_transport():
             transport._cleanup_tasks()
@@ -104,9 +106,80 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                     "title": "Avibe",
                     "version": "1.0.0",
                 },
-                "capabilities": {"experimentalApi": False},
+                "capabilities": {"experimentalApi": True},
             },
         )
+
+    async def test_start_probes_turn_collaboration_mode_support(self):
+        class _Stream:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdin=None,
+            stdout=_Stream(),
+            stderr=_Stream(),
+        )
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        transport.send_request = AsyncMock(
+            side_effect=[{}, {"data": [{"mode": "default"}]}]
+        )
+        transport.send_notification = AsyncMock()
+        transport.stop = AsyncMock(side_effect=transport._cleanup_tasks)
+
+        with (
+            patch(
+                "modules.agents.codex.transport.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("modules.agents.codex.transport.process_identity", return_value={}),
+            patch("modules.agents.codex.transport.log_process_snapshot"),
+        ):
+            await transport.start()
+
+        self.assertTrue(transport.supports_turn_collaboration_mode)
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["initialize", "collaborationMode/list"],
+        )
+        transport.stop.assert_not_awaited()
+        transport._cleanup_tasks()
+
+    async def test_start_falls_back_when_turn_collaboration_probe_is_unsupported(self):
+        class _Stream:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdin=None,
+            stdout=_Stream(),
+            stderr=_Stream(),
+        )
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        transport.send_request = AsyncMock(
+            side_effect=[{}, RuntimeError("method not found")]
+        )
+        transport.send_notification = AsyncMock()
+        transport.stop = AsyncMock(side_effect=transport._cleanup_tasks)
+
+        with (
+            patch(
+                "modules.agents.codex.transport.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("modules.agents.codex.transport.process_identity", return_value={}),
+            patch("modules.agents.codex.transport.log_process_snapshot"),
+        ):
+            await transport.start()
+
+        self.assertFalse(transport.supports_turn_collaboration_mode)
+        self.assertTrue(transport.is_initialized)
+        transport.stop.assert_not_awaited()
+        transport._cleanup_tasks()
 
     def test_app_server_policy_disables_competing_host_surfaces(self):
         disabled = set(AVIBE_APP_SERVER_CONFIG_OVERRIDES)
@@ -120,6 +193,7 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "features.multi_agent=false",
                 "features.plugins=false",
                 "features.terminal_visualization_instructions=false",
+                "skills.include_instructions=false",
             }.issubset(disabled)
         )
         # ``agents`` is a role-definition table in older supported Codex

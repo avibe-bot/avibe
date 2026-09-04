@@ -306,6 +306,91 @@ class SQLiteSessionsService:
             ).mappings().first()
             return dict(row) if row else None
 
+    def get_agent_session_runtime_marker(
+        self,
+        session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+    ) -> Any:
+        """Read one backend marker only from the exact active native binding."""
+
+        marker_key = str(key or "").strip()
+        if not marker_key:
+            raise ValueError("runtime marker key is required")
+        expected_native = encode_session_value(native_session_id)
+        with self.engine.connect() as conn:
+            raw_metadata = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .where(agent_sessions.c.agent_backend == str(backend))
+                .where(agent_sessions.c.native_session_id == expected_native)
+                .limit(1)
+            ).scalar_one_or_none()
+        metadata_value = _json_loads(raw_metadata, {})
+        if not isinstance(metadata_value, dict):
+            return None
+        return metadata_value.get(marker_key)
+
+    def set_agent_session_runtime_marker(
+        self,
+        session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+        value: Any,
+    ) -> bool:
+        """Merge one backend marker into the exact active native binding.
+
+        The writer reservation makes the read/merge/write atomic, so unrelated
+        Session metadata cannot be lost and a replaced native binding cannot
+        inherit state that belonged to its predecessor.
+        """
+
+        marker_key = str(key or "").strip()
+        if not marker_key:
+            raise ValueError("runtime marker key is required")
+        expected_native = encode_session_value(native_session_id)
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(
+                    agent_sessions.c.metadata_json,
+                    agent_sessions.c.status,
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.native_session_id,
+                )
+                .where(agent_sessions.c.id == str(session_id))
+                .limit(1)
+            ).mappings().first()
+            if (
+                row is None
+                or str(row["status"] or "") == "archived"
+                or str(row["agent_backend"] or "") != str(backend)
+                or str(row["native_session_id"] or "") != expected_native
+            ):
+                return False
+            metadata_value = _json_loads(row["metadata_json"], {})
+            metadata_object = dict(metadata_value) if isinstance(metadata_value, dict) else {}
+            if metadata_object.get(marker_key) == value:
+                return True
+            metadata_object[marker_key] = value
+            result = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .where(agent_sessions.c.agent_backend == str(backend))
+                .where(agent_sessions.c.native_session_id == expected_native)
+                .values(
+                    metadata_json=_json_dumps(metadata_object),
+                    updated_at=_utc_now_iso(),
+                )
+            )
+            return bool(result.rowcount)
+
     def reserve_agent_session(
         self,
         *,

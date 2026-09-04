@@ -53,6 +53,8 @@ def _load_message_handler_class():
             vibe_agent_backend: str | None = None
             vibe_agent_model: str | None = None
             vibe_agent_reasoning_effort: str | None = None
+            vibe_agent_model_explicit: bool = False
+            vibe_agent_reasoning_effort_explicit: bool = False
             vibe_agent_system_prompt: str | None = None
             files: list | None = None
 
@@ -1332,6 +1334,9 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_user_message(context, "hello")
 
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertTrue(request.vibe_agent_model_explicit)
+        self.assertFalse(request.vibe_agent_reasoning_effort_explicit)
         sessions_store.materialize_agent_session_route.assert_called_once_with(
             "ses_wb",
             agent_id="agent-default",

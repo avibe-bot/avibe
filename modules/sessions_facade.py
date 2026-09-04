@@ -122,6 +122,46 @@ class SessionsFacade:
             expected_route=expected_route,
         )
 
+    def get_agent_session_runtime_marker(
+        self,
+        agent_session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+    ) -> Any:
+        getter = getattr(self.sessions_store, "get_agent_session_runtime_marker", None)
+        if not callable(getter):
+            return None
+        return getter(
+            agent_session_id,
+            backend=backend,
+            native_session_id=native_session_id,
+            key=key,
+        )
+
+    def set_agent_session_runtime_marker(
+        self,
+        agent_session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+        value: Any,
+    ) -> bool:
+        setter = getattr(self.sessions_store, "set_agent_session_runtime_marker", None)
+        if not callable(setter):
+            return False
+        return bool(
+            setter(
+                agent_session_id,
+                backend=backend,
+                native_session_id=native_session_id,
+                key=key,
+                value=value,
+            )
+        )
+
     def bind_agent_session(
         self,
         user_id: Union[int, str],

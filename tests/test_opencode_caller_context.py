@@ -3,8 +3,13 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import threading
+
+import pytest
 
 from core import git_runtime
 from modules.agents.opencode import caller_context as bridge
@@ -21,9 +26,68 @@ def test_ensure_plugin_installed_writes_global_opencode_plugin(tmp_path: Path, m
     assert result.changed is True
     source = path.read_text(encoding="utf-8")
     assert '"shell.env"' in source
+    assert '"experimental.chat.system.transform"' in source
     assert "AVIBE_OPENCODE_CALLER_CONTEXT_PATH" in source
+    assert "Skills provide specialized instructions and workflows" in source
+    assert "</available_skills>" in source
+    assert "if (!bindingPath" in source
+    assert "output.system.splice" in source
 
     assert bridge.ensure_plugin_installed().changed is False
+
+
+def test_plugin_removes_native_catalog_without_touching_managed_catalog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the OpenCode runtime plugin")
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
+    plugin = bridge.ensure_plugin_installed().path
+    native = (
+        "before\n"
+        "Skills provide specialized instructions and workflows for specific tasks.\n"
+        "Use the skill tool to load a skill when a task matches its description.\n"
+        "<available_skills>\n"
+        "  <skill><name>native-only</name></skill>\n"
+        "</available_skills>\n"
+        "after"
+    )
+    managed = "## Skills\n\n### Available skills\n- managed-only: Managed by Avibe."
+    script = f"""
+import {{ AvibeCallerContextPlugin }} from {json.dumps(plugin.as_uri())}
+const hooks = await AvibeCallerContextPlugin()
+const output = {{ system: {json.dumps([native, managed])} }}
+await hooks["experimental.chat.system.transform"]({{}}, output)
+process.stdout.write(JSON.stringify(output.system))
+"""
+    env = os.environ.copy()
+    env["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"] = str(tmp_path / "bindings.json")
+    completed = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=10,
+    )
+
+    assert json.loads(completed.stdout) == ["before\nafter", managed]
+
+    direct_env = os.environ.copy()
+    direct_env.pop("AVIBE_OPENCODE_CALLER_CONTEXT_PATH", None)
+    direct = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        check=True,
+        capture_output=True,
+        env=direct_env,
+        text=True,
+        timeout=10,
+    )
+
+    assert json.loads(direct.stdout) == [native, managed]
 
 
 def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:

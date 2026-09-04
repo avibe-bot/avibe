@@ -50,6 +50,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     removed: list[str] = []
     request_sessions: list[tuple[str, str, str, str]] = []
     prompt_calls: list[dict] = []
+    inactive_runs: list[str] = []
 
     class _Server:
         def __init__(self):
@@ -58,6 +59,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             self.status = {"type": "busy"}
             self.status_error = None
             self.mark_run_active_error = None
+            self.mark_run_inactive_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
@@ -72,6 +74,9 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return None
 
         async def mark_run_inactive(self, session_id):
+            if self.mark_run_inactive_error is not None:
+                raise self.mark_run_inactive_error
+            inactive_runs.append(session_id)
             return None
 
         async def get_session_status(self, session_id, directory):
@@ -84,8 +89,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _PollLoop:
         async def run_restored_poll_loop(self, poll_info):
-            active_polls.pop(poll_info.opencode_session_id, None)
-            return None
+            return True
 
         async def remove_restored_ack(self, poll_info):
             return None
@@ -147,6 +151,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._get_server = _get_server
     agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
     agent._test_prompt_calls = prompt_calls
+    agent._test_inactive_runs = inactive_runs
     agent._test_server = server
     return agent, status_writes, removed, request_sessions
 
@@ -229,7 +234,7 @@ def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> No
 
     assert asyncio.run(run()) == 1
     assert attempts == 3
-    assert removed == []
+    assert removed == ["oc-1"]
 
 
 def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> None:
@@ -249,8 +254,7 @@ def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> No
         async def run_restored_poll_loop(self, _poll_info):
             for _ in range(100):
                 if attempts >= 4:
-                    agent.sessions.remove_active_poll("oc-1")
-                    return
+                    return True
                 await asyncio.sleep(0)
             raise AssertionError("restored binding was not retried")
 
@@ -293,8 +297,7 @@ def test_restore_delayed_binding_does_not_replace_a_newer_turn(monkeypatch) -> N
         async def run_restored_poll_loop(self, _poll_info):
             for _ in range(100):
                 if len(attempts) >= 4:
-                    agent.sessions.remove_active_poll("oc-1")
-                    return
+                    return True
                 await asyncio.sleep(0)
             raise AssertionError("restored binding was not retried")
 
@@ -650,6 +653,7 @@ def test_restore_reconciles_definitive_missing_start_attempt() -> None:
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert reconciled == [("logical-missing", ATTEMPT_ID, "opencode")]
     assert removed == ["oc-1"]
+    assert agent._test_inactive_runs == ["oc-1"]
 
 
 def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> None:
@@ -707,6 +711,58 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
 
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert removed == ["oc-1"]
+    assert agent._test_inactive_runs == ["oc-1"]
+
+
+def test_restore_continues_after_inactive_marker_cannot_be_persisted() -> None:
+    stale_poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_stale",
+        opencode_session_id="oc-stale",
+    )
+    active_poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_active",
+        opencode_session_id="oc-active",
+    )
+    active_polls = {"oc-stale": stale_poll, "oc-active": active_poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+
+    async def _list_messages(session_id, directory):
+        del directory
+        if session_id == "oc-stale":
+            return []
+        return [{"info": {"role": "assistant", "time": {}}}]
+
+    async def _get_session_status(session_id, directory):
+        del directory
+        return {"type": "idle" if session_id == "oc-stale" else "busy"}
+
+    async def _mark_run_inactive(session_id):
+        if session_id == "oc-stale":
+            raise OSError("read-only pid file")
+
+    agent._test_server.list_messages = _list_messages
+    agent._test_server.get_session_status = _get_session_status
+    agent._test_server.mark_run_inactive = _mark_run_inactive
+
+    assert asyncio.run(agent.restore_active_polls()) == 1
+
+    assert removed == ["oc-active"]
+    assert active_polls == {"oc-stale": stale_poll}
+
+
+def test_terminal_poll_is_preserved_when_inactive_marker_cannot_be_persisted() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    active_polls = {"oc-1": poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+    agent._test_server.mark_run_inactive_error = OSError("read-only pid file")
+
+    retired = asyncio.run(agent._retire_active_poll(agent._test_server, "oc-1"))
+
+    assert retired is False
+    assert removed == []
+    assert active_polls == {"oc-1": poll}
 
 
 def test_restore_excludes_baseline_assistant_from_steer_evidence() -> None:

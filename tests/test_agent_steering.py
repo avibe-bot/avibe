@@ -145,6 +145,7 @@ class _OpenCodeServer:
         self.list_calls = 0
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple] = []
+        self.inactive_runs: list[str] = []
 
     async def prompt_async(self, **kwargs) -> None:
         self.prompt_calls.append(kwargs)
@@ -191,6 +192,9 @@ class _OpenCodeServer:
     async def abort_session(self, *args) -> bool:
         self.abort_calls.append(args)
         return True
+
+    async def mark_run_inactive(self, session_id: str) -> None:
+        self.inactive_runs.append(session_id)
 
 
 def _primary_request(*, session_id: str = "avibe-session", backend: str) -> AgentRequest:
@@ -798,7 +802,10 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
     controller.emit_agent_message = AsyncMock()
     agent._get_server = AsyncMock(return_value=server)
     removed_polls: list[str] = []
-    agent.sessions = SimpleNamespace(remove_active_poll=removed_polls.append)
+    agent.sessions = SimpleNamespace(
+        get_all_active_polls=lambda: {"opencode-session": object()},
+        remove_active_poll=removed_polls.append,
+    )
     state = agent._steering_states[primary.base_session_id]
     try:
         identity = active_steer_identity(controller, "opencode", "avibe-session")
@@ -822,6 +829,7 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
         assert state.closing is True
         assert server.abort_calls == [("opencode-session", primary.working_path)]
         assert gate_task.cancelled()
+        assert server.inactive_runs == ["opencode-session"]
         assert removed_polls == ["opencode-session"]
     finally:
         await _cancel_tasks(gate_task)
