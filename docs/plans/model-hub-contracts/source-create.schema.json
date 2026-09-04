@@ -39,7 +39,7 @@
     "accept_unavailable_inventory": {
       "type": "boolean",
       "default": false,
-      "description": "Optional explicit consent to commit only when the server's repeated response-backed observation proves a protocol but inventory discovery fails. Omission or false rejects that cell with discovery_failed; true permits a Source with models: []. The flag never supplies observation evidence, has no effect on a successful discovery, and cannot bypass reachability, authentication, or protocol proof."
+      "description": "Optional explicit consent to commit only when the server's repeated observation establishes a protocol owner but inventory discovery fails. Omission or false rejects that cell with discovery_failed; true permits a Source with models: []. The flag never supplies observation evidence, has no effect on a successful discovery, and cannot bypass reachability, authentication, or protocol establishment."
     }
   },
   "examples": [
