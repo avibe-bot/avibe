@@ -441,6 +441,23 @@ def _openai_wrapperless_error_kind(
     return None
 
 
+def _is_openai_nested_numeric_request_error(
+    status: int,
+    error: Mapping[str, Any] | None,
+) -> bool:
+    if status not in _REQUEST_ERROR_STATUSES:
+        return False
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    if not isinstance(code, int) or isinstance(code, bool) or code != status:
+        return False
+    message = error.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return False
+    return True
+
+
 def _default_unproven_shape(
     *,
     status: int,
@@ -538,6 +555,12 @@ def _parse_protocol_authenticated_evidence(
     if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
         wrapperless = _openai_wrapperless_error_kind(status, payload)
         if wrapperless == "accepted":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+                shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+            )
+        if _is_openai_nested_numeric_request_error(status, error):
             return _ProtocolEvidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.ACCEPTED,
