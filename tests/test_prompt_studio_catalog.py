@@ -51,6 +51,9 @@ def test_prompt_catalog_export_is_deterministic_and_source_addressable() -> None
     assert first == second
     assert len(first["modules"]) == len(PROMPT_MODULES)
     assert [module["order"] for module in first["modules"]] == list(range(len(PROMPT_MODULES)))
+    assert "tool-policy-relaxed-section" not in {
+        module["id"] for module in first["modules"]
+    }
     for module in first["modules"]:
         assert (ROOT / module["source_path"]).read_text(encoding="utf-8") == module["source"] + "\n"
 

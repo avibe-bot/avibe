@@ -85,7 +85,6 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("tool-policy-enforced-section", "Tool Policy Enforced Section", "tool-policy-enforced.md"),
     PromptModule("tool-policy-name-only-section", "Tool Policy Name Only Section", "tool-policy-name-only.md"),
     PromptModule("tool-policy-ungated-section", "Tool Policy Ungated Section", "tool-policy-ungated.md"),
-    PromptModule("tool-policy-relaxed-section", "Tool Policy Relaxed Section", "tool-policy-relaxed.md"),
     PromptModule("quick-replies-prompt", "Quick Replies Prompt", "quick-replies.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("user-preferences-prompt", "User Preferences Prompt", "user-preferences.md", leading_newlines=1, trailing_newlines=1, placeholders=("user_context_routing", "preferences_path", "preferences_usage", "update_guidance", "platform")),
     PromptModule("user-preferences-passive-routing", "User Preferences Passive Routing", "user-preferences-passive-routing.md"),

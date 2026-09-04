@@ -38,7 +38,6 @@ from config.v2_config import (
 from core.agent_tool_policy import (
     ALWAYS_SESSION_ONLY_TOOL_NAMES,
     check_tool_call,
-    native_background_tools_allowed,
     session_only_background_tool_names,
 )
 from core.avibe_cloud import avibe_cloud_url_available
@@ -1019,8 +1018,6 @@ class SessionHandler(BaseHandler):
         """Hook config enforcing the shared tool policy, or None when unavailable."""
         if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
             return None
-        if native_background_tools_allowed():
-            return None
         matcher = "|".join(session_only_background_tool_names())
         return {
             "PreToolUse": [
@@ -1040,7 +1037,7 @@ class SessionHandler(BaseHandler):
         session-only under every input.
         """
         disallowed = list(CLAUDE_REMOTE_DISALLOWED_TOOLS)
-        if hooks is None and not native_background_tools_allowed():
+        if hooks is None:
             disallowed.extend(
                 name for name in ALWAYS_SESSION_ONLY_TOOL_NAMES if name not in disallowed
             )

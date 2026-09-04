@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from config import paths
-from core.agent_tool_policy import native_background_tools_allowed
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
 from core.prompt_registry import prompt_text, render_prompt
@@ -104,10 +103,6 @@ _TOOL_POLICY_NAME_ONLY_SECTION = prompt_text("tool-policy-name-only-section")
 # it deliberately avoids asserting which primitives the backend does or does not
 # expose — that varies per backend and would go stale as they gain features.
 _TOOL_POLICY_UNGATED_SECTION = prompt_text("tool-policy-ungated-section")
-
-# Enforcement is off, so the prompt must not claim these calls are blocked; an
-# agent told a tool is denied will not attempt what the operator re-enabled.
-_TOOL_POLICY_RELAXED_SECTION = prompt_text("tool-policy-relaxed-section")
 
 _SESSION_TITLE_PROMPT = prompt_text("session-title-prompt")
 
@@ -297,26 +292,15 @@ def _claude_sdk_hooks_available() -> bool:
 def _build_tool_policy_section(backend: str) -> str:
     """Describe backend-native background tools as the runtime actually treats them.
 
-    Four runtimes, four contracts: a non-Claude backend has no tool-layer gate
-    at all because only the Claude session handler installs one, the escape
-    hatch disables that gate where it does exist, an SDK without argument-aware
-    hooks can only refuse whole tool names, and a current SDK on Claude
-    enforces the full policy. Announcing more enforcement than exists is the
+    Three runtimes, three contracts: a non-Claude backend has no tool-layer
+    gate because only the Claude session handler installs one, an SDK without
+    argument-aware hooks can only refuse whole tool names, and a current SDK
+    on Claude enforces the full policy. Announcing more enforcement than exists is the
     dangerous direction — the agent stops self-policing the calls it believes a
     gate already covers — so an unrecognised backend gets the ungated text.
-
-    Backend is checked before the escape hatch on purpose. The hatch turns off
-    a gate that only Claude installs, so on any other backend it changes
-    nothing, and the relaxed text would replace accurate ungated wording with
-    Claude-specific tool claims.
-
-    Read at prompt-build time rather than import time so a change to the escape
-    hatch takes effect on the next turn instead of requiring a restart.
     """
     if backend != "claude":
         return _TOOL_POLICY_UNGATED_SECTION
-    if native_background_tools_allowed():
-        return _TOOL_POLICY_RELAXED_SECTION
     if not _claude_sdk_hooks_available():
         return _TOOL_POLICY_NAME_ONLY_SECTION
     return _TOOL_POLICY_ENFORCED_SECTION
