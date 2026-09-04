@@ -514,7 +514,8 @@ display names, no protocol chatter.
   the id is stored as typed after canonicalization. The OpenCode-only repair buckets and the
   `<provider>/<model>` fill are retired.
 - **Overlay (C7 → opencode-overlay.md v4).** One provider per downstream protocol,
-  `enabled_providers` naming them, Chat Completions retired downstream.
+  `enabled_providers` naming them, every menu row projected (C1's empty-Route rows included),
+  Chat Completions retired downstream.
 
 ### Contract deltas (normative; lanes cite these by number)
 
@@ -598,7 +599,7 @@ No new string anywhere else; nothing explains the mechanism.
 
 ### Acceptance (properties)
 
-1. For every OpenCode menu row with a nonempty Route chain, the overlay holds exactly one
+1. For every OpenCode menu row — empty Route chain included — the overlay holds exactly one
    model entry, under the provider named by its `native_protocol`; every generated provider
    holds at least one entry, the overlay holds no other provider, and `enabled_providers`
    equals the set of generated provider ids.
@@ -615,8 +616,9 @@ No new string anywhere else; nothing explains the mechanism.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
 5. No compatibility path exists: a pre-v4 OpenCode section is rejected as invalid input, and
-   no code reads, converts, or parks it. A user config declaring an Avibe provider id is
-   refused at launch with `opencode_overlay_collision`, never merged.
+   no code reads, converts, or parks it. A user config whose declaration of an Avibe provider
+   id changes the effective provider is refused at launch with `opencode_overlay_collision`,
+   never merged; a declaration that changes nothing is harmless.
 6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
    only place it appears, for OpenCode rows only.
 7. `avibe-*` is refused as a user custom-provider id.

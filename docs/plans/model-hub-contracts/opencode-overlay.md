@@ -24,9 +24,10 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   under canonical JSON serialization — any extra option, model, or per-model setting is a
   difference — and that no other provider is present in `/config/providers`; a difference is
   a launch failure with the closed error `opencode_overlay_collision`, surfaced by the existing
-  runtime health state — never a silently merged catalog. Required fixtures: a user config
-  declaring `avibe-openai` with its own model, and one declaring `avibe-openai` with the same
-  model ids but an extra option.
+  runtime health state — never a silently merged catalog. A user declaration that changes
+  nothing effective (an empty block, or values equal to the overlay's) is harmless by
+  definition and passes. Required fixtures: a user config declaring `avibe-openai` with its
+  own model, and one declaring `avibe-openai` with the same model ids but an extra option.
 - **Addressing.** In Gateway mode Avibe addresses OpenCode with `providerID` = the fixed
   provider id of the selected row's `native_protocol` from the table below
   (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`) and `modelID` = the
@@ -36,19 +37,18 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   edit, `native_protocol` edit, gateway credential rotation) Avibe waits for active work to
   finish, then restarts the serve process. Restarts are config events: no `resolution-event`
   of kind `channel_switch`/`switch` is emitted.
-- **Nothing projectable.** When the effective overlay would contain no projectable row
-  (the last routeful checked row was removed), Avibe writes no overlay and drains and stops
+- **Nothing projectable.** When the OpenCode menu is empty (the last checked row was
+  removed), Avibe writes no overlay and drains and stops
   the serve process; it relaunches with a fresh overlay when a projectable row exists again.
   In Gateway mode a serve process never runs without an overlay, so the user's providers are
   never exposed and a stale provider set never lingers in `/config/providers`.
 
 ## Provider entries
 
-- One provider entry per downstream protocol used by at least one projected row — a checked
-  menu row with a stored nonempty Route chain — so no generated provider is ever empty and
-  `enabled_providers` equals the generated set. When no row is projectable the existing
-  `mapping_target_unavailable` refusal applies, no overlay is written, and the serve process
-  is stopped (Delivery):
+- One provider entry per downstream protocol used by at least one checked menu row, so no
+  generated provider is ever empty and `enabled_providers` equals the generated set. When the
+  OpenCode menu is empty the existing `mapping_target_unavailable` refusal applies, no overlay
+  is written, and the serve process is stopped (Delivery):
 
   | `native_protocol` | provider id | `name` | `npm` | downstream endpoint |
   | --- | --- | --- | --- | --- |
@@ -60,16 +60,19 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   `options.baseURL` is the local Gateway base for that SDK (exact path per SDK recorded from
   the spike, S1/S2). No `@ai-sdk/openai-compatible` provider is generated: downstream Chat
   Completions is retired for OpenCode. Direct-mode user-defined providers are out of scope.
-- `avibe-` is a reserved provider-id prefix: Avibe's own Direct-mode custom-provider creation
-  refuses it with the existing reserved-id error.
+- `avibe-` is reserved for **creation**: Avibe's Direct-mode custom-provider creation refuses a
+  new id with that prefix (existing reserved-id error). An existing entry that already carries
+  such an id stays readable and editable exactly as today — the reservation never hides or
+  rejects released configuration.
 - Provider ids are fixed strings — never derived from a token digest, a Source, or a hop.
 
 ## Menu projection
 
 - `provider[<id>].models` is keyed by the bare menu id and enumerates exactly the checked menu
-  rows whose `native_protocol` maps to that provider and which have a stored nonempty Route
-  chain, with the row's display name, context/output limits, modalities, tool and reasoning
-  support. `featured|full` is a UI view state; it cannot add a model to the overlay.
+  rows whose `native_protocol` maps to that provider — an empty Route chain does not remove a
+  row (C1 lets a user add a model no Source supplies; invoking it takes the existing no-chain
+  handling) — with the row's display name, context/output limits, modalities, tool and
+  reasoning support. `featured|full` is a UI view state; it cannot add a model to the overlay.
 - Reasoning variants are emitted in the shape the provider's SDK consumes (S4):
   `avibe-openai` → `variants[effort] = { "reasoningEffort": effort }` (reaches the wire as
   `reasoning.effort`); `avibe-anthropic` → `variants[effort] = { "effort": effort }` (reaches the
@@ -110,8 +113,8 @@ runtime or refresh.
 ## Stability invariant (test requirement, L7)
 
 For a fixed set of checked rows with fixed `native_protocol` values, the generated overlay is
-byte-identical across: Source-order edits, Source cooldown/failover, route-chain edits that
-keep the chain nonempty, engine restarts, and gateway token rotation apart from
+byte-identical across: Source-order edits, Source cooldown/failover, route-chain edits,
+engine restarts, and gateway token rotation apart from
 `options.apiKey`. Adding/removing a Source without changing the stored Route chains also
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
