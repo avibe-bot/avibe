@@ -3586,7 +3586,7 @@ is revealed; the button carries the verb.
 | `subtitle` | 先检测连接与接口，确认后添加 | Detect the connection and interface first, then confirm to add |
 | `field.name` | 名称(可选) | Name (optional) |
 | `field.protocol` | 接口类型 | Interface type |
-| `field.protocol.hint` | 不确定时用自动探测；已知类型时只验证所选接口 | Use Auto detect when unsure; choose a type to validate only that interface |
+| `field.protocol.hint` | 不确定时用自动探测；已知类型时可直接声明所选接口。该路径鉴权成功即可添加；选错了运行时可能失败，而且保存后不可更改 | Use Auto detect when unsure; choose a type to declare that interface. If authentication succeeds it can be added, a wrong choice can fail at runtime, and the saved type cannot be changed |
 | `field.baseUrl` | Base URL | Base URL |
 | `field.baseUrl.hint` | 填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径 | API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path |
 | `field.apiKey` | API Key | API key |
@@ -3610,7 +3610,7 @@ is revealed; the button carries the verb.
 | `fail.inProgress` `[derived]` | 创建仍在进行,可稍后重试 | Creation is still in progress. Try again later. |
 | `retry` | 重试 | Retry |
 | `undetermined.title` | 连上了 —— 但认不出它说哪种接口 | Connected — but we cannot tell which interface it speaks |
-| `undetermined.detail` | 返回结构对不上任何一种已知接口，请选择一个明确类型后重试 | The response shape matches no interface we know; choose a concrete interface and retry |
+| `undetermined.detail` | 返回结构对不上任何一种已知接口。请选择一个明确类型后重试：只要该路径鉴权成功即可添加；但选错了运行时可能失败，而且保存后不可更改 | The response shape matches no interface we know. Choose a concrete type and retry: if authentication succeeds on that path it can be added, but a wrong choice can fail at runtime and the saved type cannot be changed |
 | `protocol.auto` | 自动探测 | Auto detect |
 | `protocol.anthropicMessages` | Anthropic Messages | Anthropic Messages |
 | `protocol.openaiResponses` | OpenAI Responses | OpenAI Responses |
