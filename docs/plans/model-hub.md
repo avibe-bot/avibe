@@ -498,7 +498,7 @@ and is never re-run by refresh, restart, health changes, or turn execution.
 | Backend/source case | Candidate set | Accepted match and tie-break |
 | --- | --- | --- |
 | Claude fixed-menu id on a native `anthropic` Source | The Source's `discovered` models observed by this add transaction | A dated request is literal only. An undated version request matches the same family and exact version tuple; a bare `opus`, `sonnet`, or `haiku` alias matches that family at any version. Select `max(version_tuple, date_or_zero, model_id)`. `fable` has no bare alias. |
-| OpenCode menu id | The Source's observed models projected through its normalized provider id | Exact checked id first; otherwise a bare model id matches only when exactly one checked identifier ends with `/<bare>`. Zero or multiple matches is rejected as ambiguous. |
+| OpenCode menu id (v4, 2026-09-04) | The Source's observed models | Literal model-id equality only, exactly as Codex. The retired `provider/model` projection has no matching branch. |
 | Codex fixed-menu id, or any non-native Source | The Source's observed models | Literal model-id equality only. Explicit user route edits may name an exact model, but runtime never infers or substitutes one. |
 
 The resulting hop always contains the selected concrete upstream model id, never the menu
@@ -517,10 +517,7 @@ for each configuration-eligible Source added in this transaction:
 
     for each backend menu model M:
         candidates = observed.discovered_models
-        if backend == opencode:
-            checked = M if M is checked else the unique checked identifier ending with "/" + M
-            match = the unique candidate whose normalized provider/model identifier equals checked
-        elif backend == claude and Source is native anthropic:
+        if backend == claude and Source is native anthropic:
             match = native_claude_alias(M, candidates)
         else:
             match = literal_model_id(M, candidates)

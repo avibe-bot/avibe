@@ -1,6 +1,6 @@
 # Backend Model Catalogs
 
-Status: implementation contract — v1 shipped in #1814; **v2 (compose from providers) below is the current definition of done, approved by the owner on 2026-09-03; C1–C7 are normative**
+Status: implementation contract — v1 shipped in #1814; v2 (compose from providers) shipped in #1830/#1837/#1839/#1843/#1846; **v3 (OpenCode: bare ids, per-protocol overlay) below is the current definition of done, approved by the owner on 2026-09-04; C1–C13 are normative, with v3 superseding the v2 sentences it names for OpenCode**
 
 ## Outcome
 
@@ -521,10 +521,16 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
 - **C10 — Overlay shape** per opencode-overlay.md v4 (providers, `enabled_providers`,
   variants per SDK, fixed provider ids, reserved `avibe-` prefix).
 - **C11 — Engine passthrough.** Engine config entries for API-key upstreams disable cloaking
-  and fingerprint rewrites (exact flags from S3) so same-protocol requests are forwarded
-  unchanged.
-- **C12 — Migration** per opencode-overlay.md v4, at config load, one-way, persisted on save.
-- **C13 — `contract_version` 7 → 8** with the version closure in `model-hub-contracts/README.md`.
+  and fingerprint rewrites (exact flags from S3) so a same-protocol request is forwarded
+  unchanged apart from credentials, host, and the mandatory `model` rewrite to the stored hop's
+  model id (user-configured substitutions stay authoritative, `model-hub.md` §4.5).
+- **C12 — Migration** per opencode-overlay.md v4: keyed on the persisted
+  `model_hub.contract_version` (absent = 7), idempotent, collision-merging, and covering every
+  persisted OpenCode selector including Vibe Agent definitions' `model`; a collision fixture is a
+  required test.
+- **C13 — `contract_version` 7 → 8**, now also persisted as `model_hub.contract_version` in the
+  config payload, with the version closure in `model-hub-contracts/README.md` extended to that
+  location and to `config/v2_config.py`.
 
 ### Copy (English source; `zh.json` mirrors 1:1)
 
@@ -543,12 +549,14 @@ No new string anywhere else; nothing explains the mechanism.
 2. A menu id is byte-identical across Gateway⇄Direct switches, Source add/remove/reorder,
    failover, route edits, and engine restarts; it changes only when the user renames the row.
 3. When the serving hop's Source protocol equals the row's `native_protocol`, the body the
-   upstream receives equals what OpenCode sent apart from credentials and host, for both
-   protocols; when it differs, the reasoning field recorded by S4 survives translation.
+   upstream receives equals what OpenCode sent apart from credentials, host, and the `model`
+   field rewritten to the stored hop's model id, for both protocols; when it differs, the
+   reasoning field recorded by S4 survives translation.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
-5. Loading a pre-v4 config yields the state a v4 write of the same rows would produce, and
-   saving persists v4.
+5. Loading a pre-v4 config yields the state a v4 write of the same rows would produce —
+   colliding rows merged deterministically, every persisted OpenCode selector rewritten —
+   saving persists v4 with `model_hub.contract_version` 8, and loading it again changes nothing.
 6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
    only place it appears, for OpenCode rows only.
 7. `avibe-*` is refused as a user custom-provider id.

@@ -49,7 +49,9 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
 - The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
   normalizes a provider, matches inventory, or substitutes a model. When the hop's Source
   protocol equals the row's `native_protocol` the Gateway passes the request through
-  unchanged apart from credentials and host (same-protocol passthrough, S3: the engine's
+  unchanged apart from credentials, host, and the `model` field, which it rewrites to the
+  stored hop's model id — a user-configured substitution (`model-hub.md` §4.5) is invoked as
+  written (same-protocol passthrough, S3: the engine's
   Claude/Codex cloaking and fingerprint rewrites are disabled for API-key upstreams); when it
   differs, the engine's automatic translation applies (S4 records what reasoning fields survive).
 
@@ -69,13 +71,30 @@ keep the chain nonempty, engine restarts, and gateway token rotation apart from
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
 
-## Migration (one-way, pre-GA)
+## Migration (one-way, pre-GA, idempotent)
 
-At the Model Hub config load boundary every pre-v4 OpenCode menu id `vendor/model` becomes
-`model` with `native_protocol` derived from `vendor` (`anthropic` → `anthropic`, anything else
-→ `openai_responses`); route keys and `removed_model_ids` follow. Saving persists v4. No
-compatibility reader for the old form is kept; usage-ledger rows keyed by an old id are left
-as history.
+- **Discriminator.** The persisted Model Hub config carries `model_hub.contract_version`; a
+  config without it is 7. The loader migrates exactly when the stored value is below 8 and
+  writes 8 on the next save. Classification never inspects id shape — a v4 id may itself
+  contain a slash (`moonshotai/kimi-k2`) — so a second load of a migrated config, or a config
+  whose OpenCode menu holds only `removed_model_ids`, changes nothing.
+- **Rows.** Every pre-v4 OpenCode menu id `vendor/model` becomes `model`. `native_protocol` is
+  derived from the stripped `model` through the vendor map (`anthropic` family → `anthropic`;
+  unknown or any other family → `openai_responses`), never from the old `vendor` segment,
+  which named a supplier rather than the model.
+- **Collisions.** When two or more pre-v4 rows strip to one id (`anthropic/foo`,
+  `openrouter/foo`), the first in menu order survives with its metadata and position; the
+  others' Route hops are appended to its chain in menu order, deduplicated by
+  `(source_id, model_id)`; the others' rows are dropped. Removal markers strip the same way and
+  deduplicate. The load never fails and never drops a hop; a fixture with such a config is a
+  required test.
+- **Selectors.** Every persisted selector that stores an OpenCode menu id is rewritten by the
+  same mapping in the same migration: the `model` of every Vibe Agent definition whose backend
+  is `opencode` (default and named agents alike) and any other persisted OpenCode selection. The
+  Direct-mode `agents.opencode.default_provider` setting refers to OpenCode's own catalog and
+  is untouched.
+- No compatibility reader for the old form is kept; usage-ledger rows keyed by an old id are
+  left as history.
 
 ## Spike record (S1–S6; filled from the spike lane's evidence before implementation starts)
 
