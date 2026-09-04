@@ -180,7 +180,7 @@ The Source workflow is complete at both entry points:
   A concrete interface restricts the preflight to one candidate; Auto detect tries the
   supported candidates in the adapter's authoritative order. The user-triggered Add
   action reuses one connectivity interaction to classify reachability/authentication
-  and prove the protocol before Save can commit. Its schema-invalid probe settles before
+  and establish a protocol owner before Save can commit. Its schema-invalid probe settles before
   a relay selects or invokes a model, so observation never depends on a synthetic model
   being routable. This unsaved operation does not save a Source, consume routing order,
   or run an Agent turn. For an API key it may provision an engine credential only
@@ -190,14 +190,14 @@ The Source workflow is complete at both entry points:
   reconciliation rather than leaving an unreferenced credential untracked. No test
   response exposes the ref. A reachability or authentication failure is reported
   independently from protocol observation: Save may proceed only when that interaction
-  still produced response evidence for the protocol, and it provisions the committed
+  still established the protocol on the named-owner ladder, and it provisions the committed
   Source independently.
 - **CPA ownership after Save.** CPA requires a concrete upstream provider configuration,
   so it cannot identify an unsaved Source without first being told the interface this
-  preflight exists to prove. Once the Source is saved, Avibe maps its proven protocol to
+  preflight exists to establish. Once the Source is saved, Avibe maps its established protocol to
   CPA's existing `claude-api-key`, `codex-api-key`, or `openai-compatibility` provider
   section and every Agent invocation runs through CPA. Avibe owns only the bounded
-  pre-save evidence step; CPA owns compatible request translation and upstream dispatch.
+  pre-save establishment step; CPA owns compatible request translation and upstream dispatch.
 - **Saved Source refresh and recovery.** Source details exposes the distinct
   `POST /api/models/sources/<id>/refresh` operation. It is intentionally mutating: it
   tests the stored protocol, rediscovers inventory, updates Source health, and clears a
@@ -1690,10 +1690,11 @@ one pinned hop it receives.
   `model_id`. A user-configured mapping to another model or vendor is legal and is
   executed exactly; that hop may use an API key or a hub-held subscription and requires
   no additional warning.
-- **No protocol guessing or post-save backfill.** A stored protocol comes from a real
-  pre-save upstream response, never a vendor/Base-URL string heuristic. Auto detect and
-  manual selection only choose which adapters to verify; the selected adapter must still
-  return matching response evidence before anything is saved. No later operation changes
+- **No protocol guessing or post-save backfill.** A stored protocol comes from one rung
+  of the pre-save ownership ladder, never a vendor/Base-URL string heuristic. Auto detect and
+  manual selection choose which adapter path to verify; Auto still requires matching
+  response proof, while a shipped catalog pin or a concrete `custom` declaration may
+  persist after authenticated generic evidence on that path. No later operation changes
   the stored value.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
