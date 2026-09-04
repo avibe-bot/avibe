@@ -167,7 +167,8 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
-        # base_session_id → (thread_id, collaboration | fallback | fallback_pending_clear)
+        # base_session_id → (thread_id, collaboration | fallback |
+        # fallback_pending_clear | unavailable)
         self._thread_prompt_strategies: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, active model, active reasoning effort)
         self._thread_model_settings: Dict[str, tuple[str, str, Optional[str]]] = {}
@@ -2042,6 +2043,7 @@ class CodexAgent(BaseAgent):
         if source_prompt_strategy in {
             "collaboration",
             "fallback_pending_clear",
+            "unavailable",
         } and not self._persist_prompt_strategy(
             request,
             thread_id,
@@ -2755,10 +2757,15 @@ class CodexAgent(BaseAgent):
             and len(marker_sha256) == 64
             and all(character in "0123456789abcdef" for character in marker_sha256)
         )
-        if (
+        marker_invalid = (
             marker_thread_id != thread_id
             or marker_strategy
-            not in {"collaboration", "fallback", "fallback_pending_clear"}
+            not in {
+                "collaboration",
+                "fallback",
+                "fallback_pending_clear",
+                "unavailable",
+            }
             or (marker_strategy == "fallback" and not marker_sha256_valid)
             or (
                 marker_strategy
@@ -2766,8 +2773,15 @@ class CodexAgent(BaseAgent):
                 and marker_sha256 is not None
                 and not marker_sha256_valid
             )
-        ):
-            raise RuntimeError("Stored Codex prompt strategy marker is invalid")
+            or (marker_strategy == "unavailable" and marker_sha256 is not None)
+        )
+        if marker_invalid:
+            logger.warning(
+                "Stored Codex prompt strategy marker is invalid for thread %s; "
+                "continuing without prompt refresh",
+                thread_id,
+            )
+            return {"thread_id": thread_id, "strategy": "unavailable"}
         resolved = {
             "thread_id": thread_id,
             "strategy": marker_strategy,
@@ -2821,6 +2835,7 @@ class CodexAgent(BaseAgent):
             "collaboration",
             "fallback",
             "fallback_pending_clear",
+            "unavailable",
         }:
             raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
         if strategy == "fallback" and not developer_instructions:
@@ -3003,7 +3018,11 @@ class CodexAgent(BaseAgent):
                     "developer_instructions": developer_instructions,
                 },
             }
-        elif developer_instructions and prompt_changed:
+        elif (
+            developer_instructions
+            and prompt_changed
+            and prompt_strategy != "unavailable"
+        ):
             await self._inject_thread_developer_instructions(
                 transport,
                 request,
