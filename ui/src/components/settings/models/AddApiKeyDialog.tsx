@@ -810,11 +810,12 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               {(id) => (
                 <Combobox
                   id={id}
-                  // The field mints the id and its label points here, but a `for`
-                  // association contributes nothing to a button's accessible
-                  // name, so the label text is given again. The chosen vendor
-                  // stays the control's contents — where a combobox's value is
-                  // read from — so the two do not collide.
+                  // The label points here, but a `for` association contributes
+                  // nothing to a button's accessible name, so the field has to
+                  // name itself. The primitive appends the selection to what is
+                  // passed here: the label alone would replace the trigger's
+                  // contents, and those contents are the chosen vendor — the one
+                  // thing a picker exists to report.
                   ariaLabel={t('settings.models.addKey.field.vendor')}
                   className="model-hub-add-key-input"
                   options={vendorOptions}
@@ -883,19 +884,27 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               )}
               {phase.kind === 'form' && !phase.report && !segmentsOpen && (
                 <div className="model-hub-add-key-protocol-idle-row">
-                  {/* Whatever 检测 is about to send, and nothing else: a catalog
-                      pin and a concrete choice are each the active constraint
-                      even while the disclosure that could have made one is shut
-                      — or, under a pin, is not offered at all. */}
-                  <span className="model-hub-add-key-protocol-active">
-                    {constrainedProtocol && <ProtocolGlyph protocol={constrainedProtocol} />}
-                    {t(constrainedProtocol
-                      ? PROTOCOL_COPY_KEYS[constrainedProtocol]
-                      : 'settings.models.addKey.protocol.auto')}
-                  </span>
-                  {/* The pin is the reason this row has no control beside it, so
-                      it says so here rather than only on the strip 检测 returns. */}
-                  {vendorPreset && protocolBadge}
+                  {/* The statement and its badge are one line; the sentence that
+                      explains them is the next. Beside the glyph the hint read as
+                      a second statement competing with the first, and it is the
+                      longer of the two — it wrapped around the name it belongs
+                      to. Underneath, at its own smaller scale, it is plainly
+                      subordinate to the line above. */}
+                  <div className="model-hub-add-key-protocol-idle-line">
+                    {/* Whatever 检测 is about to send, and nothing else: a catalog
+                        pin and a concrete choice are each the active constraint
+                        even while the disclosure that could have made one is shut
+                        — or, under a pin, is not offered at all. */}
+                    <span className="model-hub-add-key-protocol-active">
+                      {constrainedProtocol && <ProtocolGlyph protocol={constrainedProtocol} />}
+                      {t(constrainedProtocol
+                        ? PROTOCOL_COPY_KEYS[constrainedProtocol]
+                        : 'settings.models.addKey.protocol.auto')}
+                    </span>
+                    {/* The pin is the reason this row has no control beside it, so
+                        it says so here rather than only on the strip 检测 returns. */}
+                    {vendorPreset && protocolBadge}
+                  </div>
                   {/* The idle hint promises automatic identification, which is
                       only what Auto does. A named interface has already answered
                       it; a pin answers a different question — what 检测 still has

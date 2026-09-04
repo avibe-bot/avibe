@@ -387,7 +387,11 @@ export const fillApiKeyForm = async (
   values: { vendor?: string; name?: string; baseUrl: string; apiKey: string; protocol?: string },
 ): Promise<void> => {
   if (values.vendor) {
-    await dialog.getByLabel(hub('addKey.field.vendor'), { exact: true }).click();
+    // Not `exact`, and not by label: the trigger is a button, which a `for`
+    // association cannot name, so it names itself with the label AND its own
+    // contents — the vendor currently chosen. The label is the stable prefix of
+    // that name, not the whole of it.
+    await dialog.getByRole('combobox', { name: hub('addKey.field.vendor') }).click();
     await dialog.page().getByRole('option', { name: values.vendor, exact: true }).click();
   }
   if (values.name !== undefined) {

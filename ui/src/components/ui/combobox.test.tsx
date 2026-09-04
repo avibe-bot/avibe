@@ -42,14 +42,32 @@ const plain: ComboboxOption[] = [
   { value: 'b', label: 'Beta' },
 ];
 
-const trigger = () => screen.getByRole('combobox', { name: 'Vendor' });
+/** Named by its label AND by whatever it currently holds, in that order. */
+const trigger = () => screen.getByRole('combobox', { name: /^Vendor(\s|$)/ });
+
+/** A labelled field, wired the way a call site has to wire one: a visible
+ *  `<label for>` for the pointer, and the same text handed to the primitive
+ *  because that association does not reach a button. */
+const labelled = (options: ComboboxOption[], props: Record<string, unknown> = {}) => (
+  <>
+    <label htmlFor="vendor-field">Vendor</label>
+    <Combobox
+      options={options}
+      value="a"
+      onValueChange={vi.fn()}
+      id="vendor-field"
+      ariaLabel="Vendor"
+      {...props}
+    />
+  </>
+);
 
 /** The open panel is modal, so it hides the rest of the document from the
  *  accessibility tree — including the trigger. It is taken by hand first, which
  *  is also the only way to compare the field before and after a choice. */
 const open = async (options: ComboboxOption[], props: Record<string, unknown> = {}) => {
   const user = userEvent.setup();
-  render(<Combobox options={options} value="a" onValueChange={vi.fn()} ariaLabel="Vendor" {...props} />);
+  render(labelled(options, props));
   const field = trigger();
   await user.click(field);
   return { user, field };
@@ -82,14 +100,24 @@ describe('Combobox', () => {
     expect(field.querySelectorAll('svg')).toHaveLength(1);
   });
 
-  it('names the trigger for a field label that cannot reach it', async () => {
-    // A `<label for>` does not name a button, so a labelled field passes both the
-    // id it minted and the label text; the value stays the trigger's contents.
-    render(
-      <Combobox options={marked} value="b" onValueChange={vi.fn()} id="vendor-field" ariaLabel="Vendor" />,
-    );
-    expect(trigger().id).toBe('vendor-field');
-    expect(trigger().textContent).toContain('Beta');
+  it('names the trigger with the label it cannot be reached by, and with its value', async () => {
+    // A `<label for>` does not name a button, so the name is written here — and
+    // written as label PLUS selection, because a name is a replacement, not an
+    // addition: the label on its own would announce the field while withholding
+    // the vendor it is holding, which is the half a screen reader most needs.
+    render(labelled(marked, { value: 'b' }));
+
+    const field = screen.getByRole('combobox', { name: 'Vendor Beta' });
+    expect(field.id).toBe('vendor-field');
+  });
+
+  it('names a field given no label with nothing at all', async () => {
+    // Every other call site passes no label, and for those the trigger's own
+    // contents are already the whole name. Composing one anyway would prepend an
+    // empty string, or worse, repeat the value.
+    render(<Combobox options={marked} value="b" onValueChange={vi.fn()} />);
+
+    expect(screen.getByRole('combobox').getAttribute('aria-label')).toBeNull();
   });
 
   it('does not open while the field is disabled', async () => {

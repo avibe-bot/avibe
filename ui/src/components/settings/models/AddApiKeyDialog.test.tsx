@@ -145,7 +145,9 @@ const fillCredentials = async () => {
   return user;
 };
 
-const vendorField = () => screen.getByRole('combobox', { name: /^Vendor$|^服务商$/ });
+/** Named by its label AND its own contents, so the name starts with 服务商 and
+ *  continues with whichever vendor is currently chosen. */
+const vendorField = () => screen.getByRole('combobox', { name: /^(Vendor|服务商)(\s|$)/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
 const disclosure = () => screen.queryByRole('button', { name: /Manually specify interface type|手动指定接口类型/i });
 
@@ -1115,6 +1117,27 @@ describe('AddApiKeyDialog · vendor', () => {
     expect(baseUrlInput().value).toBe(reached?.official_base_url);
   });
 
+  it('names the field with its label and with the vendor it is holding', async () => {
+    // A `<button>` is not labelable, so the visible 服务商 label never reaches the
+    // trigger's accessible name and the field has to carry one. It carries the
+    // label AND the selection: a name replaces the trigger's contents rather
+    // than adding to them, so the label alone would announce the field as 服务商
+    // and never say which vendor it holds — the one thing a native select
+    // always said.
+    const entry = preset('anthropic');
+    const named = (vendor: string) => new RegExp(
+      `^${i18n.t('settings.models.addKey.field.vendor')}\\s+${vendorOptionName(vendor)}$`,
+    );
+    renderDialog();
+    const user = userEvent.setup();
+
+    expect(screen.getByRole('combobox', { name: named(CUSTOM_VENDOR) })).toBe(vendorField());
+
+    await selectVendor(user, entry.id);
+
+    expect(screen.getByRole('combobox', { name: named(entry.id) })).toBe(vendorField());
+  });
+
   it('treats picking the vendor already picked as no choice at all', async () => {
     // The switch is destructive by design — it resets the address, drops the
     // interface and retires the detection — so it must fire on a CHANGE, not on
@@ -1191,6 +1214,28 @@ describe('AddApiKeyDialog · vendor', () => {
     expect(row?.textContent).toMatch(/Built-in catalog/);
     expect(disclosure()).toBeNull();
     expect(screen.queryByRole('button', { name: 'OpenAI Responses' })).toBeNull();
+  });
+
+  it('puts the pin’s explanation under the interface it explains, not beside it', async () => {
+    // The statement and the sentence about it are two lines: the hint is the
+    // longer text, so beside the glyph it wrapped around the very name it is
+    // about. Asserted structurally, because "on the next line" is a fact about
+    // which element the hint is a child of, not about its text.
+    const entry = preset('anthropic');
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, entry.id);
+
+    const row = document.querySelector('.model-hub-add-key-protocol-idle-row');
+    const statement = row?.querySelector('.model-hub-add-key-protocol-idle-line');
+    const hint = row?.querySelector('.model-hub-add-key-hint');
+    expect(statement?.textContent).toMatch(/Anthropic Messages/);
+    expect(statement?.textContent).toMatch(/Built-in catalog/);
+    expect(hint?.textContent).toMatch(/no longer has to prove the interface|不再需要靠返回结构证明接口/);
+    // A sibling of the statement's line, not a child of it.
+    expect(hint?.parentElement).toBe(row);
+    expect(statement?.contains(hint ?? null)).toBe(false);
   });
 
   it('retires an observation taken under the previous vendor', async () => {

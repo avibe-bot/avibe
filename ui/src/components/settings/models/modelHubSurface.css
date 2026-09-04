@@ -641,17 +641,27 @@
   display: flex;
   gap: 3px;
 }
+/* Two lines, not one: the statement and its badge, then the sentence that
+   explains them. The hint is the longer text of the two, so beside the statement
+   it wrapped around the name it is about; underneath, it starts where that name
+   starts and reads as its subordinate. */
 .model-hub-add-key-protocol-idle-row {
-  flex-direction: row;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+.model-hub-add-key-protocol-idle-line {
+  display: flex;
+  width: 100%;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
 }
 /* The element that carries the statement is the element that sizes it. The idle
    row holds two deliberately different scales -- this 12px statement and the
-   10.5px hint beside it -- so the scale sits on each child rather than on the row
-   the way the single-child detecting row does. Color stays inherited so the
-   row's `.is-idle` dimming keeps applying to it. */
+   10.5px hint on the line below -- so the scale sits on each child rather than on
+   the row the way the single-child detecting row does. Color stays inherited so
+   the row's `.is-idle` dimming keeps applying to it. */
 .model-hub-add-key-protocol-active {
   display: inline-flex;
   align-items: center;
@@ -664,7 +674,7 @@
    takes both border and ink from `currentColor` so it annotates whatever it sits
    in -- mint inside ①″ -- rather than introducing an ink of its own. On a strip
    it goes to the trailing edge, out of the way of text that wraps; on the idle
-   row it stays in the reading order, between the statement and its hint. */
+   row it stays on the statement's own line, directly after it. */
 .model-hub-add-key-protocol-badge {
   flex-shrink: 0;
   align-self: center;

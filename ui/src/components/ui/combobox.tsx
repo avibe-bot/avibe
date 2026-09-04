@@ -37,9 +37,14 @@ interface ComboboxProps {
   emptyText?: string
   allowCustomValue?: boolean
   className?: string
-  /** For a labelled field: the `<label for>` target. A `for` association does not
-   *  name a button, so `ariaLabel` carries the same text — pass both. */
+  /** For a labelled field: the `<label for>` target. */
   id?: string
+  /** The field's label, for a control a `for` association cannot name — a
+   *  `<button>` is not a labelable element. The selection is appended to it: a
+   *  label alone would REPLACE the trigger's contents in the accessible name,
+   *  and those contents are the chosen option, which is the half of a picker a
+   *  screen reader most needs. Composed here rather than left to an
+   *  `aria-labelledby` self-reference, whose support is uneven. */
   ariaLabel?: string
   disabled?: boolean
   commitOnClose?: boolean
@@ -143,7 +148,7 @@ export function Combobox({
           type="button"
           role="combobox"
           aria-expanded={open}
-          aria-label={ariaLabel}
+          aria-label={ariaLabel && [ariaLabel, displayValue].filter(Boolean).join(" ")}
           disabled={disabled}
           className={cn(
             fieldBaseClass,
