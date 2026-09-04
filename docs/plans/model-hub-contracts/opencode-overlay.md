@@ -113,31 +113,16 @@ keep the chain nonempty, engine restarts, and gateway token rotation apart from
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
 
-## Upgrade (safe degradation, not migration)
+## Upgrade (pre-release: no compatibility)
 
-The persisted-shape rule (AGENTS.md) treats on-disk state written by any released version as
-a shipped surface even behind the `VIBE_MODEL_HUB_ENABLED` gate, and asks for migration or
-safe degradation with load fixtures. v4 degrades safely:
-
-- **Discriminator.** The persisted Model Hub config carries `model_hub.contract_version`; a
-  config without it is 7. Exactly when the stored value is below 8, the loader moves the
-  OpenCode agent's `models`, `routes`, `removed_model_ids`, and `menu` verbatim into
-  `agents.opencode.legacy_v7` (never read by runtime, never projected) and starts the OpenCode
-  menu empty; it writes 8 on the next save. Nothing else is read or rewritten: Sources, Source
-  order, the OpenCode mode, the other backends, Vibe Agent definitions, and sessions are
-  untouched, and startup never fails.
-- **Warning.** While `legacy_v7` exists the OpenCode card shows one notice (Copy table:
-  `OpenCode models from an earlier version were set aside — add models again.`). The parked
-  object is dropped by the first v8 save that writes a non-empty OpenCode menu.
-- **Selectors.** A Vibe Agent definition or a persisted session override that still names a
-  pre-v8 `vendor/model` id resolves through the existing no-menu-row handling until the user
-  selects again; in Direct mode such a selector is OpenCode's own `providerID/modelID` and
-  keeps working. No cross-store write exists, so the upgrade is crash-safe and idempotent by
-  construction: a v8 config has no pre-v8 OpenCode state to touch.
-- **Fixture.** A released v7 config holding OpenCode rows, a standalone Route, removed
-  markers, and a `menu` object loads to an empty OpenCode menu with `legacy_v7` holding the
-  four fields byte-for-byte, Sources and mode intact, the notice raised, and loads identically
-  a second time.
+Owner ruling 2026-09-05 (AGENTS.md persisted-shape rule, exception): the Model Hub is
+pre-release, so v4 carries no migration, degradation, parking, or compatibility reader. The
+persisted Model Hub config carries `model_hub.contract_version` (absent = 7); when it is below
+8 the loader does not load the OpenCode agent's `models`, `routes`, `removed_model_ids`, or
+`menu` — they are dropped — and writes 8 on the next save. Sources, mode, other backends,
+Vibe Agent definitions, and sessions are untouched; a selector naming a pre-v8 id takes the
+existing no-menu-row path until the user selects again. One test: a v7-shaped config loads
+with an empty OpenCode menu and loads identically a second time.
 
 ## Spike record (S1–S6; evidence captured 2026-09-04 on OpenCode 1.18.18 and CLIProxyAPI 7.2.105 `4a2eb54d`, the binary Avibe's manifest pins, with the repo mock upstream recording path/headers/body)
 

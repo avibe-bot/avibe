@@ -183,6 +183,10 @@ Persisted-shape rule:
 - a schema change must load older releases' files via migration or safe
   degradation (a broken optional-feature section disables that feature and
   warns; startup never fails), with load fixtures covering the released shapes
+- exception (owner ruling 2026-09-05): state written only by a feature the owner has
+  declared pre-release — today the Model Hub behind `VIBE_MODEL_HUB_ENABLED` — is not
+  a shipped surface; its older shapes may be dropped on load without migration,
+  degradation, or compatibility fixtures, and specs for it describe the final state only
 - Memory package upgrades are forward-only: success follows the ordinary restart
   path, while install, upgrade, or restart failures are structured terminal
   results and do not prevent a later explicit attempt. Do not add automatic
