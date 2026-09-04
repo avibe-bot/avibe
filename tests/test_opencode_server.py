@@ -141,13 +141,13 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             json.loads(content),
             {
-                "permission": "ask",
+                "permission": {"*": "ask", "skill": "deny"},
                 "tools": {"bash": True, "skill": False},
             },
         )
 
     def test_managed_runtime_config_uses_typed_validation_errors(self):
-        for content in ("{invalid", "[]"):
+        for content in ("{invalid", "[]", '{"permission":[]}'):
             with self.subTest(content=content):
                 with self.assertRaises(OpenCodeRuntimeConfigInvalidError):
                     SERVER_MODULE._managed_runtime_config_content(content)
@@ -189,7 +189,14 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(manager._process_loop)
         self.assertEqual(
             json.loads(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]),
-            {"permission": "ask", "tools": {"skill": False}},
+            {
+                "permission": {"*": "ask", "skill": "deny"},
+                "tools": {"skill": False},
+            },
+        )
+        self.assertEqual(
+            create_process.await_args.kwargs["env"]["OPENCODE_DISABLE_EXTERNAL_SKILLS"],
+            "1",
         )
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):

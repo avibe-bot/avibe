@@ -52,7 +52,7 @@ _CURRENT_OWNER_PID = os.getpid()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 # Bump whenever the process-level Avibe policy applied in ``_start_server``
 # changes so an adopted process cannot silently keep the previous behavior.
-_MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v1"
+_MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v2"
 
 
 class OpenCodeRuntimeConfigInvalidError(RuntimeError):
@@ -83,6 +83,20 @@ def _managed_runtime_config_content(raw: str | bytes | None) -> str:
     managed_tools = dict(tools) if isinstance(tools, dict) else {}
     managed_tools["skill"] = False
     payload["tools"] = managed_tools
+
+    permission = payload.get("permission")
+    if permission is None:
+        managed_permission: dict[str, Any] = {}
+    elif isinstance(permission, str):
+        managed_permission = {"*": permission}
+    elif isinstance(permission, dict):
+        managed_permission = dict(permission)
+    else:
+        raise OpenCodeRuntimeConfigInvalidError(
+            "OpenCode runtime permission override must be a string or object"
+        )
+    managed_permission["skill"] = "deny"
+    payload["permission"] = managed_permission
     return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -1755,6 +1769,7 @@ class OpenCodeServerManager:
 
         env = os.environ.copy()
         env["OPENCODE_ENABLE_EXA"] = "1"
+        env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
         env.update(server_environment())
         if self._model_hub_overlay_path:
             env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
@@ -1772,10 +1787,9 @@ class OpenCodeServerManager:
             # checked-in opencode.json from replacing Hub provider transport.
             env["OPENCODE_CONFIG_CONTENT"] = content
 
-        # Request-level ``tools.skill=false`` prevents native Skill calls, but
-        # OpenCode 1.x can still advertise its native Catalog in the model
-        # prompt. The runtime-override tier removes that competing Catalog for
-        # every Agent while leaving the user's config files untouched.
+        # Request-level ``tools.skill=false`` prevents native Skill calls. The
+        # runtime override adds defense in depth, while the Avibe runtime plugin
+        # removes OpenCode's independently assembled native Catalog.
         env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
             env.get("OPENCODE_CONFIG_CONTENT")
         )
