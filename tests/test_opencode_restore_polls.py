@@ -714,19 +714,42 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
     assert agent._test_inactive_runs == ["oc-1"]
 
 
-def test_restore_preserves_poll_when_inactive_marker_cannot_be_persisted() -> None:
-    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
-    active_polls = {"oc-1": poll}
+def test_restore_continues_after_inactive_marker_cannot_be_persisted() -> None:
+    stale_poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_stale",
+        opencode_session_id="oc-stale",
+    )
+    active_poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_active",
+        opencode_session_id="oc-active",
+    )
+    active_polls = {"oc-stale": stale_poll, "oc-active": active_poll}
     agent, _, removed, _ = _build_agent(active_polls)
-    agent._test_server.messages = []
-    agent._test_server.status = {"type": "idle"}
-    agent._test_server.mark_run_inactive_error = OSError("read-only pid file")
 
-    with pytest.raises(OSError, match="read-only pid file"):
-        asyncio.run(agent.restore_active_polls())
+    async def _list_messages(session_id, directory):
+        del directory
+        if session_id == "oc-stale":
+            return []
+        return [{"info": {"role": "assistant", "time": {}}}]
 
-    assert removed == []
-    assert active_polls == {"oc-1": poll}
+    async def _get_session_status(session_id, directory):
+        del directory
+        return {"type": "idle" if session_id == "oc-stale" else "busy"}
+
+    async def _mark_run_inactive(session_id):
+        if session_id == "oc-stale":
+            raise OSError("read-only pid file")
+
+    agent._test_server.list_messages = _list_messages
+    agent._test_server.get_session_status = _get_session_status
+    agent._test_server.mark_run_inactive = _mark_run_inactive
+
+    assert asyncio.run(agent.restore_active_polls()) == 1
+
+    assert removed == ["oc-active"]
+    assert active_polls == {"oc-stale": stale_poll}
 
 
 def test_terminal_poll_is_preserved_when_inactive_marker_cannot_be_persisted() -> None:

@@ -2532,7 +2532,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         )
                         continue
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
-                await server.mark_run_inactive(poll_info.opencode_session_id)
+                try:
+                    await server.mark_run_inactive(poll_info.opencode_session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to clear OpenCode run marker for session=%s; "
+                        "preserving its active poll and continuing restoration",
+                        poll_info.opencode_session_id,
+                    )
+                    continue
                 await self._poll_loop.remove_restored_ack(poll_info)
                 stale_poll_ids.append(session_id)
                 continue
