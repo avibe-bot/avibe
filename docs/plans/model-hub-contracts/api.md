@@ -230,8 +230,9 @@ non-empty user list with a managed declaration emits exactly one redacted
 - The API boundary also verifies referential existence where a new reference is
   emitted or accepted. JSON Schema can validate format, not cross-document existence.
 - Claude and Codex requests use fixed-menu built-in ids.
-- OpenCode requests use a prefixed `vendor/model` menu id. The prefix chooses the
-  provider; the resolver sends the bare model id upstream.
+- OpenCode requests use the bare canonical menu id (spec §4.8 v4). The overlay provider
+  is a function of the row's `native_protocol`; the resolver sends the exact stored hop's
+  model id upstream.
 - Add-time matching may suggest a sanctioned alias or mapping, but it materializes the
   accepted result as an exact `{source_id, model_id}` hop before commit. Runtime neither
   resolves aliases nor substitutes a model.

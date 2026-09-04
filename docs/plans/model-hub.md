@@ -1,12 +1,16 @@
 # Model Hub — Product Spec
 
-Status: **v3.0** (2026-08-09) · supersedes v2.0 (2026-07-29) outright
-Owner decisions incorporated through: 2026-08-09 (+08:00)
+Status: **v3.1** (2026-09-05): §4.8 replaced by the OpenCode v4 identifier scheme and §4.2's
+OpenCode branch retired · v3.0 (2026-08-09) supersedes v2.0 (2026-07-29) outright
+Owner decisions incorporated through: 2026-09-05 (+08:00)
 Design source: `../avibe-docs/design.pen`. The V6 frames remain the visual baseline;
 the v3 interaction draft for the two-module information architecture is owner-approved
 as the implementation baseline (2026-08-07 afternoon). The design lane still owes
 production-complete desktop/mobile states.
-Contracts: `model-hub-contracts/` remain unchanged by this docs-only revision.
+Pre-release (owner, 2026-09-05): Model Hub has not shipped; no revision of its persisted
+state or contracts carries migration or compatibility handling (see `model-hub-contracts/README.md`).
+Contracts: v3.1 changes `model-hub-contracts/api.md` (OpenCode identifier rule) and rewrites
+`model-hub-contracts/opencode-overlay.md` (v4); every other contract file is unchanged.
 `model-hub-implementation.md` records the exhaustive final-shape handoff. Its mechanical
 closure must coexist on one tested PR head; all remaining consumers and evidence must
 land before release.
@@ -498,7 +502,7 @@ and is never re-run by refresh, restart, health changes, or turn execution.
 | Backend/source case | Candidate set | Accepted match and tie-break |
 | --- | --- | --- |
 | Claude fixed-menu id on a native `anthropic` Source | The Source's `discovered` models observed by this add transaction | A dated request is literal only. An undated version request matches the same family and exact version tuple; a bare `opus`, `sonnet`, or `haiku` alias matches that family at any version. Select `max(version_tuple, date_or_zero, model_id)`. `fable` has no bare alias. |
-| OpenCode menu id | The Source's observed models projected through its normalized provider id | Exact checked id first; otherwise a bare model id matches only when exactly one checked identifier ends with `/<bare>`. Zero or multiple matches is rejected as ambiguous. |
+| OpenCode menu id (v4, 2026-09-04) | The Source's observed models | Literal model-id equality only, exactly as Codex. The retired `provider/model` projection has no matching branch. |
 | Codex fixed-menu id, or any non-native Source | The Source's observed models | Literal model-id equality only. Explicit user route edits may name an exact model, but runtime never infers or substitutes one. |
 
 The resulting hop always contains the selected concrete upstream model id, never the menu
@@ -517,10 +521,7 @@ for each configuration-eligible Source added in this transaction:
 
     for each backend menu model M:
         candidates = observed.discovered_models
-        if backend == opencode:
-            checked = M if M is checked else the unique checked identifier ending with "/" + M
-            match = the unique candidate whose normalized provider/model identifier equals checked
-        elif backend == claude and Source is native anthropic:
+        if backend == claude and Source is native anthropic:
             match = native_claude_alias(M, candidates)
         else:
             match = literal_model_id(M, candidates)
@@ -533,9 +534,9 @@ for each configuration-eligible Source added in this transaction:
 
 `native_claude_alias` is the literal former resolver rule: dated requests are literal;
 undated version requests require an equal version tuple; bare aliases match a family;
-the total order is `(version_tuple, date_or_zero, model_id)`. `exact_checked_identifier`
-and the unique suffix rule are the OpenCode overlay rule. No other backend gets an
-alias family, and explicit user-authored Route edits remain literal configuration.
+the total order is `(version_tuple, date_or_zero, model_id)`. No other backend gets an
+alias family — OpenCode menu ids match literally (v4, 2026-09-04) — and explicit
+user-authored Route edits remain literal configuration.
 
 **Routing configuration is per backend and per model; health is Source-global.** Quota
 and reachability belong to the Source, not the Agent that touched it. §4.3 reads the
@@ -1460,24 +1461,49 @@ current execution position added.
 | Codex | fixed | same |
 | OpenCode + future in-house agents | open | uses exact configured route chains; supports user-defined model entries |
 
-### 4.8 OpenCode identifier scheme (locked 07-23, retained in v3)
+### 4.8 OpenCode identifier scheme (v4, owner-approved 2026-09-04; supersedes the 07-23 lock)
 
-OpenCode models are `provider/model-id`. Rules:
+An OpenCode menu id is the **bare canonical model id** — the same identity rule Codex uses
+(`canonical_model_id`), unique per backend, slashes allowed when the upstream id carries them
+(`moonshotai/kimi-k2`). The `provider/model` scheme of 07-23 (standard vendor segment, single
+`custom/` fallback) is retired: it existed to keep ids stable across Gateway/Direct switches,
+and under v4 the two modes no longer share a namespace at all (§4.8.3).
 
-- The provider segment uses the **standard vendor id** (`anthropic/`,
-  `openai/`, `zhipuai/`, …) — identical to native OpenCode usage. No
-  `avibe-` namespace (owner: keep it simple). Unrecognizable vendors fall
-  back to a single `custom/` provider. Add Source may use this normalized id when it
-  proposes a one-time match; runtime reads only the stored exact hop.
-- Gateway mode merely redirects those providers' transport to the local Gateway in
-  the generated runtime config overlay. Therefore **identifiers are stable
-  across Gateway/Direct switches, across source add/remove/failover, and — new in
-  v3 — across any configured-chain edit**; never encode a concrete Source into
-  the provider segment.
-- Users never hand-assemble the string. Menu checkboxes pick models; the
-  custom-model form generates and previews the identifier (source + model ID
-  in → `zhipuai/glm-5.2-air` out). A custom model entry is, in data terms, a
-  supplement to that source's supply list.
+1. **Native protocol is a field, not a prefix.** Every OpenCode `BackendModel` row carries
+   `native_protocol ∈ {openai_responses, anthropic}` (`gemini` is a reserved future value and is
+   not admissible until `avibe-gemini` ships). The server derives it from the model id's
+   vendor family through the repo-owned vendor map, looked up on the id's last `/`-separated
+   segment so a namespaced id (`anthropic/claude-sonnet-4-6`) finds its family (`anthropic`
+   family → `anthropic`, everything else → `openai_responses`), and proposes it with every
+   picker candidate and models.dev match; a typed id defaults to `openai_responses`; the save
+   stores what the client sends. It is editable only in the model editor, as its last
+   field, shown for OpenCode rows only. It is never shown in a list, picker, row, chip, or
+   badge: it is a mechanism of the product, not information the user acts on.
+2. **Canonical OpenCode reference = `<overlay provider id>/<menu id>`.** The overlay provider
+   id is a fixed function of `native_protocol`: `avibe-openai` for `openai_responses`,
+   `avibe-anthropic` for `anthropic` (`avibe-gemini` reserved). This composite is how Avibe
+   addresses OpenCode (its `providerID`/`modelID` split on the first `/`, its config `model`
+   field, its session records). Avibe's own surfaces show the menu id; the composite appears
+   only where a user needs to reference the model outside Avibe.
+3. **Two modes, two worlds.** In Gateway mode OpenCode runs with Avibe's overlay and
+   `enabled_providers` naming exactly Avibe's providers, so the user's own providers are not
+   loaded (opencode-overlay.md). In Direct mode Avibe injects nothing and OpenCode reads its own
+   configuration — OpenCode's behaviour, not Avibe's. Avibe never writes the user's
+   `opencode.json`, so switching modes leaves nothing to clean up.
+4. **Stability.** A menu id changes only when the user renames the row. Its overlay provider
+   changes only when the user edits `native_protocol`. Neither depends on Sources, Source order,
+   route chains, health, failover, or engine restarts.
+5. **Users never assemble a prefixed string.** The picker adds candidates by bare id; the
+   custom-model editor's `Model` field takes an id as typed (typeahead proposals included) and
+   applies the Codex admission rule; the retired "three buckets" repair of `custom/` prefixes
+   does not exist. Two different vendors' models that share an id cannot coexist in one
+   OpenCode menu — the same rule Codex already has.
+
+History: 07-23 locked `provider/model` with a standard-vendor segment and no `avibe-`
+namespace so ids read like native OpenCode and survived Gateway⇄Direct switches. 09-04 the
+owner ruled that Gateway mode owns the whole OpenCode model list, that downstream Chat
+Completions is retired in favour of one provider per downstream protocol, and that the
+native protocol is recorded per model rather than inferred from a Source's API.
 
 ## 5. Surfaces — two modules, one understandable handoff
 
