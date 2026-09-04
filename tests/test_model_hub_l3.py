@@ -7672,12 +7672,16 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
         }
         assert not compared_statuses
 
+    allowed_auth_branch_consumers = {
+        "_parse_protocol_authenticated_evidence",
+        "_owner_constrained_authentication_evidence",
+    }
     auth_branch_offenders = []
     for function in (
         node
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name != "_parse_protocol_authenticated_evidence"
+        and node.name not in allowed_auth_branch_consumers
     ):
         for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):
             condition = ast.unparse(branch.test)
