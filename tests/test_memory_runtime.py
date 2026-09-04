@@ -17,7 +17,11 @@ from config.v2_config import (
     MemoryEndpointConfig,
     MemoryProcessingConfig,
 )
-from avibe_memory.everos import ProviderHealthSnapshot
+from avibe_memory.everos import (
+    MemoryPreflightDiagnostic,
+    MemoryPreflightFailure,
+    ProviderHealthSnapshot,
+)
 from avibe_memory.processing_record import (
     MaintenanceObservation,
     RuntimeHealthProjection,
@@ -55,8 +59,10 @@ def test_typed_rerank_change_reaches_sidecar_without_embedding_rebuild() -> None
             memory_llm_source="chat_fallback",
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
+            revision=1,
             model_access_key="mak_opaque",
             rerank_access_key="mak_rr_deepinfra_opaque",
+            access_key_revision=1,
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -70,8 +76,10 @@ def test_typed_rerank_change_reaches_sidecar_without_embedding_rebuild() -> None
             memory_llm_source="chat_fallback",
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
+            revision=1,
             model_access_key="mak_opaque",
             rerank_access_key="mak_rr_dashscope_opaque",
+            access_key_revision=1,
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -91,6 +99,93 @@ def test_typed_rerank_change_reaches_sidecar_without_embedding_rebuild() -> None
     assert settings.rerank_model == "gte-rerank-v2"
     assert settings.rerank_api_key == "mak_rr_dashscope_opaque"
     assert settings.rerank_provider == "dashscope"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("managed", "expected_sides", "expected_ok"),
+    [
+        (False, ["llm", "embedding", "rerank"], False),
+        (True, ["llm", "embedding"], True),
+    ],
+)
+async def test_candidate_preflight_validates_only_custom_rerank(
+    managed: bool,
+    expected_sides: list[str],
+    expected_ok: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    custom_processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig(
+            "https://llm.example.test/v1",
+            "chat",
+            "llm-secret",
+        ),
+        embedding=MemoryEndpointConfig(
+            "https://embedding.example.test/v1",
+            "embedding",
+            "embedding-secret",
+        ),
+        rerank=MemoryEndpointConfig(
+            "https://rerank.example.test/v1/inference",
+            "rerank",
+            "rerank-secret",
+            provider="deepinfra",
+        ),
+    )
+    if managed:
+        candidate = MemoryConfig(
+            enabled=True,
+            mode="platform",
+            cloud=MemoryCloudConfig(
+                scope="platform",
+                capabilities=MemoryCloudCapabilities(
+                    chat=True,
+                    embedding=True,
+                    memory_llm=True,
+                ),
+                memory_llm_source="chat_fallback",
+                embedding_identity="emb-v1",
+                applied_embedding_identity="emb-v1",
+                revision=2,
+                model_access_key="mak_opaque",
+                rerank_access_key="mak_rr_deepinfra_opaque",
+                access_key_revision=2,
+                proxy_base_url="https://backend.example.test/v1/model",
+                source_instance_id="instance-1",
+            ),
+        )
+    else:
+        candidate = MemoryConfig(
+            enabled=True,
+            mode="custom",
+            processing=custom_processing,
+        )
+
+    sides: list[str] = []
+
+    async def probe(_provider, side, *_args):
+        sides.append(side)
+        if side == "rerank":
+            return MemoryPreflightFailure(
+                "memory_rerank_unavailable",
+                MemoryPreflightDiagnostic(side, message="invalid_candidate"),
+            )
+        return None
+
+    monkeypatch.setattr(runtime_module.EverOSPort, "_preflight_endpoint", probe)
+
+    try:
+        result = await runtime.preflight(candidate)
+    finally:
+        await runtime.close()
+
+    assert sides == expected_sides
+    assert result["ok"] is expected_ok
+    if not expected_ok:
+        assert result["error"] == "memory_rerank_unavailable"
 
 
 @pytest.mark.asyncio

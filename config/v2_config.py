@@ -2246,10 +2246,15 @@ class MemoryConfig:
             or self.cloud.embedding_identity
         )
         rerank = None
-        rerank_projection = managed_rerank_projection(
-            key,
-            self.cloud.rerank_access_key,
-        )
+        rerank_projection = None
+        if (
+            self.cloud.access_key_revision is not None
+            and self.cloud.access_key_revision == self.cloud.revision
+        ):
+            rerank_projection = managed_rerank_projection(
+                key,
+                self.cloud.rerank_access_key,
+            )
         if rerank_projection is not None:
             rerank_provider, rerank_path, rerank_model = rerank_projection
             rerank = MemoryEndpointConfig(

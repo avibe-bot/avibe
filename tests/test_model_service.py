@@ -279,6 +279,121 @@ def test_key_bundle_changes_use_one_processing_reconciliation_without_embedding_
     assert state["memory"].cloud.transition_notice_pending is False
 
 
+@pytest.mark.parametrize(
+    "first_mint_outcome",
+    ["timeout", "upstream_error", "malformed"],
+)
+def test_stale_typed_rerank_is_fenced_until_matching_revision_mint(
+    first_mint_outcome: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {
+        "memory": _active_cloud_memory(
+            rerank_access_key="mak_rr_deepinfra_opaque",
+            access_key_revision=1,
+            revision=1,
+        )
+    }
+    before = deepcopy(state["memory"])
+    requests: list[str] = []
+    reconciled: list[MemoryConfig] = []
+    mint_attempts = 0
+
+    class _Cloud:
+        @staticmethod
+        def runtime_credentials() -> tuple[str, str, str]:
+            return "https://backend.example.test", "instance-1", "device-secret"
+
+    config = SimpleNamespace(
+        remote_access=SimpleNamespace(vibe_cloud=_Cloud()),
+    )
+
+    def load() -> SimpleNamespace:
+        return SimpleNamespace(memory=deepcopy(state["memory"]))
+
+    def request(_config, _credentials, _method, suffix):
+        nonlocal mint_attempts
+        requests.append(suffix)
+        if suffix == "model-service":
+            return _status(revision=2)
+        assert suffix == model_service.MODEL_ACCESS_KEY_SUFFIX
+        mint_attempts += 1
+        if mint_attempts == 1:
+            if first_mint_outcome == "timeout":
+                raise TimeoutError("mint timed out")
+            if first_mint_outcome == "upstream_error":
+                raise model_service.ModelServiceResolutionError(
+                    "cloud_request_failed"
+                )
+            return {"key": "malformed"}
+        return _key_payload(
+            "mak_opaque",
+            rerank_access_key="mak_rr_dashscope_opaque",
+            include_typed_keys=True,
+        )
+
+    def persist(_expected, candidate):
+        state["memory"] = deepcopy(candidate)
+        return SimpleNamespace(memory=deepcopy(candidate))
+
+    def reconcile(candidate):
+        reconciled.append(deepcopy(candidate))
+        applied = deepcopy(candidate)
+        applied.cloud.runtime_apply_pending = False
+        state["memory"] = applied
+        return True
+
+    monkeypatch.setattr(model_service.V2Config, "load", load)
+    monkeypatch.setattr(model_service, "_paired_device_request", request)
+    monkeypatch.setattr(model_service, "_persist_candidate", persist)
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+
+    with pytest.raises((TimeoutError, model_service.ModelServiceResolutionError)):
+        model_service.sync_model_service_once(config)
+
+    stale = deepcopy(state["memory"])
+    stale_processing = stale.runtime_processing()
+    assert stale.cloud.revision == 2
+    assert stale.cloud.access_key_revision == 1
+    assert stale.cloud.model_access_key == "mak_opaque"
+    assert stale.cloud.rerank_access_key == "mak_rr_deepinfra_opaque"
+    assert stale.runtime_source() == "cloud"
+    assert stale_processing.llm.complete() is True
+    assert stale_processing.embedding.complete() is True
+    assert stale_processing.rerank is None
+    assert stale.runtime_embedding_identity() == before.runtime_embedding_identity()
+    assert ui_memory_routes._memory_embedding_configuration_changed(  # noqa: SLF001
+        SimpleNamespace(memory=before),
+        SimpleNamespace(memory=stale),
+    ) is False
+    assert len(reconciled) == 1
+    assert reconciled[0].runtime_processing().rerank is None
+
+    result = model_service.sync_model_service_once(config)
+
+    restored = state["memory"]
+    rerank = restored.runtime_processing().rerank
+    assert result["ok"] is True
+    assert restored.cloud.revision == 2
+    assert restored.cloud.access_key_revision == 2
+    assert rerank is not None
+    assert rerank.provider == "dashscope"
+    assert rerank.api_key == "mak_rr_dashscope_opaque"
+    assert restored.runtime_embedding_identity() == before.runtime_embedding_identity()
+    assert ui_memory_routes._memory_embedding_configuration_changed(  # noqa: SLF001
+        SimpleNamespace(memory=stale),
+        SimpleNamespace(memory=restored),
+    ) is False
+    assert len(reconciled) == 2
+    assert reconciled[1].runtime_processing().rerank == rerank
+    assert requests == [
+        "model-service",
+        model_service.MODEL_ACCESS_KEY_SUFFIX,
+        "model-service",
+        model_service.MODEL_ACCESS_KEY_SUFFIX,
+    ]
+
+
 @pytest.mark.parametrize("operation", ["ensure", "rotate"])
 def test_explicit_key_bundle_paths_use_the_typed_opt_in_endpoint(
     monkeypatch: pytest.MonkeyPatch,

@@ -2364,6 +2364,9 @@ class MemoryRuntime:
         self._require_lifecycle_work()
         candidate = deepcopy(config or self._config)
         processing = candidate.runtime_processing()
+        preflight_rerank = (
+            processing.rerank if candidate.runtime_source() == "custom" else None
+        )
         provider = EverOSPort(
             self._socket_path,
             llm_base_url=processing.llm.base_url,
@@ -2372,11 +2375,11 @@ class MemoryRuntime:
             embedding_base_url=processing.embedding.base_url,
             embedding_model=processing.embedding.model,
             embedding_api_key=processing.embedding.api_key,
-            rerank_base_url=(processing.rerank.base_url if processing.rerank else None),
-            rerank_model=(processing.rerank.model if processing.rerank else None),
-            rerank_api_key=(processing.rerank.api_key if processing.rerank else None),
+            rerank_base_url=(preflight_rerank.base_url if preflight_rerank else None),
+            rerank_model=(preflight_rerank.model if preflight_rerank else None),
+            rerank_api_key=(preflight_rerank.api_key if preflight_rerank else None),
             rerank_provider=(
-                processing.rerank.rerank_provider() if processing.rerank else None
+                preflight_rerank.rerank_provider() if preflight_rerank else None
             ),
             multimodal_base_url=(
                 processing.multimodal.base_url

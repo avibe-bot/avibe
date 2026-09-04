@@ -392,8 +392,10 @@ def test_managed_rerank_closed_table_projects_exact_everos_endpoint(
             ),
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
+            revision=3,
             model_access_key="mak_opaque",
             rerank_access_key=f"{typed_prefix}opaque",
+            access_key_revision=3,
             proxy_base_url="https://backend.example.test/v1/model",
         ),
     )

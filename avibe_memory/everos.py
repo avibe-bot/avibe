@@ -670,7 +670,7 @@ class EverOSPort:
             return all(result is True for result in results)
 
     async def preflight(self) -> MemoryPreflightResult:
-        """Run bounded requests for startup-critical processing endpoints."""
+        """Run one bounded request for each configured processing endpoint."""
         checks = [
             (
                 "llm",
@@ -689,6 +689,18 @@ class EverOSPort:
                 "model": self._embedding_model, "input": "OK",
             }, _valid_embedding_probe_response),
         ]
+        if self._rerank_configured():
+            probe = self._rerank_probe_spec()
+            checks.append(
+                (
+                    "rerank",
+                    probe.base_url,
+                    probe.api_key,
+                    probe.path,
+                    probe.payload,
+                    probe.validator,
+                )
+            )
         if self._multimodal_configured():
             checks.append(
                 (

@@ -407,6 +407,78 @@ def test_embedding_identity_change_requires_loss_confirmation_before_preflight(
     assert V2Config.load().memory.processing.embedding.model == "embed-v1"
 
 
+def test_custom_rerank_candidate_failure_blocks_settings_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(
+        MemoryConfig(
+            enabled=True,
+            mode="custom",
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig(
+                    "https://llm.example.test/v1",
+                    "chat",
+                    "llm-key",
+                ),
+                embedding=MemoryEndpointConfig(
+                    "https://embed.example.test/v1",
+                    "embed-v1",
+                    "embed-key",
+                ),
+            ),
+        )
+    )
+    preflights: list[dict[str, object]] = []
+
+    async def preflight(*, payload, user_key):
+        preflights.append({"payload": payload, "user_key": user_key})
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_rerank_unavailable",
+                "diagnostic": {"side": "rerank", "message": "invalid_candidate"},
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "rerank": {
+                    "base_url": "https://rerank.example.test/v1/inference",
+                    "model": "rerank-model",
+                    "api_key": "invalid-key",
+                    "provider": "deepinfra",
+                }
+            }
+        },
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_rerank_unavailable",
+        "diagnostic": {"side": "rerank", "message": "invalid_candidate"},
+    }
+    assert len(preflights) == 1
+    candidate = preflights[0]["payload"]["memory"]
+    rerank = candidate["processing"]["rerank"]
+    assert rerank["base_url"] == "https://rerank.example.test/v1/inference"
+    assert rerank["model"] == "rerank-model"
+    assert rerank["api_key"] == "invalid-key"
+    assert rerank["provider"] == "deepinfra"
+    assert rerank["has_api_key"] is True
+    assert preflights[0]["user_key"] == "avibe:local"
+    assert V2Config.load().memory.processing.rerank is None
+
+
 def test_confirmed_embedding_identity_change_uses_unified_reconfigure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -1625,10 +1625,7 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     assert json.loads(requests[0].content)["max_tokens"] == 8
 
 
-@pytest.mark.parametrize("operation", ["preflight", "processing_healthy"])
-def test_basic_processing_aggregates_exclude_the_optional_reranker(
-    operation: str,
-) -> None:
+def test_basic_processing_health_excludes_the_optional_reranker() -> None:
     """MEMORY-SEARCH-019: basic processing does not gate on rerank."""
 
     requests: list[httpx.Request] = []
@@ -1657,7 +1654,7 @@ def test_basic_processing_aggregates_exclude_the_optional_reranker(
             rerank_model="rerank-model",
             rerank_api_key="rerank-secret",
         )
-        return await getattr(provider, operation)()
+        return await provider.processing_healthy()
 
     real_async_client = httpx.AsyncClient
     with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
@@ -1666,10 +1663,7 @@ def test_basic_processing_aggregates_exclude_the_optional_reranker(
         )
         result = asyncio.run(run())
 
-    if operation == "processing_healthy":
-        assert result is True
-    else:
-        assert result.ok is True
+    assert result is True
     assert [request.url.path for request in requests] == [
         "/v1/chat/completions",
         "/v1/embeddings",
