@@ -1625,6 +1625,57 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     assert json.loads(requests[0].content)["max_tokens"] == 8
 
 
+@pytest.mark.parametrize("operation", ["preflight", "processing_healthy"])
+def test_basic_processing_aggregates_exclude_the_optional_reranker(
+    operation: str,
+) -> None:
+    """MEMORY-SEARCH-019: basic processing does not gate on rerank."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "OK"}}]},
+            )
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(401, json={"error": {"code": "invalid_key"}})
+
+    async def run():
+        provider = EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="https://rerank.example.test/v1/inference",
+            rerank_model="rerank-model",
+            rerank_api_key="rerank-secret",
+        )
+        return await getattr(provider, operation)()
+
+    real_async_client = httpx.AsyncClient
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    if operation == "processing_healthy":
+        assert result is True
+    else:
+        assert result.ok is True
+    assert [request.url.path for request in requests] == [
+        "/v1/chat/completions",
+        "/v1/embeddings",
+    ]
+
+
 def test_processing_health_serializes_identical_provider_credentials(monkeypatch) -> None:
     provider = EverOSPort(
         Path("/tmp/everos.sock"),
@@ -1659,7 +1710,7 @@ def test_processing_health_serializes_identical_provider_credentials(monkeypatch
         )
         max_total_active = max(max_total_active, sum(active_by_group.values()))
         started.append((group, name))
-        if len(started) == 3:
+        if len(started) == 2:
             first_wave_started.set()
         try:
             await release.wait()
@@ -1675,14 +1726,14 @@ def test_processing_health_serializes_identical_provider_credentials(monkeypatch
         assert {name for _group, name in started} == {
             "chat-model",
             "embedding-model",
-            "rerank-model",
         }
         release.set()
         return await task
 
     assert asyncio.run(run()) is True
     assert [name for _group, name in started].count("vision-model") == 1
-    assert max_total_active == 3
+    assert [name for _group, name in started].count("rerank-model") == 0
+    assert max_total_active == 2
     assert all(active == 1 for active in max_active_by_group.values())
 
 
@@ -2003,7 +2054,7 @@ def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
     assert result.failure.diagnostic.message == "provider_response_invalid_finish_reason"
 
 
-def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
+def test_deepinfra_rerank_probe_keeps_provider_native_request_shape() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2015,18 +2066,21 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
         return httpx.Response(200, json={"scores": [[0.9]]})
 
     async def run():
-        return await EverOSPort(
+        provider = EverOSPort(
             Path("/tmp/everos.sock"),
-            llm_base_url="https://llm.example.test/v1",
-            llm_model="chat",
-            llm_api_key="llm-secret",
-            embedding_base_url="https://embed.example.test/v1",
-            embedding_model="embed",
-            embedding_api_key="embedding-secret",
             rerank_base_url="https://rerank.example.test/v1/inference",
             rerank_model="Qwen/Qwen3-Reranker-4B",
             rerank_api_key="rerank-secret",
-        ).preflight()
+        )
+        probe = provider._rerank_probe_spec()  # noqa: SLF001
+        return await provider._preflight_endpoint(  # noqa: SLF001
+            "rerank",
+            probe.base_url,
+            probe.api_key,
+            probe.path,
+            probe.payload,
+            probe.validator,
+        )
 
     real_async_client = httpx.AsyncClient
     with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
@@ -2035,11 +2089,9 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
         )
         result = asyncio.run(run())
 
-    assert result.ok is True
+    assert result is None
     assert [request.url.path for request in requests] == [
-        "/v1/chat/completions",
-        "/v1/embeddings",
-        "/v1/inference/Qwen/Qwen3-Reranker-4B",
+        "/v1/inference/Qwen/Qwen3-Reranker-4B"
     ]
     assert json.loads(requests[-1].content) == {
         "queries": ["OK"],
@@ -2048,7 +2100,7 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     assert requests[-1].headers["authorization"] == "Bearer rerank-secret"
 
 
-def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
+def test_vllm_rerank_probe_keeps_custom_provider_request_shape() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2060,19 +2112,22 @@ def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
         return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
 
     async def run():
-        return await EverOSPort(
+        provider = EverOSPort(
             Path("/tmp/everos.sock"),
-            llm_base_url="https://llm.example.test/v1",
-            llm_model="chat",
-            llm_api_key="llm-secret",
-            embedding_base_url="https://embed.example.test/v1",
-            embedding_model="embed",
-            embedding_api_key="embedding-secret",
             rerank_base_url="http://localhost:8000/v1",
             rerank_model="Qwen/Qwen3-Reranker-4B",
             rerank_api_key="rerank-secret",
             rerank_provider="vllm",
-        ).preflight()
+        )
+        probe = provider._rerank_probe_spec()  # noqa: SLF001
+        return await provider._preflight_endpoint(  # noqa: SLF001
+            "rerank",
+            probe.base_url,
+            probe.api_key,
+            probe.path,
+            probe.payload,
+            probe.validator,
+        )
 
     real_async_client = httpx.AsyncClient
     with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
@@ -2081,8 +2136,8 @@ def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
         )
         result = asyncio.run(run())
 
-    assert result.ok is True
-    assert [request.url.path for request in requests][-1] == "/v1/rerank"
+    assert result is None
+    assert [request.url.path for request in requests] == ["/v1/rerank"]
     assert json.loads(requests[-1].content) == {
         "model": "Qwen/Qwen3-Reranker-4B",
         "query": "OK",
@@ -2090,7 +2145,7 @@ def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
     }
 
 
-def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
+def test_dashscope_rerank_probe_keeps_provider_native_request_shape() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2105,19 +2160,22 @@ def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
         )
 
     async def run():
-        return await EverOSPort(
+        provider = EverOSPort(
             Path("/tmp/everos.sock"),
-            llm_base_url="https://llm.example.test/v1",
-            llm_model="chat",
-            llm_api_key="llm-secret",
-            embedding_base_url="https://embed.example.test/v1",
-            embedding_model="embed",
-            embedding_api_key="embedding-secret",
             rerank_base_url="https://dashscope.aliyuncs.com",
             rerank_model="gte-rerank-v2",
             rerank_api_key="rerank-secret",
             rerank_provider="dashscope",
-        ).preflight()
+        )
+        probe = provider._rerank_probe_spec()  # noqa: SLF001
+        return await provider._preflight_endpoint(  # noqa: SLF001
+            "rerank",
+            probe.base_url,
+            probe.api_key,
+            probe.path,
+            probe.payload,
+            probe.validator,
+        )
 
     real_async_client = httpx.AsyncClient
     with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
@@ -2126,10 +2184,10 @@ def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
         )
         result = asyncio.run(run())
 
-    assert result.ok is True
-    assert [request.url.path for request in requests][-1] == (
+    assert result is None
+    assert [request.url.path for request in requests] == [
         "/api/v1/services/rerank/text-rerank/text-rerank"
-    )
+    ]
     assert json.loads(requests[-1].content) == {
         "model": "gte-rerank-v2",
         "input": {"query": "OK", "documents": ["OK"]},
@@ -2137,7 +2195,7 @@ def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
     }
 
 
-def test_processing_preflight_infers_dashscope_from_maas_url_without_provider() -> None:
+def test_dashscope_rerank_probe_keeps_existing_provider_inference() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2152,18 +2210,21 @@ def test_processing_preflight_infers_dashscope_from_maas_url_without_provider() 
         )
 
     async def run():
-        return await EverOSPort(
+        provider = EverOSPort(
             Path("/tmp/everos.sock"),
-            llm_base_url="https://llm.example.test/v1",
-            llm_model="chat",
-            llm_api_key="llm-secret",
-            embedding_base_url="https://embed.example.test/v1",
-            embedding_model="embed",
-            embedding_api_key="embedding-secret",
             rerank_base_url="https://llm-space.example.maas.aliyuncs.com",
             rerank_model="gte-rerank-v2",
             rerank_api_key="rerank-secret",
-        ).preflight()
+        )
+        probe = provider._rerank_probe_spec()  # noqa: SLF001
+        return await provider._preflight_endpoint(  # noqa: SLF001
+            "rerank",
+            probe.base_url,
+            probe.api_key,
+            probe.path,
+            probe.payload,
+            probe.validator,
+        )
 
     real_async_client = httpx.AsyncClient
     with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
@@ -2172,10 +2233,10 @@ def test_processing_preflight_infers_dashscope_from_maas_url_without_provider() 
         )
         result = asyncio.run(run())
 
-    assert result.ok is True
-    assert [request.url.path for request in requests][-1] == (
+    assert result is None
+    assert [request.url.path for request in requests] == [
         "/api/v1/services/rerank/text-rerank/text-rerank"
-    )
+    ]
     assert json.loads(requests[-1].content)["input"] == {"query": "OK", "documents": ["OK"]}
 
 
@@ -2285,7 +2346,7 @@ def test_processing_preflight_returns_typed_multimodal_failure() -> None:
     assert result.failure.diagnostic.provider_error_code == "invalid_key"
 
 
-def test_processing_preflight_returns_typed_rerank_failure() -> None:
+def test_targeted_rerank_probe_still_returns_typed_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):
             return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
@@ -2294,18 +2355,21 @@ def test_processing_preflight_returns_typed_rerank_failure() -> None:
         return httpx.Response(401, json={"error": {"code": "invalid_key"}})
 
     async def run():
-        return await EverOSPort(
+        provider = EverOSPort(
             Path("/tmp/everos.sock"),
-            llm_base_url="https://llm.example.test/v1",
-            llm_model="chat",
-            llm_api_key="llm-secret",
-            embedding_base_url="https://embed.example.test/v1",
-            embedding_model="embed",
-            embedding_api_key="embedding-secret",
             rerank_base_url="https://rerank.example.test/v1/inference",
             rerank_model="rerank-model",
             rerank_api_key="rerank-secret",
-        ).preflight()
+        )
+        probe = provider._rerank_probe_spec()  # noqa: SLF001
+        return await provider._preflight_endpoint(  # noqa: SLF001
+            "rerank",
+            probe.base_url,
+            probe.api_key,
+            probe.path,
+            probe.payload,
+            probe.validator,
+        )
 
     real_async_client = httpx.AsyncClient
     with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
@@ -2314,12 +2378,11 @@ def test_processing_preflight_returns_typed_rerank_failure() -> None:
         )
         result = asyncio.run(run())
 
-    assert result.ok is False
-    assert result.failure is not None
-    assert result.failure.error == "memory_rerank_unavailable"
-    assert result.failure.diagnostic.side == "rerank"
-    assert result.failure.diagnostic.http_status == 401
-    assert result.failure.diagnostic.provider_error_code == "invalid_key"
+    assert result is not None
+    assert result.error == "memory_rerank_unavailable"
+    assert result.diagnostic.side == "rerank"
+    assert result.diagnostic.http_status == 401
+    assert result.diagnostic.provider_error_code == "invalid_key"
 
 
 def test_processing_preflight_scrubs_provider_error_code() -> None:

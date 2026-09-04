@@ -13,7 +13,7 @@ from avibe_memory.attachments import (
     AttachmentPinError,
     AttachmentPinStore,
 )
-from avibe_memory.everos import FakeMemoryProvider
+from avibe_memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
 from avibe_memory.store import MemoryStore, VolatileAdmission
 from avibe_memory.types import (
@@ -31,6 +31,7 @@ from avibe_memory.types import (
     MemoryProfileTrait,
     OperationFailed,
     ProviderSearchItem,
+    RecallPolicy,
 )
 from avibe_memory.writer import MAX_WRITER_PERMITS
 
@@ -68,6 +69,68 @@ def _module(
         effective_home=tmp_path,
     )
     return module, store, provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "health",
+    [
+        ProviderHealthSnapshot(
+            status="ok",
+            version="1.2.3",
+            capabilities={
+                "llm": True,
+                "embed": True,
+                "rerank": False,
+                "multimodal_llm": True,
+                "parser": True,
+            },
+            disabled_features=(),
+            cascade=None,
+        ),
+        ProviderHealthSnapshot(
+            status="degraded",
+            version="1.2.3",
+            capabilities={
+                "llm": True,
+                "embed": True,
+                "rerank": True,
+                "multimodal_llm": True,
+                "parser": True,
+            },
+            disabled_features=("agentic_search",),
+            cascade=None,
+        ),
+    ],
+)
+async def test_agentic_recall_fails_closed_without_a_usable_reranker(
+    tmp_path: Path,
+    health: ProviderHealthSnapshot,
+) -> None:
+    """MEMORY-SEARCH-019: agentic recall requires usable rerank health."""
+
+    provider = FakeMemoryProvider(
+        agentic_budget_enforced_flag=True,
+        health_snapshot_value=health,
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.recall(
+        "connect the clues",
+        policy=RecallPolicy(
+            mode="agentic",
+            max_results=2,
+            timeout_seconds=1,
+            max_model_calls=1,
+            cost_budget_tokens=100,
+        ),
+        principal_id=PRINCIPAL,
+        project_id="default",
+    )
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_policies == []
+    await module.close_writer()
 
 
 @pytest.mark.asyncio

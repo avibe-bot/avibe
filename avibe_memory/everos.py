@@ -609,11 +609,13 @@ class EverOSPort:
         return snapshot
 
     async def processing_healthy(self) -> bool:
-        """Probe configured model endpoints with fixed synthetic requests.
+        """Probe the mandatory LLM and embedding endpoints.
 
         The worker may call this after ambiguous provider errors.  The lock keeps
         several queued rows from multiplying credential probes during an outage.
         Matching provider credentials are serialized; independent groups overlap.
+        Optional rerank availability is reported by sidecar health and gates only
+        agentic recall, so it is deliberately excluded from this aggregate.
         """
 
         async with self._processing_lock:
@@ -645,8 +647,6 @@ class EverOSPort:
                     validator=_valid_embedding_probe_response,
                 ),
             ]
-            if self._rerank_configured():
-                probes.append(self._rerank_probe_spec())
             if self._multimodal_configured():
                 probes.append(
                     _ProcessingProbeSpec(
@@ -670,7 +670,7 @@ class EverOSPort:
             return all(result is True for result in results)
 
     async def preflight(self) -> MemoryPreflightResult:
-        """Run one bounded request for each configured processing endpoint."""
+        """Run bounded requests for startup-critical processing endpoints."""
         checks = [
             (
                 "llm",
@@ -689,18 +689,6 @@ class EverOSPort:
                 "model": self._embedding_model, "input": "OK",
             }, _valid_embedding_probe_response),
         ]
-        if self._rerank_configured():
-            probe = self._rerank_probe_spec()
-            checks.append(
-                (
-                    "rerank",
-                    probe.base_url,
-                    probe.api_key,
-                    probe.path,
-                    probe.payload,
-                    probe.validator,
-                )
-            )
         if self._multimodal_configured():
             checks.append(
                 (

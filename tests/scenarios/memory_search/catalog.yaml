@@ -122,3 +122,9 @@ scenarios:
     kind: boundary
     layer: contract
     test: tests/test_memory_module.py::test_capture_and_search_delegate_payload_size_to_everos
+  - id: MEMORY-SEARCH-019
+    name: Basic Memory ignores optional rerank failure while agentic recall fails closed
+    status: covered
+    kind: capability
+    layer: contract
+    test: tests/test_memory_everos.py::test_basic_processing_aggregates_exclude_the_optional_reranker
