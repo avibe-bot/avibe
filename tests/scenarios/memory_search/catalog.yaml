@@ -127,4 +127,4 @@ scenarios:
     status: covered
     kind: capability
     layer: contract
-    test: tests/test_memory_everos.py::test_basic_processing_aggregates_exclude_the_optional_reranker
+    test: tests/test_memory_everos.py::test_basic_processing_health_excludes_the_optional_reranker
