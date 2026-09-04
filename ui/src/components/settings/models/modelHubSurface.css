@@ -192,7 +192,7 @@
   --model-hub-order-grip-dim: var(--model-hub-wash-33);
   --model-hub-order-meta-size: 10.5px;
 
-  /* 用量 tab. */
+  /* Usage tab. */
   --model-hub-usage-padding-x: 18px;
   --model-hub-usage-columns: minmax(0, 1fr) 104px 84px 84px 116px;
   --model-hub-usage-gutter: 16px;

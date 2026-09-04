@@ -409,6 +409,26 @@ describe('unanchoredMarkupTokens', () => {
     ]);
   });
 
+  it('accepts a name declared by a class the element itself carries', () => {
+    // The declaration and the use are on one element, which is the same
+    // guarantee `:root` gives and the reason no ancestor can give it.
+    const sheets = sheetsOf('.row { --row-gap: 14px }');
+
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="row gap-[var(--row-gap)]" />'))).toEqual([]);
+  });
+
+  it('reports it on an element that does not carry that class', () => {
+    const sheets = sheetsOf('.row { --row-gap: 14px }');
+    const sources = sourcesOf([
+      '<ul className="row gap-[var(--row-gap)]" />;',
+      '<ol className="gap-[var(--row-gap)]" />;',
+    ].join('\n'));
+
+    expect(unanchoredMarkupTokens(sheets, sources)).toEqual([
+      { origin: 'Component.tsx', property: '--row-gap' },
+    ]);
+  });
+
   it('says nothing about a name no stylesheet here declares, which is somebody else to anchor', () => {
     // `--radix-popover-trigger-width` is written onto the element by Radix at
     // open time. This project could not anchor it if it wanted to.

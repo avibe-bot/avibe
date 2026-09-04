@@ -117,9 +117,16 @@ function firstCompound(selector) {
   return selector;
 }
 
-// The value of one JSX attribute, read whole: a quoted literal with its quotes,
-// a braced expression with its braces, so `cn('a', flag && 'b')` contributes
-// both halves rather than its first.
+// One JSX element as the two things this file asks of markup: the class names
+// it carries and the tokens it reads. An attribute's value is read whole -- a
+// quoted literal with its quotes, a braced expression with its braces, so
+// `cn('a', flag && 'b')` contributes both halves rather than its first.
+//
+// Per element, not per file, because the two answers are only related on one
+// element: a token `.row` declares answers a `var()` written on an element that
+// carries `.row`, and says nothing about the element next to it. Collecting
+// each attribute separately loses the pairing that makes that judgement
+// possible.
 //
 // Tree, not text. `className` is an ordinary identifier, so the question "is
 // this one an attribute" is a question about position, and every answer read off
@@ -132,17 +139,35 @@ function firstCompound(selector) {
 //
 // `nonRenderingText.mjs` already parses each of these files and already asks
 // this exact question of the tree (`NAMES_A_STYLE_SINK`), so the parse is shared
-// rather than repeated -- its cache keys on the source text, and the two walks
-// below hand over the same one.
-function* attributeValues(source, file, attribute) {
+// rather than repeated -- its cache keys on the source text, and the walks below
+// hand over the same one.
+function* markupElements(source, file) {
   const tree = parseSource(source, file);
 
   const visit = function* visit(node) {
-    if (node.kind === ts.SyntaxKind.JsxAttribute
-      && node.initializer
-      && node.name?.getText(tree) === attribute) {
-      yield node.initializer.getText(tree);
+    if (node.kind === ts.SyntaxKind.JsxAttributes) {
+      const classes = new Set();
+      const tokens = new Set();
+
+      for (const attribute of node.properties) {
+        if (attribute.kind !== ts.SyntaxKind.JsxAttribute || !attribute.initializer) continue;
+        const name = attribute.name?.getText(tree);
+        if (name !== 'className' && name !== 'style') continue;
+
+        // `style={{ gap: 'var(--x)' }}` is the same use as `gap-[var(--x)]`
+        // spelled the other way, so both attributes are read for tokens; only
+        // `className` carries class names.
+        const expression = attribute.initializer.getText(tree);
+        for (const match of expression.matchAll(UNGUARDED_USE)) tokens.add(match[1]);
+        if (name !== 'className') continue;
+        for (const literal of expression.matchAll(/["'`]([^"'`]*)["'`]/g)) {
+          for (const one of literal[1].split(/\s+/)) if (one) classes.add(one);
+        }
+      }
+
+      yield { classes, tokens };
     }
+
     for (const child of node.getChildren(tree)) yield* visit(child);
   };
 
@@ -160,10 +185,8 @@ function* attributeValues(source, file, attribute) {
 function classesRenderedBy(source, file) {
   const found = new Set();
 
-  for (const expression of attributeValues(source, file, 'className')) {
-    for (const literal of expression.matchAll(/["'`]([^"'`]*)["'`]/g)) {
-      for (const name of literal[1].split(/\s+/)) if (name) found.add(name);
-    }
+  for (const element of markupElements(source, file)) {
+    for (const name of element.classes) found.add(name);
   }
 
   return found;
@@ -184,10 +207,8 @@ function classesRenderedBy(source, file) {
 function tokensUsedInMarkup(source, file) {
   const found = new Set();
 
-  for (const attribute of ['className', 'style']) {
-    for (const expression of attributeValues(source, file, attribute)) {
-      for (const match of expression.matchAll(UNGUARDED_USE)) found.add(match[1]);
-    }
+  for (const element of markupElements(source, file)) {
+    for (const property of element.tokens) found.add(property);
   }
 
   return found;
@@ -508,15 +529,48 @@ function unscopedTokens(sheets, classNames) {
   return unresolved;
 }
 
+// Every custom property a class declares on the element carrying it, keyed to
+// the classes that element must carry for the declaration to apply.
+//
+// A use written in markup applies to its element always, so only a declaration
+// that applies to that element always can answer for it: no `@media` around it,
+// no `:hover` or `[data-open]` on it, and no combinator -- `.row > span` lands
+// on the span. What survives is a plain compound of classes, which the element
+// either carries or does not, and that is a question about the element itself
+// rather than about its ancestors.
+function classDeclaredTokens(sheets) {
+  const declared = new Map();
+
+  for (const [, root] of sheets) {
+    root.walkDecls((declaration) => {
+      if (!declaration.prop.startsWith('--')) return;
+      if (declaration.parent.type !== 'rule') return;
+      if (conditionsOn(declaration).length > 0) return;
+
+      for (const one of declaration.parent.selectors) {
+        const selector = one.trim();
+        if (firstCompound(selector) !== selector) continue;
+        const { classes, guards } = compoundParts(selector);
+        if (guards.length > 0 || classes.length === 0) continue;
+        if (!declared.has(declaration.prop)) declared.set(declaration.prop, []);
+        declared.get(declaration.prop).push(classes);
+      }
+    });
+  }
+
+  return declared;
+}
+
 /**
  * The tokens ``sources`` consume from markup without a scope that answers.
  *
  * The stylesheet half above can attribute a use to the subject its rule names.
- * A use written on an element cannot be attributed at all -- the element's
- * ancestors are a fact about the React tree, and the one that happens to
- * declare the token today is one refactor away from not being an ancestor. So
- * the requirement here is the strict one: the name is declared by a scope every
- * element inherits, unconditionally.
+ * A use written on an element names no subject, so what can answer for it is
+ * narrower: a scope every element inherits, unconditionally -- or a class the
+ * element itself carries, which is the same element the use is on and therefore
+ * the same guarantee. What cannot answer is an ancestor: which one that is, is a
+ * fact about the React tree, and the one that happens to declare the token today
+ * is one refactor away from not being an ancestor.
  *
  * A name no stylesheet here declares at all is somebody else's to declare --
  * `--radix-popover-trigger-width` is written by Radix onto the element at open
@@ -529,15 +583,24 @@ function unscopedTokens(sheets, classNames) {
  */
 function unanchoredMarkupTokens(sheets, sources) {
   const inheritable = inheritableTokens(sheets);
+  const onClasses = classDeclaredTokens(sheets);
   const ours = new Map();
   for (const [, root] of sheets) customPropertiesIn(root, ours);
   const unresolved = [];
+  const reported = new Set();
 
   for (const [origin, text] of sources) {
-    for (const property of tokensUsedInMarkup(text, origin)) {
-      if (!ours.has(property)) continue;
-      if (inForce(inheritable.get(property), [])) continue;
-      unresolved.push({ origin, property });
+    for (const element of markupElements(text, origin)) {
+      for (const property of element.tokens) {
+        if (!ours.has(property)) continue;
+        if (inForce(inheritable.get(property), [])) continue;
+        const carried = (onClasses.get(property) ?? [])
+          .some((classes) => classes.every((name) => element.classes.has(name)));
+        if (carried) continue;
+        if (reported.has(`${origin} ${property}`)) continue;
+        reported.add(`${origin} ${property}`);
+        unresolved.push({ origin, property });
+      }
     }
   }
 
