@@ -486,8 +486,10 @@ Normative text lives in `model-hub.md` §4.8 (v4) and `model-hub-contracts/openc
 (v4); this section binds the catalog product model to them and supersedes, for OpenCode only,
 these v2 sentences: question 1's `vendor/model` candidate identity, question 6's
 "OpenCode requires `vendor/model`", question 7's `custom/<query>` typeahead item and the
-"three buckets" manual rule, C4's `custom/` fill rule, and the `vendor/model` clauses of the
-candidates read and the admission predicate.
+"three buckets" manual rule, C7's OpenCode clause (the models.dev-filled id is
+`<provider>/<model>` through the vendor normalization — under v3 the filled id is the selected
+match's model id as models.dev states it), and the `vendor/model` clauses of the candidates
+read and the admission predicate.
 
 ### Outcome
 
@@ -504,9 +506,10 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
 - **Native protocol (new).** Selection derives `native_protocol` from the id's vendor family
   through `vibe/data/model_vendors.json` at add time; the editor's last field (`API`, OpenCode
   rows only) lets the user change it. No other surface shows it.
-- **Custom model editor (q7).** The typeahead's last item is the plain
-  `Use "{{query}}" as the model ID`; the id is stored as typed after canonicalization. The
-  OpenCode-only repair buckets are retired.
+- **Custom model editor (q7, C7).** The typeahead's last item is the plain
+  `Use "{{query}}" as the model ID`; choosing a models.dev match fills the match's model id;
+  the id is stored as typed after canonicalization. The OpenCode-only repair buckets and the
+  `<provider>/<model>` fill are retired.
 - **Overlay (C7 → opencode-overlay.md v4).** One provider per downstream protocol,
   `enabled_providers` naming them, Chat Completions retired downstream.
 
@@ -527,10 +530,10 @@ OpenCode list looks like the Codex list: bare ids, display names, no protocol ch
   and fingerprint rewrites (exact flags from S3) so a same-protocol request is forwarded
   unchanged apart from credentials, host, and the mandatory `model` rewrite to the stored hop's
   model id (user-configured substitutions stay authoritative, `model-hub.md` §4.5).
-- **C12 — Migration** per opencode-overlay.md v4: keyed on the persisted
-  `model_hub.contract_version` (absent = 7), idempotent, collision-merging, and covering every
-  persisted OpenCode selector including Vibe Agent definitions' `model`; a collision fixture is a
-  required test.
+- **C12 — Upgrade** per opencode-overlay.md v4: keyed on the persisted
+  `model_hub.contract_version` (absent = 7), the loader discards pre-v8 OpenCode menu state
+  (rows, routes, removed markers, `menu`) and touches nothing else; no migration, no
+  cross-store write; the reset fixture is a required test.
 - **C13 — `contract_version` 7 → 8**, now also persisted as `model_hub.contract_version` in the
   config payload, with the version closure in `model-hub-contracts/README.md` extended to that
   location and to `config/v2_config.py`.
@@ -558,9 +561,9 @@ No new string anywhere else; nothing explains the mechanism.
    reasoning field recorded by S4 survives translation.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
-5. Loading a pre-v4 config yields the state a v4 write of the same rows would produce —
-   colliding rows merged deterministically, every persisted OpenCode selector rewritten —
-   saving persists v4 with `model_hub.contract_version` 8, and loading it again changes nothing.
+5. Loading a pre-v8 config yields an empty OpenCode menu with Sources, mode, other backends,
+   Agent definitions, and sessions untouched; saving persists `model_hub.contract_version` 8,
+   and loading it again changes nothing.
 6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
    only place it appears, for OpenCode rows only.
 7. `avibe-*` is refused as a user custom-provider id.

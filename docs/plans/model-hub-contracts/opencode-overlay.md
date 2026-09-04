@@ -14,21 +14,28 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
 - `enabled_providers` lists exactly the provider ids the overlay generates, so providers from
   the user's own configuration or from environment keys are not loaded and their models never
   appear in `/config/providers`. In Direct mode no overlay exists.
-- **Addressing.** In Gateway mode Avibe addresses OpenCode with `providerID` =
-  `avibe-<protocol>` derived from the selected row's `native_protocol` and `modelID` = the
+- **Addressing.** In Gateway mode Avibe addresses OpenCode with `providerID` = the fixed
+  provider id of the selected row's `native_protocol` from the table below
+  (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`) and `modelID` = the
   menu id; the Direct-mode `agents.opencode.default_provider` setting is not consulted. A
   selector naming no menu row keeps the existing no-chain handling.
 - The overlay content hash is recorded at launch; when the effective overlay changes (menu
   edit, `native_protocol` edit, gateway credential rotation) Avibe waits for active work to
   finish, then restarts the serve process. Restarts are config events: no `resolution-event`
   of kind `channel_switch`/`switch` is emitted.
+- **Nothing projectable.** When the effective overlay would contain no projectable row
+  (the last routeful checked row was removed), Avibe writes no overlay and drains and stops
+  the serve process; it relaunches with a fresh overlay when a projectable row exists again.
+  In Gateway mode a serve process never runs without an overlay, so the user's providers are
+  never exposed and a stale provider set never lingers in `/config/providers`.
 
 ## Provider entries
 
 - One provider entry per downstream protocol used by at least one projected row — a checked
   menu row with a stored nonempty Route chain — so no generated provider is ever empty and
   `enabled_providers` equals the generated set. When no row is projectable the existing
-  `mapping_target_unavailable` refusal applies and no overlay is written:
+  `mapping_target_unavailable` refusal applies, no overlay is written, and the serve process
+  is stopped (Delivery):
 
   | `native_protocol` | provider id | `name` | `npm` | downstream endpoint |
   | --- | --- | --- | --- | --- |
@@ -78,34 +85,25 @@ keep the chain nonempty, engine restarts, and gateway token rotation apart from
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
 
-## Migration (one-way, pre-GA, idempotent)
+## Upgrade (pre-GA: reset, not migrate)
 
-**Discriminator.** The persisted Model Hub config carries `model_hub.contract_version`; a
-config without it is 7. The loader migrates exactly when the stored value is below 8 and
-writes 8 on the next save. Classification never inspects id shape — a v4 id may itself
-contain a slash (`moonshotai/kimi-k2`) — so a second load of a migrated config changes
-nothing, whatever it holds.
+Model Hub is behind the `VIBE_MODEL_HUB_ENABLED` release gate, so no released installation
+holds OpenCode menu state; only development environments do. v4 therefore does not migrate
+OpenCode menu state — it discards it:
 
-**Mapping.** `strip(vendor/model) = model`; `protocol(model)` is the vendor-map family
-(`anthropic` → `anthropic`; unknown or any other family → `openai_responses`), never the old
-`vendor` segment, which named a supplier rather than the model.
-
-**Inventory — every persisted holder of an OpenCode menu id, one rule each.** The
-implementation lane greps for any holder this table misses and adds it here before merging.
-
-| Holder | Rule |
-| --- | --- |
-| `agents.opencode.models[].id` | `strip`; `native_protocol = protocol(id)`. Collisions: the first row in menu order survives with its metadata and position; the others are dropped. |
-| `agents.opencode.routes` — every key, including a Route with no row (a legal v7 state) | rekey by `strip`. Keys that collide concatenate their hop arrays in stored key order, deduplicated by `(source_id, model_id)`; a dropped row's chain therefore lands on the survivor. |
-| `agents.opencode.removed_model_ids` | `strip`, deduplicate, then drop every marker equal to a surviving row's id — a live row is never tombstoned (C6). |
-| `agents.opencode.menu` (`checked` identifiers, no UI consumer since #1814) | the lane inventories its remaining readers: migrate `checked` by `strip` if any reader remains, otherwise delete the field in the same change. |
-| Vibe Agent definitions' `model` where `backend == "opencode"` | rewritten by `strip` **only when `agents.opencode.mode == "hub"`** at migration time — a Hub-mode selector denotes a menu id. In Direct mode a selector denotes OpenCode's own `providerID/modelID` and is untouched. |
-| Usage-ledger rows keyed by an old id | left as history; no rewrite, no fold. |
-
-A load fixture holding all of: a standalone Route, an active/removed collision
-(`openrouter/foo` row + `anthropic/foo` marker), a two-row collision with distinct chains, a
-`menu.checked` entry, and Hub-mode and Direct-mode Agent selectors, is a required test: it
-loads, drops no hop, tombstones no live row, and loads identically a second time.
+- **Discriminator.** The persisted Model Hub config carries `model_hub.contract_version`; a
+  config without it is 7. Exactly when the stored value is below 8, the loader empties the
+  OpenCode agent's `models`, `routes`, `removed_model_ids`, and `menu` and writes 8 on the
+  next save. Nothing else is read or rewritten: Sources, Source order, the OpenCode mode, the
+  other backends, Vibe Agent definitions, and sessions are untouched.
+- **Selectors.** A Vibe Agent definition or a persisted session override that still names a
+  retired `vendor/model` id resolves through the existing no-menu-row handling until the user
+  selects again; in Direct mode such a selector is OpenCode's own `providerID/modelID` and
+  keeps working. No cross-store write exists, so the upgrade is crash-safe and idempotent by
+  construction: a v8 config has no pre-v8 OpenCode state to touch.
+- **Fixture.** A v7 config holding OpenCode rows, a standalone Route, removed markers, and a
+  `menu` object loads to an empty OpenCode menu with Sources and mode intact, and loads
+  identically a second time.
 
 ## Spike record (S1–S6; filled from the spike lane's evidence before implementation starts)
 
