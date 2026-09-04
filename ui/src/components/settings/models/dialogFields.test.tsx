@@ -39,8 +39,8 @@ describe('Field', () => {
   });
 
   it('names a control with no icon inset', () => {
-    // The vendor <select> takes the same path minus the wrapper — the branch that
-    // renders `children(id)` bare is the one that could drop the argument.
+    // A field with no icon takes the same path minus the wrapper — the branch
+    // that renders `children(id)` bare is the one that could drop the argument.
     const { labelFor, controlId } = pair(
       renderToStaticMarkup(
         <Field label="Vendor">

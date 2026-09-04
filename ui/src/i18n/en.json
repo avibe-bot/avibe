@@ -1371,6 +1371,8 @@
           "vendor": "Vendor",
           "vendor.custom": "Custom · compatible endpoint",
           "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like to prefill the official address and pin the interface",
+          "vendor.search": "Search vendors",
+          "vendor.empty": "No vendor by that name",
           "name": "Name (optional)",
           "protocol": "Interface type",
           "protocol.hint": "Use Auto detect when unsure; choose a type to declare that interface. If authentication succeeds it can be added, a wrong choice can fail at runtime, and the saved type cannot be changed",

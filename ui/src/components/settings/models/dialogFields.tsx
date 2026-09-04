@@ -55,7 +55,7 @@ const IconField: React.FC<{
  * control: taking it as a prop would let a caller pass its own and drift, and
  * cloning the child to inject it would do the same thing invisibly.
  *
- * `icon` is optional because a `<Select>` carries its own chevron; `hint` because
+ * `icon` is optional because a picker carries its own chevron; `hint` because
  * only two of the four fields explain themselves.
  */
 export const Field: React.FC<{

@@ -622,13 +622,6 @@
   padding-inline: var(--model-hub-add-key-input-padding);
   font-size: var(--model-hub-add-key-input-size);
 }
-/* Same field surface, one exception: `Select` lays its chevron over the trailing
-   edge, so the shared inline padding has to leave that side room. Qualified by
-   element rather than by a second class, which would make every future select
-   here a call site that can forget it. */
-.model-hub-add-key-input:is(select) {
-  padding-inline-end: calc(var(--model-hub-add-key-input-padding) + 20px);
-}
 .model-hub-add-key-secret { width: 100%; }
 .model-hub-add-key-hint {
   color: var(--model-hub-muted-b3);
@@ -648,17 +641,27 @@
   display: flex;
   gap: 3px;
 }
+/* Two lines, not one: the statement and its badge, then the sentence that
+   explains them. The hint is the longer text of the two, so beside the statement
+   it wrapped around the name it is about; underneath, it starts where that name
+   starts and reads as its subordinate. */
 .model-hub-add-key-protocol-idle-row {
-  flex-direction: row;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+.model-hub-add-key-protocol-idle-line {
+  display: flex;
+  width: 100%;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
 }
 /* The element that carries the statement is the element that sizes it. The idle
    row holds two deliberately different scales -- this 12px statement and the
-   10.5px hint beside it -- so the scale sits on each child rather than on the row
-   the way the single-child detecting row does. Color stays inherited so the
-   row's `.is-idle` dimming keeps applying to it. */
+   10.5px hint on the line below -- so the scale sits on each child rather than on
+   the row the way the single-child detecting row does. Color stays inherited so
+   the row's `.is-idle` dimming keeps applying to it. */
 .model-hub-add-key-protocol-active {
   display: inline-flex;
   align-items: center;
@@ -671,7 +674,7 @@
    takes both border and ink from `currentColor` so it annotates whatever it sits
    in -- mint inside ①″ -- rather than introducing an ink of its own. On a strip
    it goes to the trailing edge, out of the way of text that wraps; on the idle
-   row it stays in the reading order, between the statement and its hint. */
+   row it stays on the statement's own line, directly after it. */
 .model-hub-add-key-protocol-badge {
   flex-shrink: 0;
   align-self: center;
@@ -709,7 +712,11 @@
   font-size: var(--model-hub-add-key-hint-size);
   font-weight: 600;
 }
-.model-hub-add-key-protocol-glyph {
+/* Interface glyphs and vendor marks are one visual family at one size, so they
+   share the rule rather than each declaring 14px and drifting apart. Two names
+   because a vendor's logo is not a statement about its interface. */
+.model-hub-add-key-protocol-glyph,
+.model-hub-add-key-vendor-glyph {
   width: 14px;
   height: 14px;
   flex-shrink: 0;

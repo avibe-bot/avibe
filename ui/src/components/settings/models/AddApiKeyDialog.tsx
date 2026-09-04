@@ -14,8 +14,8 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
-import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
@@ -53,6 +53,7 @@ import {
 } from './types';
 import { ProtocolGlyph } from './protocolGlyph';
 import { optionalTrimmedTextWithin } from './validation';
+import { VendorGlyph } from './vendorGlyph';
 
 type Phase =
   | { kind: 'form'; report: SourceObservation | null }
@@ -123,6 +124,35 @@ const ProtocolSegments: React.FC<{
       ))}
     </div>
   );
+};
+
+/**
+ * The 服务商 field's rows: the shipped catalog A–Z by label, then the one entry
+ * that is not a vendor at all, each carrying its mark.
+ *
+ * A–Z because the file's order is the backend's business — whatever it means
+ * there, on screen it reads as arbitrary, and a name is what a user scans for.
+ * The comparison is base-sensitivity English so case and accents do not split
+ * the alphabet. 自定义 sorts nowhere: it is the absence of a vendor, so it sits
+ * at the end of the vendors rather than inside them, while staying the value the
+ * field opens on.
+ *
+ * The mark is why the field is no longer a `<select>`. A vendor is recognised by
+ * its logo long before its name is read, and an `<option>` holds text only — so
+ * the closed control could only ever show what an option could hold, dropping
+ * the mark exactly where the choice has already been made. What replaces it is
+ * this app's one picker, `Combobox`, given a mark per row; a second local
+ * implementation of the same trigger, panel, and keyboard would only be a place
+ * for the two to diverge.
+ */
+const useVendorOptions = (): ComboboxOption[] => {
+  const { t } = useTranslation();
+  return React.useMemo(() => ([
+    ...API_KEY_VENDOR_PRESETS
+      .map((preset) => ({ value: preset.id, label: preset.label }))
+      .sort((one, other) => one.label.localeCompare(other.label, 'en', { sensitivity: 'base' })),
+    { value: CUSTOM_VENDOR, label: t('settings.models.addKey.field.vendor.custom') },
+  ].map((option) => ({ ...option, icon: <VendorGlyph vendor={option.value} /> }))), [t]);
 };
 
 type ReplaceOutcome =
@@ -255,6 +285,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const addOnAdded = replaceMode ? null : props.onAdded;
   const replaceSourceId = replaceMode ? props.source.id : null;
   const { t } = useTranslation();
+  const vendorOptions = useVendorOptions();
   const [vendor, setVendor] = React.useState<string>(CUSTOM_VENDOR);
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
@@ -621,7 +652,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   // `retireProvedEvidence` would have kept, and an ④/failure the new vendor may
   // simply not have. §1.5: switching resets the URL to the new vendor's official
   // one, drops the interface selection, and retires the observation outright.
+  // Picking the vendor that is already picked is not a switch, and everything
+  // below is destructive: it would throw away a hand-edited address, a declared
+  // interface, and a completed detection to arrive back where it started. The
+  // guard is here rather than in the picker because this function is what
+  // destroys that state — a caller that re-announces the same choice is not
+  // wrong, acting on it is.
   const editVendor = (value: string) => {
+    if (value === vendor) return;
     setVendor(value);
     setBaseUrl(apiKeyVendorPreset(value)?.official_base_url ?? '');
     setProtocolSelection('auto');
@@ -761,8 +799,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           <div className="model-hub-add-key-body flex flex-col">
             {/* First, because it is the field the rest are conditioned on: it
                 decides what the Base URL starts as and whether the interface is
-                still a question. Options are the shipped catalog in file order,
-                after the one entry that is not a vendor at all. */}
+                still a question. */}
             <Field
               className="model-hub-add-key-field"
               labelClassName="model-hub-add-key-label"
@@ -771,18 +808,26 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               hint={t('settings.models.addKey.field.vendor.hint')}
             >
               {(id) => (
-                <Select
+                <Combobox
                   id={id}
-                  value={vendor}
-                  disabled={formLocked}
-                  onChange={(event) => editVendor(event.target.value)}
+                  // The label points here, but a `for` association contributes
+                  // nothing to a button's accessible name, so the field has to
+                  // name itself. The primitive appends the selection to what is
+                  // passed here: the label alone would replace the trigger's
+                  // contents, and those contents are the chosen vendor — the one
+                  // thing a picker exists to report.
+                  ariaLabel={t('settings.models.addKey.field.vendor')}
                   className="model-hub-add-key-input"
-                >
-                  <option value={CUSTOM_VENDOR}>{t('settings.models.addKey.field.vendor.custom')}</option>
-                  {API_KEY_VENDOR_PRESETS.map((preset) => (
-                    <option key={preset.id} value={preset.id}>{preset.label}</option>
-                  ))}
-                </Select>
+                  options={vendorOptions}
+                  value={vendor}
+                  onValueChange={editVendor}
+                  // A vendor is a catalog row, and the request sends its id: there
+                  // is no typed value this field could accept.
+                  allowCustomValue={false}
+                  disabled={formLocked}
+                  searchPlaceholder={t('settings.models.addKey.field.vendor.search')}
+                  emptyText={t('settings.models.addKey.field.vendor.empty')}
+                />
               )}
             </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
@@ -839,19 +884,27 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               )}
               {phase.kind === 'form' && !phase.report && !segmentsOpen && (
                 <div className="model-hub-add-key-protocol-idle-row">
-                  {/* Whatever 检测 is about to send, and nothing else: a catalog
-                      pin and a concrete choice are each the active constraint
-                      even while the disclosure that could have made one is shut
-                      — or, under a pin, is not offered at all. */}
-                  <span className="model-hub-add-key-protocol-active">
-                    {constrainedProtocol && <ProtocolGlyph protocol={constrainedProtocol} />}
-                    {t(constrainedProtocol
-                      ? PROTOCOL_COPY_KEYS[constrainedProtocol]
-                      : 'settings.models.addKey.protocol.auto')}
-                  </span>
-                  {/* The pin is the reason this row has no control beside it, so
-                      it says so here rather than only on the strip 检测 returns. */}
-                  {vendorPreset && protocolBadge}
+                  {/* The statement and its badge are one line; the sentence that
+                      explains them is the next. Beside the glyph the hint read as
+                      a second statement competing with the first, and it is the
+                      longer of the two — it wrapped around the name it belongs
+                      to. Underneath, at its own smaller scale, it is plainly
+                      subordinate to the line above. */}
+                  <div className="model-hub-add-key-protocol-idle-line">
+                    {/* Whatever 检测 is about to send, and nothing else: a catalog
+                        pin and a concrete choice are each the active constraint
+                        even while the disclosure that could have made one is shut
+                        — or, under a pin, is not offered at all. */}
+                    <span className="model-hub-add-key-protocol-active">
+                      {constrainedProtocol && <ProtocolGlyph protocol={constrainedProtocol} />}
+                      {t(constrainedProtocol
+                        ? PROTOCOL_COPY_KEYS[constrainedProtocol]
+                        : 'settings.models.addKey.protocol.auto')}
+                    </span>
+                    {/* The pin is the reason this row has no control beside it, so
+                        it says so here rather than only on the strip 检测 returns. */}
+                    {vendorPreset && protocolBadge}
+                  </div>
                   {/* The idle hint promises automatic identification, which is
                       only what Auto does. A named interface has already answered
                       it; a pin answers a different question — what 检测 still has

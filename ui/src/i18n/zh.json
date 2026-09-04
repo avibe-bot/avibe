@@ -1371,6 +1371,8 @@
           "vendor": "服务商",
           "vendor.custom": "自定义 · 兼容端点",
           "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，预填官方地址并钉死接口",
+          "vendor.search": "搜索服务商",
+          "vendor.empty": "没有同名的服务商",
           "name": "名称(可选)",
           "protocol": "接口类型",
           "protocol.hint": "不确定时用自动探测；已知类型时可直接声明所选接口。该路径鉴权成功即可添加；选错了运行时可能失败，而且保存后不可更改",
