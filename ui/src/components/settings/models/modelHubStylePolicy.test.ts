@@ -123,4 +123,53 @@ describe('Model Hub visual token policy', () => {
 
     expect(restated).toEqual([]);
   });
+
+  // Both properties are decided by CSS that jsdom does not resolve — a grid track
+  // and a line break — so they are asserted where they are declared. They are
+  // stated as one rule each rather than as the rows that must not break: the
+  // manual-draft band broke because 手动添加 has no min-content floor to overflow
+  // against, and the same shape was already latent on any committed row whose
+  // model id was long enough to make its own pill the part that gives.
+  it('never lets a source-table pill be the part of a row that gives', () => {
+    const pill = surfaceCss.match(/\.model-hub-source-pill \{([^}]*)\}/)?.[1] ?? '';
+    expect(pill).toContain('white-space: nowrap');
+    expect(pill).toContain('flex-shrink: 0');
+
+    // And no call site hands the give back with a utility, whichever pill it draws.
+    const reopened = productFiles(__dirname).flatMap((path) => (
+      [...readFileSync(path, 'utf8').matchAll(/(['"`])((?:(?!\1)[\s\S])*)\1/g)]
+        .filter((match) => /model-hub-source-pill/.test(match[2])
+          && /(?:^|\s)(?:whitespace-(?!nowrap)|shrink(?!-0)|flex-shrink)/.test(match[2]))
+        .map((match) => `${path}:${match[2]}`)
+    ));
+
+    expect(reopened).toEqual([]);
+  });
+
+  // A column heading is a claim about the cells beneath it, so the draft either
+  // keeps the row's tracks or stops standing in them. It cannot do both: its
+  // controls are words where a row's are two 26px icons, and the only cell with
+  // room to pay the difference is the shared 1fr — which slides the tier cell
+  // out from under 推理强度. The draft takes its own two lines instead.
+  it('keeps the manual draft off the row columns and out of column arithmetic', () => {
+    // The property rather than the draft's own rule: whichever rule hands out
+    // the row template, its selector list must not name the draft. Reading only
+    // the override would pass while the shared rule still declared the token on
+    // the draft earlier and left source order to clean up after it.
+    const sharing = [...surfaceCssBody.matchAll(/([^{}]*)\{[^{}]*var\(--model-hub-source-table-columns\)[^{}]*\}/g)]
+      .map((match) => match[1]);
+    expect(sharing.some((selector) => selector.includes('model-hub-source-table-row'))).toBe(true);
+    for (const selector of sharing) expect(selector).not.toContain('model-hub-source-table-draft');
+
+    // Anchored on the preceding `}` so this is the draft's own rule, not the
+    // shared band whose selector list also ends in this class.
+    const draft = surfaceCssBody.match(/\}\s*\.model-hub-source-table-draft \{([^}]*)\}/)?.[1] ?? '';
+    expect(draft).toContain('grid-template-columns: minmax(0, 1fr) auto');
+
+    // Full width as a span to both edges, never as a count: the count has
+    // already changed once, and the cell that carried it through the change is
+    // how the failure line lands in an implicit fourth track.
+    const line = surfaceCssBody.match(/\.model-hub-source-draft-line \{([^}]*)\}/)?.[1] ?? '';
+    expect(line).toContain('grid-column: 1 / -1');
+  });
 });

@@ -898,6 +898,27 @@ describe('SourceDetailPanel', () => {
     expect((add as HTMLButtonElement).disabled).toBe(true);
   });
 
+  // Where the draft's cells sit is the stylesheet's decision — it lays the band
+  // out over two lines of its own rather than in the columns the table header
+  // names — so no cell may restate the column count in its class list. Seeded in
+  // the state where every cell exists, a failed add, and asserted over whatever
+  // the band renders: a cell added later is covered without editing a list.
+  it('places every manual-draft cell without column arithmetic in the markup', async () => {
+    vi.spyOn(modelsApi, 'addCustomModel').mockRejectedValueOnce(new Error('write failed'));
+    renderPanel();
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i)
+      .closest('[data-manual-model-draft]') as HTMLElement;
+    await userEvent.type(within(draft).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
+    await userEvent.click(within(draft).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    // The failure line is the fourth cell, and the only one that has to be
+    // waited for; the count is what proves the band is fully seeded.
+    await waitFor(() => { expect(draft.children.length).toBe(4); });
+
+    const cells = Array.from(draft.children).map((cell) => cell.className);
+    expect(cells.filter((name) => /(?:col|row)-(?:span|start|end)-/.test(name))).toEqual([]);
+  });
+
   it('keeps a failed refetch visible beside the inventory it could not replace', async () => {
     vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(new Error('lost response'));
     renderPanel();
