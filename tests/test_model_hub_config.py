@@ -591,7 +591,9 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
     assert "Ordinary create" in succeeded
     assert "legitimately empty" in succeeded
 
-    failed_rows = [line for line in result_rows if line.startswith("| Protocol proved; `discovery: failed` |")]
+    failed_rows = [
+        line for line in result_rows if line.startswith("| Protocol established; `discovery: failed` |")
+    ]
     assert len(failed_rows) == 2
     rejected = next(line for line in failed_rows if "omitted or `false`" in line)
     accepted = next(line for line in failed_rows if "| `true` |" in line)
@@ -600,9 +602,9 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
     assert "AC-26 cleanup" in rejected
     assert "Commit exactly one Source" in accepted
     assert "`models: []`" in accepted
-    assert "proved protocol" in accepted
+    assert "established protocol" in accepted
 
-    unproved = next(line for line in result_rows if line.startswith("| Protocol not proved"))
+    unproved = next(line for line in result_rows if line.startswith("| Protocol not established"))
     assert "omitted, `false`, or `true`" in unproved
     assert "no Source is committed" in unproved
     assert "cannot authorize" in unproved
