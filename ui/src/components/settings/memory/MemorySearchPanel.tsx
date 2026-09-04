@@ -36,10 +36,6 @@ const FALLBACK_PROJECTS = [
   { id: 'all', kind: 'all' as const },
 ];
 
-function episodeExcerpt(item: MemoryListItem): string {
-  return item.summary || item.subject || item.body;
-}
-
 function episodeTitle(item: MemoryListItem): string {
   return item.subject || item.summary || item.body;
 }
@@ -440,7 +436,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
                         </time>
                       </div>
                       <p className="line-clamp-2 text-[13px] leading-relaxed text-foreground">
-                        {episodeExcerpt(item)}
+                        {episodeTitle(item)}
                       </p>
                     </button>
                   );

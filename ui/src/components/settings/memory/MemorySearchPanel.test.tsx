@@ -95,6 +95,53 @@ afterEach(() => {
 });
 
 describe('MemorySearchPanel browse and search modes', () => {
+  it('[MEMORY-LIST-006] shows the subject first with summary and body fallbacks', async () => {
+    const subjectFirst = episode({
+      id: 'subject-first',
+      subject: '2026-09-05 release decision',
+      summary: '2026-09-05T07:30:00Z Chose the staged rollout.',
+      body: 'Full release decision with every rollout consideration preserved.',
+    });
+    const summaryFallback = episode({
+      id: 'summary-fallback',
+      subject: '',
+      summary: 'Summary fallback title',
+      body: 'Summary fallback detail.',
+    });
+    const bodyFallback = episode({
+      id: 'body-fallback',
+      subject: '',
+      summary: '',
+      body: 'Body fallback title and detail.',
+    });
+    api.listMemoryEpisodes.mockResolvedValue(listResult([
+      subjectFirst,
+      summaryFallback,
+      bodyFallback,
+    ]));
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+
+    expect(await screen.findByText(subjectFirst.subject)).toBeTruthy();
+    expect(screen.queryByText(subjectFirst.summary)).toBeNull();
+    expect(screen.getByText(summaryFallback.summary)).toBeTruthy();
+    expect(screen.getByText(bodyFallback.body)).toBeTruthy();
+
+    const subjectRow = screen.getByRole('button', {
+      name: `memory.search.browse.openDetail:${subjectFirst.subject}`,
+    });
+    const rowTimestamp = subjectRow.querySelector(`time[datetime="${subjectFirst.timestamp}"]`);
+    expect(rowTimestamp?.textContent).toMatch(/^\d{4}-\d{2}-\d{2} · \d{2}:\d{2}$/);
+    await user.click(subjectRow);
+
+    expect(screen.getByText(subjectFirst.body)).toBeTruthy();
+    const detailTimestamp = document.querySelector(
+      `[aria-labelledby="memory-episode-detail-title"] time[datetime="${subjectFirst.timestamp}"]`,
+    );
+    expect(detailTimestamp?.textContent).toMatch(/^\d{4}-\d{2}-\d{2} · \d{2}:\d{2}$/);
+  });
+
   it('[MEMORY-LIST-004][MEMORY-LIST-006][MEMORY-LIST-008] browses a page boundary and copies the selected entry ID', async () => {
     const first = episode();
     const second = episode({ id: 'entry-021', subject: 'Follow-up', summary: '', body: 'Second page body.' });
@@ -107,7 +154,7 @@ describe('MemorySearchPanel browse and search modes', () => {
 
     render(<MemorySearchPanel enabled />);
 
-    expect(await screen.findByText(first.summary)).toBeTruthy();
+    expect(await screen.findByText(first.subject)).toBeTruthy();
     expect(screen.getByLabelText('memory.search.browse.sortLabel')).toHaveProperty('value', 'newest');
     expect(screen.getByLabelText('memory.search.browse.sortLabel')).toHaveProperty('disabled', false);
     expect(api.listMemoryEpisodes).toHaveBeenCalledWith('default', {
@@ -151,7 +198,7 @@ describe('MemorySearchPanel browse and search modes', () => {
 
   it('[MEMORY-LIST-003] resumes the all-project aggregate with the opaque cursor', async () => {
     const first = episode({ id: 'all-001', project: 'notes' });
-    const second = episode({ id: 'all-002', project: 'default', summary: 'Older aggregate episode.' });
+    const second = episode({ id: 'all-002', project: 'default', subject: 'Older aggregate episode.' });
     api.listMemoryEpisodes.mockImplementation((project: string, options: { cursor: string | null }) => {
       if (project !== 'all') return Promise.resolve(listResult([]));
       return Promise.resolve(options.cursor === 'cursor-page-2'
@@ -163,14 +210,14 @@ describe('MemorySearchPanel browse and search modes', () => {
     render(<MemorySearchPanel enabled />);
     await user.selectOptions(await screen.findByLabelText('memory.search.projectLabel'), 'all');
 
-    expect(await screen.findByText(first.summary)).toBeTruthy();
+    expect(await screen.findByText(first.subject)).toBeTruthy();
     expect(api.listMemoryEpisodes).toHaveBeenLastCalledWith('all', {
       page: 1,
       cursor: null,
       limit: 20,
     });
     await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
-    expect(await screen.findByText(second.summary)).toBeTruthy();
+    expect(await screen.findByText(second.subject)).toBeTruthy();
     expect(api.listMemoryEpisodes).toHaveBeenLastCalledWith('all', {
       page: 2,
       cursor: 'cursor-page-2',
@@ -186,8 +233,8 @@ describe('MemorySearchPanel browse and search modes', () => {
   });
 
   it('[MEMORY-LIST-004] refetches the displayed page when the API identity changes', async () => {
-    const first = episode({ id: 'page-1', summary: 'Original first page.' });
-    const second = episode({ id: 'page-2', summary: 'Original second page.' });
+    const first = episode({ id: 'page-1', subject: 'Original first page.' });
+    const second = episode({ id: 'page-2', subject: 'Original second page.' });
     api.listMemoryEpisodes.mockImplementation((_project: string, options: { page: number }) =>
       Promise.resolve(options.page === 1
         ? listResult([first], { total_count: 21 })
@@ -201,7 +248,7 @@ describe('MemorySearchPanel browse and search modes', () => {
     await screen.findByText('Original second page.');
 
     const replacementList = vi.fn().mockResolvedValue(listResult([
-      episode({ id: 'replacement-page-2', summary: 'Replacement second page.' }),
+      episode({ id: 'replacement-page-2', subject: 'Replacement second page.' }),
     ], { total_count: 21 }));
     apiHarness.current = { ...api, listMemoryEpisodes: replacementList };
     view.rerender(<MemorySearchPanel enabled />);
@@ -221,12 +268,12 @@ describe('MemorySearchPanel browse and search modes', () => {
       if (project !== 'all') return Promise.resolve(listResult([]));
       if (options.cursor === 'cursor-page-2') {
         return Promise.resolve(listResult([
-          episode({ id: 'page-2', summary: 'Aggregate page two.' }),
+          episode({ id: 'page-2', subject: 'Aggregate page two.' }),
         ], { total_count: 60, next_cursor: 'cursor-page-3' }));
       }
       pageOneReads += 1;
       return Promise.resolve(listResult([
-        episode({ id: `page-1-${pageOneReads}`, summary: 'Aggregate page one.' }),
+        episode({ id: `page-1-${pageOneReads}`, subject: 'Aggregate page one.' }),
       ], {
         total_count: 60,
         next_cursor: pageOneReads === 1 ? 'cursor-page-2' : null,
@@ -293,11 +340,11 @@ describe('MemorySearchPanel browse and search modes', () => {
         pageTwoAttempts += 1;
         return Promise.resolve(pageTwoAttempts === 1
           ? { status: 'failed', error: 'memory_provider_timeout' }
-          : listResult([episode({ id: 'recovered-page', summary: 'Recovered page.' })], {
+          : listResult([episode({ id: 'recovered-page', subject: 'Recovered page.' })], {
               total_count: 21,
             }));
       }
-      return Promise.resolve(listResult([episode({ summary: 'First aggregate page.' })], {
+      return Promise.resolve(listResult([episode({ subject: 'First aggregate page.' })], {
         total_count: 21,
         next_cursor: 'cursor-page-2',
       }));
@@ -337,7 +384,7 @@ describe('MemorySearchPanel browse and search modes', () => {
     expect(screen.getByText('memory.search.browse.partial')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
 
-    expect(await screen.findByText('Compared the rollout options.')).toBeTruthy();
+    expect(await screen.findByText('Release planning')).toBeTruthy();
     expect(api.listMemoryEpisodes).toHaveBeenLastCalledWith('all', {
       page: 2,
       cursor: 'retry-cursor',
@@ -416,6 +463,7 @@ describe('MemorySearchPanel browse and search modes', () => {
       Promise.resolve(listResult([
         episode({
           id: 'agent-entry',
+          subject: 'Agent-owned episode',
           body: 'Agent-owned episode',
           summary: 'Agent-owned episode',
           origin: options.origin === 'agent' ? 'agent' : 'user',
