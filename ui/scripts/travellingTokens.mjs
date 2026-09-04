@@ -38,8 +38,10 @@
 // name resolving perfectly while resolving to the wrong value -- `frozenAliases`
 // is that half, and it exists because this file's own refactor tripped it.
 
+import ts from 'typescript';
+
 import { customPropertiesIn } from './customProperties.mjs';
-import { withoutNonRenderingText } from './nonRenderingText.mjs';
+import { parseSource } from './nonRenderingText.mjs';
 
 // A selector that matches the document root itself, so a custom property
 // declared there is inherited by every element regardless of where it mounts.
@@ -115,48 +117,36 @@ function firstCompound(selector) {
   return selector;
 }
 
-// `:not(.model-hub-guard-dialog)` names a class it excludes, so the
-// parenthesised groups come out before the class names go in.
-function classesOf(compound) {
-  const bare = compound.replace(/\([^)]*\)/g, '');
-  return [...bare.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((match) => match[1]);
-}
-
-// The value of one JSX attribute, wherever it is spelled in a source. A quoted
-// literal ends at its closing quote; a braced expression is read whole, so
-// `cn('a', flag && 'b')` contributes both halves rather than its first.
+// The value of one JSX attribute, read whole: a quoted literal with its quotes,
+// a braced expression with its braces, so `cn('a', flag && 'b')` contributes
+// both halves rather than its first.
 //
-// Text, not tree, because an attribute's value is read as written and every
-// spelling of it is a literal somewhere. What the text does not distinguish is
-// whether it ships, so callers hand it source with the non-rendering text
-// already blanked: a commented-out `<div className="…">` left in place while a
-// component is reworked is not markup, and reading it as markup would assert a
-// scope for a class nothing renders and anchor a token nothing uses.
-function* attributeValues(source, attribute) {
-  const opening = new RegExp(`\\b${attribute}\\s*=\\s*`, 'g');
+// Tree, not text. `className` is an ordinary identifier, so the question "is
+// this one an attribute" is a question about position, and every answer read off
+// the bytes is an approximation of the grammar that is wrong for some spelling.
+// This one was wrong twice: first for a commented-out `<div className="…">`
+// left in place while a component is reworked, then -- once comments were
+// blanked -- for `const className = cn(…)`, which is a variable whose name
+// happens to match. Both are excluded here by construction rather than by a
+// third subtraction, because a `JsxAttribute` node is only ever an attribute.
+//
+// `nonRenderingText.mjs` already parses each of these files and already asks
+// this exact question of the tree (`NAMES_A_STYLE_SINK`), so the parse is shared
+// rather than repeated -- its cache keys on the source text, and the two walks
+// below hand over the same one.
+function* attributeValues(source, file, attribute) {
+  const tree = parseSource(source, file);
 
-  for (let match = opening.exec(source); match; match = opening.exec(source)) {
-    const cursor = match.index + match[0].length;
-    let end = cursor;
-
-    if (source[cursor] === '{') {
-      let depth = 0;
-      for (; end < source.length; end += 1) {
-        if (source[end] === '{') depth += 1;
-        else if (source[end] === '}') {
-          depth -= 1;
-          if (depth === 0) { end += 1; break; }
-        }
-      }
-    } else {
-      const quote = source[cursor];
-      if (quote !== '"' && quote !== "'" && quote !== '`') continue;
-      end = source.indexOf(quote, cursor + 1) + 1;
-      if (end === 0) continue;
+  const visit = function* visit(node) {
+    if (node.kind === ts.SyntaxKind.JsxAttribute
+      && node.initializer
+      && node.name?.getText(tree) === attribute) {
+      yield node.initializer.getText(tree);
     }
+    for (const child of node.getChildren(tree)) yield* visit(child);
+  };
 
-    yield source.slice(cursor, end);
-  }
+  yield* visit(tree);
 }
 
 /**
@@ -170,7 +160,7 @@ function* attributeValues(source, attribute) {
 function classesRenderedBy(source, file) {
   const found = new Set();
 
-  for (const expression of attributeValues(withoutNonRenderingText(source, file), 'className')) {
+  for (const expression of attributeValues(source, file, 'className')) {
     for (const literal of expression.matchAll(/["'`]([^"'`]*)["'`]/g)) {
       for (const name of literal[1].split(/\s+/)) if (name) found.add(name);
     }
@@ -193,10 +183,9 @@ function classesRenderedBy(source, file) {
  */
 function tokensUsedInMarkup(source, file) {
   const found = new Set();
-  const shipped = withoutNonRenderingText(source, file);
 
   for (const attribute of ['className', 'style']) {
-    for (const expression of attributeValues(shipped, attribute)) {
+    for (const expression of attributeValues(source, file, attribute)) {
       for (const match of expression.matchAll(UNGUARDED_USE)) found.add(match[1]);
     }
   }
@@ -204,14 +193,60 @@ function tokensUsedInMarkup(source, file) {
   return found;
 }
 
-// A selector made of nothing but classes, so every element it matches is known
-// from its class list alone. That is what lets a declaration on `.segment`
-// answer for a use whose subject is `.segment.is-selected`: both classes sit on
-// one element, so the declaration is on the element the use applies to. Any
-// other ingredient -- an attribute, a state pseudo, a tag -- adds a condition
-// the use's own subject does not carry, and counting it would sanction a
-// declaration that is only sometimes there.
-const PURE_CLASSES = /^(?:\.-?[_a-zA-Z][\w-]*)+$/;
+// One compound split into its ingredients, so each can be asked about
+// separately. Boundaries are the characters that start one -- `.`, `#`, `[`, and
+// a `:` that is not the second of a `::` -- read at depth zero, so `:not(.b)`
+// and `[data-x="a.b"]` stay whole.
+function ingredientsOf(compound) {
+  const parts = [];
+  let start = 0;
+  let depth = 0;
+  const cut = (index) => {
+    if (index > start) parts.push(compound.slice(start, index));
+    start = index;
+  };
+
+  for (let index = 0; index < compound.length; index += 1) {
+    const character = compound[index];
+    if (character === '(' || character === '[') {
+      if (depth === 0 && character === '[') cut(index);
+      depth += 1;
+    } else if (character === ')' || character === ']') depth -= 1;
+    else if (depth === 0 && (character === '.' || character === '#')) cut(index);
+    else if (depth === 0 && character === ':' && compound[index - 1] !== ':') cut(index);
+  }
+  cut(compound.length);
+
+  return parts;
+}
+
+// A compound as the two questions a declaration on it raises: WHICH elements
+// (its classes) and WHEN (everything else).
+//
+// Every non-class ingredient -- a state pseudo, an attribute, a tag -- is a
+// condition, and the first rule written here treated conditions as
+// disqualifications: any selector that was not classes alone was dropped, so a
+// declaration could not answer for a use. That is right about
+// `.a:hover { --ink: red }` answering a use on plain `.a`, and wrong about
+// `.control:hover { --hover-ink: red; color: var(--hover-ink) }`, where the
+// declaration and the use carry the SAME guard and the property therefore exists
+// on the element whenever the use applies. Dropping it failed correct CSS, which
+// is the one direction this gate is not allowed to be wrong in.
+//
+// So a guard is compared rather than counted, exactly as an `@media` condition
+// already was -- the file's own rule, applied to the other half of a
+// declaration's reach.
+function compoundParts(compound) {
+  const classes = [];
+  const guards = [];
+
+  for (const part of ingredientsOf(compound)) {
+    if (part.startsWith('.')) classes.push(part.slice(1));
+    else guards.push(part);
+  }
+
+  return { classes, guards };
+}
 
 /**
  * Every custom property some scope every element inherits, keyed to the
@@ -284,7 +319,19 @@ function scopeOf(declaration) {
 // The one scope that is not a subtree. Every scope narrower than this is a
 // place a value can differ, so it gets its own name; this one is where "the
 // value everywhere" is declared, and there is only ever one of those.
+//
+// "At the root" is not enough to be it: `@media (prefers-color-scheme: light)
+// { :root { --ink: black } }` is the ordinary way to write a theme, and it is a
+// place the value differs. Collapsing it here would file the override under the
+// same name as the base it overrides, and an alias frozen above it would read as
+// accompanied by the very declaration it fails to follow.
 const EVERYWHERE = ':root';
+
+function scopeUnder(declaration) {
+  const conditions = conditionsOn(declaration);
+  const everywhere = atDocumentRoot(declaration) && conditions.length === 0;
+  return everywhere ? EVERYWHERE : scopeOf(declaration);
+}
 
 /**
  * Aliases declared where the value they rename is not the one their readers see.
@@ -320,8 +367,7 @@ function frozenAliases(sheets) {
   for (const [, root] of sheets) {
     root.walkDecls((declaration) => {
       if (!declaration.prop.startsWith('--')) return;
-      const everywhere = insideTheme(declaration) || atDocumentRoot(declaration);
-      record(declaration.prop, everywhere ? EVERYWHERE : scopeOf(declaration));
+      record(declaration.prop, insideTheme(declaration) ? EVERYWHERE : scopeUnder(declaration));
     });
   }
 
@@ -366,7 +412,7 @@ function styledSubjects(sheets) {
   for (const [, root] of sheets) {
     root.walkRules((rule) => {
       for (const one of rule.selectors) {
-        for (const name of classesOf(firstCompound(one.trim()))) subjects.add(name);
+        for (const name of compoundParts(firstCompound(one.trim())).classes) subjects.add(name);
       }
     });
   }
@@ -401,20 +447,37 @@ function unscopedTokens(sheets, classNames) {
 
       for (const one of owner.selectors) {
         const selector = one.trim();
-        // Only a declaration on the element ITSELF is inherited by its whole
-        // subtree. One on `.guard-label > span` reaches that span's children
-        // and no sibling, so counting it would sanction a scope narrower than
-        // the one being consumed.
-        if (!PURE_CLASSES.test(selector)) continue;
+        // A declaration is inherited by the whole subtree of the element it
+        // lands on, so what a use may lean on is: this declaration is in force
+        // on every element that use applies to. Whether the selector reaches
+        // the element from the outside -- no combinator, so it says only what
+        // the element itself carries -- decides which of the two clauses below
+        // can answer for it. One on `.guard-label > span` reaches that span's
+        // children and no sibling, so it cannot answer for `.guard-label`.
+        const { classes, guards } = compoundParts(firstCompound(selector));
         if (!declaredOn.has(declaration.prop)) declaredOn.set(declaration.prop, []);
-        declaredOn.get(declaration.prop).push({ classes: classesOf(selector), conditions });
+        declaredOn.get(declaration.prop).push({
+          selector, classes, guards, conditions, itself: firstCompound(selector) === selector,
+        });
       }
     });
   }
 
-  const carried = (property, subject, conditions) => (declaredOn.get(property) ?? []).some(
-    (site) => site.classes.every((name) => subject.includes(name))
-      && site.conditions.every((one) => conditions.includes(one)),
+  // A declaration answers for a use when everything it asks for, the use asks
+  // for too, so the use cannot be reached without the declaration being in
+  // force. Two ways that happens. Either the declaration names the element
+  // itself -- its classes are on the use's element and every guard it applies
+  // under holds there too -- and then it is in force whatever the ancestors
+  // are. Or it is the very same selector, where there is nothing to compare
+  // because there is no second element: a rule that declares a token and reads
+  // it back resolves it, and a combinator in the path it took to get there says
+  // nothing about that. Either way the at-rule conditions must hold as well.
+  const carried = (property, selector, subject, guards, conditions) => (declaredOn.get(property) ?? []).some(
+    (site) => site.conditions.every((one) => conditions.includes(one))
+      && (site.selector === selector
+        || (site.itself
+          && site.classes.every((name) => subject.includes(name))
+          && site.guards.every((one) => guards.includes(one)))),
   );
 
   const unresolved = [];
@@ -429,12 +492,12 @@ function unscopedTokens(sheets, classNames) {
       const conditions = conditionsOn(declaration);
       for (const one of owner.selectors) {
         const selector = one.trim();
-        const subject = classesOf(firstCompound(selector));
+        const { classes: subject, guards } = compoundParts(firstCompound(selector));
         for (const name of subject) {
           if (!audited.has(name)) continue;
           for (const property of used) {
             if (inForce(inheritable.get(property), conditions)) continue;
-            if (carried(property, subject, conditions)) continue;
+            if (carried(property, selector, subject, guards, conditions)) continue;
             unresolved.push({ className: name, property, origin, selector, declaration: declaration.prop });
           }
         }

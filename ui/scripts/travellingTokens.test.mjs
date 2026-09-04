@@ -94,6 +94,25 @@ describe('classesRenderedBy', () => {
 
     expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['one', 'three']));
   });
+
+  it('reads only an attribute of an element, not every binding that shares its name', () => {
+    // `className` is an ordinary identifier as well as an attribute name, and a
+    // variable holding one is not markup: nothing here renders, so nothing here
+    // is a class this project styles or a token it has to anchor.
+    const source = "const className = 'gap-[var(--local-gap)] phantom-class';";
+
+    expect(classesRenderedBy(source, PROBE)).toEqual(new Set());
+    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set());
+  });
+
+  it('still reads the element that does render, standing next to one that does not', () => {
+    const source = [
+      "const className = 'gap-[var(--local-gap)] phantom-class';",
+      'const a = <div className="real-class" />;',
+    ].join('\n');
+
+    expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['real-class']));
+  });
 });
 
 describe('unscopedTokens', () => {
@@ -226,7 +245,7 @@ describe('unscopedTokens', () => {
     expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
   });
 
-  it('reports a declaration guarded by anything that is not a class', () => {
+  it('reports a declaration guarded by anything the use does not ask for too', () => {
     // Each of these adds a condition the use's own subject does not carry, so
     // the declaration is on the element only some of the time.
     for (const guard of ['.travels:hover', '.travels[data-open="true"]', 'div.travels']) {
@@ -234,6 +253,33 @@ describe('unscopedTokens', () => {
 
       expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
     }
+  });
+
+  it('accepts a declaration whose guard the use carries as well', () => {
+    // The guard is a condition, not a disqualification: where the use applies,
+    // it applies too. A rule that declares a token and reads it back in the
+    // same body is the shape this most often takes.
+    for (const selector of ['.travels:hover', '.travels[data-open]', 'div.travels']) {
+      const sheets = sheetsOf(`${selector} { --hover-ink: red; color: var(--hover-ink); }`);
+
+      expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
+    }
+  });
+
+  it('accepts a rule that declares and reads a token behind a combinator', () => {
+    // The declaration lands on the span, and so does the use. There is no
+    // second element for the combinator to be wrong about.
+    const sheets = sheetsOf('.travels > span { --pad: 8px; padding: var(--pad); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toEqual([]);
+  });
+
+  it('reports a token only a narrower subtree declares, which the class cannot reach', () => {
+    // The same combinator, now between the two: the span's children inherit it
+    // and no sibling of the span does, so `.travels` does not resolve it.
+    const sheets = sheetsOf('.travels > span { --pad: 8px } .travels { padding: var(--pad); }');
+
+    expect(unscopedTokens(sheets, ['travels'])).toHaveLength(1);
   });
 });
 
@@ -293,6 +339,29 @@ describe('frozenAliases', () => {
     const sheets = sheetsOf(`:root { --ink: white } ${themed} :root { --label-ink: var(--ink) }`);
 
     expect(frozenAliases(sheets)).toHaveLength(1);
+  });
+
+  it('reports an alias whose token a query restates at the very same root', () => {
+    // A bare `:root` under `@media` is not every element unconditionally: the
+    // value differs where the query holds, and the alias was substituted where
+    // it does not. The selector alone cannot tell the two apart.
+    const sheets = sheetsOf(
+      ':root { --ink: white; --label-ink: var(--ink) }'
+      + ' @media (prefers-color-scheme: light) { :root { --ink: black } }',
+    );
+
+    expect(frozenAliases(sheets)).toEqual([
+      expect.objectContaining({ property: '--label-ink', reads: '--ink' }),
+    ]);
+  });
+
+  it('accepts it once the query restates the alias too', () => {
+    const sheets = sheetsOf(
+      ':root { --ink: white; --label-ink: var(--ink) }'
+      + ' @media (prefers-color-scheme: light) { :root { --ink: black; --label-ink: var(--ink) } }',
+    );
+
+    expect(frozenAliases(sheets)).toEqual([]);
   });
 
   it('accepts an alias for a token nothing narrower ever restates', () => {
