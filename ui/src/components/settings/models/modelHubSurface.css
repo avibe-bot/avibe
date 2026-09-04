@@ -178,8 +178,6 @@
   --model-hub-source-age-size: 11px;
   --model-hub-source-tier-size: 10.5px;
   --model-hub-source-summary-ink: var(--model-hub-muted-b3);
-  --model-hub-source-label-ink: var(--model-hub-ink-73);
-  --model-hub-source-footnote-ink: var(--model-hub-ink-8c);
   --model-hub-source-chip-padding-y: 4px;
   --model-hub-source-chip-padding-x: 9px;
 
@@ -203,7 +201,6 @@
   --model-hub-usage-cell-size: 12px;
   --model-hub-usage-note-size: 10.5px;
   --model-hub-usage-column-radius: 2px;
-  --model-hub-usage-label-ink: var(--model-hub-ink-73);
   --model-hub-usage-note-ink: var(--model-hub-muted-b3);
 
   /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
@@ -214,7 +211,6 @@
   --model-hub-catalog-row-pad-y: 10px;
   --model-hub-catalog-row-gap: 14px;
   --model-hub-catalog-grip-size: 16px;
-  --model-hub-catalog-grip-ink: var(--model-hub-ink-4d);
   --model-hub-catalog-note-size: 11px;
 
   /* Model editor. */
@@ -1215,7 +1211,7 @@
   border-radius: var(--model-hub-source-action-radius);
 }
 .model-hub-source-metadata dt {
-  color: var(--model-hub-source-label-ink);
+  color: var(--model-hub-ink-73);
   font-size: 9.5px;
   font-weight: 600;
   line-height: 14px;
@@ -1254,7 +1250,7 @@
      column against the 36px band. */
   align-items: center;
   background: var(--model-hub-source-table-head-fill);
-  color: var(--model-hub-source-label-ink);
+  color: var(--model-hub-ink-73);
   font-size: var(--model-hub-source-label-size);
   line-height: 15px;
 }
@@ -1310,7 +1306,7 @@
 }
 .model-hub-source-tier-suggest:hover { border-color: var(--model-hub-wash-33); color: var(--foreground); }
 .model-hub-source-tier-note {
-  color: var(--model-hub-source-footnote-ink);
+  color: var(--model-hub-ink-8c);
   font-size: var(--model-hub-source-tier-size);
   line-height: 15px;
 }
@@ -1363,7 +1359,7 @@
 .model-hub-source-footnote {
   --model-hub-source-footnote-size: 11.5px;
   min-height: 16px;
-  color: var(--model-hub-source-footnote-ink);
+  color: var(--model-hub-ink-8c);
   font-size: var(--model-hub-source-footnote-size);
   line-height: 16px;
 }
@@ -1997,7 +1993,7 @@
   gap: 5px;
 }
 .model-hub-usage-stat-label {
-  color: var(--model-hub-usage-label-ink);
+  color: var(--model-hub-ink-73);
   font-size: var(--model-hub-usage-label-size);
 }
 .model-hub-usage-stat-value {
@@ -2028,7 +2024,7 @@
   gap: var(--model-hub-usage-gutter);
   align-items: center;
   background: var(--model-hub-usage-head-fill);
-  color: var(--model-hub-usage-label-ink);
+  color: var(--model-hub-ink-73);
   font-size: var(--model-hub-usage-label-size);
 }
 .model-hub-usage-row {
@@ -2051,7 +2047,7 @@
 .model-hub-usage-cell { min-width: 0; }
 .model-hub-usage-cell { font-variant-numeric: tabular-nums; }
 .model-hub-usage-cell-label {
-  color: var(--model-hub-usage-label-ink);
+  color: var(--model-hub-ink-73);
   font-size: var(--model-hub-usage-note-size);
   font-variant-numeric: normal;
 }
@@ -2102,7 +2098,7 @@
 }
 .model-hub-usage-axis-label:last-child { text-align: right; }
 .model-hub-usage-peak {
-  color: var(--model-hub-usage-label-ink);
+  color: var(--model-hub-ink-73);
   text-align: center;
 }
 
@@ -2281,7 +2277,7 @@
   justify-content: center;
   flex: none;
   width: var(--model-hub-catalog-grip-size);
-  color: var(--model-hub-catalog-grip-ink);
+  color: var(--model-hub-ink-4d);
 }
 .model-hub-catalog-grip.is-grabbed { color: var(--mint-ink); }
 .model-hub-catalog-grip:disabled { color: var(--model-hub-wash-33); }
@@ -2289,7 +2285,7 @@
   width: var(--model-hub-catalog-grip-size);
   height: var(--model-hub-catalog-grip-size);
   flex: none;
-  color: var(--model-hub-catalog-grip-ink);
+  color: var(--model-hub-ink-4d);
 }
 
 .model-hub-catalog-name {

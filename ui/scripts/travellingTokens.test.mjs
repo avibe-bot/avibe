@@ -12,6 +12,7 @@ import { eachStylesheet } from './stylesheets.mjs';
 import {
   classesRenderedBy,
   firstCompound,
+  frozenAliases,
   styledSubjects,
   tokensUsedInMarkup,
   unanchoredMarkupTokens,
@@ -55,6 +56,8 @@ describe('firstCompound', () => {
 });
 
 describe('classesRenderedBy', () => {
+  const PROBE = 'Component.tsx';
+
   it('reads a plain literal, a helper call and a conditional alike', () => {
     const source = [
       'const a = <div className="one two" />;',
@@ -62,13 +65,34 @@ describe('classesRenderedBy', () => {
       'const c = <div className={`five`} />;',
     ].join('\n');
 
-    expect(classesRenderedBy(source)).toEqual(new Set(['one', 'two', 'three', 'four', 'five']));
+    expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['one', 'two', 'three', 'four', 'five']));
   });
 
   it('ignores a class name that is only talked about', () => {
     const source = '// .model-hub-guard-label is styled elsewhere\nconst tip = ".model-hub-guard-hop";';
 
-    expect(classesRenderedBy(source)).toEqual(new Set());
+    expect(classesRenderedBy(source, PROBE)).toEqual(new Set());
+  });
+
+  it('ignores markup that is commented out, in either spelling', () => {
+    // A component half-reworked leaves the old tree sitting right there, and it
+    // is markup by every syntactic measure. What it is not is rendered, so a
+    // class only it carries is not a class this project styles anything with.
+    for (const source of [
+      'const a = <div className="live" />;\n// const b = <div className="dead" />;',
+      'const a = <div className="live" />;\n/* <div className="dead" /> */',
+      'const a = (\n  <div className="live">\n    {/* <span className="dead" /> */}\n  </div>\n);',
+    ]) {
+      expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['live']));
+    }
+  });
+
+  it('keeps reading the markup that is still there around it', () => {
+    // Blanking has to leave the file's shape alone: a comment between two
+    // elements must not swallow the second one.
+    const source = 'const a = (\n  <div className="one">\n    {/* was: two */}\n    <span className="three" />\n  </div>\n);';
+
+    expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['one', 'three']));
   });
 });
 
@@ -214,17 +238,87 @@ describe('unscopedTokens', () => {
 });
 
 describe('tokensUsedInMarkup', () => {
+  const PROBE = 'Component.tsx';
+
   it('reads a Tailwind arbitrary value and an inline style alike', () => {
     const source = [
       'const a = <ul className="flex gap-[var(--row-gap)]" />;',
       "const b = <li style={{ paddingInline: 'var(--row-pad)' }} />;",
     ].join('\n');
 
-    expect(tokensUsedInMarkup(source)).toEqual(new Set(['--row-gap', '--row-pad']));
+    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap', '--row-pad']));
   });
 
   it('leaves a fallback-bearing use alone, which draws something either way', () => {
-    expect(tokensUsedInMarkup('<ul className="gap-[var(--row-gap,4px)]" />')).toEqual(new Set());
+    expect(tokensUsedInMarkup('<ul className="gap-[var(--row-gap,4px)]" />', PROBE)).toEqual(new Set());
+  });
+
+  it('ignores a use that is commented out, which asks nothing of any scope', () => {
+    // The cost of reading it is not a missed defect but an invented one: the
+    // token would have to be anchored at `:root` to satisfy markup that does
+    // not render, and every remedy for that is a change to shipping CSS.
+    const source = "// <li style={{ gap: 'var(--dead-gap)' }} />\nconst a = <ul className=\"gap-[var(--row-gap)]\" />;";
+
+    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap']));
+  });
+});
+
+describe('frozenAliases', () => {
+  const sheetsOf = (css) => [['inline', postcss.parse(css)]];
+  const THEMED = ':root { --ink: white } [data-theme="light"] { --ink: black }';
+
+  it('reports an alias at the root for a token a theme restates', () => {
+    // Substituted once, at the root, in whichever theme applies there. An
+    // element inside `[data-theme="light"]` inherits that answer and not its own.
+    const sheets = sheetsOf(`${THEMED} :root { --label-ink: var(--ink) }`);
+
+    expect(frozenAliases(sheets)).toEqual([{
+      origin: 'inline',
+      property: '--label-ink',
+      reads: '--ink',
+      missing: ['[data-theme="light"]'],
+    }]);
+  });
+
+  it('accepts an alias restated in every scope that restates what it reads', () => {
+    const sheets = sheetsOf(
+      `${THEMED} :root { --label-ink: var(--ink) } [data-theme="light"] { --label-ink: var(--ink) }`,
+    );
+
+    expect(frozenAliases(sheets)).toEqual([]);
+  });
+
+  it('compares the query around a scope too, not only its selector', () => {
+    const themed = '@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --ink: black } }';
+    const sheets = sheetsOf(`:root { --ink: white } ${themed} :root { --label-ink: var(--ink) }`);
+
+    expect(frozenAliases(sheets)).toHaveLength(1);
+  });
+
+  it('accepts an alias for a token nothing narrower ever restates', () => {
+    const sheets = sheetsOf(':root { --ink: white } :root { --label-ink: var(--ink) }');
+
+    expect(frozenAliases(sheets)).toEqual([]);
+  });
+
+  it('says nothing about a value that computes, where placement is a real choice', () => {
+    // `color-mix` is doing work, and where that work happens has reasons on both
+    // sides. Only a rename is asserted, because a rename has no other job.
+    const sheets = sheetsOf(`${THEMED} :root { --label-ink: color-mix(in srgb, var(--ink) 80%, transparent) }`);
+
+    expect(frozenAliases(sheets)).toEqual([]);
+  });
+
+  it('says nothing about an alias on a class, whose scope promises nothing global', () => {
+    const sheets = sheetsOf(`${THEMED} .panel { --label-ink: var(--ink) }`);
+
+    expect(frozenAliases(sheets)).toEqual([]);
+  });
+
+  it('says nothing about a `@theme` entry, which is substituted rather than inherited', () => {
+    const sheets = sheetsOf(`${THEMED} @theme inline { --color-label: var(--ink) }`);
+
+    expect(frozenAliases(sheets)).toEqual([]);
   });
 });
 
@@ -270,7 +364,9 @@ describe('this project', () => {
     expect(styled).toContain(FOUND_ON);
 
     const rendered = new Set();
-    for (const [, text] of sources) for (const name of classesRenderedBy(text)) rendered.add(name);
+    for (const [origin, text] of sources) {
+      for (const name of classesRenderedBy(text, origin)) rendered.add(name);
+    }
     expect(rendered).toContain(FOUND_ON);
   });
 
@@ -285,5 +381,13 @@ describe('this project', () => {
 
   it('anchors every token its markup reads directly, which no selector can scope', () => {
     expect(unanchoredMarkupTokens(sheets, sources)).toEqual([]);
+  });
+
+  it('renames no token at the root that a theme restates underneath it', () => {
+    // The other half of the same question, and the half moving a declaration
+    // gets wrong: the name still resolves, so the check above stays green while
+    // the value stops following the theme. Asserted over the whole token layer
+    // for the same reason as the rest — the next widening is not this one.
+    expect(frozenAliases(sheets)).toEqual([]);
   });
 });

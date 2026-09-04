@@ -30,8 +30,16 @@
 // are compared against the use: which subtree its selector claims, and which
 // conditions its enclosing at-rules put on it. A rule that answers only the
 // first half sanctions exactly the kind of scope this file exists to catch.
+//
+// The same question has a second half, and moving a declaration is when it gets
+// asked. A `var()` inside a custom property's value is substituted where that
+// declaration applies, not where the value is finally read: descendants inherit
+// the answer, not the question. So widening a declaration's scope can leave the
+// name resolving perfectly while resolving to the wrong value -- `frozenAliases`
+// is that half, and it exists because this file's own refactor tripped it.
 
 import { customPropertiesIn } from './customProperties.mjs';
+import { withoutNonRenderingText } from './nonRenderingText.mjs';
 
 // A selector that matches the document root itself, so a custom property
 // declared there is inherited by every element regardless of where it mounts.
@@ -117,6 +125,13 @@ function classesOf(compound) {
 // The value of one JSX attribute, wherever it is spelled in a source. A quoted
 // literal ends at its closing quote; a braced expression is read whole, so
 // `cn('a', flag && 'b')` contributes both halves rather than its first.
+//
+// Text, not tree, because an attribute's value is read as written and every
+// spelling of it is a literal somewhere. What the text does not distinguish is
+// whether it ships, so callers hand it source with the non-rendering text
+// already blanked: a commented-out `<div className="…">` left in place while a
+// component is reworked is not markup, and reading it as markup would assert a
+// scope for a class nothing renders and anchor a token nothing uses.
 function* attributeValues(source, attribute) {
   const opening = new RegExp(`\\b${attribute}\\s*=\\s*`, 'g');
 
@@ -149,13 +164,13 @@ function* attributeValues(source, attribute) {
  *
  * The component is the authority on this, not a list kept next to the check: a
  * class it stops rendering stops being asserted, and one it starts rendering
- * starts. Only `className` is read, so a class named in a comment or a log line
- * is not mistaken for one that ships.
+ * starts. Only `className` is read, and only where it ships, so a class named
+ * in a comment or a log line is not mistaken for one that renders.
  */
-function classesRenderedBy(source) {
+function classesRenderedBy(source, file) {
   const found = new Set();
 
-  for (const expression of attributeValues(source, 'className')) {
+  for (const expression of attributeValues(withoutNonRenderingText(source, file), 'className')) {
     for (const literal of expression.matchAll(/["'`]([^"'`]*)["'`]/g)) {
       for (const name of literal[1].split(/\s+/)) if (name) found.add(name);
     }
@@ -176,11 +191,12 @@ function classesRenderedBy(source) {
  * `style` is read alongside `className` because `style={{ gap: 'var(--x)' }}`
  * is the same use spelled the other way.
  */
-function tokensUsedInMarkup(source) {
+function tokensUsedInMarkup(source, file) {
   const found = new Set();
+  const shipped = withoutNonRenderingText(source, file);
 
   for (const attribute of ['className', 'style']) {
-    for (const expression of attributeValues(source, attribute)) {
+    for (const expression of attributeValues(shipped, attribute)) {
       for (const match of expression.matchAll(UNGUARDED_USE)) found.add(match[1]);
     }
   }
@@ -231,6 +247,107 @@ function inheritableTokens(sheets) {
   }
 
   return inheritable;
+}
+
+// A declaration whose entire value is one unguarded `var()`. That is a rename
+// and nothing else, which is what makes it checkable here: a rename has to be
+// transparent, so if it resolves to a different value than the name it renames
+// would have, it has failed at the only thing it does. A value that computes --
+// `color-mix(…, var(--gold), …)` -- is doing work, and where that work happens
+// is a decision with reasons on both sides; this makes no claim about those.
+const PURE_ALIAS = /^var\(\s*(--[\w-]+)\s*\)$/;
+
+// A selector matching the document root itself, unqualified. `DOCUMENT_ROOT`
+// answers the same question, but `insideTheme` is deliberately not folded in
+// here: a `@theme inline` entry is a Tailwind bridge, substituted into the
+// utility rather than emitted as a variable an element inherits (`index.css`
+// says so at its own `--color-*` block), so it is not a scope anything inherits
+// a value from.
+function atDocumentRoot(declaration) {
+  const owner = declaration.parent;
+  return owner.type === 'rule'
+    && owner.selectors.some((one) => DOCUMENT_ROOT.test(one.trim()));
+}
+
+// The scope one declaration applies in: its selector and the conditions above
+// it, as a single comparable name. Two declarations share a scope when they
+// apply to exactly the same elements under exactly the same conditions, which
+// is the only sense in which one can be said to accompany the other.
+function scopeOf(declaration) {
+  const owner = declaration.parent;
+  const where = owner.type === 'rule'
+    ? owner.selector.replace(/\s+/g, ' ').trim()
+    : `@${owner.name} ${owner.params}`.replace(/\s+/g, ' ').trim();
+  return [where, ...conditionsOn(declaration)].join(' && ');
+}
+
+// The one scope that is not a subtree. Every scope narrower than this is a
+// place a value can differ, so it gets its own name; this one is where "the
+// value everywhere" is declared, and there is only ever one of those.
+const EVERYWHERE = ':root';
+
+/**
+ * Aliases declared where the value they rename is not the one their readers see.
+ *
+ * `var()` in a custom property's value is substituted at computed-value time on
+ * the element the declaration applies to. So `:root { --a: var(--b) }` does not
+ * mean "`--a` is `--b`"; it means "`--a` is whatever `--b` was at the root", and
+ * every descendant inherits that answer. Where `--b` is a theme token the
+ * project restates under `[data-theme="light"]` -- an attribute this repo sets
+ * on nested elements, not only on `<html>` -- an element inside that subtree
+ * reading `--a` gets the value from outside it. The theme switches and the
+ * alias does not.
+ *
+ * This is the failure mode of exactly one edit: moving a declaration outward.
+ * On its consuming class the alias sat inside whichever theme scope its element
+ * was in and was substituted there; at `:root` it is substituted once, above
+ * every boundary. Nothing about the name resolving changes, so the check above
+ * still passes -- which is why this one exists.
+ *
+ * The remedy is either half of what the freeze removed: read the token directly
+ * at the point of use, where substitution happens under the reader's own theme,
+ * or restate the alias in each scope that restates what it reads. The second is
+ * what gets checked for, so an alias that is genuinely maintained per theme is
+ * not reported.
+ */
+function frozenAliases(sheets) {
+  const scopes = new Map();
+  const record = (property, scope) => {
+    if (!scopes.has(property)) scopes.set(property, new Set());
+    scopes.get(property).add(scope);
+  };
+
+  for (const [, root] of sheets) {
+    root.walkDecls((declaration) => {
+      if (!declaration.prop.startsWith('--')) return;
+      const everywhere = insideTheme(declaration) || atDocumentRoot(declaration);
+      record(declaration.prop, everywhere ? EVERYWHERE : scopeOf(declaration));
+    });
+  }
+
+  const frozen = [];
+  for (const [origin, root] of sheets) {
+    root.walkDecls((declaration) => {
+      if (!declaration.prop.startsWith('--')) return;
+      // Only an alias at the document root is reported. One on a class freezes
+      // its value too, but only for a theme boundary mounted inside that class,
+      // and it is the class's own token to place. At the root the promise is
+      // that every element inherits it, and that is the promise a freeze breaks.
+      if (insideTheme(declaration) || !atDocumentRoot(declaration)) return;
+
+      const alias = PURE_ALIAS.exec(declaration.value.trim());
+      if (!alias) return;
+
+      const restated = scopes.get(declaration.prop);
+      const missing = [...(scopes.get(alias[1]) ?? [])]
+        .filter((scope) => scope !== EVERYWHERE && !restated.has(scope));
+      if (missing.length > 0) {
+        frozen.push({ origin, property: declaration.prop, reads: alias[1], missing });
+      }
+    });
+  }
+
+  return frozen;
 }
 
 /**
@@ -354,7 +471,7 @@ function unanchoredMarkupTokens(sheets, sources) {
   const unresolved = [];
 
   for (const [origin, text] of sources) {
-    for (const property of tokensUsedInMarkup(text)) {
+    for (const property of tokensUsedInMarkup(text, origin)) {
       if (!ours.has(property)) continue;
       if (inForce(inheritable.get(property), [])) continue;
       unresolved.push({ origin, property });
@@ -367,6 +484,7 @@ function unanchoredMarkupTokens(sheets, sources) {
 export {
   classesRenderedBy,
   firstCompound,
+  frozenAliases,
   inheritableTokens,
   styledSubjects,
   tokensUsedInMarkup,
