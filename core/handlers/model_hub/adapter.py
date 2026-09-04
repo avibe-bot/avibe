@@ -70,6 +70,9 @@ class SourceBinding:
     model_ids: tuple[str, ...]  # declared supply list (discovered + manual
     # custom entries); required by the engine's generic/API-key config. Bare
     # model ids, no provider prefix.
+    model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Per-model levels declared by the Source. CLIProxyAPI needs these on its
+    # model registration or it removes an otherwise valid reasoning effort.
 
 
 class OriginNotAllowedError(Exception):

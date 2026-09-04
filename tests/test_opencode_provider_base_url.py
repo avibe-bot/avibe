@@ -429,6 +429,23 @@ def test_upsert_custom_provider_refuses_existing_builtin_block(tmp_path: Path) -
         )
 
 
+def test_upsert_custom_provider_refuses_empty_existing_reserved_block(tmp_path: Path) -> None:
+    config_path = get_opencode_config_paths(tmp_path)[0]
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"provider": {"openai": {}}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="provider_id already exists"):
+        upsert_opencode_custom_provider(
+            "openai",
+            "OpenAI Override",
+            "openai-compatible",
+            "https://other.example/v1",
+            home=tmp_path,
+        )
+
+    assert _read_config(config_path) == {"provider": {"openai": {}}}
+
+
 @pytest.mark.parametrize(
     "provider_id",
     (

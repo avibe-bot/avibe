@@ -1417,6 +1417,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
                 vendor="openai",
                 protocol="openai_responses",
                 base_url=None,
+                model_reasoning_efforts=(("model-a", ("low", "high")),),
             ),
             _binding(
                 codex_ref,
@@ -1461,6 +1462,18 @@ def test_config_generation_is_private_and_never_logs_secrets(
     } == {"https://api.example.test/v1", "https://api.deepseek.com"}
     assert len(payload["codex-api-key"]) == 2
     assert {entry["base-url"] for entry in payload["codex-api-key"]} == {"https://api.openai.com/v1"}
+    responses_entry = next(
+        entry
+        for entry in payload["codex-api-key"]
+        if entry["api-key"] == "responses-secret-value"
+    )
+    assert responses_entry["models"] == [
+        {
+            "name": "model-a",
+            "alias": "model-a",
+            "thinking": {"levels": ["high", "low"]},
+        }
+    ]
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
     credential_path = next((store.root / "credentials").iterdir())
@@ -1633,6 +1646,26 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
         store.audit_auth_permissions()
     store.audit_auth_permissions(enforce=True)
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+
+
+def test_source_record_requires_valid_reasoning_state() -> None:
+    payload = {
+        "source_id": "src_fixture123",
+        "vendor": "anthropic",
+        "protocol": "anthropic",
+        "base_url": None,
+        "credential_ref": "cred_fixture123",
+        "allowed_origins": [],
+        "model_ids": ["model-a"],
+        "prefix": "avibe-fixture",
+    }
+
+    with pytest.raises(EngineStateError, match="invalid engine source reasoning state"):
+        SourceRecord.from_payload(payload)
+
+    payload["model_reasoning_efforts"] = [["other-model", ["high"]]]
+    with pytest.raises(EngineStateError, match="invalid engine source reasoning state"):
+        SourceRecord.from_payload(payload)
 
 
 @pytest.mark.parametrize(

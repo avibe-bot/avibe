@@ -770,18 +770,14 @@ def upsert_opencode_custom_provider(
 
     config, target_path = _load_or_create_user_config(home=home, logger_instance=active_logger)
     provider_map = config.get("provider")
-    existing_provider = (
-        provider_map.get(provider_id)
-        if isinstance(provider_map, dict)
-        else None
-    )
-    if existing_provider is None and (
+    provider_exists = isinstance(provider_map, dict) and provider_id in provider_map
+    if not provider_exists and (
         is_reserved_opencode_provider_id(provider_id)
         or provider_id.startswith("avibe-")
     ):
         raise ValueError("provider_id already exists")
     provider_config = _get_provider_config(config, provider_id)
-    if provider_config and get_opencode_custom_provider_adapter(
+    if provider_exists and get_opencode_custom_provider_adapter(
         provider_id,
         provider_config,
     ) is None:

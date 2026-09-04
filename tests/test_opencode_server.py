@@ -2934,6 +2934,40 @@ def test_empty_model_hub_menu_stops_the_healthy_serve_process():
     )
 
 
+def test_ui_process_adopts_only_a_running_model_hub_overlay():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    pid_info = {
+        "pid": 321,
+        "port": 4096,
+        "model_hub_overlay_path": "/tmp/opencode-overlay.json",
+        "model_hub_overlay_hash": "overlay-hash",
+        "model_hub_overlay_provider_ids": ["avibe-openai"],
+    }
+    manager._read_pid_file = Mock(return_value=pid_info)  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    base_url = asyncio.run(manager.adopt_running_model_hub_overlay())
+
+    assert base_url == "http://127.0.0.1:4096"
+    assert manager._active_model_hub_provider_ids() == ("avibe-openai",)
+
+
+def test_ui_process_refuses_to_launch_without_a_running_model_hub_overlay():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._read_pid_file = Mock(  # type: ignore[method-assign]
+        return_value={"pid": 321, "port": 4096}
+    )
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "overlay is not running"):
+        asyncio.run(manager.adopt_running_model_hub_overlay())
+
+    manager._start_server.assert_not_awaited()
+
+
 def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
     manager = OpenCodeServerManager(binary="opencode", port=4096)
     manager._model_hub_overlay_path = "/tmp/old-overlay.json"

@@ -194,8 +194,15 @@ def project_opencode_public_model(
         projected["modalities"] = modalities
     if model.supports_tools is not None:
         projected["tool_call"] = model.supports_tools
-    if model.supports_reasoning is not None:
-        projected["reasoning"] = model.supports_reasoning
+    if model.supports_reasoning is False:
+        projected["reasoning"] = False
+    elif (
+        model.supports_reasoning is True
+        and model.native_protocol == "openai_responses"
+    ):
+        # Anthropic variants already express support. ``reasoning: true`` makes
+        # that SDK add a budget-based option which overrides the selected effort.
+        projected["reasoning"] = True
     variant_key = {
         "openai_responses": "reasoningEffort",
         "anthropic": "effort",
@@ -641,6 +648,7 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
     source_origins = allowed_origins(source)
     if source.kind == "subscription" and not source_origins:
         raise ModelHubError("mode_switch_blocked", status=409)
+    active_models = [model for model in source.models if not model.retired]
     return SourceBinding(
         source_id=source.id,
         vendor=source.vendor,
@@ -648,7 +656,10 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
         base_url=source.base_url,
         credential_ref=source.credential_ref,
         allowed_origins=source_origins,
-        model_ids=tuple(model.id for model in source.models if not model.retired),
+        model_ids=tuple(model.id for model in active_models),
+        model_reasoning_efforts=tuple(
+            (model.id, tuple(model.reasoning_efforts)) for model in active_models
+        ),
     )
 
 

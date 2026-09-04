@@ -5307,6 +5307,7 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
         ModelHubBackendModelConfig(
             id="menu-model",
             native_protocol="openai_responses",
+            supports_reasoning=True,
             reasoning_efforts=["low", "high"],
         )
     ]
@@ -5340,6 +5341,7 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
         "high": {"reasoningEffort": "high"},
         "low": {"reasoningEffort": "low"},
     }
+    assert provider["models"]["menu-model"]["reasoning"] is True
     assert overlay.launches[0].target_model == "upstream-model"
     assert opencode_model_catalog_for_overlay(overlay) == {
         "providers": [
@@ -5502,6 +5504,7 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
         ModelHubBackendModelConfig(
             id="first-model",
             native_protocol="anthropic",
+            supports_reasoning=True,
             reasoning_efforts=["high"],
         ),
         ModelHubBackendModelConfig(
@@ -5545,6 +5548,7 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
     assert anthropic["models"]["first-model"]["variants"] == {
         "high": {"effort": "high"},
     }
+    assert "reasoning" not in anthropic["models"]["first-model"]
     assert set(anthropic["models"]) == {"first-model", "empty-route-model"}
     assert openai["name"] == "Avibe · OpenAI"
     assert openai["npm"] == "@ai-sdk/openai"

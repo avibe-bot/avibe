@@ -71,7 +71,15 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
         # OAuth credentials are engine auth files, not YAML credential values.
         return
     api_key = store.read_api_key(source.credential_ref)
-    models = [{"name": model, "alias": model} for model in source.model_ids]
+    reasoning_by_model = dict(source.model_reasoning_efforts)
+    models = []
+    for model in source.model_ids:
+        entry: dict[str, Any] = {"name": model, "alias": model}
+        reasoning_efforts = reasoning_by_model.get(model, ())
+        if reasoning_efforts:
+            # CLIProxyAPI's measured model-registration shape is strongest-first.
+            entry["thinking"] = {"levels": list(reversed(reasoning_efforts))}
+        models.append(entry)
     if source.protocol == "anthropic":
         base_url = source.base_url
         if not base_url:
