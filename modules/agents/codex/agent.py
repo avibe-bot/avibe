@@ -168,7 +168,8 @@ class CodexAgent(BaseAgent):
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, collaboration | fallback |
-        # fallback_pending_clear | injected_pending_persist | unavailable)
+        # fallback_pending_clear | fallback_pending_injection |
+        # fallback_pending_clear_injection | injected_pending_persist | unavailable)
         self._thread_prompt_strategies: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, developer_instructions, target_strategy)
         self._thread_unpersisted_prompts: Dict[str, tuple[str, str, str]] = {}
@@ -2704,11 +2705,16 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Fallback for Codex builds without Turn collaboration settings."""
 
+        pending_strategy = (
+            "fallback_pending_clear_injection"
+            if strategy == "fallback_pending_clear"
+            else "fallback_pending_injection"
+        )
         if not self._persist_prompt_strategy(
             request,
             thread_id,
             developer_instructions,
-            strategy="fallback_pending_injection",
+            strategy=pending_strategy,
             agent_session_id=agent_session_id,
         ):
             # No native mutation happened, so volatile strategy selection can
@@ -2720,6 +2726,14 @@ class CodexAgent(BaseAgent):
             raise CodexPromptRefreshUnavailableError(
                 "Could not prepare the fallback prompt strategy before injection"
             )
+        # Keep the write-ahead state in memory too. If the RPC outcome is
+        # ambiguous, a same-process retry must follow the same at-most-once
+        # recovery path as a process restart.
+        self._remember_thread_prompt_strategy(
+            request.base_session_id,
+            thread_id,
+            pending_strategy,
+        )
         await transport.send_request(
             "thread/inject_items",
             {
@@ -2828,11 +2842,16 @@ class CodexAgent(BaseAgent):
                 "fallback",
                 "fallback_pending_clear",
                 "fallback_pending_injection",
+                "fallback_pending_clear_injection",
                 "unavailable",
             }
             or (marker_strategy == "fallback" and not marker_sha256_valid)
             or (
-                marker_strategy == "fallback_pending_injection"
+                marker_strategy
+                in {
+                    "fallback_pending_injection",
+                    "fallback_pending_clear_injection",
+                }
                 and not marker_sha256_valid
             )
             or (
@@ -2917,6 +2936,7 @@ class CodexAgent(BaseAgent):
             "fallback",
             "fallback_pending_clear",
             "fallback_pending_injection",
+            "fallback_pending_clear_injection",
             "unavailable",
         }:
             raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
@@ -2937,17 +2957,38 @@ class CodexAgent(BaseAgent):
         }
         if developer_instructions:
             marker["sha256"] = self._prompt_fingerprint(developer_instructions)
-        try:
-            persisted = setter(
-                agent_session_id,
-                backend=self.name,
-                native_session_id=thread_id,
-                key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
-                value=marker,
+        def _set_marker(target_session_id: str) -> bool:
+            return bool(
+                setter(
+                    target_session_id,
+                    backend=self.name,
+                    native_session_id=thread_id,
+                    key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+                    value=marker,
+                )
             )
+
+        try:
+            persisted = _set_marker(agent_session_id)
         except Exception:
             logger.warning("Failed to persist Codex prompt strategy", exc_info=True)
             return False
+        if not persisted:
+            # A native thread is cached before its durable Session bind. The
+            # Workbench binder deliberately preserves the selected row when a
+            # first bind fails, so retry that exact bind before treating the
+            # marker as unavailable on every later Turn.
+            try:
+                rebound_session_id = self.bind_agent_session_id(request, thread_id)
+                persisted = bool(rebound_session_id) and _set_marker(
+                    str(rebound_session_id)
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to rebind the Codex Session before prompt marker persistence",
+                    exc_info=True,
+                )
+                persisted = False
         if not persisted:
             logger.warning(
                 "Skipped Codex prompt strategy for stale Session binding %s",
@@ -3046,6 +3087,15 @@ class CodexAgent(BaseAgent):
                 thread_id,
                 agent_session_id=agent_session_id,
             )
+        if prompt_strategy == "fallback_pending_injection":
+            # The native injection may already have succeeded. Never append it
+            # again when only its RPC acknowledgement is unknown.
+            prompt_strategy = "unavailable"
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                prompt_strategy,
+            )
         persisted_prompt_marker = None
         if developer_instructions and prompt_strategy is None:
             persisted_prompt_marker = self._read_persisted_prompt_strategy_marker(
@@ -3088,7 +3138,14 @@ class CodexAgent(BaseAgent):
                 developer_instructions,
             )
             prompt_changed = False
-        if prompt_strategy in {"collaboration", "fallback_pending_clear"}:
+        pending_clear_after_unknown_injection = (
+            prompt_strategy == "fallback_pending_clear_injection"
+        )
+        if prompt_strategy in {
+            "collaboration",
+            "fallback_pending_clear",
+            "fallback_pending_clear_injection",
+        }:
             await self._confirm_collaboration_mode_capability(transport)
         collaboration_mode_is_known = bool(
             getattr(transport, "supports_turn_collaboration_mode", True)
@@ -3099,14 +3156,15 @@ class CodexAgent(BaseAgent):
             and not effective_model
         )
         clear_collaboration_mode = collaboration_mode_is_known and bool(
-            prompt_strategy == "fallback_pending_clear"
+            prompt_strategy
+            in {"fallback_pending_clear", "fallback_pending_clear_injection"}
             or (model_explicit and effective_model is None)
             or collaboration_strategy_has_no_model
         )
         if clear_collaboration_mode:
             was_collaboration = prompt_strategy == "collaboration"
             turn_params["collaborationMode"] = None
-            if developer_instructions:
+            if developer_instructions and not pending_clear_after_unknown_injection:
                 prompt_strategy = (
                     "fallback_pending_clear"
                     if was_collaboration
@@ -3142,7 +3200,8 @@ class CodexAgent(BaseAgent):
         elif (
             developer_instructions
             and prompt_changed
-            and prompt_strategy != "unavailable"
+            and prompt_strategy
+            not in {"unavailable", "fallback_pending_clear_injection"}
         ):
             await self._inject_thread_developer_instructions(
                 transport,
@@ -3171,7 +3230,10 @@ class CodexAgent(BaseAgent):
         try:
             resp = await transport.send_request("turn/start", turn_params)
         except Exception as exc:
-            if prompt_strategy == "fallback_pending_clear":
+            if prompt_strategy in {
+                "fallback_pending_clear",
+                "fallback_pending_clear_injection",
+            }:
                 raise CodexPromptRefreshUnavailableError(
                     "Could not confirm that Codex cleared the previous collaboration prompt"
                 ) from exc
@@ -3219,6 +3281,29 @@ class CodexAgent(BaseAgent):
             else:
                 logger.warning(
                     "Codex collaboration clear succeeded but its completed prompt strategy marker remains pending"
+                )
+        elif (
+            prompt_strategy == "fallback_pending_clear_injection"
+            and developer_instructions
+        ):
+            # The clear is confirmed, but the preceding injection outcome is
+            # unknowable. Lock this thread against later prompt reinjection.
+            if self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy="unavailable",
+                agent_session_id=agent_session_id,
+            ):
+                prompt_strategy = "unavailable"
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    prompt_strategy,
+                )
+            else:
+                logger.warning(
+                    "Codex collaboration clear succeeded but the unknown injection marker remains pending"
                 )
 
         if use_collaboration_mode and developer_instructions:

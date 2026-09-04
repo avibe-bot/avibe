@@ -3860,7 +3860,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(
             get_agent_session_runtime_marker=Mock(return_value=None),
             set_agent_session_runtime_marker=Mock(
-                side_effect=[True, False, True]
+                side_effect=[True, False, False, True]
             ),
         )
         agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
@@ -4369,6 +4369,124 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             agent._thread_prompt_strategies["session-1"],
             ("thread-1", "fallback"),
+        )
+
+    async def test_start_turn_clears_collaboration_without_reinjecting_after_unknown_injection(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            get_codex_overrides=Mock(return_value=(None, None, None)),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        marker = {
+            "thread_id": "thread-1",
+            "strategy": "collaboration",
+            "sha256": agent._prompt_fingerprint("stable prompt"),
+        }
+
+        def read_marker(*_args, **_kwargs):
+            return dict(marker)
+
+        def write_marker(*_args, **kwargs):
+            marker.clear()
+            marker.update(kwargs["value"])
+            return True
+
+        agent.sessions = SimpleNamespace(
+            get_agent_session_runtime_marker=Mock(side_effect=read_marker),
+            set_agent_session_runtime_marker=Mock(side_effect=write_marker),
+        )
+        agent.ensure_agent_session_id = Mock(return_value="ses-runtime")
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._write_caller_env_script = Mock()
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="avibe:session-1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
+        )
+        failed_transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, TimeoutError("injection outcome unknown")],
+            ),
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "injection outcome unknown"):
+            await agent._start_turn(
+                failed_transport,
+                request,
+                "thread-1",
+                developer_instructions="stable prompt",
+            )
+
+        self.assertEqual(marker["strategy"], "fallback_pending_clear_injection")
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "fallback_pending_clear_injection"),
+        )
+
+        # Simulate a controller restart: recovery has only the write-ahead marker.
+        agent._thread_prompt_strategies = {}
+        agent._thread_developer_instructions = {}
+        resumed_transport = SimpleNamespace(
+            supports_turn_collaboration_mode=False,
+            send_request=AsyncMock(
+                side_effect=[{}, {"turn": {"id": "turn-2"}}],
+            ),
+        )
+
+        await agent._start_turn(
+            resumed_transport,
+            request,
+            "thread-1",
+            developer_instructions="stable prompt",
+        )
+
+        resumed_calls = resumed_transport.send_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in resumed_calls],
+            ["collaborationMode/list", "turn/start"],
+        )
+        self.assertIsNone(resumed_calls[1].args[1]["collaborationMode"])
+        self.assertEqual(marker["strategy"], "unavailable")
+        self.assertNotIn("sha256", marker)
+        self.assertEqual(
+            agent._thread_prompt_strategies["session-1"],
+            ("thread-1", "unavailable"),
+        )
+
+    def test_prompt_strategy_rebinds_a_stale_native_session_before_retry(self):
+        agent = object.__new__(CodexAgent)
+        agent.sessions = SimpleNamespace(
+            set_agent_session_runtime_marker=Mock(side_effect=[False, True]),
+        )
+        agent.bind_agent_session_id = Mock(return_value="ses-runtime")
+        request = SimpleNamespace(
+            base_session_id="session-1",
+            context=SimpleNamespace(platform_specific={}),
+        )
+
+        persisted = agent._persist_prompt_strategy(
+            request,
+            "thread-1",
+            "stable prompt",
+            strategy="collaboration",
+            agent_session_id="ses-runtime",
+        )
+
+        self.assertTrue(persisted)
+        agent.bind_agent_session_id.assert_called_once_with(request, "thread-1")
+        self.assertEqual(
+            agent.sessions.set_agent_session_runtime_marker.call_count,
+            2,
         )
 
     async def test_start_turn_persists_changed_fallback_prompt(self):
