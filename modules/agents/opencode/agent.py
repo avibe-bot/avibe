@@ -18,7 +18,6 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import (
     AVIBE_CALLER_PLATFORM_ENV,
@@ -29,6 +28,7 @@ from core.caller_context import (
     validated_caller_env_snapshot,
 )
 from core.message_output import stop_output_for, terminal_output_for
+from core.memory_cli_access import configure_memory_cli_access
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
@@ -59,7 +59,6 @@ from core.services.agent_steering import (
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
 )
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
@@ -1458,7 +1457,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # Resolve admission once: it associates or clears this turn's Memory
             # CLI session scope as a side effect, so a second call per turn would
             # repeat that write.
-            memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+            configure_memory_cli_access(self.controller, request.context)
             caller_context_env = caller_env_for_platform_payload(
                 request.context.platform_specific or {},
                 message=request.context,
@@ -1519,12 +1518,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
-                include_memory_cli=memory_cli_admitted,
-                avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
+                memory_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
+                ),
                 context=request.context,
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
-                current_agent_backend="opencode",
                 skills_cwd=request.working_path if binding_bound else None,
                 skills_project_base=project_base,
                 skills_claude_cli_path=managed_skill_claude_cli_path(

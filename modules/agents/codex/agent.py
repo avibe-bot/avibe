@@ -16,10 +16,10 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
-from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
+from core.memory_cli_access import configure_memory_cli_access
 from core.managed_skills import (
     managed_skill_claude_cli_path,
     managed_skill_environment,
@@ -39,7 +39,6 @@ from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
 )
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -2516,7 +2515,7 @@ class CodexAgent(BaseAgent):
         # Resolve admission once: it associates or clears this turn's Memory CLI
         # session scope as a side effect, so a second call per turn would repeat
         # that write.
-        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+        configure_memory_cli_access(self.controller, request.context)
 
         instruction_parts.append(
             await asyncio.to_thread(
@@ -2525,12 +2524,12 @@ class CodexAgent(BaseAgent):
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
                 include_codex_generated_images=True,
-                include_memory_cli=memory_cli_admitted,
-                avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
+                memory_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
+                ),
                 context=request.context,
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
-                current_agent_backend="codex",
                 skills_cwd=getattr(request, "working_path", None),
                 skills_project_base=managed_skill_project_base(request.context),
                 skills_claude_cli_path=managed_skill_claude_cli_path(

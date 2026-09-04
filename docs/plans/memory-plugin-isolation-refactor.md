@@ -274,11 +274,10 @@ protocol.
 
 ### Agent prompt
 
-Keep `_MEMORY_CLI_PROMPT`, its eligibility decision, and the current Personal
-Memory/user-preferences routing unchanged. Eligibility is derived from validated
-host config and the same generic author/message facts; prompt construction never
-invokes the optional runtime. Reducing prompt content is a separate product
-change.
+Keep the registered `memory-context-prompt` contract in the host. Stable
+`memory.enabled` configuration selects the Memory or Preferences prompt for the
+Session; turn-scoped CLI authorization never selects prompt content. Prompt
+construction never invokes the optional runtime.
 
 ## Host and Optional-Package Ownership
 

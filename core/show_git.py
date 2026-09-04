@@ -83,11 +83,6 @@ SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT = (
     "`git -C <workspace>` addresses the **user's repo**, not Avibe history: never commit, push, or publish on their behalf, and never use it for Avibe restore.",
     "Never locate or mutate Avibe's shadow gitdir on your own initiative. Only if the user explicitly asks to recover from Avibe history, use standard git with explicit `--git-dir` and `--work-tree` against the session's shadow gitdir for read or restore only; never commit to it.",
 )
-SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT = (
-    "Automatic Show Page history is unavailable because Git could not be resolved for this process. Continue editing normally, but do not use history or restore commands for this workspace.",
-)
-
-
 class ShowGitError(RuntimeError):
     """A platform Git operation failed."""
 
@@ -201,8 +196,8 @@ def format_agent_contract(
     if checkpointing_available is None:
         checkpointing_available = show_git_checkpointing_active()
     if not checkpointing_available:
-        lines = SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT
-    elif session_id is not None and _workspace_is_self_managed(session_id):
+        return ""
+    if session_id is not None and _workspace_is_self_managed(session_id):
         lines = SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT
     else:
         lines = SHOW_GIT_AGENT_CONTRACT

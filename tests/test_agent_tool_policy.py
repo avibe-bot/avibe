@@ -201,58 +201,6 @@ def test_shared_prompt_module_has_no_top_level_claude_import():
                 assert not alias.name.startswith("modules.claude")
 
 
-def test_prompt_describes_enforcement_when_the_policy_is_active(monkeypatch):
-    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
-    section = spi._build_tool_policy_section("claude")
-    assert "is blocked at the tool layer" in section
-    assert "are all denied" in section
-
-
-def test_prompt_admits_partial_enforcement_without_argument_aware_hooks(monkeypatch):
-    # The name-only fallback cannot inspect arguments, so it blocks Workflow and
-    # nothing else. Claiming full denial would stop the agent from self-policing
-    # exactly the calls no gate is covering.
-    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
-    section = spi._build_tool_policy_section("claude")
-    assert "only partly blocked" in section
-    assert "A native multi-agent workflow is denied outright" in section
-    assert "are **not** stopped here" in section
-    assert "is blocked at the tool layer" not in section
-    assert "are all denied" not in section
-
-
-def test_hookless_prompt_names_every_tool_the_name_list_leaves_open(monkeypatch):
-    # Whatever `check_tool_call` can deny but the name-only list does not carry
-    # is unguarded on this path, and the prompt is the only thing left telling
-    # the agent so. `Bash` is exempt because the policy never denies it.
-    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
-    section = spi._build_tool_policy_section("claude")
-    unguarded = {
-        name
-        for name in policy.session_only_background_tool_names()
-        if name not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES and name != "Bash"
-    }
-    assert unguarded == {"Agent", "ScheduleWakeup", "CronCreate"}
-    described = {
-        "Agent": "background subagent",
-        "ScheduleWakeup": "self-scheduled wakeup",
-        "CronCreate": "non-durable in-session cron job",
-    }
-    for name in unguarded:
-        assert described[name] in section, f"{name} is unguarded but unmentioned"
-
-
-def test_prompt_claims_no_gate_on_backends_that_install_none(monkeypatch):
-    # Only the Claude session handler installs the hook, so hook availability in
-    # an importable SDK says nothing about a Codex or OpenCode session.
-    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
-    for backend in ("codex", "opencode", "unknown"):
-        section = spi._build_tool_policy_section(backend)
-        assert "is not gated in this runtime" in section
-        assert "blocked at the tool layer" not in section
-        assert "only partly blocked" not in section
-        assert "vibe watch add" in section
-
 # --------------------------------------------------------------------------
 # claude adapter
 # --------------------------------------------------------------------------

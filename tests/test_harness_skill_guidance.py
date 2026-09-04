@@ -66,7 +66,7 @@ def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
     the agent a call that fails at runtime. `tests/test_agent_tool_policy.py`
     guards the same rule for the native-scheduler denial strings. Harness
     operational detail now lives in ``use-avibe-harness`` while the always-on
-    prompt retains only routing and live safety boundaries.
+    prompt retains only stable routing.
     """
 
     prompt = build_system_prompt_injection(
@@ -76,7 +76,6 @@ def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
             platform="avibe",
             platform_specific={"agent_session_id": "ses-test"},
         ),
-        current_agent_backend="codex",
     )
     examples = _embedded_cli_examples(
         prompt + "\n" + _read("skills/use-avibe-harness/SKILL.md")

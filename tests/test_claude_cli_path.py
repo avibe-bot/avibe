@@ -1523,7 +1523,7 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
     assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
 
 
-def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
+def test_cached_claude_subagent_revalidates_memory_principal_without_prompt_churn(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1618,10 +1618,12 @@ def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
         platform_specific={"routing_subagent": "reviewer"},
     )
     denied_client = _run_session(handler, denied_context)
-    assert denied_client is not local_client
-    assert local_client.disconnects == 1
+    assert denied_client is local_client
+    assert local_client.disconnects == 0
     assert principals == {}
-    assert "## Personal Memory" not in str(denied_client.options.system_prompt)
+    assert "## Personal Memory" in str(denied_client.options.system_prompt)
+
+
 def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(
     monkeypatch,
     tmp_path: Path,

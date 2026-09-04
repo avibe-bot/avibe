@@ -2258,7 +2258,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
     launch_path: str,
 ) -> None:
     from core.controller import Controller
-    from core.system_prompt_injection import memory_cli_prompt_admitted
+    from core.memory_cli_access import configure_memory_cli_access
 
     manager, _other, engine, _engine_b, _starts = managers
     manager.controller.config.memory = SimpleNamespace(enabled=True)
@@ -2294,12 +2294,12 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
         memory_users.append(
             facts_controller._memory_turn_facts(context).user_id
         )
-        prompt_admitted = memory_cli_prompt_admitted(prompt_controller, context)
+        cli_admitted = configure_memory_cli_access(prompt_controller, context)
         payload = context.platform_specific or {}
         memory_cli_observations.append(
             (
                 payload.get("memory_cli_admitted") is True,
-                prompt_admitted,
+                cli_admitted,
                 prompt_controller.memory_scope_for_cli_session("ses_fsm"),
             )
         )
