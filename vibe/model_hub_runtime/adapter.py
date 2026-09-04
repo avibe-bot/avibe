@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import threading
 import uuid
@@ -41,6 +42,7 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
+from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
 from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
@@ -93,6 +95,7 @@ class _ProtocolEvidence:
     protocol: _ProtocolProof
     authentication: _AuthenticationEvidence
     shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
+    status: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -207,6 +210,17 @@ _CREDENTIAL_ERROR_PARAMS = frozenset(
         "x-token",
     }
 )
+_CREDENTIAL_ERROR_MESSAGE_TOKENS = frozenset(
+    {
+        "authentication",
+        "auth_failed",
+        "invalid_api_key",
+        "api_key_not_valid",
+        "missing_api_key",
+        "no_api_key",
+        "unauthorized",
+    }
+)
 _PAIRWISE_EXCLUSION_SHAPES = frozenset(
     {
         _ProtocolObservationShape.HTTP_404,
@@ -214,6 +228,8 @@ _PAIRWISE_EXCLUSION_SHAPES = frozenset(
         _ProtocolObservationShape.UNSTRUCTURED,
     }
 )
+_IDENTIFIER_SEPARATOR_RE = re.compile(r"[^0-9A-Za-z]+")
+_CAMEL_CASE_BOUNDARY_RE = re.compile(r"(?<=[0-9a-z])(?=[A-Z])")
 
 
 def _openai_evidence_rules(
@@ -344,10 +360,21 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
 
 
 def _error_identifiers(error: Mapping[str, Any]) -> frozenset[str]:
+    return _payload_identifiers(error)
+
+
+def _normalized_identifier(value: str) -> str:
+    normalized = _CAMEL_CASE_BOUNDARY_RE.sub("_", value.strip())
+    normalized = _IDENTIFIER_SEPARATOR_RE.sub("_", normalized).strip("_").lower()
+    return normalized
+
+
+def _payload_identifiers(payload: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(
-        value.strip().lower()
-        for value in (error.get("type"), error.get("code"))
+        normalized
+        for value in (payload.get("type"), payload.get("code"))
         if isinstance(value, str)
+        if (normalized := _normalized_identifier(value))
     )
 
 
@@ -359,6 +386,13 @@ def _error_param_name(error: Mapping[str, Any]) -> str | None:
     return normalized or None
 
 
+def _error_message_indicates_credential_rejection(message: object) -> bool:
+    if not isinstance(message, str) or not message.strip():
+        return False
+    normalized = _normalized_identifier(message)
+    return any(token in normalized for token in _CREDENTIAL_ERROR_MESSAGE_TOKENS)
+
+
 def _request_error_rejects_credential(
     status: int,
     error: Mapping[str, Any] | None,
@@ -366,7 +400,11 @@ def _request_error_rejects_credential(
     return (
         status in _REQUEST_ERROR_STATUSES
         and isinstance(error, dict)
-        and _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+        and (
+            _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+            or not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(_error_identifiers(error))
+            or _error_message_indicates_credential_rejection(error.get("message"))
+        )
     )
 
 
@@ -404,6 +442,28 @@ def _anthropic_wrapperless_error_kind(
     return None
 
 
+def _openai_wrapperless_error_kind(
+    status: int,
+    payload: Mapping[str, Any],
+) -> str | None:
+    if isinstance(payload.get("error"), dict):
+        return None
+    identifiers = _payload_identifiers(payload)
+    if not identifiers:
+        return None
+    if status in _REQUEST_ERROR_STATUSES and not (
+        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
+    ).isdisjoint(identifiers):
+        return "accepted"
+    if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "rejected"
+    if status in _SERVER_ERROR_STATUSES and not _SERVER_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    if status in _RATE_LIMIT_STATUSES and not _RATE_LIMIT_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    return None
+
+
 def _default_unproven_shape(
     *,
     status: int,
@@ -425,52 +485,58 @@ def _parse_protocol_authenticated_evidence(
     protocol: str,
     status: int,
     body: str | bytes,
+    *,
+    vendor: str | None = None,
+    request_root: str | None = None,
 ) -> _ProtocolEvidence:
-    """Classify protocol proof and authentication as independent evidence.
+    """Classify response-shaped protocol proof and table-driven auth evidence.
 
-    Observation is sequential and stops at the first authenticated proof.
-    Status, vendor, URL, and probe order never prove a protocol or credential
-    by themselves; a generic response therefore remains unproven even when its
-    HTTP status is conventionally associated with authentication or validation.
-    A structured authentication error may prove credential rejection without
-    distinguishing the attempted OpenAI protocol. Accepted, rejected, and unknown
-    are all positive table entries; there is no default authentication result for
-    a shaped response. The observation result exposes a non-null protocol if and
-    only if a protocol-specific response shape also proves authentication
-    acceptance.
+    This parser never upgrades a generic response into a protocol owner on its
+    own. ``observe_source()`` may later apply the September 4, 2026 owner-based
+    ladder for shipped vendor pins and concrete `custom` declarations after the
+    constrained path has responded. `custom` Auto detect still relies on this
+    parser's response evidence alone.
     """
+
+    def evidence(
+        protocol: _ProtocolProof,
+        authentication: _AuthenticationEvidence,
+        shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE,
+    ) -> _ProtocolEvidence:
+        return _ProtocolEvidence(
+            protocol=protocol,
+            authentication=authentication,
+            shape=shape,
+            status=status,
+        )
 
     try:
         payload = json.loads(body)
     except (TypeError, UnicodeDecodeError, ValueError):
-        return _ProtocolEvidence(
+        return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
             shape=_default_unproven_shape(status=status, non_json=True),
         )
     if not isinstance(payload, dict):
-        return _ProtocolEvidence(
+        return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
             shape=_default_unproven_shape(status=status),
         )
 
-    top_level_identifiers = {
-        value.strip().lower()
-        for value in (payload.get("type"), payload.get("code"))
-        if isinstance(value, str)
-    }
+    top_level_identifiers = _payload_identifiers(payload)
     if (
         status in _AUTHENTICATION_ERROR_STATUSES
         and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
     ):
-        return _ProtocolEvidence(
+        return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
         )
     error = payload.get("error")
     if _request_error_rejects_credential(status, error):
-        return _ProtocolEvidence(
+        return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
         )
@@ -478,18 +544,18 @@ def _parse_protocol_authenticated_evidence(
     if protocol == "anthropic":
         wrapperless = _anthropic_wrapperless_error_kind(status, payload)
         if wrapperless == "accepted":
-            return _ProtocolEvidence(
+            return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.ACCEPTED,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
         if wrapperless == "rejected":
-            return _ProtocolEvidence(
+            return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.REJECTED,
             )
         if wrapperless == "unknown":
-            return _ProtocolEvidence(
+            return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.UNKNOWN,
             )
@@ -497,12 +563,19 @@ def _parse_protocol_authenticated_evidence(
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
         if rule.matches(status, payload):
-            return _ProtocolEvidence(
+            return evidence(
                 protocol=rule.protocol,
                 authentication=rule.authentication,
                 shape=rule.shape,
             )
     if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
+        wrapperless = _openai_wrapperless_error_kind(status, payload)
+        if wrapperless == "accepted":
+            return evidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+                shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+            )
         if isinstance(error, dict):
             identifiers = _error_identifiers(error)
             if (
@@ -510,17 +583,17 @@ def _parse_protocol_authenticated_evidence(
                 and _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers)
                 and _error_param_name(error) not in _OPENAI_FAMILY_PARAMS
             ):
-                return _ProtocolEvidence(
+                return evidence(
                     protocol=_ProtocolProof.UNPROVEN,
                     authentication=_AuthenticationEvidence.ACCEPTED,
                     shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
                 )
     if _response_shape_proves_protocol(protocol, payload):
-        return _ProtocolEvidence(
+        return evidence(
             protocol=_ProtocolProof.PROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
         )
-    return _ProtocolEvidence(
+    return evidence(
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_default_unproven_shape(status=status, payload=payload),
@@ -572,6 +645,8 @@ async def _probe_protocol_response(
                     protocol,
                     response.status,
                     body,
+                    vendor=vendor,
+                    request_root=root,
                 )
     except asyncio.TimeoutError:
         raise EngineClientError("protocol observation timed out", error_type="timeout") from None
@@ -676,6 +751,21 @@ def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
     )
 
 
+def _protocol_is_persistable_without_shape_proof(
+    *,
+    credential_kind: str,
+    vendor: str,
+    protocol: str,
+    protocol_order: Sequence[str],
+) -> bool:
+    if credential_kind != "api_key":
+        return False
+    pinned_protocol = pinned_api_key_protocol(vendor)
+    if pinned_protocol == protocol:
+        return True
+    return vendor == "custom" and len(protocol_order) == 1 and protocol_order[0] == protocol
+
+
 def _anthropic_wrapperless_elimination_proof(
     responses: Mapping[str, _ProtocolEvidence],
     *,
@@ -766,6 +856,7 @@ def _probe_oauth_protocol_response(
         protocol,
         status,
         body if isinstance(body, str) else "",
+        vendor=vendor,
     )
 
 
@@ -1428,14 +1519,18 @@ class CLIProxyEngineAdapter:
         credential_ref: str,
         protocol_order: Sequence[str],
     ) -> SourceObservation:
-        """Observe sequentially and stop at the first authenticated proof.
+        """Observe sequentially and stop at the first persistable proof.
 
         ``protocol_order`` orders attempts only. A protocol-specific response
         with accepted authentication proves the current attempt and terminates
-        observation. A shaped credential rejection is recorded while later
-        candidates continue. Vendor, URL, and order never create a conclusion;
-        exhausting the order without any shaped response is the ambiguous
-        boundary. This is the require-proven reading of AC-27.
+        observation. A shipped vendor catalog pin or a concrete `custom`
+        declaration also terminates observation once that exact protocol path
+        returns an owner-scoped auth status: 401/403 reject, while 2xx and
+        request-error 400/404/422 accept even when the response shape stays
+        generic. A shaped credential rejection is recorded while later
+        candidates continue on Auto detect. Vendor, URL, and order never create
+        a conclusion on their own; `custom` Auto still requires response-backed
+        proof, and exhausting that path without one remains ambiguous.
         """
 
         metadata = await asyncio.to_thread(
@@ -1499,6 +1594,33 @@ class CLIProxyEngineAdapter:
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
+            owner_scoped_protocol = _protocol_is_persistable_without_shape_proof(
+                credential_kind=str(credential_kind),
+                vendor=normalized_vendor,
+                protocol=protocol,
+                protocol_order=protocol_order,
+            )
+            owner_rejected = (
+                owner_scoped_protocol
+                and evidence.status in _AUTHENTICATION_ERROR_STATUSES
+            )
+            owner_accepted = (
+                owner_scoped_protocol
+                and (
+                    evidence.status in _SUCCESS_STATUSES
+                    or evidence.status in _REQUEST_ERROR_STATUSES
+                )
+            )
+            if owner_rejected:
+                evidence = replace(
+                    evidence,
+                    authentication=_AuthenticationEvidence.REJECTED,
+                )
+            elif owner_accepted:
+                evidence = replace(
+                    evidence,
+                    authentication=_AuthenticationEvidence.ACCEPTED,
+                )
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
                 ruled_out_protocols.add(protocol)
@@ -1513,10 +1635,13 @@ class CLIProxyEngineAdapter:
                 received_unproven_response = True
                 if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
                     received_accepted_unproven_response = True
+                    if owner_scoped_protocol:
+                        proved_protocol = protocol
                 if _pairwise_positive_exclusion(evidence):
                     ruled_out_protocols.add(protocol)
                 response_evidence_by_protocol[protocol] = evidence
-                continue
+                if proved_protocol is None:
+                    continue
             try:
                 if credential_kind == "api_key":
                     models = await probe_models(

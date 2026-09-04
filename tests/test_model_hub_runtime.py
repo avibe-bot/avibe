@@ -40,6 +40,7 @@ from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
@@ -76,6 +77,15 @@ RELEASED_INSTALL_CLAIMS = json.loads(
 )["claims"]
 RUNTIME_INSTALL_GENERATION_A = "a" * 32
 RUNTIME_INSTALL_GENERATION_B = "b" * 32
+API_KEY_VENDOR_RUNTIME_CASES = tuple(
+    [
+        *[
+            pytest.param(entry.id, entry.protocol, entry.official_base_url, id=entry.id)
+            for entry in api_key_vendor_catalog()
+        ],
+        pytest.param("codex", "openai_responses", "https://api.openai.com/v1", id="codex"),
+    ]
+)
 
 
 def _create_runtime_install_claim(
@@ -1388,6 +1398,16 @@ def test_config_generation_is_private_and_never_logs_secrets(
         vendor="openai",
         protocol="openai_responses",
     )
+    codex_ref = store.store_api_key(
+        "codex-secret-value",
+        vendor="codex",
+        protocol="openai_responses",
+    )
+    deepseek_ref = store.store_api_key(
+        "deepseek-secret-value",
+        vendor="deepseek",
+        protocol="openai_chat",
+    )
     store.sync_sources(
         [
             _binding(credential_ref),
@@ -1396,6 +1416,20 @@ def test_config_generation_is_private_and_never_logs_secrets(
                 source_id="src_responses1",
                 vendor="openai",
                 protocol="openai_responses",
+                base_url=None,
+            ),
+            _binding(
+                codex_ref,
+                source_id="src_codexresp1",
+                vendor="codex",
+                protocol="openai_responses",
+                base_url=None,
+            ),
+            _binding(
+                deepseek_ref,
+                source_id="src_deepseekcfg",
+                vendor="deepseek",
+                protocol="openai_chat",
                 base_url=None,
             ),
         ]
@@ -1422,7 +1456,11 @@ def test_config_generation_is_private_and_never_logs_secrets(
     assert payload["remote-management"]["allow-remote"] is False
     assert payload["remote-management"]["disable-control-panel"] is True
     assert payload["openai-compatibility"][0]["api-key-entries"][0]["api-key"] == ("upstream-secret-value")
-    assert payload["codex-api-key"][0]["base-url"] == "https://api.openai.com/v1"
+    assert {
+        entry["base-url"] for entry in payload["openai-compatibility"]
+    } == {"https://api.example.test/v1", "https://api.deepseek.com"}
+    assert len(payload["codex-api-key"]) == 2
+    assert {entry["base-url"] for entry in payload["codex-api-key"]} == {"https://api.openai.com/v1"}
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
     credential_path = next((store.root / "credentials").iterdir())
@@ -1432,6 +1470,8 @@ def test_config_generation_is_private_and_never_logs_secrets(
         runtime_secrets.gateway_token,
         "upstream-secret-value",
         "responses-secret-value",
+        "codex-secret-value",
+        "deepseek-secret-value",
     ):
         assert secret not in caplog.text
 
@@ -1495,6 +1535,25 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     )
     assert official[0].base_url is None
 
+    official_deepseek_ref = store.store_api_key(
+        "secret",
+        vendor="deepseek",
+        protocol="openai_chat",
+        base_url=None,
+    )
+    official_deepseek = store.sync_sources(
+        [
+            _binding(
+                official_deepseek_ref,
+                source_id="src_deepseek01",
+                vendor="deepseek",
+                protocol="openai_chat",
+                base_url=None,
+            )
+        ]
+    )
+    assert official_deepseek[0].base_url is None
+
     auth_file = store.auth_dir / "oauth.json"
     auth_file.write_text("{}", encoding="utf-8")
     auth_file.chmod(0o644)
@@ -1502,6 +1561,76 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
         store.audit_auth_permissions()
     store.audit_auth_permissions(enforce=True)
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("vendor", "expected_base_url"),
+    [
+        *[
+            pytest.param(entry.id, entry.official_base_url, id=entry.id)
+            for entry in api_key_vendor_catalog()
+        ],
+        pytest.param("codex", "https://api.openai.com/v1", id="codex"),
+    ],
+)
+def test_api_key_vendor_catalog_populates_runtime_official_base_urls(
+    vendor: str,
+    expected_base_url: str,
+) -> None:
+    assert client_module._OFFICIAL_BASE_URLS[vendor] == expected_base_url
+
+
+@pytest.mark.parametrize(
+    ("vendor", "protocol", "expected_base_url"),
+    API_KEY_VENDOR_RUNTIME_CASES,
+)
+def test_catalog_owned_api_key_sources_without_explicit_base_url_sync_and_write_engine_config(
+    tmp_path: Path,
+    vendor: str,
+    protocol: str,
+    expected_base_url: str,
+) -> None:
+    source_suffix = "".join(character for character in vendor.lower() if character.isalnum())
+    source_id = f"src_{(source_suffix + '12345678')[:8]}"
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    credential_ref = store.store_api_key(
+        "secret",
+        vendor=vendor,
+        protocol=protocol,
+        base_url=None,
+    )
+    store.sync_sources(
+        [
+            _binding(
+                credential_ref,
+                source_id=source_id,
+                vendor=vendor,
+                protocol=protocol,
+                base_url=None,
+            )
+        ]
+    )
+    config_path = instance_dir / "config.yaml"
+
+    write_engine_config(
+        config_path,
+        host="127.0.0.1",
+        port=18231,
+        auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets,
+        sources=store.list_sources(),
+        state_store=store,
+    )
+
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if protocol == "anthropic":
+        assert payload["claude-api-key"][0]["base-url"] == expected_base_url
+        return
+    if protocol == "openai_responses":
+        assert payload["codex-api-key"][0]["base-url"] == expected_base_url
+        return
+    assert payload["openai-compatibility"][0]["base-url"] == expected_base_url
 
 
 def test_state_removes_secret_bearing_configs_on_upgrade_and_revocation(tmp_path: Path) -> None:

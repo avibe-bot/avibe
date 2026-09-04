@@ -40,6 +40,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolUsageReport,
     observe_buffered_protocol_response,
 )
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_urls
 from vibe.model_hub_runtime.state import SourceRecord
 
 
@@ -48,11 +49,7 @@ _STREAM_CHUNK_BYTES = 64 * 1024
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
 _ERROR_OBSERVATION_BYTES = 256 * 1024
-_OFFICIAL_BASE_URLS = {
-    "anthropic": "https://api.anthropic.com/v1",
-    "openai": "https://api.openai.com/v1",
-    "codex": "https://api.openai.com/v1",
-}
+_OFFICIAL_BASE_URLS = official_api_key_base_urls()
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")

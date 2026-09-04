@@ -40,7 +40,7 @@ from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
-from tests.ui_server_test_helpers import _save_config, remote_session_cookie
+from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
@@ -2523,6 +2523,166 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         runner = ScenarioRunner(self.harness)
         api = self._api_module()
         await self._run_round_trip(runner, api)
+
+
+def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-111"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    _save_config(tmp_path)
+
+    from core.handlers.model_hub.adapter import (
+        ObservationDiscovery,
+        ObservationOutcome,
+        SourceObservation,
+    )
+    from tests.test_model_hub_api import _service
+
+    class _CatalogAPIKeySetupHarness(SimpleNamespace):
+        pass
+
+    def make_harness(state_dir: Path) -> _CatalogAPIKeySetupHarness:
+        service, store, adapter = _service(state_dir)
+        return _CatalogAPIKeySetupHarness(
+            service=service,
+            store=store,
+            adapter=adapter,
+            client=app.test_client(),
+            base_url="http://127.0.0.1:15131",
+        )
+
+    harness = make_harness(tmp_path / "catalog-api-key-flow")
+    runner = ScenarioRunner(harness)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: harness.service)
+
+    def observe_catalog_pin(h) -> None:
+        response = h.client.post(
+            "/api/models/sources/observe",
+            json={
+                "vendor": "qwen",
+                "key": "sk-test-auth-setup-qwen",
+            },
+            headers=csrf_headers(h.client, h.base_url),
+            base_url=h.base_url,
+        )
+
+        assert response.status_code == 200
+        observation = response.get_json()["observation"]
+        assert observation["outcome"] == "observed"
+        assert observation["protocol"] == "openai_chat"
+        assert h.store.config.sources == []
+        assert h.adapter.observed_protocol_orders == [("openai_chat",)]
+        assert h.adapter.revoked == ["cred_test001"]
+
+    def create_catalog_pin(h) -> None:
+        response = h.client.post(
+            "/api/models/sources",
+            json={
+                "kind": "api_key",
+                "vendor": "qwen",
+                "key": "sk-test-auth-setup-qwen",
+            },
+            headers=csrf_headers(h.client, h.base_url),
+            base_url=h.base_url,
+        )
+
+        assert response.status_code == 201
+        source = response.get_json()["source"]
+        assert source["vendor"] == "qwen"
+        assert source["display_name"] == "Qwen"
+        assert source["protocol"] == "openai_chat"
+        assert len(h.store.config.sources) == 1
+        assert h.store.config.sources[0].vendor == "qwen"
+        assert h.store.config.sources[0].protocol == "openai_chat"
+        assert h.store.config.sources[0].credential_ref == "cred_test003"
+        assert h.adapter.observed_protocol_orders == [
+            ("openai_chat",),
+            ("openai_chat",),
+        ]
+        assert h.adapter.revoked == ["cred_test001", "cred_test002"]
+
+    def observe_auth_failure(h) -> None:
+        h.adapter.observation = SourceObservation(
+            outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+            reachable=True,
+            authenticated=False,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            models=(),
+        )
+        response = h.client.post(
+            "/api/models/sources/observe",
+            json={
+                "vendor": "qwen",
+                "key": "sk-test-auth-setup-qwen-invalid",
+            },
+            headers=csrf_headers(h.client, h.base_url),
+            base_url=h.base_url,
+        )
+
+        assert response.status_code == 200
+        observation = response.get_json()["observation"]
+        assert observation["outcome"] == "authentication_failed"
+        assert observation["authenticated"] == "rejected"
+        assert len(h.store.config.sources) == 1
+        assert h.adapter.observed_protocol_orders == [
+            ("openai_chat",),
+            ("openai_chat",),
+            ("openai_chat",),
+        ]
+        assert h.store.config.sources[0].credential_ref == "cred_test003"
+        assert h.adapter.revoked == ["cred_test001", "cred_test002", "cred_test004"]
+
+    def create_auth_failure(h) -> None:
+        response = h.client.post(
+            "/api/models/sources",
+            json={
+                "kind": "api_key",
+                "vendor": "qwen",
+                "key": "sk-test-auth-setup-qwen-invalid",
+            },
+            headers=csrf_headers(h.client, h.base_url),
+            base_url=h.base_url,
+        )
+
+        assert response.status_code == 422
+        body = response.get_json()
+        assert body["error"] == "discovery_failed"
+        assert len(h.store.config.sources) == 1
+        assert h.store.config.sources[0].vendor == "qwen"
+        assert h.store.config.sources[0].protocol == "openai_chat"
+        assert h.store.config.sources[0].credential_ref == "cred_test003"
+        assert h.adapter.observed_protocol_orders == [
+            ("openai_chat",),
+            ("openai_chat",),
+            ("openai_chat",),
+            ("openai_chat",),
+        ]
+        assert h.adapter.revoked == [
+            "cred_test001",
+            "cred_test002",
+            "cred_test004",
+            "cred_test005",
+        ]
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("observe_catalog_pin", observe_catalog_pin),
+            ScenarioStep("create_catalog_pin", create_catalog_pin),
+            ScenarioStep("observe_auth_failure", observe_auth_failure),
+            ScenarioStep("create_auth_failure", create_auth_failure),
+        )
+    )
+
+    ScenarioExpect.step_history(
+        runner,
+        [
+            "observe_catalog_pin",
+            "create_catalog_pin",
+            "observe_auth_failure",
+            "create_auth_failure",
+        ],
+    )
 
 
 if __name__ == "__main__":

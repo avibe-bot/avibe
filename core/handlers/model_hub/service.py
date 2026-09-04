@@ -42,6 +42,10 @@ from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
 from vibe.backend_model_catalog import bundled_catalog_reasoning_efforts_by_model
+from vibe.model_hub_runtime.api_key_vendors import (
+    catalog_api_key_vendor_label,
+    pinned_api_key_protocol,
+)
 
 from .adapter import (
     DiscoveredModel,
@@ -1266,11 +1270,21 @@ class ModelHubService:
         )
 
     @staticmethod
-    def _observation_protocols(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    def _observation_protocols(
+        vendor: str,
+        payload: Mapping[str, Any],
+    ) -> tuple[str, ...]:
+        pinned_protocol = pinned_api_key_protocol(vendor)
         if "protocol" not in payload:
-            return SOURCE_PROTOCOLS
+            if pinned_protocol is not None:
+                return (pinned_protocol,)
+            if vendor == "custom":
+                return SOURCE_PROTOCOLS
+            raise ModelHubError("discovery_failed")
         requested = payload.get("protocol")
         if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS:
+            raise ModelHubError("discovery_failed")
+        if pinned_protocol is not None and requested != pinned_protocol:
             raise ModelHubError("discovery_failed")
         return (requested,)
 
@@ -1373,7 +1387,7 @@ class ModelHubService:
         credential_ref: str,
         protocol_order: tuple[str, ...],
     ) -> SourceObservation:
-        """Require response-backed protocol evidence before Source persistence."""
+        """Require a persistable protocol owner before Source persistence."""
 
         observation = await self._observe_provisioned_credential(
             vendor,
@@ -1427,7 +1441,7 @@ class ModelHubService:
         key = payload.get("key")
         if not isinstance(key, str) or not key.strip():
             raise ModelHubError("discovery_failed")
-        protocol_order = self._observation_protocols(payload)
+        protocol_order = self._observation_protocols(vendor, payload)
         transient_ref = await _provision_transient_credential_with_cancellation_ownership(
             self,
             vendor,
@@ -2652,11 +2666,11 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         kind = payload.get("kind")
         vendor = payload.get("vendor")
-        display_name = payload.get("display_name") or vendor
         try:
             vendor = normalize_model_hub_vendor_id(vendor)
         except ValueError:
             raise ModelHubError("discovery_failed") from None
+        display_name = payload.get("display_name") or catalog_api_key_vendor_label(vendor) or vendor
         if kind not in {"subscription", "api_key"}:
             raise ModelHubError("discovery_failed")
         if (
@@ -2735,7 +2749,7 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         protocol_order: tuple[str, ...] | None = None
         if kind == "api_key":
-            protocol_order = self._observation_protocols(payload)
+            protocol_order = self._observation_protocols(vendor, payload)
 
         if oauth_ref:
             return self._source_creation_result(

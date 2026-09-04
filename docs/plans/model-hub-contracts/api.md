@@ -25,8 +25,8 @@ compatibility path.
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
-| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. Omitted `protocol` auto-detects; a supplied value restricts observation to that one interface and still requires matching response proof. No credential reference is returned. |
-| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated, protocol-proven observation whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. On `custom`, omitted `protocol` auto-detects and still requires matching response proof. A shipped vendor catalog pin collapses omission to that one protocol. A supplied value restricts observation to one interface and is established when authentication succeeds and either `vendor` has a shipped catalog pin, the client declared the protocol on `custom`, or a matching protocol-shaped response proves it. No credential reference is returned. |
+| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated observation that established a protocol owner but whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | Both Hub OAuth and `native_cli` Sources require the acknowledgement before OAuth starts. Missing or false acknowledgement returns `reauth_confirmation_required` before any adapter call. See repair rules. |
@@ -82,9 +82,12 @@ create request:
 ```
 
 `base_url` may be null for an official vendor endpoint. `protocol`, when present,
-restricts observation to exactly that interface; omitting it probes the authoritative
-three-value order. The selected value is a constraint, not evidence: the endpoint still
-requires a matching protocol-shaped upstream response. The protocol probe is deliberately
+restricts observation to exactly that interface; omitting it selects the shipped vendor
+pin when one exists, otherwise on `custom` it probes the authoritative three-value
+order. Auto-detect on `custom` still requires a matching protocol-shaped upstream
+response. A supplied protocol is established when authentication succeeds and either
+`vendor` has a shipped catalog pin, the client declared that protocol on `custom`, or
+a matching protocol-shaped response proves it. The protocol probe is deliberately
 schema-invalid and names no synthetic model, so a relay can authenticate and classify it
 without selecting or invoking an upstream model. A bare-origin Base URL uses the
 standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
@@ -94,14 +97,15 @@ settling. A revoke failure remains in the existing pending-revocation journal. T
 response never contains that reference or any persisted Source.
 
 For an API-key `POST /api/models/sources`, the server performs the same
-response-backed observation internally before its independent committed credential
+server-owned observation internally before its independent committed credential
 provisioning. It accepts the create fields and optional protocol constraint, but never
 accepts protocol proof or inventory results from the caller. A null protocol
-produces no Source. A proven protocol with failed inventory discovery produces no Source
-unless this request explicitly carries `accept_unavailable_inventory: true`; the accepted
-Source has `models: []` and the existing uncertain health projection. Subscription OAuth
-creation follows its vendor-specific observation flow before commit. Saved Sources use
-the stored protocol for every later operation.
+produces no Source. A repeated observation that establishes a protocol owner but ends
+with failed inventory discovery produces no Source unless this request explicitly carries
+`accept_unavailable_inventory: true`; the accepted Source has `models: []` and the
+existing uncertain health projection. Subscription OAuth creation follows its
+vendor-specific observation flow before commit. Saved Sources use the stored protocol for
+every later operation.
 
 `source-create.schema.json` is the complete `SourceCreate` request. Its field table is
 authoritative; no Source response field may be inferred backwards into the request:
@@ -109,12 +113,12 @@ authoritative; no Source response field may be inferred backwards into the reque
 | Field | Required | Producer → consumer | Rule |
 | --- | --- | --- | --- |
 | `vendor` | yes | Add Source client → observation adapter | Same normalized vendor id as the unsaved observation request. |
-| `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical vendor label; it never carries credential material. |
+| `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical locale-neutral vendor label; it never carries credential material. |
 | `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
-| `protocol` | no | Add Source client → observation adapter | One supported interface. It restricts the probe to that type; omission auto-detects. Persistence still requires matching response proof. |
+| `protocol` | no | Add Source client → observation adapter | One supported interface. It restricts the probe to that type. Omission auto-detects only on `custom`; a shipped vendor catalog pin collapses omission to the pinned protocol. Persistence requires authentication plus a shipped catalog pin, a `custom` declaration, or matching response proof. |
 | `client_nonce` | no | Add Source client → process-local create reservation and persisted Source read projection | Client-generated before send and atomically reserved in the live process before observation or credential work; only the successful commit persists and echoes it unchanged so an ordinary list read can reconcile a lost response. |
-| `accept_unavailable_inventory` | no | Add Source state ⑤ client → Source-create commit gate | Boolean; omission is `false`. It consents only to the server's repeated observation returning a proven protocol with `discovery: failed`; it never supplies or overrides observation evidence. |
+| `accept_unavailable_inventory` | no | Add Source state ⑤ client → Source-create commit gate | Boolean; omission is `false`. It consents only to the server's repeated observation returning an established protocol owner with `discovery: failed`; it never supplies or overrides observation evidence. |
 
 The request has no `id`, `created_at`, `state`, `usage`, protocol evidence, discovered-model,
 credential-ref, billing, or supply-channel field. The server assigns or observes all of
@@ -130,10 +134,10 @@ create precondition:
 
 | Repeated server observation | `accept_unavailable_inventory` | Server result |
 | --- | --- | --- |
-| Protocol proved; `discovery: succeeded` | omitted, `false`, or `true` | Ordinary create from the newly observed inventory; a legitimately empty result may commit as `models: []`. |
-| Protocol proved; `discovery: failed` | omitted or `false` | Existing classified `discovery_failed`; no Source or committed credential is written, and AC-26 cleanup settles before return. |
-| Protocol proved; `discovery: failed` | `true` | Commit exactly one Source with the proved protocol, `models: []`, and the existing uncertain health projection; matching has no inventory candidates. |
-| Protocol not proved, or an earlier reachability/authentication failure | omitted, `false`, or `true` | Existing classified failure; no Source is committed. The flag cannot authorize this result. |
+| Protocol established; `discovery: succeeded` | omitted, `false`, or `true` | Ordinary create from the newly observed inventory; a legitimately empty result may commit as `models: []`. |
+| Protocol established; `discovery: failed` | omitted or `false` | Existing classified `discovery_failed`; no Source or committed credential is written, and AC-26 cleanup settles before return. |
+| Protocol established; `discovery: failed` | `true` | Commit exactly one Source with the established protocol, `models: []`, and the existing uncertain health projection; matching has no inventory candidates. |
+| Protocol not established, or an earlier reachability/authentication failure | omitted, `false`, or `true` | Existing classified failure; no Source is committed. The flag cannot authorize this result. |
 
 When `client_nonce` is present, the server atomically reserves it in the live process
 before observation, transient-ref creation, or committed credential provisioning. The
@@ -177,8 +181,9 @@ the commit point.
 
 The observation result has six terminal outcomes: `observed`, `ambiguous`,
 `unreachable`, `authentication_failed`, `adapter_error`, and `timeout`. Its
-`protocol` is non-null only when a real upstream response shape and positive
-authentication evidence prove the transport. Authentication is accepted only by a
+`protocol` is non-null only when authentication succeeds and one rung establishes the
+transport contract for the attempted path: a shipped vendor catalog pin, an explicit
+`custom` declaration, or a matching upstream response shape. Authentication is accepted only by a
 shaped success or a shaped request-level error that occurs after authentication;
 shaped authentication errors are rejected. Shaped server and rate-limit errors
 prove reachability but not authentication, so they settle as `adapter_error` with

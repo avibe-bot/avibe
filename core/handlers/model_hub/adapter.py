@@ -491,9 +491,14 @@ class EngineAdapter(Protocol):
     ) -> SourceObservation:
         """Observe connectivity, authentication, protocol, and inventory.
 
-        ``protocol_order`` only orders probes. A returned protocol must be
-        proven by a real upstream response; it cannot be inferred from vendor
-        metadata, Base URL, or the first candidate.
+        ``protocol_order`` either enumerates Auto-detect probes or names one
+        owner-constrained protocol. A returned protocol may be established by
+        a protocol-shaped upstream response, by a shipped API-key vendor pin,
+        or by a concrete `custom` declaration. The latter two require a
+        response from that exact path plus the September 4, 2026 auth ladder:
+        401/403 reject, while 2xx and request-error 400/404/422 accept even
+        if the response shape itself stays generic. `custom` Auto detect still
+        requires response-backed proof; order alone never proves a protocol.
         """
         ...
 

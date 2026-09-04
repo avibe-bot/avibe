@@ -1,0 +1,74 @@
+[
+  {
+    "id": "deepseek",
+    "label": "DeepSeek",
+    "official_base_url": "https://api.deepseek.com",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "qwen",
+    "label": "Qwen",
+    "official_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "kimi",
+    "label": "Kimi",
+    "official_base_url": "https://api.moonshot.cn/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "zhipuai",
+    "label": "Zhipu AI",
+    "official_base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "openai",
+    "label": "OpenAI",
+    "official_base_url": "https://api.openai.com/v1",
+    "protocol": "openai_responses"
+  },
+  {
+    "id": "anthropic",
+    "label": "Anthropic",
+    "official_base_url": "https://api.anthropic.com",
+    "protocol": "anthropic"
+  },
+  {
+    "id": "openrouter",
+    "label": "OpenRouter",
+    "official_base_url": "https://openrouter.ai/api/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "groq",
+    "label": "Groq",
+    "official_base_url": "https://api.groq.com/openai/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "mistral",
+    "label": "Mistral",
+    "official_base_url": "https://api.mistral.ai/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "xai",
+    "label": "xAI",
+    "official_base_url": "https://api.x.ai/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "together",
+    "label": "Together",
+    "official_base_url": "https://api.together.xyz/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "fireworks",
+    "label": "Fireworks",
+    "official_base_url": "https://api.fireworks.ai/inference/v1",
+    "protocol": "openai_chat"
+  }
+]
