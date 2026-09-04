@@ -26,7 +26,10 @@ from modules.agents.base import AgentRequest
 from modules.agents.model_hub import launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
-from modules.agents.opencode.server import OpenCodeManagedPolicyRefreshPendingError
+from modules.agents.opencode.server import (
+    OpenCodeManagedPolicyRefreshPendingError,
+    OpenCodeRuntimeConfigInvalidError,
+)
 from modules.agents.opencode.poll_loop import (
     OpenCodePollLoop,
     _settlement_assistant_message,
@@ -56,6 +59,22 @@ def test_opencode_policy_refresh_failure_is_localized() -> None:
     )
 
     assert "仍在完成已有回合" in display
+    assert "internal diagnostic" not in display
+
+
+def test_opencode_runtime_config_failure_is_localized() -> None:
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = type(
+        "Controller",
+        (),
+        {"config": type("Config", (), {"language": "zh"})()},
+    )()
+
+    display = agent._server_start_error_display_text(
+        OpenCodeRuntimeConfigInvalidError("internal diagnostic")
+    )
+
+    assert "运行时配置" in display
     assert "internal diagnostic" not in display
 
 

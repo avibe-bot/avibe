@@ -91,6 +91,7 @@ from .poll_loop import (
 from .server import (
     OpenCodeManagedPolicyRefreshPendingError,
     OpenCodePromptRejectedError,
+    OpenCodeRuntimeConfigInvalidError,
     OpenCodeServerManager,
     native_part_id_for_attempt,
 )
@@ -938,12 +939,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         )
 
     def _server_start_error_display_text(self, error: BaseException) -> str:
+        localized_key = None
         if isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
+            localized_key = "error.opencodePolicyRefreshPending"
+        elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
+            localized_key = "error.opencodeRuntimeConfigInvalid"
+        if localized_key is not None:
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t('error.opencodePolicyRefreshPending', language)}"
+            return f"❌ {i18n_t(localized_key, language)}"
         return f"Failed to start OpenCode server: {error}"
 
     async def prepare_runtime_restart(self) -> None:

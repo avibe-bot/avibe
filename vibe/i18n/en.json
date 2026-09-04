@@ -403,6 +403,7 @@
     "sessionGeneric": "An error occurred: {error}",
     "codexPromptRefreshUnavailable": "Codex could not confirm that it can safely refresh Avibe's instructions for this existing session. Check or update Codex, then retry this turn.",
     "opencodePolicyRefreshPending": "OpenCode is still finishing an existing turn and cannot restart with Avibe's current Skill policy yet. Retry after that turn finishes.",
+    "opencodeRuntimeConfigInvalid": "OpenCode could not start because OPENCODE_CONFIG_CONTENT is invalid. Fix the runtime configuration and retry.",
     "resultAttachmentUploadFailed": "Failed to upload attachment. Want me to split the result into multiple messages?",
     "resultDeliveryFailed": "⚠️ Message delivery failed. The content may be too long or incompatible. Ask me to resend it.",
     "fileAttachmentUploadFailedWithLink": "⚠️ I could not deliver {filename} as a WeChat file. You can download it from Avibe after signing in if prompted:\n{url}",

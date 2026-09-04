@@ -45,6 +45,7 @@ SERVER_MODULE = _load_server_module()
 OpenCodeManagedPolicyRefreshPendingError = (
     SERVER_MODULE.OpenCodeManagedPolicyRefreshPendingError
 )
+OpenCodeRuntimeConfigInvalidError = SERVER_MODULE.OpenCodeRuntimeConfigInvalidError
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
 
 
@@ -144,6 +145,12 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 "tools": {"bash": True, "skill": False},
             },
         )
+
+    def test_managed_runtime_config_uses_typed_validation_errors(self):
+        for content in ("{invalid", "[]"):
+            with self.subTest(content=content):
+                with self.assertRaises(OpenCodeRuntimeConfigInvalidError):
+                    SERVER_MODULE._managed_runtime_config_content(content)
 
     async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
