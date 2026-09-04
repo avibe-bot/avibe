@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { API_KEY_VENDOR_PRESETS } from './apiKeyVendors';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
@@ -142,6 +143,23 @@ const fillCredentials = async () => {
   await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
   await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
   return user;
+};
+
+const vendorSelect = () => screen.getByRole('combobox', { name: /^Vendor$|^服务商$/ }) as HTMLSelectElement;
+const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
+const disclosure = () => screen.queryByRole('button', { name: /Manually specify interface type|手动指定接口类型/i });
+
+/** A catalog row read from the shipped file, so the case does not restate an id,
+ *  a URL, or a pin that the backend owns. Chosen by protocol rather than by name:
+ *  the assertions are about a pin being carried, not about which vendor it is. */
+const preset = (protocol: string) => {
+  const entry = API_KEY_VENDOR_PRESETS.find((row) => row.protocol === protocol);
+  if (!entry) throw new Error(`the shipped catalog has no ${protocol} row to exercise the pin with`);
+  return entry;
+};
+
+const selectVendor = async (user: ReturnType<typeof userEvent.setup>, id: string) => {
+  await user.selectOptions(vendorSelect(), id);
 };
 
 const openManualProtocol = async (user: ReturnType<typeof userEvent.setup>) => {
@@ -989,4 +1007,133 @@ describe('AddApiKeyDialog', () => {
       expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i }) !== null).toBe(retries);
     },
   );
+});
+
+// The vendor dropdown is the ladder's rung selector. A catalog row makes the
+// interface a fact this dialog READS — from the same shipped file the server
+// pins by — so detection only has to authenticate; 自定义 leaves the two rungs
+// that still ask, the response's shape or the user's word.
+describe('AddApiKeyDialog · vendor', () => {
+  it('sends custom with nothing pinned when the vendor is left on 自定义', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+
+    await clickDetect(user);
+    await clickConfirm(user);
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(observe.mock.calls[0][0].vendor).toBe('custom');
+    expect(observe.mock.calls[0][0].protocol).toBeUndefined();
+    expect(create.mock.calls[0][0].vendor).toBe('custom');
+  });
+
+  it('prefills the official address and sends the catalog id with its pinned interface', async () => {
+    const entry = preset('openai_chat');
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValueOnce(observed({ protocol: entry.protocol }));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, entry.id);
+    expect(baseUrlInput().value).toBe(entry.official_base_url);
+    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
+    await clickDetect(user);
+    await clickConfirm(user);
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(observe.mock.calls[0][0]).toMatchObject({ vendor: entry.id, protocol: entry.protocol });
+    expect(create.mock.calls[0][0]).toMatchObject({ vendor: entry.id, protocol: entry.protocol });
+  });
+
+  it('states the pinned interface as a fact and offers no way to choose another', async () => {
+    const entry = preset('anthropic');
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, entry.id);
+
+    const row = document.querySelector('.model-hub-add-key-protocol-idle-row');
+    expect(row?.textContent).toMatch(/Anthropic Messages/);
+    expect(row?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
+    expect(row?.textContent).toMatch(/Built-in catalog/);
+    expect(disclosure()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'OpenAI Responses' })).toBeNull();
+  });
+
+  it('retires an observation taken under the previous vendor', async () => {
+    const entry = preset('openai_chat');
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    renderDialog();
+    const user = await fillCredentials();
+
+    await clickDetect(user);
+    expect(await screen.findByRole('button', { name: CONFIRM })).toBeTruthy();
+
+    await selectVendor(user, entry.id);
+
+    expect(screen.queryByRole('button', { name: CONFIRM })).toBeNull();
+    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
+    expect(baseUrlInput().value).toBe(entry.official_base_url);
+  });
+
+  it('keeps the pin when a preset is pointed at another address', async () => {
+    const entry = preset('openai_chat');
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValueOnce(observed({ protocol: entry.protocol }));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, entry.id);
+    await user.clear(baseUrlInput());
+    await user.type(baseUrlInput(), 'https://relay.example/v1');
+    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
+
+    // A gateway in front of a catalog vendor is still that vendor: the address
+    // is the one thing the preset only proposes.
+    expect(document.querySelector('.model-hub-add-key-protocol-idle-row')?.textContent)
+      .toMatch(/Built-in catalog/);
+    expect(disclosure()).toBeNull();
+
+    await clickDetect(user);
+    await clickConfirm(user);
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      vendor: entry.id,
+      base_url: 'https://relay.example/v1',
+      protocol: entry.protocol,
+    });
+    expect(create.mock.calls[0][0]).toMatchObject({
+      vendor: entry.id,
+      base_url: 'https://relay.example/v1',
+    });
+  });
+
+  it('gives the address and the interface choice back on the way to 自定义', async () => {
+    const entry = preset('openai_chat');
+    renderDialog();
+    const user = userEvent.setup();
+
+    await selectVendor(user, entry.id);
+    await selectVendor(user, 'custom');
+
+    expect(baseUrlInput().value).toBe('');
+    expect(disclosure()).not.toBeNull();
+  });
 });

@@ -1368,6 +1368,9 @@
         "title": "添加 API Key",
         "subtitle": "先检测连接与接口，确认后添加",
         "field": {
+          "vendor": "服务商",
+          "vendor.custom": "自定义 · 兼容端点",
+          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，预填官方地址并钉死接口",
           "name": "名称(可选)",
           "protocol": "接口类型",
           "protocol.hint": "不确定时用自动探测；已知类型时可直接声明所选接口。该路径鉴权成功即可添加；选错了运行时可能失败，而且保存后不可更改",
@@ -1412,7 +1415,10 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "idleHint": "填好 Base URL 和 API Key 后自动识别",
           "detecting": "识别接口中…",
-          "manual": "手动指定接口类型"
+          "manual": "手动指定接口类型",
+          "catalogPinned": "内置目录",
+          "catalogPinned.hint": "检测会验证密钥并拉取模型；不再需要靠返回结构证明接口",
+          "declared": "手动指定"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"

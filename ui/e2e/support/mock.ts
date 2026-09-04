@@ -9,7 +9,10 @@ import type { APIRequestContext } from '@playwright/test';
 import { MOCK_UPSTREAM_URL } from './env';
 
 export type MockAuthMode = 'ok' | '401' | '403_banned' | '402' | '429' | 'quota_message' | '5xx';
-export type MockProtocol = 'anthropic' | 'openai_responses' | 'openai_chat';
+/** Declared as values, not only as a union, so a caller can ask at runtime
+ *  whether some protocol it read from elsewhere is one this mock can serve. */
+export const MOCK_PROTOCOLS = ['anthropic', 'openai_responses', 'openai_chat'] as const;
+export type MockProtocol = (typeof MOCK_PROTOCOLS)[number];
 export type MockModelsEndpoint = 'ok' | 'http_404' | 'http_500' | 'timeout' | 'malformed_json';
 
 export type MockConfig = {

@@ -22,6 +22,9 @@ export type Source = {
   id: string;
   display_name: string;
   kind: string;
+  /** The catalog id a preset was added under, or `custom` for a compatible
+   *  endpoint. It is what the vendor dropdown selected, not a UI label. */
+  vendor: string;
   protocol: string;
   supply_channel: string;
   base_url?: string | null;

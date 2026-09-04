@@ -369,11 +369,20 @@ export const labelledButton = (scope: Locator, name: string): Locator =>
  * Fills the add-API-key form. `name` is optional in the product and optional
  * here for the same reason: a spec that does not care about the label should
  * not have to invent one.
+ *
+ * `vendor` is a catalog id and goes FIRST, because choosing one rewrites the
+ * Base URL and retires whatever interface was selected — filling those before it
+ * would fill them into a form the next click resets. It also removes the manual
+ * disclosure, so `vendor` and `protocol` are alternatives, not a pair: the pin IS
+ * the interface, and there is no control left for `protocol` to press.
  */
 export const fillApiKeyForm = async (
   dialog: Locator,
-  values: { name?: string; baseUrl: string; apiKey: string; protocol?: string },
+  values: { vendor?: string; name?: string; baseUrl: string; apiKey: string; protocol?: string },
 ): Promise<void> => {
+  if (values.vendor) {
+    await dialog.getByLabel(hub('addKey.field.vendor'), { exact: true }).selectOption(values.vendor);
+  }
   if (values.name !== undefined) {
     await dialog.getByLabel(hub('addKey.field.name'), { exact: true }).fill(values.name);
   }

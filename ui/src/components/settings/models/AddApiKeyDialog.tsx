@@ -15,7 +15,9 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
 import { Field } from './dialogFields';
 import {
@@ -253,6 +255,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const addOnAdded = replaceMode ? null : props.onAdded;
   const replaceSourceId = replaceMode ? props.source.id : null;
   const { t } = useTranslation();
+  const [vendor, setVendor] = React.useState<string>(CUSTOM_VENDOR);
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
   const [apiKey, setApiKey] = React.useState('');
@@ -280,6 +283,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     }
     if (open) {
       clientNonce.current = sourceClientNonce();
+      setVendor(CUSTOM_VENDOR);
       setDisplayName('');
       setBaseUrl('');
       setApiKey('');
@@ -328,14 +332,17 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     acceptUnavailableInventory = false,
   ): ApiKeySourceCreate => ({
     kind: 'api_key',
-    vendor: 'custom',
+    vendor,
+    // The name is left out when empty rather than filled in here: the server
+    // already names a catalog source after its catalog label, and a second
+    // owner of that default is a second thing to keep in step with the catalog.
     ...(displayName.trim() ? { display_name: displayName.trim() } : {}),
     base_url: baseUrl.trim(),
     key: apiKey.trim(),
     client_nonce: clientNonce.current,
     ...(protocol ? { protocol } : {}),
     ...(acceptUnavailableInventory ? { accept_unavailable_inventory: true } : {}),
-  }), [apiKey, baseUrl, displayName]);
+  }), [apiKey, baseUrl, displayName, vendor]);
 
   const persist = React.useCallback(async (
     seq: ContinuationTicket,
@@ -388,7 +395,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     setPhase({ kind: 'working', origin, stage: 'observe' });
     try {
       const observation = await modelsApi.observeApiKeySource({
-        vendor: 'custom',
+        vendor,
         base_url: baseUrl.trim(),
         key: apiKey.trim(),
         ...(protocol ? { protocol } : {}),
@@ -417,7 +424,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         });
       });
     }
-  }, [apiKey, baseUrl, continuation]);
+  }, [apiKey, baseUrl, continuation, vendor]);
 
   const submitReplacement = React.useCallback(async (force: boolean) => {
     if (props.mode !== 'replace' || !apiKey.trim() || replacePhase.kind === 'submitting') return;
@@ -518,10 +525,20 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     createdDelivery.close();
   }, [continuation, createdDelivery, onClose, phase, replaceMode, replacePhase.kind]);
 
+  // What the next observation will be made under. A catalog vendor pins the
+  // interface (ladder rung 1: the catalog row is the proof, so the response only
+  // has to authenticate); 自定义 leaves it to the disclosure — a concrete choice
+  // is a declaration (rung 3), and Auto sends nothing so the shape must prove it
+  // (rung 2). Read by the handlers below and by the render, because "what 检测
+  // will send" and "what the row says 检测 will send" must be one value.
+  const vendorPreset = apiKeyVendorPreset(vendor);
+  const selectedProtocol = protocolSelection === 'auto' ? undefined : protocolSelection;
+  const constrainedProtocol = vendorPreset?.protocol ?? selectedProtocol;
+
   const retry = async () => {
     if (phase.kind === 'undetermined') {
-      if (protocolSelection === 'auto') return;
-      await observe(phase.origin, protocolSelection);
+      if (!constrainedProtocol) return;
+      await observe(phase.origin, constrainedProtocol);
       return;
     }
     if (phase.kind === 'inventory') {
@@ -559,10 +576,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       return;
     }
     if (phase.kind === 'failure') {
-      await observe(
-        phase.origin,
-        protocolSelection === 'auto' ? undefined : protocolSelection,
-      );
+      await observe(phase.origin, constrainedProtocol);
     }
   };
 
@@ -601,6 +615,19 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     setProtocolSelection(value);
     retireProvedEvidence();
   };
+  // A vendor is not one more field of the same request. It changes the endpoint
+  // AND the interface the request is made under, so anything observed before the
+  // switch was observed against a different pair — including a report that
+  // `retireProvedEvidence` would have kept, and an ④/failure the new vendor may
+  // simply not have. §1.5: switching resets the URL to the new vendor's official
+  // one, drops the interface selection, and retires the observation outright.
+  const editVendor = (value: string) => {
+    setVendor(value);
+    setBaseUrl(apiKeyVendorPreset(value)?.official_base_url ?? '');
+    setProtocolSelection('auto');
+    setManualOpen(false);
+    setPhase(INITIAL_PHASE);
+  };
 
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
@@ -610,15 +637,25 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const displayNameValid = optionalTrimmedTextWithin(displayName, SOURCE_DISPLAY_NAME_MAX_LENGTH);
   const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
   const canSubmit = canObserve && displayNameValid;
-  const selectedProtocol = protocolSelection === 'auto' ? undefined : protocolSelection;
   const protocolIdle = !baseUrl.trim() || !apiKey.trim();
   const detecting = isWorking && phase.kind === 'working' && phase.stage === 'observe';
   const identified = phase.kind === 'form' && phase.report !== null && Boolean(phase.report.protocol);
   const identifiedProtocol = identified && phase.kind === 'form' ? phase.report?.protocol ?? null : null;
   // The segments and the summary row are two renderings of one selection, so
   // only one of them is on screen at a time: expanded, the pressed segment IS
-  // the statement; collapsed, the row carries it.
-  const segmentsOpen = phase.kind === 'undetermined' || (manualOpen && !isWorking);
+  // the statement; collapsed, the row carries it. Under a catalog pin neither
+  // the disclosure nor ④'s forced selector may open one: the interface is not
+  // this dialog's to choose, so offering the choice would be offering a control
+  // whose value the request then ignores.
+  const segmentsOpen = !vendorPreset && (phase.kind === 'undetermined' || (manualOpen && !isWorking));
+  // Why the interface is what it is, on every strip that states it. A catalog
+  // pin and a user declaration are the two answers that are not "the response
+  // proved it" — and Auto, which is that third answer, carries no badge.
+  const protocolBadge = vendorPreset
+    ? <span className="model-hub-add-key-protocol-badge">{t('settings.models.addKey.protocol.catalogPinned')}</span>
+    : selectedProtocol
+      ? <span className="model-hub-add-key-protocol-badge">{t('settings.models.addKey.protocol.declared')}</span>
+      : null;
   const showForm = phase.kind !== 'inventory';
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
@@ -722,6 +759,32 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
 
         {!replaceMode && showForm && (
           <div className="model-hub-add-key-body flex flex-col">
+            {/* First, because it is the field the rest are conditioned on: it
+                decides what the Base URL starts as and whether the interface is
+                still a question. Options are the shipped catalog in file order,
+                after the one entry that is not a vendor at all. */}
+            <Field
+              className="model-hub-add-key-field"
+              labelClassName="model-hub-add-key-label"
+              hintClassName="model-hub-add-key-hint"
+              label={t('settings.models.addKey.field.vendor')}
+              hint={t('settings.models.addKey.field.vendor.hint')}
+            >
+              {(id) => (
+                <Select
+                  id={id}
+                  value={vendor}
+                  disabled={formLocked}
+                  onChange={(event) => editVendor(event.target.value)}
+                  className="model-hub-add-key-input"
+                >
+                  <option value={CUSTOM_VENDOR}>{t('settings.models.addKey.field.vendor.custom')}</option>
+                  {API_KEY_VENDOR_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label}</option>
+                  ))}
+                </Select>
+              )}
+            </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
               {(id) => <Input id={id} value={displayName} disabled={formLocked} aria-invalid={!displayNameValid} onChange={(event) => editDisplayName(event.target.value)} className="model-hub-add-key-input" />}
             </Field>
@@ -749,6 +812,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                     <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
                     <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
                   </div>
+                  {protocolBadge}
                 </div>
               )}
               {detecting && (
@@ -770,22 +834,31 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                           count: phase.kind === 'form' && phase.report ? phase.report.models.length : 0,
                         })}
                   </span>
+                  {protocolBadge}
                 </div>
               )}
               {phase.kind === 'form' && !phase.report && !segmentsOpen && (
                 <div className="model-hub-add-key-protocol-idle-row">
-                  {/* Whatever 检测 is about to send, and nothing else: a concrete
-                      choice is the active constraint even while the disclosure
-                      that made it is closed. */}
+                  {/* Whatever 检测 is about to send, and nothing else: a catalog
+                      pin and a concrete choice are each the active constraint
+                      even while the disclosure that could have made one is shut
+                      — or, under a pin, is not offered at all. */}
                   <span className="model-hub-add-key-protocol-active">
-                    {selectedProtocol && <ProtocolGlyph protocol={selectedProtocol} />}
-                    {t(selectedProtocol
-                      ? PROTOCOL_COPY_KEYS[selectedProtocol]
+                    {constrainedProtocol && <ProtocolGlyph protocol={constrainedProtocol} />}
+                    {t(constrainedProtocol
+                      ? PROTOCOL_COPY_KEYS[constrainedProtocol]
                       : 'settings.models.addKey.protocol.auto')}
                   </span>
-                  {/* The hint promises automatic identification, which is only
-                      what Auto does. A named interface has already answered it. */}
-                  {!selectedProtocol && (
+                  {/* The pin is the reason this row has no control beside it, so
+                      it says so here rather than only on the strip 检测 returns. */}
+                  {vendorPreset && protocolBadge}
+                  {/* The idle hint promises automatic identification, which is
+                      only what Auto does. A named interface has already answered
+                      it; a pin answers a different question — what 检测 still has
+                      to establish once the interface is no longer in doubt. */}
+                  {vendorPreset ? (
+                    <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.catalogPinned.hint')}</span>
+                  ) : !selectedProtocol && (
                     <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.idleHint')}</span>
                   )}
                 </div>
@@ -800,7 +873,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   <p className="model-hub-add-key-hint">{t('settings.models.addKey.field.protocol.hint')}</p>
                 </div>
               )}
-              {!isWorking && phase.kind !== 'undetermined' && (
+              {!vendorPreset && !isWorking && phase.kind !== 'undetermined' && (
                 <button
                   type="button"
                   className="model-hub-add-key-protocol-disclosure"
@@ -916,7 +989,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   variant="brand"
                   className="model-hub-add-key-action"
                   disabled={!canSubmit}
-                  onClick={() => void observe('add', selectedProtocol)}
+                  onClick={() => void observe('add', constrainedProtocol)}
                 >
                   {t('settings.models.addKey.detect')}
                 </Button>
@@ -946,10 +1019,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   variant="brand"
                   className={cn(
                     'model-hub-add-key-action',
-                    (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && protocolSelection === 'auto'))
+                    (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && !constrainedProtocol))
                       && 'model-hub-add-key-action--dim',
                   )}
-                  disabled={phase.kind === 'undetermined' && protocolSelection === 'auto'}
+                  disabled={phase.kind === 'undetermined' && !constrainedProtocol}
                   onClick={() => void retry()}
                 >
                   {t('settings.models.addKey.retry')}
