@@ -766,30 +766,6 @@ def _protocol_is_persistable_without_shape_proof(
     return vendor == "custom" and len(protocol_order) == 1 and protocol_order[0] == protocol
 
 
-def _owner_constrained_authentication_evidence(
-    *,
-    credential_kind: str,
-    vendor: str,
-    protocol: str,
-    protocol_order: Sequence[str],
-    status: int | None,
-) -> _AuthenticationEvidence | None:
-    if status is None:
-        return None
-    if not _protocol_is_persistable_without_shape_proof(
-        credential_kind=credential_kind,
-        vendor=vendor,
-        protocol=protocol,
-        protocol_order=protocol_order,
-    ):
-        return None
-    if status in _AUTHENTICATION_ERROR_STATUSES:
-        return _AuthenticationEvidence.REJECTED
-    if status in _SUCCESS_STATUSES or status in _REQUEST_ERROR_STATUSES:
-        return _AuthenticationEvidence.ACCEPTED
-    return None
-
-
 def _anthropic_wrapperless_elimination_proof(
     responses: Mapping[str, _ProtocolEvidence],
     *,
@@ -1618,15 +1594,33 @@ class CLIProxyEngineAdapter:
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
-            owner_scoped_auth = _owner_constrained_authentication_evidence(
+            owner_scoped_protocol = _protocol_is_persistable_without_shape_proof(
                 credential_kind=str(credential_kind),
                 vendor=normalized_vendor,
                 protocol=protocol,
                 protocol_order=protocol_order,
-                status=evidence.status,
             )
-            if owner_scoped_auth is not None:
-                evidence = replace(evidence, authentication=owner_scoped_auth)
+            owner_rejected = (
+                owner_scoped_protocol
+                and evidence.status in _AUTHENTICATION_ERROR_STATUSES
+            )
+            owner_accepted = (
+                owner_scoped_protocol
+                and (
+                    evidence.status in _SUCCESS_STATUSES
+                    or evidence.status in _REQUEST_ERROR_STATUSES
+                )
+            )
+            if owner_rejected:
+                evidence = replace(
+                    evidence,
+                    authentication=_AuthenticationEvidence.REJECTED,
+                )
+            elif owner_accepted:
+                evidence = replace(
+                    evidence,
+                    authentication=_AuthenticationEvidence.ACCEPTED,
+                )
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
                 ruled_out_protocols.add(protocol)
@@ -1641,12 +1635,7 @@ class CLIProxyEngineAdapter:
                 received_unproven_response = True
                 if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
                     received_accepted_unproven_response = True
-                    if _protocol_is_persistable_without_shape_proof(
-                        credential_kind=str(credential_kind),
-                        vendor=normalized_vendor,
-                        protocol=protocol,
-                        protocol_order=protocol_order,
-                    ):
+                    if owner_scoped_protocol:
                         proved_protocol = protocol
                 if _pairwise_positive_exclusion(evidence):
                     ruled_out_protocols.add(protocol)
