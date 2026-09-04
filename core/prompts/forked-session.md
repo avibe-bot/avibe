@@ -1,0 +1,1 @@
+This Agent Session was forked from `{source_session_id}`. The authoritative Avibe session id for this fork is `{default_session_id}`. If copied source context mentions another Avibe session id, treat it as historical source-context only.
