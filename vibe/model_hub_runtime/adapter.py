@@ -42,7 +42,7 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
-from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url, pinned_api_key_protocol
 from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
@@ -209,6 +209,18 @@ _CREDENTIAL_ERROR_PARAMS = frozenset(
         "x-token",
     }
 )
+_CREDENTIAL_ERROR_MESSAGE_TOKENS = frozenset(
+    {
+        "authentication",
+        "auth_failed",
+        "invalid_api_key",
+        "api_key_not_valid",
+        "missing_api_key",
+        "no_api_key",
+        "unauthorized",
+    }
+)
+_OPENROUTER_OFFICIAL_BASE_URL = official_api_key_base_url("openrouter")
 _PAIRWISE_EXCLUSION_SHAPES = frozenset(
     {
         _ProtocolObservationShape.HTTP_404,
@@ -374,6 +386,13 @@ def _error_param_name(error: Mapping[str, Any]) -> str | None:
     return normalized or None
 
 
+def _error_message_indicates_credential_rejection(message: object) -> bool:
+    if not isinstance(message, str) or not message.strip():
+        return False
+    normalized = _normalized_identifier(message)
+    return any(token in normalized for token in _CREDENTIAL_ERROR_MESSAGE_TOKENS)
+
+
 def _request_error_rejects_credential(
     status: int,
     error: Mapping[str, Any] | None,
@@ -381,7 +400,11 @@ def _request_error_rejects_credential(
     return (
         status in _REQUEST_ERROR_STATUSES
         and isinstance(error, dict)
-        and _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+        and (
+            _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+            or not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(_error_identifiers(error))
+            or _error_message_indicates_credential_rejection(error.get("message"))
+        )
     )
 
 
@@ -444,7 +467,18 @@ def _openai_wrapperless_error_kind(
 def _is_openai_nested_numeric_request_error(
     status: int,
     error: Mapping[str, Any] | None,
+    *,
+    vendor: str | None = None,
+    request_root: str | None = None,
 ) -> bool:
+    normalized_vendor = vendor.strip().lower() if isinstance(vendor, str) else None
+    if normalized_vendor != "openrouter":
+        try:
+            normalized_root = normalize_model_hub_base_url(request_root)
+        except (TypeError, ValueError):
+            normalized_root = None
+        if normalized_root != _OPENROUTER_OFFICIAL_BASE_URL:
+            return False
     if status not in _REQUEST_ERROR_STATUSES:
         return False
     if not isinstance(error, dict):
@@ -479,6 +513,9 @@ def _parse_protocol_authenticated_evidence(
     protocol: str,
     status: int,
     body: str | bytes,
+    *,
+    vendor: str | None = None,
+    request_root: str | None = None,
 ) -> _ProtocolEvidence:
     """Classify protocol proof and authentication as independent evidence.
 
@@ -560,7 +597,12 @@ def _parse_protocol_authenticated_evidence(
                 authentication=_AuthenticationEvidence.ACCEPTED,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
-        if _is_openai_nested_numeric_request_error(status, error):
+        if _is_openai_nested_numeric_request_error(
+            status,
+            error,
+            vendor=vendor,
+            request_root=request_root,
+        ):
             return _ProtocolEvidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.ACCEPTED,
@@ -635,6 +677,8 @@ async def _probe_protocol_response(
                     protocol,
                     response.status,
                     body,
+                    vendor=vendor,
+                    request_root=root,
                 )
     except asyncio.TimeoutError:
         raise EngineClientError("protocol observation timed out", error_type="timeout") from None
@@ -844,6 +888,7 @@ def _probe_oauth_protocol_response(
         protocol,
         status,
         body if isinstance(body, str) else "",
+        vendor=vendor,
     )
 
 

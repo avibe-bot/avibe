@@ -6623,6 +6623,82 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
     assert inventory_kwargs["base_url"] is None
 
 
+def test_openrouter_numeric_auth_failure_message_stays_authentication_failed(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.store_api_key(
+        "test-openrouter-invalid-key",
+        vendor="openrouter",
+        protocol="openai_chat",
+        base_url=None,
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=Mock(),
+        state_store=state_store,
+    )
+
+    async def scenario() -> tuple[list[str], object]:
+        requests: list[str] = []
+
+        async def capture_probe(request: web.Request) -> web.Response:
+            requests.append(request.path)
+            if request.path == _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_path:
+                return web.json_response(
+                    {
+                        "error": {
+                            "code": 400,
+                            "message": "invalid API key",
+                        }
+                    },
+                    status=400,
+                )
+            return web.json_response({}, status=404)
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", capture_probe)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        origin = f"http://127.0.0.1:{port}"
+        try:
+            with (
+                patch.dict(
+                    "vibe.model_hub_runtime.adapter._OFFICIAL_BASE_URLS",
+                    {"openrouter": origin},
+                    clear=False,
+                ),
+                patch(
+                    "vibe.model_hub_runtime.adapter.probe_models",
+                    new=AsyncMock(return_value=(DiscoveredModel(id="should-not-discover"),)),
+                ) as inventory_probe,
+            ):
+                observed = await adapter.observe_source(
+                    "openrouter",
+                    None,
+                    credential_ref,
+                    SOURCE_PROTOCOLS,
+                )
+                inventory_probe.assert_not_awaited()
+        finally:
+            await runner.cleanup()
+        return requests, observed
+
+    requests, observed = asyncio.run(scenario())
+
+    assert observed.outcome.value == "authentication_failed"
+    assert observed.protocol is None
+    assert observed.authenticated is False
+    assert observed.model_ids == ()
+    assert requests == [
+        _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
+        for protocol in SOURCE_PROTOCOLS
+    ]
+
+
 @pytest.mark.parametrize(
     ("vendor", "base_url", "credential_vendor", "credential_protocol", "protocol_order"),
     [
@@ -7168,7 +7244,24 @@ def test_qwen_wrapperless_invalid_parameter_request_error_counts_as_authenticate
 
 
 @pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
-def test_openai_family_nested_numeric_request_error_counts_as_authenticated(protocol: str) -> None:
+def test_openai_family_nested_numeric_request_error_requires_openrouter_context(protocol: str) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        400,
+        json.dumps(
+            {
+                "error": {
+                    "code": 400,
+                    "message": "missing required parameter",
+                }
+            }
+        ),
+        vendor="openrouter",
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
     assert _parse_protocol_authenticated_evidence(
         protocol,
         400,
@@ -7182,8 +7275,29 @@ def test_openai_family_nested_numeric_request_error_counts_as_authenticated(prot
         ),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
-        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+
+@pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
+def test_openai_family_nested_numeric_auth_failure_message_is_rejected(
+    protocol: str,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        400,
+        json.dumps(
+            {
+                "error": {
+                    "code": 400,
+                    "message": "invalid API key",
+                }
+            }
+        ),
+        vendor="openrouter",
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
     )
 
 
