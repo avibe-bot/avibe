@@ -357,6 +357,58 @@ def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
     assert payload["models"][0]["auto_compact_token_limit"] == 180_000
 
 
+def test_codex_hub_catalog_promotes_a_configured_hidden_native_model():
+    efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]
+    raw = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "priority": 1,
+                    "visibility": "hide",
+                    "supported_in_api": True,
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [
+                        {
+                            "effort": effort,
+                            "description": backend_model_catalog._REASONING_LABELS[
+                                effort
+                            ],
+                        }
+                        for effort in efforts
+                    ],
+                }
+            ]
+        }
+    ).encode()
+
+    payload = json.loads(
+        backend_model_catalog._codex_hub_catalog_bytes(
+            raw,
+            [
+                {
+                    "id": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "reasoning_efforts": efforts,
+                }
+            ],
+        )
+    )
+
+    assert payload["models"][0]["slug"] == "gpt-6-astra"
+    assert payload["models"][0]["visibility"] == "list"
+    assert payload["models"][0]["supported_in_api"] is True
+    assert payload["models"][0]["default_reasoning_level"] == "low"
+    assert payload["models"][0]["supported_reasoning_levels"] == [
+        {
+            "effort": effort,
+            "description": backend_model_catalog._REASONING_LABELS[effort],
+        }
+        for effort in efforts
+    ]
+
+
 def test_codex_hub_catalog_retires_native_compaction_limit_after_context_override():
     raw = json.dumps(
         {
@@ -411,7 +463,7 @@ def test_codex_hub_catalog_does_not_give_custom_models_template_modalities():
     assert payload["models"][0]["supports_image_detail_original"] is False
 
 
-def test_codex_hub_catalog_can_disable_and_restore_native_reasoning():
+def test_codex_hub_catalog_can_disable_reasoning_and_preserve_native_default():
     raw = json.dumps(
         {
             "models": [
@@ -446,7 +498,7 @@ def test_codex_hub_catalog_can_disable_and_restore_native_reasoning():
 
     assert disabled["default_reasoning_level"] == "none"
     assert disabled["supported_reasoning_levels"] == [{"effort": "none", "description": "None"}]
-    assert restored["default_reasoning_level"] == "low"
+    assert restored["default_reasoning_level"] == "high"
     assert restored["supported_reasoning_levels"] == [
         {"effort": "low", "description": "Low"},
         {"effort": "high", "description": "High"},
@@ -630,7 +682,10 @@ def test_merge_sources_applies_tombstones_and_fills_missing_metadata():
     }
 
 
-def test_codex_local_hidden_tombstone_overrides_remote_visible(monkeypatch, tmp_path):
+def test_codex_local_hidden_tombstone_overrides_implicit_remote_entry(
+    monkeypatch,
+    tmp_path,
+):
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
     (codex_home / "models_cache.json").write_text(
@@ -666,6 +721,43 @@ def test_codex_local_hidden_tombstone_overrides_remote_visible(monkeypatch, tmp_
 
     assert "account-hidden" not in snapshot["models"]
     assert snapshot["models"][:2] == ["remote-model", "account-visible"]
+
+
+def test_codex_explicit_catalog_visibility_overrides_local_hidden(
+    monkeypatch,
+    tmp_path,
+):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-6-astra", "visibility": "hide"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "load_cached_remote_catalog",
+        lambda **kwargs: {},
+    )
+
+    picker_snapshot = backend_model_catalog.backend_model_snapshot(
+        "codex",
+        schedule_refresh=False,
+    )
+    builtin_snapshot = backend_model_catalog.backend_builtin_snapshot(
+        "codex",
+        cli_installed=True,
+        schedule_refresh=False,
+    )
+
+    assert picker_snapshot["models"][0] == "gpt-6-astra"
+    assert builtin_snapshot["models"][0]["id"] == "gpt-6-astra"
 
 
 def test_codex_local_efforts_override_remote_metadata(monkeypatch, tmp_path):
@@ -1053,11 +1145,15 @@ def test_fetch_remote_catalog_rejects_unknown_backend(monkeypatch):
         backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
 
 
-def test_bundled_codex_56_efforts_include_ultra():
+def test_bundled_codex_astra_is_first_with_native_reasoning_efforts():
     snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
 
-    values = {entry["value"] for entry in snapshot["reasoning_options"]["gpt-5.6-terra"]}
-    assert "ultra" in values
+    assert snapshot["models"][0] == "gpt-6-astra"
+    assert snapshot["model_labels"]["gpt-6-astra"] == "GPT-6-Astra"
+    assert [
+        entry["value"]
+        for entry in snapshot["reasoning_options"]["gpt-6-astra"]
+    ] == ["__default__", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):
