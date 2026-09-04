@@ -182,10 +182,9 @@ When model-invocable Skills exist, Avibe injects this shape:
 ## Skills
 
 Skills provide specialized instructions and workflows for specific tasks.
-When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.
-If the user requests a skill by exact name, load that name directly.
-When these rules require an Avibe-managed Skill, reuse an earlier successful `vibe skill load -- <name>` result for that name if it remains in the current context.
-Otherwise, only load skill names listed here or returned by `vibe skill list`; do not guess names.
+Before acting on a task covered by a listed Skill, ensure its content is in context: reuse an earlier successful load that remains in context; otherwise run `vibe skill load -- <name>`.
+If the user requests a Skill by exact name, apply this rule to that name.
+Only load Skill names listed here or returned by `vibe skill list`; do not guess names.
 Use `vibe skill list --page 2` only when more discovery is useful; ordinary tasks do not require scanning every page.
 
 ### Available skills
@@ -206,8 +205,7 @@ and retains only exact-name guidance:
 ```md
 ## Skills
 
-If the user requests a skill by exact name, run `vibe skill load -- <name>` before proceeding.
-When these rules require an Avibe-managed Skill, reuse an earlier successful `vibe skill load -- <name>` result for that name if it remains in the current context.
+If the user requests a Skill by exact name, ensure its content is in context: reuse an earlier successful load that remains in context; otherwise run `vibe skill load -- <name>` before proceeding.
 Otherwise, do not guess skill names.
 ```
 
@@ -310,7 +308,7 @@ consistency boundaries.
 
 | Backend | Native isolation | Avibe prompt application |
 | --- | --- | --- |
-| Claude Code | Configure the SDK with `skills=[]`. | Rebuild when the Skill Catalog changes and resume the same native Session. |
+| Claude Code | Configure the SDK with `skills=[]` and disallow the native `Skill` tool. | Rebuild when the Skill Catalog changes and resume the same native Session. |
 | Codex | Set `skills.include_instructions=false`. | Apply the current developer instructions through `turn/start.collaborationMode` while retaining the same thread; use one developer-item fallback only when that API is unavailable. |
 | OpenCode | Send `tools.skill=false` in every prompt request and runtime config override. | Send the current system prompt on every new Turn. |
 
