@@ -804,12 +804,25 @@
   font-weight: 600;
 }
 /* Interface glyphs and vendor marks are one visual family at one size, so they
-   share the rule rather than each declaring 14px and drifting apart. Two names
-   because a vendor's logo is not a statement about its interface. */
+   share the rule rather than each declaring a height and drifting apart. Two
+   names because a vendor's logo is not a statement about its interface.
+   The height is the only size here: `vendorMarks.ts` boxes every mark into a
+   10:7 box holding 19 units of ink in 24, so one height is one ink height for
+   all of them, and the slot takes that shape from the ratio rather than from a
+   second px value that could be changed without the first. It is wider than it
+   is tall because a mark is not: matching cap heights across a wordmark and a
+   monogram needs the room the widest of them asks for, and a fixed slot is what
+   keeps the labels beside them in one column.
+   `width: auto` is what makes "the height is the only size" true rather than
+   merely intended: a ratio decides a width only while the other one is
+   indefinite, so a drawing arriving with its own `width` attribute — every
+   lucide icon ships `width="24" height="24"` — would otherwise keep that width
+   beside the shared height and push its label out of the column. */
 .model-hub-add-key-protocol-glyph,
 .model-hub-add-key-vendor-glyph {
-  width: 14px;
   height: 14px;
+  width: auto;
+  aspect-ratio: 10 / 7;
   flex-shrink: 0;
 }
 .model-hub-add-key-action {
