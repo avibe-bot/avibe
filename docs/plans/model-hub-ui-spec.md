@@ -398,7 +398,7 @@ silently retargets.
 for a saved-protocol edit route and remains closed by subtraction: changing protocol
 still requires a new Source. G-4 asked for a badge conditioned on manual provenance;
 that marker still does not exist. The new ruling adds an unconditional source identity
-label (`provider or host · proved protocol`) and a form-level Auto/manual selector.
+label (`provider or host · established protocol`) and a form-level Auto/manual selector.
 Neither resurrects the retired edit route or invents provenance.
 
 ### 0.6 Conflicts raised by this pass — all five now ruled
@@ -446,9 +446,9 @@ next one should go: the escalation was worth its cost precisely because the answ
 edited and Source still carries no manual/automatic provenance. What changed is the
 preflight and read presentation: frame 05 exposes Auto/manual protocol selection before
 the first request, while every Source card and detail header show the endpoint identity
-and proved protocol unconditionally. The label never claims who selected it and has no
+and established protocol unconditionally. The label never claims who selected it and has no
 edit action. This separates three facts that the older ruling conflated: choosing a
-candidate, proving a protocol, and displaying the proved protocol.
+candidate, establishing a protocol owner, and displaying the established protocol.
 
 **E-3 is closed, and the design moved again.** It read: *can a source be saved without
 a verifying upstream response?* The frames drew 05 state ③ with a 仍要添加 escape, on
@@ -493,20 +493,20 @@ produce. The taxonomy and the payload agree once the words are separated, which 
 usual sign that the split was the real fix and the copy ban was the symptom.
 
 **E-5 is closed by drawing the missing state.** It read: *05 has no state for 「protocol
-proved, inventory unavailable」.* It was the only one of the five where the contract asked
-for **more** surface than the frames drew. AC-27 says 「『Add anyway』 is available only
-after the protocol was proved and a different result, such as model inventory, remains
-unavailable; that uncertainty is a health fact.」 The rebuilt frame 05 drew neither that
-nor E-3's version, because the rebuild removed 仍要添加 from every failure state — its two
-failure states were authentication failure (③) and unrecognized interface (④), and both are
-protocol-*not*-proved.
+established, inventory unavailable」.* It was the only one of the five where the contract
+asked for **more** surface than the frames drew. AC-27 now says 「『Add anyway』 is
+available only after the protocol was established and a different result, such as model
+inventory, remains unavailable; that uncertainty is a health fact.」 The rebuilt frame 05
+drew neither that nor E-3's version, because the rebuild removed 仍要添加 from every
+failure state — its two failure states were authentication failure (③) and unrecognized
+interface (④), and both still lack an established protocol owner.
 
 The owner ruled that the two 仍要添加 are different affordances wearing one word, and that
 this one is legitimate. Frame 05 now draws **state ⑤** (`d6bFlX`): the interface was
 recognised, the second fetch came back without an inventory, and the foot offers
 取消 / 仍要添加 / 重试. §1.5 specifies it and §2's D-27 states the property it protects:
 
-> 已保存的来源恒有一个被观测证明过的协议;凡拿不到证明的路径,产物都是「没有添加成功」。
+> 已保存的来源恒有一个已建立且有归属的协议;凡拿不到这个归属的路径,产物都是「没有添加成功」。
 
 That single sentence is what separates the two 仍要添加 and is why E-3 stays closed while
 E-5 opens a button with the same label. E-3's 仍要添加 would have persisted a source whose
@@ -865,12 +865,12 @@ state exit; held intent never bypasses the evidence column.
 | §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow in this dialog's hands, for any reason that is not the singleton refusal above — a refusal, or no answer at all. The exact generated `(client_nonce, vendor, channel)` tuple remains held `[contract]` | F1, in place — there is no `flow_id` to poll or cancel, so D-36 reconciliation repeats only the held tuple. The server coalesces an in-flight claim, returns its one committed flow, or releases the tuple for one fresh provider start | `addSub.error.startFailed`, `addSub.retry` | 重试 sends the same tuple and classifies the answer as Default does: accepted/coalesced flow → RR-1/RR-2, singleton refusal → Already bound, still no flow → back here. It never opens a second provider start beside the first. 取消 dismisses; a claim released before flow creation has no Source binding `[derived]` |
 | §1.5 | ① Default | Dialog opened; Base URL or API key empty | F5 | `addKey.title`, `addKey.subtitle`, `addKey.field.vendor`, `addKey.field.vendor.custom`, `addKey.field.vendor.hint`, `addKey.field.name`, `addKey.field.baseUrl`, `addKey.field.baseUrl.hint`, `addKey.field.apiKey`, `addKey.field.apiKey.reveal`, `addKey.field.apiKey.conceal`, `addKey.field.protocol`, `addKey.protocol.auto`, `addKey.protocol.idleHint`, `addKey.protocol.manual`, `addKey.protocol.catalogPinned`, `addKey.detect`, `addKey.cancel` | 服务商 is the first field (自定义 · 兼容端点 by default). A catalog vendor prefills Base URL, locks 接口类型 to the catalog protocol with badge 「内置目录」, and hides the manual disclosure. On 自定义, interface type is a dimmed result area; the collapsed disclosure `addKey.protocol.manual` holds Auto plus the three concrete interfaces as a **declaration**, not a probe constraint. Auto carries no glyph; a concrete option carries its protocol-family glyph. 检测 is disabled until Base URL and API key are filled. 取消 → dismiss |
 | §1.5 | ① Ready `[derived]` | Base URL and API key filled; no fresh observation | F5 | ①'s keys, undimmed | 检测 → ②. A catalog vendor sends its pin; a concrete disclosure selection is a declaration on `custom`; Auto auto-detects. 取消 → dismiss |
-| §1.5 | ①″ Identified `[derived]` | ② came back `observed`, protocol non-null, `discovery: succeeded` | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.confirm`, `addKey.protocol.manual`, and ①'s still-visible form | Mint strip: protocol-family glyph + proved protocol label + count (or `addKey.pull.empty`). No model names. Editing Base URL, API key, or the protocol selection → ① Ready, the report dropped — §1.5's retirement property, of which this is the plainest case. A rename is not one of those three inputs and keeps the report. 确认添加 → ②″ with the proved protocol and `accept_unavailable_inventory` false / omitted `[contract]`. 取消 → dismiss |
+| §1.5 | ①″ Identified `[derived]` | ② came back `observed`, protocol non-null, `discovery: succeeded` | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.confirm`, `addKey.protocol.manual`, and ①'s still-visible form | Mint strip: protocol-family glyph + established protocol label + count (or `addKey.pull.empty`). No model names. Editing Base URL, API key, or the protocol selection → ① Ready, the report dropped — §1.5's retirement property, of which this is the plainest case. A rename is not one of those three inputs and keeps the report. 确认添加 → ②″ with the established protocol and `accept_unavailable_inventory` false / omitted `[contract]`. 取消 → dismiss |
 | §1.5 | ② Detecting | 检测 pressed, or 重试 pressed from ③ / ④ / ⑤ / ⑥ — `POST /api/models/sources/observe` `[contract]` | → ③ / ④ / ⑤ / ⑥ through O1 | `addKey.protocol.detecting` | O1 classifies the explicit observation. Ready → ①″, persisting nothing. 取消 aborts the in-flight probe and returns to ① Ready with the form intact. A second detect cannot start while one is in flight |
 | §1.5 | ②″ Saving `[derived]` | 确认添加 pressed from ①″, or 仍要添加 pressed from ⑤ — `POST /api/models/sources` with one generated `client_nonce` `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.saving`, `addKey.saving.detail` | Cancel is blocked. An accepted create closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
 | §1.5 | ③ Failure | O1 received one of four closed unsuccessful outcomes from the explicit 检测 observation or Source create's repeated observation: `authentication_failed`, `unreachable`, `timeout` or `adapter_error` `[contract]` | F1 | `addKey.fail.subtitle`; exactly one outcome line: `authentication_failed` → `addKey.fail.auth` + `addKey.fail.auth.detail`, `unreachable` → `addKey.fail.address`, `timeout` → `addKey.fail.network`, `adapter_error` → `addKey.fail.unclassified`; `addKey.retry` | 重试 → ②, whichever producer returned the line — the retry re-runs the explicit observation before any create and does not depend on what the last one concluded. 取消 → dismiss |
 | §1.5 | ④ Interface undetermined | O1 received `SourceObservation.outcome: ambiguous` from the explicit 检测 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` — Auto detect on `custom` with no shape proof | F1 | ①'s still-visible form plus `addKey.undetermined.title`, `addKey.undetermined.detail`, the four-segment selector expanded in place (concrete options carry protocol-family glyphs), `addKey.field.protocol.hint`, and `addKey.retry` | Choose one concrete interface + 重试 → ② as a **declaration**: authenticated on that path → ①″ (discovery succeeded) or ⑤ (discovery failed), persisting nothing yet; Auto still selected → 重试 stays disabled; still ambiguous only if Auto is retried. 取消 → dismiss |
-| §1.5 | ⑤ Identified, inventory unavailable `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 检测 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → ② (the entire explicit observation). 仍要添加 is offered whenever this inventory cell carries a proved protocol — it is not origin-scoped. 仍要添加 → ②″ with **`accept_unavailable_inventory: true`** `[contract]`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-proved / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06. This state renders no form, so it offers no edit to retire its waived cell; §1.5's retirement property binds it regardless and needs no exception. 取消 → dismiss |
+| §1.5 | ⑤ Identified, inventory unavailable `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 检测 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → ② (the entire explicit observation). 仍要添加 is offered whenever this inventory cell carries an established protocol owner — it is not origin-scoped. 仍要添加 → ②″ with **`accept_unavailable_inventory: true`** `[contract]`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-established / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06. This state renders no form, so it offers no edit to retire its waived cell; §1.5's retirement property binds it regardless and needs no exception. 取消 → dismiss |
 | §1.5 | ⑥ Engine unavailable `[derived]` | The gateway is not running when 检测 is pressed | F1 | `addKey.fail.engineDown`, `addKey.retry` | F1 in full: the form keeps every value it holds and the primary becomes 重试. Pressing it **is** the recovery observation — nothing here watches for one — and re-attempts 检测 → ②, whose own outcomes then apply; the engine still down → back here; 取消 → dismiss |
 | §1.5 | ⑦ Save unconfirmed `[derived]` | The observation 确认添加 / 仍要添加 owed has already come back with consent — clean in ①″, identified after a hint in ④, or waived in ⑤ — and the complete `SourceCreate` then returned no terminal observation classifier or never answered. Every classified pre-commit observation instead leaves through O1 to ③ / ④ / ⑤. The generated `client_nonce` and every request field remain held `[contract]` | F1 | `addKey.fail.save`; after `source_create_in_progress`, `addKey.fail.inProgress`; `addKey.retry` | Each user press of 重试 first reads `GET /api/models/sources` for the exact nonce. Match → claim the committed Source and enter 06 through the ordinary projection read. Miss → resend the same request/nonce. A response-backed observation enters O1; nonce conflicts follow the exact branches here. `source_create_in_progress` returns to this actionable state with `addKey.fail.inProgress`; there is no timer, automatic list read or automatic mutation retry. A later user press alone repeats the list-read + same-nonce resend algorithm. `source_nonce_conflict` rereads the list and claims the committed Source; a classified pre-commit observation → ③ / ④ / ⑤; a released slot starts one fresh create. Committed never replays the original response, and no branch matches by URL/name or creates a second Source (D-36). 重试 resends the held request rather than the form, so F1 here keeps the form's values while locking every field: the request may not outlive the fields it was built from, and this state resolves that by making them uneditable rather than by retiring on an edit that cannot happen. §1.5's retirement property still binds it. 取消 dismisses; after a committed boundary it ends only the caller's wait and the next Source/Agent read owns the result |
 | §1.6 | Ready | Source detail loaded and the table holds at least one model — discovered, added by hand, or both. When `last_discovered_at` is null the inventory has no age, `{{time}}` is absent by §0.9's rule, and the status line drops that segment `[contract]` | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; a rendered 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry. The §1.6 action-capability row decides whether 重新拉取 exists |
@@ -3370,7 +3370,7 @@ The dialog is now a single add flow:
   established on the 2026-09-04 ladder (catalog pin, user declaration, or
   matching response proof). ③ never persists. ④ never persists from Auto;
   a concrete declaration that authenticates leaves ④ through ② into ①″.
-- Evidence retires with the inputs it was proved against. Editing Base URL, the API
+- Evidence retires with the inputs it was derived from. Editing Base URL, the API
   key or the protocol selection returns **any** state whose primary would persist
   without observing again to ① Ready — ①″'s report, ⑤'s waived inventory, and the
   protocol a refused or unanswered create still holds. That is the property, stated
@@ -3392,7 +3392,7 @@ The dialog is now a single add flow:
 | `cXsiv` Base URL + hint | free text; the hint names an API root, and says a bare host uses the standard `/v1` path | user | yes | — |
 | `mZBBw` API Key | masked value, reveal icon | user | yes | Toggle reveal |
 | Interface type | result area last: idle/ready row naming the interface 检测 will send, detecting spinner, identified mint strip, catalog-locked row, or ④'s gold strip; protocol-family glyphs on every concrete protocol name | observation result; catalog pin; disclosure selection is a declaration on 自定义 | disclosure yes on 自定义; ④ selector yes | Open `addKey.protocol.manual`, which replaces the row with the selector; a concrete choice declares the next 检测 / ④ 重试 |
-| `S0pOY2` 检测 / 确认添加 | 检测 while there is no fresh result; 确认添加 after ①″ | form validity | yes | 检测 → ②; 确认添加 → ②″ with the proved protocol |
+| `S0pOY2` 检测 / 确认添加 | 检测 while there is no fresh result; 确认添加 after ①″ | form validity | yes | 检测 → ②; 确认添加 → ②″ with the established protocol |
 | `OT0Xf` state ② | spinner, 识别接口中… | in-flight observe | 取消 only | Abort; return to ① Ready with the form intact |
 | persist strip state ②″ | spinner, 保存中…, 正在保存这个供应商 | in-flight persist | none — cancel blocked | — |
 | `C72yS` state ③ strip | classified outcome copy | observation result | no | — |
@@ -3457,8 +3457,8 @@ names, and after it the source exists and its questions belong to 06.
 of the same probe — 添加 and optional 拉取型号 — and every outcome was primed as an
 add/pull twin so that a pull could never persist. Detect is now mandatory and Confirm is
 the only persisting primary, so there is no optional pull branch and no remaining work for
-those twins. ①′ / ②′ / ③′ / ④′ / ⑤′ / ⑥′ are tombstones. ⑤'s 仍要添加 is gated on a proved
-protocol with unavailable inventory, not on origin.
+those twins. ①′ / ②′ / ③′ / ④′ / ⑤′ / ⑥′ are tombstones. ⑤'s 仍要添加 is gated on an
+established protocol owner with unavailable inventory, not on origin.
 
 Cancel is no longer an origin-dependent fork. ②'s 取消 aborts the in-flight observe and
 returns to ① Ready with the form intact — a real abort, not a dismissal — and a second
@@ -3481,7 +3481,7 @@ copy.
 
 **A successful Detect lands in ①″, not back in ① and not in a persist** `[derived]`. ①″ is
 the form exactly as ① Ready renders it, plus the mint identified strip: protocol-family
-glyph, proved protocol label, and `addKey.pull.result` or `addKey.pull.empty`. It is also
+glyph, established protocol label, and `addKey.pull.result` or `addKey.pull.empty`. It is also
 where ④ lands when the manual selection identifies the interface with discovery succeeded,
 and where ⑤'s 重试 lands when the repeated observation comes back usable. Nothing was
 persisted, so 确认添加 from here still runs Source-create's repeated observation and reuses
@@ -3501,9 +3501,9 @@ hides this selector and pins protocol from the shipped table.
 State ④ keeps the same selector visible — expanded in place, not behind the disclosure —
 and requires a concrete choice before 重试. The primary is still a retry, not a save, and
 the strip always describes the latest attempt. A successful retry with discovery succeeded
-lands ①″ and still persists nothing. The stored Source records the proved protocol but no
-manual/automatic provenance marker: the distinction matters during preflight, not during
-later invocation. Saved protocol changes still require a new Source.
+lands ①″ and still persists nothing. The stored Source records the established protocol
+but no manual/automatic provenance marker: the distinction matters during preflight, not
+during later invocation. Saved protocol changes still require a new Source.
 
 **State ⑤ is the one place in the product that saves something it could not fully
 verify, and the rule that makes it safe is a property, not a permission** `[frame]`
@@ -3511,24 +3511,26 @@ verify, and the rule that makes it safe is a property, not a permission** `[fram
 (`d6bFlX`), and the ruling that closed it states the invariant the whole dialog
 enforces:
 
-> 已保存的来源恒有一个被观测证明过的协议;凡拿不到证明的路径,产物都是「没有添加成功」。
+> 已保存的来源恒有一个已建立且有归属的协议;凡拿不到这个归属的路径,产物都是「没有添加成功」。
 
 Read that as a partition of the four ways an add can end, and every button on this
-screen falls out of it. ③ and ④ are the paths where the protocol was **not** proved,
-so both refuse — that is E-3's gate, and ⑤ does not reopen it, because ⑤ is
-downstream of the gate rather than around it. ⑤ is the path where the protocol
-*was* proved by a real response and a *different* result — the model inventory —
-did not arrive. AC-27 at `ca45aeb6` puts the same thing from the contract's side:
-「『Add anyway』 is available only after the protocol was proved and a different
-result, such as model inventory, remains unavailable; that uncertainty is a health
-fact.」 An unknown inventory is a fact a saved source can carry; an unknown protocol
-is not, because every later request depends on it.
+screen falls out of it. ③ and ④ are the paths where the protocol owner was **not**
+established, so both refuse — that is E-3's gate, and ⑤ does not reopen it, because
+⑤ is downstream of the gate rather than around it. ⑤ is the path where the protocol
+*was* established by one rung of the ladder — catalog pin, concrete `custom`
+declaration, or matching response proof — and a *different* result, the model
+inventory, did not arrive. AC-27 at `ca45aeb6` puts the same thing from the
+contract's side: 「『Add anyway』 is available only after the protocol was
+established and a different result, such as model inventory, remains unavailable;
+that uncertainty is a health fact.」 An unknown inventory is a fact a saved source
+can carry; an unknown protocol owner is not, because every later request depends on
+it.
 
 That is why 仍要添加 exists here and nowhere else, and the frame says so in its own
 caption: 「全产品唯一一处「仍要添加」」. It is also why the state carries **no field**.
 ④ asks the user for a concrete interface because the product is missing something the user might
 know; ⑤ asks for nothing, because the user cannot supply a model list. The only
-question ⑤ puts to a person is whether to keep the connection they just proved.
+question ⑤ puts to a person is whether to keep the connection they just established.
 
 **The three-button foot is the shape of that question, and the ink partition holds
 through it** `[frame]`. `x0Gzg` carries 取消 (`SvK44`), 仍要添加 (`wouXZ`) and 重试
@@ -3544,7 +3546,7 @@ advisory inks describe the state of the world, and the world's state here is alr
 said once, by the gold strip above.
 
 **The property this state produces is an equality, not a pixel**: the set of dialog exits
-that persist a source equals the set whose protocol came from an observed response. A
+that persist a source equals the set whose protocol has a named established owner. A
 build that lets ③ or ④ save, and a build that refuses ⑤, break the same equality from
 opposite sides — which is why it is worth stating as one.
 
@@ -3559,9 +3561,9 @@ models and health. Thus ④'s Auto path still cannot save, a concrete ④ declar
 is authority once authenticated, and ⑤'s
 仍要添加 is the only producer that sets `accept_unavailable_inventory: true`;
 the clean path sends false or omits it and may not commit when that server-side
-observation again proves a protocol while discovery remains unavailable. The flag never
-supplies or overrides observation evidence, is inert on successful discovery, and cannot
-bypass reachability, authentication or protocol proof. The response is
+observation again establishes the protocol owner while discovery remains unavailable. The
+flag never supplies or overrides observation evidence, is inert on successful discovery,
+and cannot bypass reachability, authentication or protocol establishment. The response is
 `{source, added_to, adopted_by}`;
 the plaintext key and nonce reservation never become routing inputs.
 
@@ -3723,13 +3725,13 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `iGcAi` back icon | icon only; `sourceDetail.back` is its accessible name in both locales `[derived]` | route | yes | Return to 01 |
-| `sugad` source bar | 36×36 identity tile, source name, `provider or endpoint host · proved protocol` identity pill, **state dot + state label** (使用中 in the drawn state) + 型号列表更新于 {{time}}, mono `host · N 个型号` | source state `[spec §4.5]` | capability-gated 重新拉取 / 添加模型 / source overflow `[frame 11]` | Refetch / append an editable row / open 编辑来源 · 移除来源 |
+| `sugad` source bar | 36×36 identity tile, source name, `provider or endpoint host · established protocol` identity pill, **state dot + state label** (使用中 in the drawn state) + 型号列表更新于 {{time}}, mono `host · N 个型号` | source state `[spec §4.5]` | capability-gated 重新拉取 / 添加模型 / source overflow `[frame 11]` | Refetch / append an editable row / open 编辑来源 · 移除来源 |
 | 重新拉取 action capability `[derived]` | `sourceDetail.action.refetch` | `Source.supply_channel` | render for `hub`; do not render for `native_cli` | A Hub Source → Refetching. A native Source has no stored credential for this route to validate, so it exposes no activation |
 | `myA8k` header | 型号 ID (250) · 录入 (84) · 推理强度 (470, with info) · fill spacer | static | no | — |
 | `OM5PH` row | model id, entry-kind pill, tier chips, overflow icon | one model | tiers, overflow | Edit tiers / row menu |
 | Retired discovered-row delta `[derived]` | same `OM5PH` chrome, muted ink, existing tag component with `sourceDetail.entry.retired`; never a new row component | `origin: discovered`, `retired: true` `[contract]` | no delete or reactivation action | Remains readable and non-supplying; refetch preserves it |
 | `p2JwTz` tiers | chips, or 未设置档位; `+ 添加档位` is drawn only while a pointer is on the row, in the box it reserves either way, and the row answers that hover with `--model-hub-wash-0a` fill and nothing else — no border, no height, no reflow; a write this row rolled back keeps its 重试 here `[derived]` | `reasoning_efforts[]` `[contract]` FC-03 | the whole cell, by pointer, focus or tap — the cell's box is the row band rather than the chips it happens to hold, so a device with no hover draws no pill and still has the same target | Enter edit mode; retry the rolled-back write |
-| `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 + ghost suggestion chips derived from the source's proved protocol (the OpenAI protocols offer `low` `medium` `high` `xhigh`; Anthropic Messages names no tier vocabulary and offers none) + one muted line stating that tiers are sent as typed and that a model with none is still routable `[derived]` | local edit → `PATCH /api/models/sources/<source_id>/models/<model_id>` `[contract]`; suggestions are presentation only — never persisted, never pre-filled at discovery, never sent | yes; one row is in this state at a time, and the state ends when focus leaves the editor — Escape (which hands focus back to the row) or focus moving anywhere outside it, including another row's cell — so every control inside it is reachable by keyboard and by pointer alike; a rolled-back write is not held here, it stays with its row `p2JwTz` | Add / remove a tier; a suggestion adds through the same path typing it would take; retry a rolled-back write |
+| `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 + ghost suggestion chips derived from the source's established protocol (the OpenAI protocols offer `low` `medium` `high` `xhigh`; Anthropic Messages names no tier vocabulary and offers none) + one muted line stating that tiers are sent as typed and that a model with none is still routable `[derived]` | local edit → `PATCH /api/models/sources/<source_id>/models/<model_id>` `[contract]`; suggestions are presentation only — never persisted, never pre-filled at discovery, never sent | yes; one row is in this state at a time, and the state ends when focus leaves the editor — Escape (which hands focus back to the row) or focus moving anywhere outside it, including another row's cell — so every control inside it is reachable by keyboard and by pointer alike; a rolled-back write is not held here, it stays with its row `p2JwTz` | Add / remove a tier; a suggestion adds through the same path typing it would take; retry a rolled-back write |
 | `nN4TZ` manual row | editable id input, 手动添加 pill, tier affordance, 取消 / 添加 | local draft → `POST /api/models/sources/<source_id>/models` `[contract]` | yes | Commit or discard |
 | `Q83BF` add row | 添加模型 + when to use it | — | yes | Append a manual draft row |
 | `tF3Bh` footnote | scope of this page; that tiers are yours to type; that the interface type is confirmed at add time, shown, and not editable here | static | no | — |
@@ -4225,7 +4227,7 @@ Five rules:
 | `edit.title` `[frame]` | 编辑来源 {{source}} | Edit source {{source}} |
 | `edit.name` `[frame]` | 显示名称 | Display name |
 | `edit.baseUrl` `[frame]` | Base URL | Base URL |
-| `edit.hint` `[derived]` `[contract]` | 协议已由真实响应证明,不在这里改;改显示名称不会影响型号与路由链。改地址时会先检查供给影响。 | The protocol was proved by a real response and cannot be changed here. Renaming does not affect models or routes; changing the address first checks its supply impact. |
+| `edit.hint` `[derived]` `[contract]` | 协议已在添加时建立,不在这里改;改显示名称不会影响型号与路由链。改地址时会先检查供给影响。 | The protocol was established during add and cannot be changed here. Renaming does not affect models or routes; changing the address first checks its supply impact. |
 | `edit.cancel` `[frame]` | 取消 | Cancel |
 | `edit.save` `[frame]` | 保存 | Save |
 | `edit.saving` `[derived]` | 正在保存… | Saving… |
@@ -4346,7 +4348,7 @@ act on. A latency figure next to a refetch button would invite exactly the confl
 the previous rule forbids.
 
 **The source identity label is unconditional and non-editable** `[frame]` `[contract]`.
-The card and detail header show `provider or endpoint host · proved protocol`, for
+The card and detail header show `provider or endpoint host · established protocol`, for
 example `ai-relay.chainbot.io · Anthropic Messages`. It is not the retired
 「接口由你指定」 badge: Source carries no manual/automatic provenance, so the label never
 claims how the protocol was selected. `PATCH /api/models/sources/<source_id>` still has
@@ -4953,7 +4955,7 @@ lifecycle. A `needs_action` card suppresses only a duplicate action already rend
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | Source overflow | 编辑来源; capability-gated 重新授权 or 更换 Key; 移除来源 | selected source + credential capability | yes | Edit / Remove open frame 11; either credential action enters the matching §1.11 producer with the exact source-detail origin held |
-| Edit head | `sourceDetail.edit.title` plus kind, credential owner and proved protocol | selected source | close | Dismiss unchanged |
+| Edit head | `sourceDetail.edit.title` plus kind, credential owner and established protocol | selected source | close | Dismiss unchanged |
 | 显示名称 | current `display_name` | source | yes | Edit locally |
 | Base URL | current `base_url` | API-key source | yes | Edit locally; clearing a custom value commits `null` and restores the official endpoint |
 | Edit helper | Why protocol is fixed and when a Base-URL edit can affect supply | static | no | — |
@@ -5362,7 +5364,8 @@ a category the product cannot adjudicate becomes a label that lies. `[spec §3]`
 Auto detect plus each supported interface before the first request. Auto is the default;
 a concrete choice restricts observation to that one protocol.
 *Why:* compatible relays often expose multiple or misleading routes. The operator may
-know the contract while the product still owns the proof required to save it.
+know the contract while the product still owns the establishment check required to save
+it.
 
 **D-3 — Manual selection narrows verification; it never bypasses it.** A concrete
 selection produces exactly one candidate probe. State ④ keeps the form and selector

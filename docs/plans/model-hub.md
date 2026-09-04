@@ -1747,8 +1747,9 @@ directions into questions that later lanes must answer before writing mechanical
       backend has at most one native Source.
 - [ ] §4.1 defines manual connectivity testing, model discovery, manual model
       add/remove, and editable `reasoning_efforts` lists for every inventory entry;
-      every saved protocol is response-proven before Save and immutable afterward,
-      with no persistent provenance marker or protocol-level unverified value.
+      every saved protocol is established before Save by a named owner (catalog pin,
+      `custom` declaration, or matching response proof) and immutable afterward, with
+      no persistent provenance marker or protocol-level unverified value.
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
       Completions, and shows Auto detect plus those three protocol choices before
       observation; an ambiguous Auto result requires one concrete choice to retry.
