@@ -10,7 +10,6 @@ import { intendedFiles } from './lintPolicy.mjs';
 import { rendersAtAll } from './nonRenderingText.mjs';
 import { eachStylesheet } from './stylesheets.mjs';
 import {
-  classesRenderedBy,
   firstCompound,
   frozenAliases,
   styledSubjects,
@@ -52,66 +51,6 @@ describe('firstCompound', () => {
 
   it('does not mistake a combinator inside a functional or attribute part for the end', () => {
     expect(firstCompound('.a:not(.b > .c)[data-x="y > z"] span')).toBe('.a:not(.b > .c)[data-x="y > z"]');
-  });
-});
-
-describe('classesRenderedBy', () => {
-  const PROBE = 'Component.tsx';
-
-  it('reads a plain literal, a helper call and a conditional alike', () => {
-    const source = [
-      'const a = <div className="one two" />;',
-      "const b = <div className={cn('three', flag && 'four')} />;",
-      'const c = <div className={`five`} />;',
-    ].join('\n');
-
-    expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['one', 'two', 'three', 'four', 'five']));
-  });
-
-  it('ignores a class name that is only talked about', () => {
-    const source = '// .model-hub-guard-label is styled elsewhere\nconst tip = ".model-hub-guard-hop";';
-
-    expect(classesRenderedBy(source, PROBE)).toEqual(new Set());
-  });
-
-  it('ignores markup that is commented out, in either spelling', () => {
-    // A component half-reworked leaves the old tree sitting right there, and it
-    // is markup by every syntactic measure. What it is not is rendered, so a
-    // class only it carries is not a class this project styles anything with.
-    for (const source of [
-      'const a = <div className="live" />;\n// const b = <div className="dead" />;',
-      'const a = <div className="live" />;\n/* <div className="dead" /> */',
-      'const a = (\n  <div className="live">\n    {/* <span className="dead" /> */}\n  </div>\n);',
-    ]) {
-      expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['live']));
-    }
-  });
-
-  it('keeps reading the markup that is still there around it', () => {
-    // Blanking has to leave the file's shape alone: a comment between two
-    // elements must not swallow the second one.
-    const source = 'const a = (\n  <div className="one">\n    {/* was: two */}\n    <span className="three" />\n  </div>\n);';
-
-    expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['one', 'three']));
-  });
-
-  it('reads only an attribute of an element, not every binding that shares its name', () => {
-    // `className` is an ordinary identifier as well as an attribute name, and a
-    // variable holding one is not markup: nothing here renders, so nothing here
-    // is a class this project styles or a token it has to anchor.
-    const source = "const className = 'gap-[var(--local-gap)] phantom-class';";
-
-    expect(classesRenderedBy(source, PROBE)).toEqual(new Set());
-    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set());
-  });
-
-  it('still reads the element that does render, standing next to one that does not', () => {
-    const source = [
-      "const className = 'gap-[var(--local-gap)] phantom-class';",
-      'const a = <div className="real-class" />;',
-    ].join('\n');
-
-    expect(classesRenderedBy(source, PROBE)).toEqual(new Set(['real-class']));
   });
 });
 
@@ -295,15 +234,57 @@ describe('tokensUsedInMarkup', () => {
     expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap', '--row-pad']));
   });
 
+  it('reads any attribute, because a styling prop is a third spelling of one', () => {
+    // `className` and `style` are the two an element applies itself; a component
+    // that forwards `contentClassName` or `trackStyle` to a child applies the
+    // same use one level down. Which name a component chose for that is not a
+    // question worth asking, so none is asked.
+    const source = [
+      'const a = <Panel contentClassName="gap-[var(--row-gap)]" />;',
+      "const b = <Track trackStyle={{ height: 'var(--row-pad)' }} />;",
+    ].join('\n');
+
+    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap', '--row-pad']));
+  });
+
+  it('reads a helper call and a conditional whole, not their first branch', () => {
+    const source = "const a = <div className={cn('gap-[var(--row-gap)]', flag && 'p-[var(--row-pad)]')} />;";
+
+    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap', '--row-pad']));
+  });
+
   it('leaves a fallback-bearing use alone, which draws something either way', () => {
     expect(tokensUsedInMarkup('<ul className="gap-[var(--row-gap,4px)]" />', PROBE)).toEqual(new Set());
   });
 
   it('ignores a use that is commented out, which asks nothing of any scope', () => {
     // The cost of reading it is not a missed defect but an invented one: the
-    // token would have to be anchored at `:root` to satisfy markup that does
-    // not render, and every remedy for that is a change to shipping CSS.
-    const source = "// <li style={{ gap: 'var(--dead-gap)' }} />\nconst a = <ul className=\"gap-[var(--row-gap)]\" />;";
+    // token would have to be declared globally to satisfy markup that does not
+    // render, and every remedy for that is a change to shipping CSS.
+    for (const source of [
+      "// <li style={{ gap: 'var(--dead-gap)' }} />\nconst a = <ul className=\"gap-[var(--row-gap)]\" />;",
+      "/* <li style={{ gap: 'var(--dead-gap)' }} /> */\nconst a = <ul className=\"gap-[var(--row-gap)]\" />;",
+      'const a = (\n  <ul className="gap-[var(--row-gap)]">\n'
+      + "    {/* <li style={{ gap: 'var(--dead-gap)' }} /> */}\n  </ul>\n);",
+    ]) {
+      expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap']));
+    }
+  });
+
+  it('reads only an attribute of an element, not every binding that shares its name', () => {
+    // `className` is an ordinary identifier as well as an attribute name, and a
+    // variable holding one is not markup: nothing here renders, so nothing here
+    // is a token anything has to resolve.
+    const source = "const className = 'gap-[var(--local-gap)]';";
+
+    expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set());
+  });
+
+  it('still reads the element that does render, standing next to one that does not', () => {
+    const source = [
+      "const className = 'gap-[var(--local-gap)]';",
+      'const a = <div className="gap-[var(--row-gap)]" />;',
+    ].join('\n');
 
     expect(tokensUsedInMarkup(source, PROBE)).toEqual(new Set(['--row-gap']));
   });
@@ -384,7 +365,7 @@ describe('frozenAliases', () => {
     expect(frozenAliases(sheets)).toEqual([]);
   });
 
-  it('says nothing about a `@theme` entry, which is substituted rather than inherited', () => {
+  it('says nothing about a `@theme` entry, which is not a scope this project placed', () => {
     const sheets = sheetsOf(`${THEMED} @theme inline { --color-label: var(--ink) }`);
 
     expect(frozenAliases(sheets)).toEqual([]);
@@ -394,6 +375,7 @@ describe('frozenAliases', () => {
 describe('unanchoredMarkupTokens', () => {
   const sheetsOf = (css) => [['inline', postcss.parse(css)]];
   const sourcesOf = (tsx) => [['Component.tsx', tsx]];
+  const REPORTED = [{ origin: 'Component.tsx', property: '--row-gap' }];
 
   it('accepts a name a scope every element inherits declares', () => {
     const sheets = sheetsOf(':root { --row-gap: 14px }');
@@ -401,41 +383,59 @@ describe('unanchoredMarkupTokens', () => {
     expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual([]);
   });
 
+  it('accepts a name a `@theme` block declares, which Tailwind emits at the root', () => {
+    // `@theme` entries are emitted into `@layer theme { :root, :host { … } }`,
+    // so every element inherits them; `inline` decides how a generated utility
+    // references the value, not whether the variable exists.
+    const sheets = sheetsOf('@theme inline { --row-gap: 14px }');
+
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual([]);
+  });
+
   it('reports a name only some class declares, because markup names no subject', () => {
     const sheets = sheetsOf('.dialog { --row-gap: 14px }');
 
-    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual([
-      { origin: 'Component.tsx', property: '--row-gap' },
-    ]);
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual(REPORTED);
   });
 
-  it('accepts a name declared by a class the element itself carries', () => {
-    // The declaration and the use are on one element, which is the same
-    // guarantee `:root` gives and the reason no ancestor can give it.
+  it('reports it even where the element is written carrying that very class', () => {
+    // The class is right there in the literal, and it still answers nothing:
+    // whether it is on the element that renders is a question about props,
+    // branches and variant maps, so no answer read out of one file is one. A
+    // component-scoped token is consumed in the stylesheet, where a selector
+    // says which elements the value is for.
     const sheets = sheetsOf('.row { --row-gap: 14px }');
 
-    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="row gap-[var(--row-gap)]" />'))).toEqual([]);
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="row gap-[var(--row-gap)]" />'))).toEqual(REPORTED);
   });
 
-  it('reports it on an element that does not carry that class', () => {
-    const sheets = sheetsOf('.row { --row-gap: 14px }');
-    const sources = sourcesOf([
-      '<ul className="row gap-[var(--row-gap)]" />;',
-      '<ol className="gap-[var(--row-gap)]" />;',
-    ].join('\n'));
-
-    expect(unanchoredMarkupTokens(sheets, sources)).toEqual([
-      { origin: 'Component.tsx', property: '--row-gap' },
-    ]);
+  it('reports a name nothing declares anywhere, which draws nothing at all', () => {
+    // The previous rule left this one alone as somebody else's to declare, and
+    // a typo is spelled exactly the same way.
+    expect(unanchoredMarkupTokens(sheetsOf(''), sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual(REPORTED);
   });
 
-  it('says nothing about a name no stylesheet here declares, which is somebody else to anchor', () => {
+  it('reports a name declared at the root only under a query', () => {
+    // A use on an element is not itself guarded by that query, so the value is
+    // missing wherever it does not hold.
+    const sheets = sheetsOf('@media (min-width: 40rem) { :root { --row-gap: 14px } }');
+
+    expect(unanchoredMarkupTokens(sheets, sourcesOf('<ul className="gap-[var(--row-gap)]" />'))).toEqual(REPORTED);
+  });
+
+  it('says nothing about a name another runtime writes onto the element', () => {
     // `--radix-popover-trigger-width` is written onto the element by Radix at
-    // open time. This project could not anchor it if it wanted to.
-    const sheets = sheetsOf('.dialog { --row-gap: 14px }');
+    // open time. This project could not declare it if it wanted to, so it is
+    // named as an exception rather than inferred from being undeclared.
     const sources = sourcesOf('<ul className="w-[var(--radix-popover-trigger-width)]" />');
 
-    expect(unanchoredMarkupTokens(sheets, sources)).toEqual([]);
+    expect(unanchoredMarkupTokens(sheetsOf(''), sources)).toEqual([]);
+  });
+
+  it('says nothing about a use carrying a fallback, which draws something either way', () => {
+    const sources = sourcesOf('<ul className="gap-[var(--row-gap,4px)]" />');
+
+    expect(unanchoredMarkupTokens(sheetsOf('.row { --row-gap: 14px }'), sources)).toEqual([]);
   });
 });
 
@@ -444,19 +444,19 @@ describe('this project', () => {
   const sources = [...shippedSources()];
   const styled = styledSubjects(sheets);
 
-  it('styles classes the product renders, so the checks have a subject', () => {
+  it('styles classes and reads tokens from markup, so the checks have a subject', () => {
     // Without this the assertions below pass by asking about nothing, which is
-    // how a check outlives the thing it checks. Both sides are covered: the
-    // stylesheets style something, the sources render something, and the class
-    // the defect was found on is still in both.
+    // how a check outlives the thing it checks. Each half is anchored by the
+    // walk that half uses: the stylesheets style something, including the class
+    // the defect was found on, and the markup reads tokens at all.
     expect(styled.size).toBeGreaterThan(0);
     expect(styled).toContain(FOUND_ON);
 
-    const rendered = new Set();
+    const read = new Set();
     for (const [origin, text] of sources) {
-      for (const name of classesRenderedBy(text, origin)) rendered.add(name);
+      for (const property of tokensUsedInMarkup(text, origin)) read.add(property);
     }
-    expect(rendered).toContain(FOUND_ON);
+    expect(read.size).toBeGreaterThan(0);
   });
 
   it('resolves every token every class it styles consumes, wherever that class mounts', () => {
@@ -468,7 +468,7 @@ describe('this project', () => {
     expect(unscopedTokens(sheets, styled)).toEqual([]);
   });
 
-  it('anchors every token its markup reads directly, which no selector can scope', () => {
+  it('reads only global or runtime-provided tokens from markup, which no selector can scope', () => {
     expect(unanchoredMarkupTokens(sheets, sources)).toEqual([]);
   });
 

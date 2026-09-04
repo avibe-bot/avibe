@@ -40,7 +40,6 @@
 
 import ts from 'typescript';
 
-import { customPropertiesIn } from './customProperties.mjs';
 import { parseSource } from './nonRenderingText.mjs';
 
 // A selector that matches the document root itself, so a custom property
@@ -71,6 +70,15 @@ const CONDITIONAL = new Set(['media', 'supports', 'container', 'scope', 'documen
 // counts -- otherwise every deliberately-optional token reads as a violation
 // and the gate fails correct CSS.
 const UNGUARDED_USE = /var\(\s*(--[\w-]+)\s*\)/g;
+
+// Names another runtime writes onto the element itself. Radix sets
+// `--radix-popover-trigger-width` and its siblings on the popover at open time,
+// which is the same element the use is on; this project could not declare them
+// if it wanted to. Named as a prefix allowlist rather than inferred from "no
+// stylesheet here declares it", because that reading is indistinguishable from a
+// typo -- and a name nothing declares draws nothing, which is the defect itself
+// rather than an exception to it.
+const RUNTIME_PROVIDED = /^--radix-/;
 
 function insideTheme(node) {
   for (let at = node.parent; at; at = at.parent) {
@@ -117,81 +125,6 @@ function firstCompound(selector) {
   return selector;
 }
 
-// One JSX element as the two things this file asks of markup: the class names
-// it carries and the tokens it reads. An attribute's value is read whole -- a
-// quoted literal with its quotes, a braced expression with its braces, so
-// `cn('a', flag && 'b')` contributes both halves rather than its first.
-//
-// Per element, not per file, because the two answers are only related on one
-// element: a token `.row` declares answers a `var()` written on an element that
-// carries `.row`, and says nothing about the element next to it. Collecting
-// each attribute separately loses the pairing that makes that judgement
-// possible.
-//
-// Tree, not text. `className` is an ordinary identifier, so the question "is
-// this one an attribute" is a question about position, and every answer read off
-// the bytes is an approximation of the grammar that is wrong for some spelling.
-// This one was wrong twice: first for a commented-out `<div className="…">`
-// left in place while a component is reworked, then -- once comments were
-// blanked -- for `const className = cn(…)`, which is a variable whose name
-// happens to match. Both are excluded here by construction rather than by a
-// third subtraction, because a `JsxAttribute` node is only ever an attribute.
-//
-// `nonRenderingText.mjs` already parses each of these files and already asks
-// this exact question of the tree (`NAMES_A_STYLE_SINK`), so the parse is shared
-// rather than repeated -- its cache keys on the source text, and the walks below
-// hand over the same one.
-function* markupElements(source, file) {
-  const tree = parseSource(source, file);
-
-  const visit = function* visit(node) {
-    if (node.kind === ts.SyntaxKind.JsxAttributes) {
-      const classes = new Set();
-      const tokens = new Set();
-
-      for (const attribute of node.properties) {
-        if (attribute.kind !== ts.SyntaxKind.JsxAttribute || !attribute.initializer) continue;
-        const name = attribute.name?.getText(tree);
-        if (name !== 'className' && name !== 'style') continue;
-
-        // `style={{ gap: 'var(--x)' }}` is the same use as `gap-[var(--x)]`
-        // spelled the other way, so both attributes are read for tokens; only
-        // `className` carries class names.
-        const expression = attribute.initializer.getText(tree);
-        for (const match of expression.matchAll(UNGUARDED_USE)) tokens.add(match[1]);
-        if (name !== 'className') continue;
-        for (const literal of expression.matchAll(/["'`]([^"'`]*)["'`]/g)) {
-          for (const one of literal[1].split(/\s+/)) if (one) classes.add(one);
-        }
-      }
-
-      yield { classes, tokens };
-    }
-
-    for (const child of node.getChildren(tree)) yield* visit(child);
-  };
-
-  yield* visit(tree);
-}
-
-/**
- * Every class name a component renders, read from its own source.
- *
- * The component is the authority on this, not a list kept next to the check: a
- * class it stops rendering stops being asserted, and one it starts rendering
- * starts. Only `className` is read, and only where it ships, so a class named
- * in a comment or a log line is not mistaken for one that renders.
- */
-function classesRenderedBy(source, file) {
-  const found = new Set();
-
-  for (const element of markupElements(source, file)) {
-    for (const name of element.classes) found.add(name);
-  }
-
-  return found;
-}
-
 /**
  * Every custom property a component consumes from its own markup.
  *
@@ -199,17 +132,53 @@ function classesRenderedBy(source, file) {
  * compiles to `gap: var(--x)` -- but it is written on an element, not in a rule,
  * so no walk of the stylesheet can see it and no selector says which scope it
  * expects. `BackendModelCatalogDialog` renders one on a `<ul>` carrying no
- * `model-hub-*` class at all, which is a use with no subject to attribute it
- * to: the only thing that can answer for it is a scope every element inherits.
- * `style` is read alongside `className` because `style={{ gap: 'var(--x)' }}`
- * is the same use spelled the other way.
+ * `model-hub-*` class at all. Every attribute is read rather than a chosen two,
+ * because `style={{ gap: 'var(--x)' }}` is the same use as `gap-[var(--x)]`
+ * spelled the other way, and a styling prop a component forwards is a third
+ * spelling of it. The value is read whole -- a braced expression with its
+ * braces -- so `cn('a', flag && 'b')` contributes both halves rather than its
+ * first.
+ *
+ * Names, and nothing else. Which classes an element carries when it renders is
+ * the question this walk used to answer alongside them, and it is not answerable
+ * from one file: a class arrives through a forwarded prop, a variant map, or a
+ * branch nothing here can evaluate. `unanchoredMarkupTokens` therefore asks
+ * nothing of it.
+ *
+ * Tree, not text. `className` is an ordinary identifier, so the question "is
+ * this one an attribute" is a question about position, and every answer read off
+ * the bytes is an approximation of the grammar that is wrong for some spelling.
+ * This one was wrong twice: first for a commented-out `<div style={{…}}>` left
+ * in place while a component is reworked, then -- once comments were blanked --
+ * for `const className = cn(…)`, which is a variable whose name happens to
+ * match. Both are excluded here by construction rather than by a third
+ * subtraction, because a `JsxAttribute` node is only ever an attribute.
+ *
+ * `nonRenderingText.mjs` already parses each of these files and already asks
+ * this exact question of the tree (`NAMES_A_STYLE_SINK`), so the parse is shared
+ * rather than repeated -- its cache keys on the source text, and the walk below
+ * hands over the same one.
  */
 function tokensUsedInMarkup(source, file) {
+  const tree = parseSource(source, file);
   const found = new Set();
 
-  for (const element of markupElements(source, file)) {
-    for (const property of element.tokens) found.add(property);
-  }
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.JsxAttributes) {
+      // The attribute list of an element that renders, read whole: a nested
+      // element written inside one of these values is inside this text too.
+      for (const attribute of node.properties) {
+        if (attribute.kind !== ts.SyntaxKind.JsxAttribute || !attribute.initializer) continue;
+        for (const match of attribute.initializer.getText(tree).matchAll(UNGUARDED_USE)) {
+          found.add(match[1]);
+        }
+      }
+      return;
+    }
+
+    for (const child of node.getChildren(tree)) visit(child);
+  };
+  visit(tree);
 
   return found;
 }
@@ -313,12 +282,16 @@ function inheritableTokens(sheets) {
 // is a decision with reasons on both sides; this makes no claim about those.
 const PURE_ALIAS = /^var\(\s*(--[\w-]+)\s*\)$/;
 
-// A selector matching the document root itself, unqualified. `DOCUMENT_ROOT`
-// answers the same question, but `insideTheme` is deliberately not folded in
-// here: a `@theme inline` entry is a Tailwind bridge, substituted into the
-// utility rather than emitted as a variable an element inherits (`index.css`
-// says so at its own `--color-*` block), so it is not a scope anything inherits
-// a value from.
+// A selector matching the document root itself, unqualified. This asks where a
+// declaration is WRITTEN, which is a narrower question than which elements can
+// read it, and `insideTheme` is deliberately not folded in on those grounds
+// rather than on the ones first written here. A `@theme` entry IS emitted, into
+// `@layer theme { :root, :host { … } }`, and every element does inherit it --
+// `inline` decides how a generated utility references the value, not whether the
+// variable exists, which is why `inheritableTokens` counts one. What a `@theme`
+// entry is not is a declaration this project placed at a scope of its own
+// choosing, and that is the whole subject of `frozenAliases`, the one caller
+// below: whether moving a declaration outward froze it.
 function atDocumentRoot(declaration) {
   const owner = declaration.parent;
   return owner.type === 'rule'
@@ -529,78 +502,47 @@ function unscopedTokens(sheets, classNames) {
   return unresolved;
 }
 
-// Every custom property a class declares on the element carrying it, keyed to
-// the classes that element must carry for the declaration to apply.
-//
-// A use written in markup applies to its element always, so only a declaration
-// that applies to that element always can answer for it: no `@media` around it,
-// no `:hover` or `[data-open]` on it, and no combinator -- `.row > span` lands
-// on the span. What survives is a plain compound of classes, which the element
-// either carries or does not, and that is a question about the element itself
-// rather than about its ancestors.
-function classDeclaredTokens(sheets) {
-  const declared = new Map();
-
-  for (const [, root] of sheets) {
-    root.walkDecls((declaration) => {
-      if (!declaration.prop.startsWith('--')) return;
-      if (declaration.parent.type !== 'rule') return;
-      if (conditionsOn(declaration).length > 0) return;
-
-      for (const one of declaration.parent.selectors) {
-        const selector = one.trim();
-        if (firstCompound(selector) !== selector) continue;
-        const { classes, guards } = compoundParts(selector);
-        if (guards.length > 0 || classes.length === 0) continue;
-        if (!declared.has(declaration.prop)) declared.set(declaration.prop, []);
-        declared.get(declaration.prop).push(classes);
-      }
-    });
-  }
-
-  return declared;
-}
-
 /**
- * The tokens ``sources`` consume from markup without a scope that answers.
+ * The tokens ``sources`` read from markup that nothing guarantees is there.
  *
- * The stylesheet half above can attribute a use to the subject its rule names.
- * A use written on an element names no subject, so what can answer for it is
- * narrower: a scope every element inherits, unconditionally -- or a class the
- * element itself carries, which is the same element the use is on and therefore
- * the same guarantee. What cannot answer is an ancestor: which one that is, is a
- * fact about the React tree, and the one that happens to declare the token today
- * is one refactor away from not being an ancestor.
+ * The stylesheet half above attributes a use to the subject its rule names. A
+ * use written on an element names no subject, and the obvious substitute -- the
+ * classes that element carries -- is not readable from the file the use is
+ * written in. A class arrives through a forwarded prop, a variant map, or a
+ * branch, so every rule of the form "the element also carries the class that
+ * declares it" is a guess about the React tree, and a guess in that direction
+ * fails correct markup.
  *
- * A name no stylesheet here declares at all is somebody else's to declare --
- * `--radix-popover-trigger-width` is written by Radix onto the element at open
- * time, and this project could not anchor it if it wanted to. So what gets
- * reported is a name THIS token layer declares somewhere but not everywhere,
- * which is the defect; an externally provided name is left alone, a miss rather
- * than a false positive, on the same grounds as the fallback rule above.
+ * So the rule is the one that needs no such answer. A token read from markup is
+ * one of three things, each decidable from the token layer alone:
+ *
+ * - global: declared in a `:root` block or a `@theme` block, both emitted at the
+ *   document root and inherited by every element whatever the React tree does;
+ * - runtime-provided: named by `RUNTIME_PROVIDED`, written onto the element by
+ *   somebody this project does not speak for;
+ * - fallback-bearing, which never reaches here at all -- `UNGUARDED_USE` does
+ *   not match `var(--x, 6px)`, because that draws 6px and is not this defect.
+ *
+ * Anything else resolves only under some ancestor, and which ancestor that is,
+ * is exactly the fact one refactor falsifies. The remedy is either half: declare
+ * the token globally, or read it from the stylesheet, where a selector says
+ * which elements the value is for. A component-scoped token is consumed in the
+ * stylesheet only.
  *
  * ``sources`` is ``[origin, text]`` per shipped file.
  */
 function unanchoredMarkupTokens(sheets, sources) {
   const inheritable = inheritableTokens(sheets);
-  const onClasses = classDeclaredTokens(sheets);
-  const ours = new Map();
-  for (const [, root] of sheets) customPropertiesIn(root, ours);
   const unresolved = [];
-  const reported = new Set();
 
   for (const [origin, text] of sources) {
-    for (const element of markupElements(text, origin)) {
-      for (const property of element.tokens) {
-        if (!ours.has(property)) continue;
-        if (inForce(inheritable.get(property), [])) continue;
-        const carried = (onClasses.get(property) ?? [])
-          .some((classes) => classes.every((name) => element.classes.has(name)));
-        if (carried) continue;
-        if (reported.has(`${origin} ${property}`)) continue;
-        reported.add(`${origin} ${property}`);
-        unresolved.push({ origin, property });
-      }
+    for (const property of tokensUsedInMarkup(text, origin)) {
+      if (RUNTIME_PROVIDED.test(property)) continue;
+      // In force unconditionally, because a use on an element is not itself
+      // guarded by the `@media` a declaration may sit under: one made only there
+      // is missing wherever the query does not hold.
+      if (inForce(inheritable.get(property), [])) continue;
+      unresolved.push({ origin, property });
     }
   }
 
@@ -608,7 +550,6 @@ function unanchoredMarkupTokens(sheets, sources) {
 }
 
 export {
-  classesRenderedBy,
   firstCompound,
   frozenAliases,
   inheritableTokens,
