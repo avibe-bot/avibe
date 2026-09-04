@@ -1460,24 +1460,46 @@ current execution position added.
 | Codex | fixed | same |
 | OpenCode + future in-house agents | open | uses exact configured route chains; supports user-defined model entries |
 
-### 4.8 OpenCode identifier scheme (locked 07-23, retained in v3)
+### 4.8 OpenCode identifier scheme (v4, owner-approved 2026-09-04; supersedes the 07-23 lock)
 
-OpenCode models are `provider/model-id`. Rules:
+An OpenCode menu id is the **bare canonical model id** — the same identity rule Codex uses
+(`canonical_model_id`), unique per backend, slashes allowed when the upstream id carries them
+(`moonshotai/kimi-k2`). The `provider/model` scheme of 07-23 (standard vendor segment, single
+`custom/` fallback) is retired: it existed to keep ids stable across Gateway/Direct switches,
+and under v4 the two modes no longer share a namespace at all (§4.8.3).
 
-- The provider segment uses the **standard vendor id** (`anthropic/`,
-  `openai/`, `zhipuai/`, …) — identical to native OpenCode usage. No
-  `avibe-` namespace (owner: keep it simple). Unrecognizable vendors fall
-  back to a single `custom/` provider. Add Source may use this normalized id when it
-  proposes a one-time match; runtime reads only the stored exact hop.
-- Gateway mode merely redirects those providers' transport to the local Gateway in
-  the generated runtime config overlay. Therefore **identifiers are stable
-  across Gateway/Direct switches, across source add/remove/failover, and — new in
-  v3 — across any configured-chain edit**; never encode a concrete Source into
-  the provider segment.
-- Users never hand-assemble the string. Menu checkboxes pick models; the
-  custom-model form generates and previews the identifier (source + model ID
-  in → `zhipuai/glm-5.2-air` out). A custom model entry is, in data terms, a
-  supplement to that source's supply list.
+1. **Native protocol is a field, not a prefix.** Every OpenCode `BackendModel` row carries
+   `native_protocol ∈ {openai_responses, anthropic}` (`gemini` is a reserved future value and is
+   not admissible until `avibe-gemini` ships). It is derived once at add time from the model
+   id's vendor family through the repo-owned vendor map (`anthropic` family → `anthropic`,
+   everything else → `openai_responses`), and is editable only in the model editor, as its last
+   field, shown for OpenCode rows only. It is never shown in a list, picker, row, chip, or
+   badge: it is a mechanism of the product, not information the user acts on.
+2. **Canonical OpenCode reference = `<overlay provider id>/<menu id>`.** The overlay provider
+   id is a fixed function of `native_protocol`: `avibe-openai` for `openai_responses`,
+   `avibe-anthropic` for `anthropic` (`avibe-gemini` reserved). This composite is how Avibe
+   addresses OpenCode (its `providerID`/`modelID` split on the first `/`, its config `model`
+   field, its session records). Avibe's own surfaces show the menu id; the composite appears
+   only where a user needs to reference the model outside Avibe.
+3. **Two modes, two worlds.** In Gateway mode OpenCode runs with Avibe's overlay and
+   `enabled_providers` naming exactly Avibe's providers, so the user's own providers are not
+   loaded (opencode-overlay.md). In Direct mode Avibe injects nothing and OpenCode reads its own
+   configuration — OpenCode's behaviour, not Avibe's. Avibe never writes the user's
+   `opencode.json`, so switching modes leaves nothing to clean up.
+4. **Stability.** A menu id changes only when the user renames the row. Its overlay provider
+   changes only when the user edits `native_protocol`. Neither depends on Sources, Source order,
+   route chains, health, failover, or engine restarts.
+5. **Users never assemble a prefixed string.** The picker adds candidates by bare id; the
+   custom-model editor's `Model` field takes an id as typed (typeahead proposals included) and
+   applies the Codex admission rule; the retired "three buckets" repair of `custom/` prefixes
+   does not exist. Two different vendors' models that share an id cannot coexist in one
+   OpenCode menu — the same rule Codex already has.
+
+History: 07-23 locked `provider/model` with a standard-vendor segment and no `avibe-`
+namespace so ids read like native OpenCode and survived Gateway⇄Direct switches. 09-04 the
+owner ruled that Gateway mode owns the whole OpenCode model list, that downstream Chat
+Completions is retired in favour of one provider per downstream protocol, and that the
+native protocol is recorded per model rather than inferred from a Source's API.
 
 ## 5. Surfaces — two modules, one understandable handoff
 

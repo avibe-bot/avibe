@@ -1,61 +1,89 @@
-# OpenCode overlay contract
+# OpenCode overlay contract (v4, 2026-09-04)
 
-<!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
+<!-- authority-consumer: protocol anthropic openai_responses -->
 
-How Avibe generates the OpenCode runtime config overlay (`OPENCODE_CONFIG`) in
-Gateway mode. Owner-locked identifier rules (spec §4.8) restated as testable
-requirements.
+How Avibe generates the OpenCode runtime config overlay in Gateway mode. Owner-locked
+identifier rules (spec §4.8 v4) restated as testable requirements. Supersedes the 07-23
+contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that shape survives.
+
+## Delivery
+
+- The overlay is injected at `opencode serve` launch as `OPENCODE_CONFIG` (file) and
+  `OPENCODE_CONFIG_CONTENT` (same bytes, OpenCode's runtime-override tier). OpenCode merges its
+  own configuration layers underneath; Avibe never writes the user's `opencode.json`.
+- `enabled_providers` lists exactly the provider ids the overlay generates, so providers from
+  the user's own configuration or from environment keys are not loaded and their models never
+  appear in `/config/providers`. In Direct mode no overlay exists.
+- The overlay content hash is recorded at launch; when the effective overlay changes (menu
+  edit, `native_protocol` edit, gateway credential rotation) Avibe waits for active work to
+  finish, then restarts the serve process. Restarts are config events: no `resolution-event`
+  of kind `channel_switch`/`switch` is emitted.
 
 ## Provider entries
 
-- One provider entry per normalized **provider id** referenced by OpenCode's stored
-  menu Route chains: `anthropic`, `openai`, `zhipuai`, … Models whose provider
-  cannot be identified use the single `custom` provider id. Provider normalization
-  occurs at Add/edit time and the stored result is authoritative.
-- No `avibe-` namespace anywhere (owner 07-23). Identifiers read exactly like
-  native OpenCode: `anthropic/claude-opus-4-6`, `zhipuai/glm-5.2`,
-  `custom/<model-id>`.
-- Each generated entry uses the OpenAI-compatible Chat frontend and redirects it to
-  the local Gateway (`127.0.0.1:<port>/v1`), injecting the **local gateway token**
-  (never upstream credentials). This frontend transport is stable for the provider
-  entry even when its models resolve to Sources with different stored protocols. The
-  Gateway uses the exact configured hop to reach an upstream whose protocol is one of
-  `anthropic | openai_responses | openai_chat`. A custom `base_url`, not a fourth
-  protocol, represents a relay or self-hosted upstream.
-- Any Hub-held subscription may supply OpenCode through an exact configured hop.
-  A `native_cli` Source remains bound to its sanctioned backend and therefore cannot
-  materialize as an OpenCode provider.
+- One provider entry per downstream protocol that at least one checked menu row uses:
+
+  | `native_protocol` | provider id | `name` | `npm` | downstream endpoint |
+  | --- | --- | --- | --- | --- |
+  | `openai_responses` | `avibe-openai` | `Avibe · OpenAI` | `@ai-sdk/openai` | Gateway `/v1/responses` |
+  | `anthropic` | `avibe-anthropic` | `Avibe · Anthropic` | `@ai-sdk/anthropic` | Gateway `/v1/messages` |
+  | `gemini` (reserved) | `avibe-gemini` | — | — | not generated |
+
+  `options.apiKey` is the local gateway token (never an upstream credential);
+  `options.baseURL` is the local Gateway base for that SDK (exact path per SDK recorded from
+  the spike, S1/S2). No `@ai-sdk/openai-compatible` provider is generated: downstream Chat
+  Completions is retired for OpenCode. Direct-mode user-defined providers are out of scope.
+- `avibe-` is a reserved provider-id prefix: Avibe's own Direct-mode custom-provider creation
+  refuses it with the existing reserved-id error.
+- Provider ids are fixed strings — never derived from a token digest, a Source, or a hop.
 
 ## Menu projection
 
-- The generated provider entries enumerate exactly the checked menu models with a
-  stored nonempty Route chain (plus display names). `featured|full` is a UI view
-  state; it cannot add a model to the overlay.
-- Custom model entries (`origin: manual`) appear under their Source's normalized provider
-  prefix, or `custom/` when the vendor is unidentifiable.
+- `provider[<id>].models` is keyed by the bare menu id and enumerates exactly the checked menu
+  rows whose `native_protocol` maps to that provider and which have a stored nonempty Route
+  chain, with the row's display name, context/output limits, modalities, tool and reasoning
+  support. `featured|full` is a UI view state; it cannot add a model to the overlay.
+- Reasoning variants are emitted in the shape the provider's SDK consumes:
+  `avibe-openai` → `variants[effort] = { "reasoningEffort": effort }`; `avibe-anthropic` →
+  the shape recorded from the spike (S4). A row with `supports_reasoning: false` has no variants.
 - The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
-  normalizes a provider, matches inventory, or substitutes a model.
+  normalizes a provider, matches inventory, or substitutes a model. When the hop's Source
+  protocol equals the row's `native_protocol` the Gateway passes the request through
+  unchanged apart from credentials and host (same-protocol passthrough, S3: the engine's
+  Claude/Codex cloaking and fingerprint rewrites are disabled for API-key upstreams); when it
+  differs, the engine's automatic translation applies (S4 records what reasoning fields survive).
 
 ## Add-time matching (`matching-v1`)
 
-OpenCode matching occurs once while adding a Source, adding a menu model, or reconciling
-a newly available built-in, using the inventory owned by that write. An exact checked identifier wins. Otherwise a bare model id is
-accepted only when exactly one checked identifier ends with `/<bare>`; zero matches and
-ambiguous matches are left unconfigured. The stored Route carries the concrete upstream
-model id and this normalization is never repeated by runtime or refresh.
+OpenCode matching occurs once while adding a Source or a menu model, using the inventory
+owned by that write. An exact model id wins; there is no prefix to strip or repair. The stored
+Route carries the concrete upstream model id and this normalization is never repeated by
+runtime or refresh.
 
 ## Stability invariant (test requirement, L7)
 
-For a fixed set of checked models, the generated identifier strings are
-byte-identical across: Gateway⇄Direct mode switches, Source-order edits, Source
-cooldown/failover, and engine restarts. Adding/removing a Source without changing the
-stored OpenCode Route chains also leaves identifiers byte-identical. A scenario test
-asserts this by diffing generated overlays under each perturbation.
+For a fixed set of checked rows with fixed `native_protocol` values, the generated overlay is
+byte-identical across: Source-order edits, Source cooldown/failover, route-chain edits that
+keep the chain nonempty, engine restarts, and gateway token rotation apart from
+`options.apiKey`. Adding/removing a Source without changing the stored Route chains also
+leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
+each perturbation.
 
-## Long-lived `opencode serve`
+## Migration (one-way, pre-GA)
 
-The overlay content hash is recorded in process metadata at launch. When the
-effective overlay changes (menu edit, source vendor set change), Avibe waits
-for active work to finish, then restarts the serve process; a
-`resolution-event` of kind `channel_switch`/`switch` is NOT emitted for
-restarts (they are config events, not supply switches).
+At the Model Hub config load boundary every pre-v4 OpenCode menu id `vendor/model` becomes
+`model` with `native_protocol` derived from `vendor` (`anthropic` → `anthropic`, anything else
+→ `openai_responses`); route keys and `removed_model_ids` follow. Saving persists v4. No
+compatibility reader for the old form is kept; usage-ledger rows keyed by an old id are left
+as history.
+
+## Spike record (S1–S6; filled from the spike lane's evidence before implementation starts)
+
+| # | Question | Evidence |
+| --- | --- | --- |
+| S1 | `@ai-sdk/openai` + custom `baseURL` calls `/v1/responses` (exact base path) | pending |
+| S2 | `@ai-sdk/anthropic` + custom `baseURL` calls `/v1/messages`; client auth header the Gateway accepts | pending |
+| S3 | Same-protocol passthrough body diff, and the engine flags that make it empty for API-key upstreams | pending |
+| S4 | Variant shapes on the wire per SDK, and what survives cross-protocol translation | pending |
+| S5 | `enabled_providers` hides user/env providers in `/config/providers` | pending |
+| S6 | Canonical reference as OpenCode reports it (`avibe-anthropic/<id>`) and provider `name` display | pending |

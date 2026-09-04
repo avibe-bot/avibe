@@ -478,3 +478,86 @@ renders 23px tall against the frame's 19px chip, which stacks a picker row to 60
 frame B‴ measures 52 — retuning the pill would move every pill in the Model Hub — and the
 narrow-viewport footer orders its two buttons the other way, which is the shared `Dialog`
 primitive's own narrow layout. Neither hides nor clips anything.
+
+## v3 — OpenCode: bare ids, per-protocol overlay (2026-09-04)
+
+Owner decisions of 2026-09-04, recorded here because they change what an OpenCode row *is*.
+Normative text lives in `model-hub.md` §4.8 (v4) and `model-hub-contracts/opencode-overlay.md`
+(v4); this section binds the catalog product model to them and supersedes, for OpenCode only,
+these v2 sentences: question 1's `vendor/model` candidate identity, question 6's
+"OpenCode requires `vendor/model`", question 7's `custom/<query>` typeahead item and the
+"three buckets" manual rule, C4's `custom/` fill rule, and the `vendor/model` clauses of the
+candidates read and the admission predicate.
+
+### Outcome
+
+A user who puts OpenCode on the Gateway sees, in OpenCode, exactly the models they composed in
+the Model Hub and nothing else; each is addressed as `avibe-openai/<id>` or
+`avibe-anthropic/<id>`; requests reach a same-protocol upstream unchanged. In Avibe the
+OpenCode list looks like the Codex list: bare ids, display names, no protocol chatter.
+
+### Product model deltas
+
+- **Identity (q1, q6).** An OpenCode candidate and menu id is the bare canonical model id,
+  deduplicated exactly as for Codex; two Sources supplying the same id are one candidate with
+  two suppliers. Admission is the Codex rule (canonical form, length).
+- **Native protocol (new).** Selection derives `native_protocol` from the id's vendor family
+  through `vibe/data/model_vendors.json` at add time; the editor's last field (`API`, OpenCode
+  rows only) lets the user change it. No other surface shows it.
+- **Custom model editor (q7).** The typeahead's last item is the plain
+  `Use "{{query}}" as the model ID`; the id is stored as typed after canonicalization. The
+  OpenCode-only repair buckets are retired.
+- **Overlay (C7 → opencode-overlay.md v4).** One provider per downstream protocol,
+  `enabled_providers` naming them, Chat Completions retired downstream.
+
+### Contract deltas (normative; lanes cite these by number)
+
+- **C8 — `BackendModel.native_protocol`** (`openai_responses | anthropic`; `gemini` reserved,
+  refused) is required on OpenCode rows, absent on other backends; `from_payload` refuses an
+  OpenCode row without it and any row with an unknown value.
+- **C9 — OpenCode ids are bare.** Every schema, pattern, and validator that required
+  `^[a-z0-9_-]+/.+$` for an OpenCode id now applies the canonical-id rule; the
+  `standard_vendors` projection of agent-supply is removed (no consumer remains).
+- **C10 — Overlay shape** per opencode-overlay.md v4 (providers, `enabled_providers`,
+  variants per SDK, fixed provider ids, reserved `avibe-` prefix).
+- **C11 — Engine passthrough.** Engine config entries for API-key upstreams disable cloaking
+  and fingerprint rewrites (exact flags from S3) so same-protocol requests are forwarded
+  unchanged.
+- **C12 — Migration** per opencode-overlay.md v4, at config load, one-way, persisted on save.
+- **C13 — `contract_version` 7 → 8** with the version closure in `model-hub-contracts/README.md`.
+
+### Copy (English source; `zh.json` mirrors 1:1)
+
+| Where | String |
+| --- | --- |
+| Editor, last field (OpenCode rows only) | label `API` · options `OpenAI Responses` · `Anthropic Messages` |
+| OpenCode provider names (visible only inside OpenCode) | `Avibe · OpenAI` · `Avibe · Anthropic` |
+
+No new string anywhere else; nothing explains the mechanism.
+
+### Acceptance (properties)
+
+1. For every OpenCode menu row with a nonempty Route chain, the overlay holds exactly one
+   model entry, under the provider named by its `native_protocol`; the overlay holds no other
+   provider, and `enabled_providers` equals the set of generated provider ids.
+2. A menu id is byte-identical across Gateway⇄Direct switches, Source add/remove/reorder,
+   failover, route edits, and engine restarts; it changes only when the user renames the row.
+3. When the serving hop's Source protocol equals the row's `native_protocol`, the body the
+   upstream receives equals what OpenCode sent apart from credentials and host, for both
+   protocols; when it differs, the reasoning field recorded by S4 survives translation.
+4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
+   model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
+5. Loading a pre-v4 config yields the state a v4 write of the same rows would produce, and
+   saving persists v4.
+6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
+   only place it appears, for OpenCode rows only.
+7. `avibe-*` is refused as a user custom-provider id.
+8. `contract_version` 8 satisfies the version closure test.
+
+### Delivery plan
+
+Spike first (S1–S6 recorded in opencode-overlay.md v4 before any implementation lane starts),
+then: backend (identity, `native_protocol`, overlay writer, engine flags, migration, contract
+version) · UI (bare-id rows, editor `API` field, retired prefixing and buckets, e2e fixtures)
+· docs mirror. Gemini ships in its own later revision with a Gemini Source protocol.
+
