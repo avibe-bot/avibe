@@ -537,6 +537,10 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
     assert "`vibe skill list --page 2`" in prompt
     assert "ordinary tasks do not require scanning every page" in prompt
     assert "load that name directly" in prompt
+    assert (
+        "When these rules require an Avibe-managed Skill, reuse an earlier successful "
+        "`vibe skill load -- <name>` result for that name if it remains in the current context."
+    ) in prompt
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
@@ -582,6 +586,10 @@ def test_manual_only_skill_is_loadable_but_not_advertised(tmp_path: Path) -> Non
     assert render_skill_list([manual]) == ""
     manual_prompt = render_skill_catalog_prompt([manual])
     assert "`vibe skill load -- <name>`" in manual_prompt
+    assert (
+        "When these rules require an Avibe-managed Skill, reuse an earlier successful "
+        "`vibe skill load -- <name>` result for that name if it remains in the current context."
+    ) in manual_prompt
     assert "- manual:" not in manual_prompt
     assert "Run only when explicitly requested." not in manual_prompt
 
