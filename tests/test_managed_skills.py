@@ -541,6 +541,7 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
         "reuse an earlier successful load that remains in context; otherwise run "
         "`vibe skill load -- <name>`"
     ) in prompt
+    assert "For non-explicit requests, only load Skill names listed here" in prompt
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
