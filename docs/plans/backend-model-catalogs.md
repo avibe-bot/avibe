@@ -489,7 +489,8 @@ these v2 sentences: question 1's `vendor/model` candidate identity, question 6's
 "three buckets" manual rule, C7's OpenCode clause (the models.dev-filled id is
 `<provider>/<model>` through the vendor normalization — under v3 the filled id is the selected
 match's model id as models.dev states it), and the `vendor/model` clauses of the candidates
-read and the admission predicate.
+read and the admission predicate — and C5's unchanged-runtime guarantee, superseded for
+OpenCode row projections (C8) and the OpenCode overlay (C10) only.
 
 ### Outcome
 
@@ -523,23 +524,26 @@ display names, no protocol chatter.
   picker's `Add models` submits candidates as today, unchanged `Candidate` shape — and accepts
   the editor's explicit value; `from_payload` refuses a persisted OpenCode row without it and
   any row with an unknown value. Row projections carry it so the editor can show it. Artifact
-  change: `backend-model.schema.json` (closed shape) gains the optional `native_protocol`
-  property with the closed enum, required exactly when the row belongs to the `opencode`
-  backend; the `types.ts` `BackendModel` mirror and the response registry follow (see the
-  artifact checklist below).
+  change: `backend-model.schema.json` gains the optional `native_protocol` property with the
+  closed enum; because that row schema has no backend discriminator, `agent-supply.schema.json`
+  and the response wrapper enforce the backend condition on their `models` items; the
+  `types.ts` mirror follows (artifact checklist below).
 - **C9 — OpenCode ids are bare.** Every schema, pattern, and validator that required
   `^[a-z0-9_-]+/.+$` for an OpenCode id now applies the canonical-id rule; the
   `standard_vendors` projection of agent-supply is removed (no consumer remains).
 - **C10 — Overlay shape** per opencode-overlay.md v4 (providers, `enabled_providers`,
   variants per SDK, fixed provider ids, reserved `avibe-` prefix).
-- **C11 — Engine passthrough.** Engine config for API-key upstreams sets
+- **C11 — Engine passthrough (API-key Sources).** Engine config for API-key upstreams sets
   `disable-claude-cloak-mode: true`, credential `cloak.mode: never`, and
   `rebuild-mid-system-message: false` (S3), so a same-protocol Anthropic request body is
   forwarded unchanged apart from the mandatory `model` rewrite to the stored hop's model id
   (user-configured substitutions stay authoritative, `model-hub.md` §4.5); transport headers
   and upstream auth are the engine's own. Responses bodies toward a `codex-api-key` upstream
   are rewritten by the engine (S3): the implementation verifies each real `openai_responses`
-  Source still serves such requests and files the engine follow-up.
+  Source still serves such requests and files the engine follow-up. A Hub-held Claude
+  subscription (OAuth credential) keeps the engine's cloaking: the vendor accepts those tokens
+  only from the Claude Code identity the cloak reproduces, so rows served by a subscription
+  get the reasoning-preserving path of S4, not the body-identical guarantee.
 - **C12 — Upgrade** per opencode-overlay.md v4: keyed on the persisted
   `model_hub.contract_version` (absent = 7), the loader discards pre-v8 OpenCode menu state
   (rows, routes, removed markers, `menu`) and touches nothing else; no migration, no
@@ -553,7 +557,8 @@ display names, no protocol chatter.
 
 | Artifact | Change |
 | --- | --- |
-| `backend-model.schema.json`, `ui/src/components/settings/models/types.ts` | `native_protocol` property (closed enum `openai_responses | anthropic`), required exactly for `opencode` rows, absent otherwise (C8). |
+| `backend-model.schema.json`, `ui/src/components/settings/models/types.ts` | optional `native_protocol` property (closed enum `openai_responses | anthropic`) on the row shape (C8). |
+| `agent-supply.schema.json`, `api-response.schema.json` (picker-safe wrapper and the models `PUT`/read rows) | backend-conditional item constraints: `native_protocol` required for `opencode` rows and forbidden for `claude`/`codex` rows — the row schema has no backend discriminator, so the containing schemas enforce it (C8). |
 | `agent-supply.schema.json` | `menu.checked` items follow the canonical-id rule (no `/` requirement); the `standard_vendors` projection is removed (C9). |
 | `mirror-registry.json` | registers the `native_protocol` enum and the fixed provider-id mapping (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`). |
 | `api.md` | identifier rule (done in this revision); response-registry rows for the models `PUT`/read carrying `native_protocol`. |
@@ -577,8 +582,9 @@ No new string anywhere else; nothing explains the mechanism.
    equals the set of generated provider ids.
 2. A menu id is byte-identical across Gateway⇄Direct switches, Source add/remove/reorder,
    failover, route edits, and engine restarts; it changes only when the user renames the row.
-3. When the serving hop's Source protocol equals the row's `native_protocol`, an Anthropic
-   request body reaches the upstream JSON-identical apart from the `model` field rewritten to
+3. When the serving hop is an API-key Source whose protocol equals the row's
+   `native_protocol`, an Anthropic request body reaches the upstream JSON-identical apart from
+   the `model` field rewritten to
    the stored hop's model id; a Responses request keeps its `input`, `reasoning`, and
    `prompt_cache_key` while the engine's Codex executor edits the envelope as S3 records; when
    the protocols differ, a Responses `reasoning.effort` reaches an `anthropic` upstream as
@@ -596,8 +602,11 @@ No new string anywhere else; nothing explains the mechanism.
 
 ### Delivery plan
 
-Spike first (S1–S6 recorded in opencode-overlay.md v4 before any implementation lane starts),
-then: backend (identity, `native_protocol`, overlay writer, engine flags, migration, contract
-version) · UI (bare-id rows, editor `API` field, retired prefixing and buckets, e2e fixtures)
-· docs mirror. Gemini ships in its own later revision with a Gemini Source protocol.
+Spike done (S1–S6 recorded in opencode-overlay.md v4). Lanes: **backend** — identity,
+`native_protocol`, the overlay writer and the whole OpenCode launch seam it changes
+(`modules/agents/model_hub.py` provider set, `modules/agents/opencode/server.py` provider-set
+filtering, `modules/agents/opencode/agent.py` addressing), engine flags, the pre-GA reset,
+contract artifacts and version 8 · **UI** — bare-id rows, editor `API` field, retired prefixing
+and buckets, e2e fixtures · **docs mirror**. Gemini ships in its own later revision with a
+Gemini Source protocol.
 
