@@ -148,6 +148,10 @@ def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
 
     assert "Avibe Harness turns user intent into durable Agent work" in body
     assert "Avibe Harness is the first-choice automation layer" in body
+    assert "Backend-native work is process-local" in body
+    assert "anything that may outlive the turn through Harness" in body
+    assert "Never detach with `nohup` or a trailing `&`" in body
+    assert "live backend-native tool policy" not in body
     assert "### Mental model" in body
     assert "### Inspecting Harness state" in body
     assert "### Choosing the right Harness shape" in body

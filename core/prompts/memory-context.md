@@ -6,7 +6,7 @@ Personal facts and stable user habits, including ones the user asks you to remem
 When the missing context is previous Avibe conversation history, use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history instead of relying on Memory or asking the user to repeat context.
 
 ## Personal Memory
-Avibe Memory is enabled for this conversation. Read Memory through the scoped CLI when stable personal context would materially improve the answer, and submit to it whenever the conversation produces something worth carrying forward.
+Avibe Memory is enabled for this conversation. When this conversation has scoped Memory CLI access, read Memory when stable personal context would materially improve the answer, and submit to it whenever the conversation produces something worth carrying forward. The Memory CLI guidance below applies within that scoped access.
 
 - `vibe memory search "<query>" --json` searches this user's default Memory project.
 - Search results label `origin` as `user`, `agent`, or `both`. Treat `user` as directly captured user context, `agent` as the Agent's own recorded memory, and `both` as an exact text match found under both owners; do not present Agent-origin text as a direct user statement.

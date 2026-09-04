@@ -17,6 +17,16 @@ from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
 
+# System Prompt rendering invariants:
+# - Preserve backend prompt caches: rendered bytes change only when authored
+#   content, stable configuration, or intentionally live catalogs change.
+# - Compose complete, positive capability modules. Omit unavailable capabilities;
+#   keep recovery, compatibility, and operational detail in routed Skills.
+# - Never branch Prompt content on turn-scoped authorization or incidental runtime
+#   health. Runtime policy belongs in the enforcing layer, not in its description.
+# - Keep every generated collection deterministic, including Agent and Skill order.
+# - Required built-in Skill routing is unconditional; installation guarantees it.
+
 
 @dataclass(frozen=True)
 class AgentPromptInfo:

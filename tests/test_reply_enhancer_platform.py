@@ -1811,6 +1811,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         skill = (Path(__file__).resolve().parents[1] / "skills" / "use-avibe-harness" / "SKILL.md").read_text()
         self.assertIn("Avibe Harness turns user intent into durable Agent work", skill)
+        self.assertIn("Backend-native work is process-local", skill)
+        self.assertIn("anything that may outlive the turn through Harness", skill)
         self.assertIn("### Mental model", skill)
         self.assertIn("Watch waiter contract", skill)
         self.assertIn("vibe harness status", skill)
@@ -1914,7 +1916,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("History is saved automatically around each turn", skill)
         self.assertNotIn("Avibe's shadow history continues automatically in the background", skill)
         self.assertNotIn("Automatic Show Page history is unavailable", skill)
-        self.assertIn("one active history", skill)
+        self.assertIn("Follow the History contract in the current System Prompt", skill)
+        self.assertIn("`vibe show status`", skill)
 
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
         context = MessageContext(
@@ -1972,6 +1975,9 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[show-annotation]", skill)
         self.assertIn("vibe show mark", skill)
         self.assertIn("They include Show Page motion for changed text", skill)
+        self.assertIn("`vibe show status`", skill)
+        self.assertIn("command output as authoritative", skill)
+        self.assertNotIn("injects the current Cloud-availability guidance", skill)
         self.assertNotIn("Avibe Cloud is not connected", skill)
 
     def test_disabled_show_pages_are_not_advertised_through_the_skill_catalog(self):
