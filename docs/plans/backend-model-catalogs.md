@@ -544,10 +544,11 @@ display names, no protocol chatter.
   subscription (OAuth credential) keeps the engine's cloaking: the vendor accepts those tokens
   only from the Claude Code identity the cloak reproduces, so rows served by a subscription
   get the reasoning-preserving path of S4, not the body-identical guarantee.
-- **C12 — Upgrade** per opencode-overlay.md v4: keyed on the persisted
-  `model_hub.contract_version` (absent = 7), the loader discards pre-v8 OpenCode menu state
-  (rows, routes, removed markers, `menu`) and touches nothing else; no migration, no
-  cross-store write; the reset fixture is a required test.
+- **C12 — Upgrade (safe degradation)** per opencode-overlay.md v4: keyed on the persisted
+  `model_hub.contract_version` (absent = 7), the loader parks pre-v8 OpenCode menu state
+  verbatim in `agents.opencode.legacy_v7`, starts the OpenCode menu empty, raises one notice,
+  and touches nothing else; no cross-store write; the released-shape load fixture is a required
+  test (AGENTS.md persisted-shape rule).
 - **C13 — `contract_version` 7 → 8 (prospective).** This spec pre-bumps nothing: every
   registered version location still reads 7 on this head, and the implementation change moves
   all of them to 8 in one tested head, adding the persisted `model_hub.contract_version` and
@@ -571,6 +572,7 @@ display names, no protocol chatter.
 | --- | --- |
 | Editor, last field (OpenCode rows only) | label `API` · options `OpenAI Responses` · `Anthropic Messages` |
 | OpenCode provider names (visible only inside OpenCode) | `Avibe · OpenAI` · `Avibe · Anthropic` |
+| OpenCode card notice while `legacy_v7` exists | `OpenCode models from an earlier version were set aside — add models again.` |
 
 No new string anywhere else; nothing explains the mechanism.
 
@@ -592,9 +594,11 @@ No new string anywhere else; nothing explains the mechanism.
    `openai_chat` hop loses its effort.
 4. In Gateway mode, a user configuration declaring other providers with keys surfaces no
    model outside Avibe's providers in `/config/providers`; in Direct mode no overlay exists.
-5. Loading a pre-v8 config yields an empty OpenCode menu with Sources, mode, other backends,
-   Agent definitions, and sessions untouched; saving persists `model_hub.contract_version` 8,
-   and loading it again changes nothing.
+5. Loading a pre-v8 config yields an empty OpenCode menu with the pre-v8 state preserved
+   byte-for-byte in `legacy_v7`, one notice raised, and Sources, mode, other backends, Agent
+   definitions, and sessions untouched; saving persists `model_hub.contract_version` 8, and
+   loading it again changes nothing. A user config declaring an Avibe provider id is refused
+   at launch with `opencode_overlay_collision`, never merged.
 6. No Avibe list, picker, row, or chip renders the protocol; the editor's `API` field is the
    only place it appears, for OpenCode rows only.
 7. `avibe-*` is refused as a user custom-provider id.

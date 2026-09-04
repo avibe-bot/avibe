@@ -8,7 +8,9 @@
 > the v4 rule governs instead: OpenCode menu ids are bare canonical model ids matched by literal
 > equality, each OpenCode row carries `native_protocol`, and the Gateway-mode overlay generates
 > one provider per downstream protocol (`avibe-openai`, `avibe-anthropic`) with
-> `enabled_providers`. The v4 backend lane (catalogs spec v3, delivery plan) owns the launch
+> `enabled_providers`; the `standard_vendors` projection of agent-supply is removed (catalogs
+> spec v3, C9), so any disposition below that keeps it mode-independent is retired with it.
+> The v4 backend lane (catalogs spec v3, delivery plan) owns the launch
 > seam this shape changes — `modules/agents/model_hub.py` (`OpenCodeOverlay` carries a provider
 > set, not one `provider_id`), `modules/agents/opencode/server.py` (overlay provider set,
 > runtime-catalog filtering to that set), `modules/agents/opencode/agent.py`
@@ -1630,7 +1632,7 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/agent-supply.schema.json
 but the final five projections are `selected_model_id`, `sources`, `routes`,
 `supply_status`, and `model_supply`. `mappings` is not a final field. `selected_by_agent` and
 `current` remain legitimately nullable, and `menu`, `builtin_models`, and
-`standard_vendors` remain mode-independent.
+`standard_vendors` remain mode-independent. *[Retired 2026-09-04: the `standard_vendors` projection is removed by catalogs spec v3 C9; see the v4 override at the top of this document.]*
 
 **Acceptance.** I1 builds every fixture from an otherwise-valid payload. A Hub payload
 with any of the five final projections explicitly null is rejected by the Hub branch;

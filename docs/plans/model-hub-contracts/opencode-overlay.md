@@ -1,6 +1,6 @@
 # OpenCode overlay contract (v4, 2026-09-04)
 
-<!-- authority-consumer: protocol anthropic openai_responses -->
+<!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
 
 How Avibe generates the OpenCode runtime config overlay in Gateway mode. Owner-locked
 identifier rules (spec §4.8 v4) restated as testable requirements. Supersedes the 07-23
@@ -8,12 +8,22 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
 
 ## Delivery
 
-- The overlay is injected at `opencode serve` launch as `OPENCODE_CONFIG` (file) and
-  `OPENCODE_CONFIG_CONTENT` (same bytes, OpenCode's runtime-override tier). OpenCode merges its
-  own configuration layers underneath; Avibe never writes the user's `opencode.json`.
+- The overlay is injected at `opencode serve` launch as `OPENCODE_CONFIG` (the overlay file)
+  and `OPENCODE_CONFIG_CONTENT` (OpenCode's runtime-override tier: the overlay composed with
+  Avibe's managed runtime policy, today the native-Skill restrictions). The recorded content
+  hash covers that composed inline content, so a change in either input restarts the server.
+  OpenCode merges its own configuration layers underneath; Avibe never writes the user's
+  `opencode.json`.
 - `enabled_providers` lists exactly the provider ids the overlay generates, so providers from
   the user's own configuration or from environment keys are not loaded and their models never
   appear in `/config/providers`. In Direct mode no overlay exists.
+- **Same-id collision.** OpenCode deep-merges a user-authored provider that shares one of
+  Avibe's ids underneath the overlay, and `enabled_providers` cannot exclude it. After launch
+  Avibe therefore verifies `/config/providers`: for each Avibe provider the reported model set
+  must equal the projected set and no other provider may be present; a mismatch is a launch
+  failure with the closed error `opencode_overlay_collision`, surfaced by the existing runtime
+  health state — never a silently mixed catalog. A fixture with a user config declaring
+  `avibe-openai` with its own model is a required test.
 - **Addressing.** In Gateway mode Avibe addresses OpenCode with `providerID` = the fixed
   provider id of the selected row's `native_protocol` from the table below
   (`openai_responses` → `avibe-openai`, `anthropic` → `avibe-anthropic`) and `modelID` = the
@@ -103,25 +113,31 @@ keep the chain nonempty, engine restarts, and gateway token rotation apart from
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
 
-## Upgrade (pre-GA: reset, not migrate)
+## Upgrade (safe degradation, not migration)
 
-Model Hub is behind the `VIBE_MODEL_HUB_ENABLED` release gate, so no released installation
-holds OpenCode menu state; only development environments do. v4 therefore does not migrate
-OpenCode menu state — it discards it:
+The persisted-shape rule (AGENTS.md) treats on-disk state written by any released version as
+a shipped surface even behind the `VIBE_MODEL_HUB_ENABLED` gate, and asks for migration or
+safe degradation with load fixtures. v4 degrades safely:
 
 - **Discriminator.** The persisted Model Hub config carries `model_hub.contract_version`; a
-  config without it is 7. Exactly when the stored value is below 8, the loader empties the
-  OpenCode agent's `models`, `routes`, `removed_model_ids`, and `menu` and writes 8 on the
-  next save. Nothing else is read or rewritten: Sources, Source order, the OpenCode mode, the
-  other backends, Vibe Agent definitions, and sessions are untouched.
+  config without it is 7. Exactly when the stored value is below 8, the loader moves the
+  OpenCode agent's `models`, `routes`, `removed_model_ids`, and `menu` verbatim into
+  `agents.opencode.legacy_v7` (never read by runtime, never projected) and starts the OpenCode
+  menu empty; it writes 8 on the next save. Nothing else is read or rewritten: Sources, Source
+  order, the OpenCode mode, the other backends, Vibe Agent definitions, and sessions are
+  untouched, and startup never fails.
+- **Warning.** While `legacy_v7` exists the OpenCode card shows one notice (Copy table:
+  `OpenCode models from an earlier version were set aside — add models again.`). The parked
+  object is dropped by the first v8 save that writes a non-empty OpenCode menu.
 - **Selectors.** A Vibe Agent definition or a persisted session override that still names a
-  retired `vendor/model` id resolves through the existing no-menu-row handling until the user
+  pre-v8 `vendor/model` id resolves through the existing no-menu-row handling until the user
   selects again; in Direct mode such a selector is OpenCode's own `providerID/modelID` and
   keeps working. No cross-store write exists, so the upgrade is crash-safe and idempotent by
   construction: a v8 config has no pre-v8 OpenCode state to touch.
-- **Fixture.** A v7 config holding OpenCode rows, a standalone Route, removed markers, and a
-  `menu` object loads to an empty OpenCode menu with Sources and mode intact, and loads
-  identically a second time.
+- **Fixture.** A released v7 config holding OpenCode rows, a standalone Route, removed
+  markers, and a `menu` object loads to an empty OpenCode menu with `legacy_v7` holding the
+  four fields byte-for-byte, Sources and mode intact, the notice raised, and loads identically
+  a second time.
 
 ## Spike record (S1–S6; evidence captured 2026-09-04 on OpenCode 1.18.18 and CLIProxyAPI 7.2.105 `4a2eb54d`, the binary Avibe's manifest pins, with the repo mock upstream recording path/headers/body)
 
