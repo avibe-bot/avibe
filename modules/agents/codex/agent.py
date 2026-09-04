@@ -2034,11 +2034,16 @@ class CodexAgent(BaseAgent):
                 # injected, so a fork must not inherit an unrepairable state.
                 source_prompt_strategy = "unavailable"
                 source_prompt_sha256 = None
+                source_prompt_instructions = None
         elif source_prompt_strategy == "fallback_pending_injection":
             # The source injection outcome is ambiguous. The fork already
             # carries whatever native history exists; never append it again.
             source_prompt_strategy = "unavailable"
             source_prompt_sha256 = None
+            source_prompt_instructions = None
+        elif source_prompt_strategy == "unavailable":
+            source_prompt_sha256 = None
+            source_prompt_instructions = None
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
@@ -3040,6 +3045,10 @@ class CodexAgent(BaseAgent):
             or any(character not in "0123456789abcdef" for character in prompt_sha256)
         ):
             raise ValueError("Codex prompt fingerprint must be lowercase SHA-256")
+        if strategy == "unavailable" and (
+            developer_instructions or prompt_sha256 is not None
+        ):
+            raise ValueError("Unavailable prompt strategy cannot carry prompt identity")
         if strategy == "fallback" and not developer_instructions and not prompt_sha256:
             raise ValueError("Fallback prompt strategy requires developer instructions")
         if not agent_session_id:
