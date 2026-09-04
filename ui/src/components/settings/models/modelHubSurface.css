@@ -33,8 +33,11 @@
  * the root, because the root is its only reader. The exception is a use written
  * `var(--x, fallback)`: it draws either way, so declaring --x on a context root
  * is a deliberate override there rather than the defect above.
- * `scripts/travellingTokens.mjs` checks this, over every class this project
- * styles and over the tokens the Model Hub's markup reads directly.
+ * `scripts/travellingTokens.mjs` checks this for the shared guard body, the
+ * class the defect was found on. Extending that check to every class this file
+ * styles is #1856: the generalized version drew a fresh finding on every
+ * review, because answering "which elements does this selector match" in the
+ * general case is a re-implementation of the cascade.
  */
 :root {
   /* Neutral wash channel: white over the dark frame. */
