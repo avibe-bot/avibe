@@ -108,7 +108,7 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
     assert fake_manager.closed_loop is not None
 
 
-def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
+def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
 
@@ -152,6 +152,8 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
             },
         ),
     )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
     monkeypatch.setattr(
@@ -175,7 +177,7 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
     result = asyncio.run(api.opencode_options_async("~/workspace"))
 
     assert result["ok"] is True
-    assert captured_kwargs["model_hub_overlay_required"] is False
+    assert "model_hub_overlay_required" not in captured_kwargs
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "ui-agents"
@@ -198,6 +200,7 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
         runtime=RuntimeConfig(default_cwd="."),
     )
     v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
     monkeypatch.setattr(
@@ -303,6 +306,7 @@ def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch)
         runtime=RuntimeConfig(default_cwd="."),
     )
     v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
     monkeypatch.setattr(
@@ -333,6 +337,56 @@ def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch)
     assert direct_result["data"]["agents"] == [{"name": "build"}]
     assert manager.ensure_calls == 1
     assert api._OPENCODE_OPTIONS_CACHE["/tmp/workspace"]["mode"] == "direct"
+
+
+def test_opencode_options_rereads_hub_mode_at_launch_boundary(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+    from modules.agents.opencode import server as opencode_server_module
+
+    direct_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    hub_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    hub_config.model_hub.agents["opencode"].mode = "hub"
+    configs = iter((direct_config, hub_config))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: next(configs)))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module.OpenCodeServerManager, "_instance", None)
+    monkeypatch.setattr(
+        opencode_server_module,
+        "ensure_plugin_installed",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Hub refusal must happen before server setup")
+        ),
+    )
+
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
+
+    assert result["ok"] is False
+    assert "Gateway mode" in result["error"]
 
 
 def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
@@ -536,52 +590,10 @@ def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatc
 
     assert server is fake_manager
     fake_manager.ensure_running.assert_awaited_once()
-    assert captured_kwargs["model_hub_overlay_required"] is False
+    assert "model_hub_overlay_required" not in captured_kwargs
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "provider-ui-agents"
-
-
-def test_opencode_get_server_requires_controller_overlay_in_hub_mode(monkeypatch):
-    import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
-
-    captured_kwargs = {}
-    fake_manager = SimpleNamespace(ensure_running=AsyncMock())
-
-    class _FakeServerManager:
-        @staticmethod
-        async def get_instance(**kwargs):
-            captured_kwargs.update(kwargs)
-            return fake_manager
-
-    v2_config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(),
-        agents=AgentsConfig(),
-        runtime=RuntimeConfig(default_cwd="."),
-    )
-    v2_config.model_hub.agents["opencode"].mode = "hub"
-    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
-    monkeypatch.setattr(
-        v2_compat,
-        "to_app_config",
-        lambda config: SimpleNamespace(
-            opencode=SimpleNamespace(
-                binary="opencode",
-                port=4096,
-                request_timeout_seconds=10,
-            )
-        ),
-    )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
-
-    server = asyncio.run(api._opencode_get_server())
-
-    assert server is fake_manager
-    assert captured_kwargs["model_hub_overlay_required"] is True
-    fake_manager.ensure_running.assert_awaited_once()
 
 
 def test_opencode_provider_settings_return_structured_hub_refusal(monkeypatch):

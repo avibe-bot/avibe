@@ -5966,6 +5966,7 @@ async def opencode_options_async(
     server = None
     try:
         from config.v2_compat import to_app_config
+        from config.v2_config import is_model_hub_enabled
         from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
             OpenCodeServerManager,
@@ -5981,7 +5982,11 @@ async def opencode_options_async(
             if isinstance(model_hub_agents, dict)
             else None
         )
-        model_hub_mode = getattr(model_hub_agent, "mode", "direct")
+        model_hub_mode = (
+            getattr(model_hub_agent, "mode", "direct")
+            if is_model_hub_enabled()
+            else "direct"
+        )
         if (
             model_hub_mode != "hub"
             and cache_data
@@ -6050,7 +6055,6 @@ async def opencode_options_async(
             port=opencode_config.port,
             request_timeout_seconds=opencode_config.request_timeout_seconds,
             resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
-            model_hub_overlay_required=False,
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
@@ -11915,19 +11919,11 @@ async def _opencode_get_server():
     if not config.opencode:
         return None
     opencode_config = config.opencode
-    model_hub_agents = getattr(getattr(v2_config, "model_hub", None), "agents", {})
-    model_hub_agent = (
-        model_hub_agents.get("opencode")
-        if isinstance(model_hub_agents, dict)
-        else None
-    )
     server = await OpenCodeServerManager.get_instance(
         binary=opencode_config.binary,
         port=opencode_config.port,
         request_timeout_seconds=opencode_config.request_timeout_seconds,
         resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
-        model_hub_overlay_required=getattr(model_hub_agent, "mode", "direct")
-        == "hub",
     )
     try:
         await server.ensure_running()

@@ -712,6 +712,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         self._client_manager = OpenCodeClientManager(opencode_config)
         self._client_manager.set_resource_governor(governor_from_controller(controller))
+        model_hub_runtime = getattr(controller, "model_hub_runtime", None)
+        prepare_overlay = getattr(
+            model_hub_runtime,
+            "prepare_opencode_overlay",
+            None,
+        )
+        if callable(prepare_overlay):
+            self._client_manager.set_model_hub_overlay_preparer(prepare_overlay)
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
@@ -732,11 +740,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if restored_server is not None:
                 return restored_server
         server = await self._client_manager.get_server()
-        model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
-        turn_mode = getattr(model_hub_runtime, "turn_mode", None)
-        server.set_model_hub_overlay_required(
-            callable(turn_mode) and turn_mode("opencode") == "hub"
-        )
         server.set_active_poll_session_ids_provider(
             lambda: set(self.sessions.get_all_active_polls())
         )

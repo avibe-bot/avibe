@@ -3190,28 +3190,12 @@ class AgentAuthService:
         opencode_cfg = getattr(compat, "opencode", None)
         if opencode_cfg is None:
             return None
-        model_hub_agents = getattr(
-            getattr(v2_config, "model_hub", None),
-            "agents",
-            {},
-        )
-        model_hub_agent = (
-            model_hub_agents.get("opencode")
-            if isinstance(model_hub_agents, dict)
-            else None
-        )
         try:
             server = await OpenCodeServerManager.get_instance(
                 binary=opencode_cfg.binary,
                 port=opencode_cfg.port,
                 request_timeout_seconds=opencode_cfg.request_timeout_seconds,
                 resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
-                model_hub_overlay_required=getattr(
-                    model_hub_agent,
-                    "mode",
-                    "direct",
-                )
-                == "hub",
             )
             await server.ensure_running()
             return server

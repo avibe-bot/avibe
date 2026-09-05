@@ -485,15 +485,22 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
 
     async def test_hub_mode_refuses_unconfigured_launch_and_logs_once(self):
-        manager = OpenCodeServerManager(
-            binary="opencode",
-            port=4096,
-            model_hub_overlay_required=True,
-        )
-        manager._read_pid_file = Mock(return_value=None)  # type: ignore[method-assign]
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
         manager._start_server = AsyncMock()  # type: ignore[method-assign]
 
         with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                return_value=types.SimpleNamespace(
+                    model_hub=types.SimpleNamespace(
+                        agents={
+                            "opencode": types.SimpleNamespace(mode="hub"),
+                        }
+                    )
+                ),
+            ),
             patch.object(SERVER_MODULE.logger, "error") as log_error,
             patch.object(
                 SERVER_MODULE,
@@ -508,33 +515,130 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         log_error.assert_called_once()
         manager._start_server.assert_not_awaited()
 
-    async def test_hub_mode_adopts_controller_owned_overlaid_server_without_restart(self):
+    async def test_ui_hub_mode_refuses_even_when_controller_overlay_is_running(self):
+        overlay = _model_hub_overlay("/tmp/opencode-overlay.json", "gpt-5")
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._model_hub_overlay_path = str(overlay.path)
+        manager._model_hub_overlay_hash = overlay.content_hash
+        manager._model_hub_overlay_content = SERVER_MODULE._managed_runtime_config_content(
+            overlay.content
+        )
+        manager._model_hub_overlay_provider_ids = overlay.provider_ids
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+        with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                return_value=types.SimpleNamespace(
+                    model_hub=types.SimpleNamespace(
+                        agents={
+                            "opencode": types.SimpleNamespace(mode="hub"),
+                        }
+                    )
+                ),
+            ),
+            patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                side_effect=AssertionError("UI process must refuse before server setup"),
+            ),
+        ):
+            with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
+                await manager.ensure_running()
+
+        manager._start_server.assert_not_awaited()
+
+    async def test_controller_probe_prepares_overlay_before_launch(self):
+        from core.resource_governance import mark_controller_resource_governor
+
+        governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        mark_controller_resource_governor(governor)
         manager = OpenCodeServerManager(
             binary="opencode",
             port=4096,
-            model_hub_overlay_required=True,
+            resource_governor=governor,
         )
-        pid_info = {
-            "pid": 123,
-            "port": 4096,
-            "model_hub_overlay_path": "/tmp/opencode-overlay.json",
-            "model_hub_overlay_hash": "overlay-hash",
-            "model_hub_overlay_provider_ids": ["avibe-openai"],
-        }
-        manager._read_pid_file = Mock(return_value=pid_info)  # type: ignore[method-assign]
-        manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
-        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
-        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        overlay = _model_hub_overlay("/tmp/opencode-overlay.json", "gpt-5")
+        prepare_overlay = AsyncMock(return_value=overlay)
+        manager.set_model_hub_overlay_preparer(prepare_overlay)
+        manager._read_pid_file = Mock(return_value=None)  # type: ignore[method-assign]
+        manager._is_healthy = AsyncMock(side_effect=[False, False, True])  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._is_port_available = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._write_pid_file = Mock()  # type: ignore[method-assign]
+        manager._clear_pid_file = Mock()  # type: ignore[method-assign]
+        manager._observe_runtime_generation = Mock()  # type: ignore[method-assign]
+        launched = {}
 
-        with patch.object(
-            SERVER_MODULE,
-            "ensure_plugin_installed",
-            side_effect=AssertionError("UI adoption must not restart OpenCode"),
+        async def create_subprocess_exec(*args, **kwargs):
+            launched["args"] = args
+            launched["env"] = kwargs["env"]
+            return types.SimpleNamespace(pid=4321, returncode=None)
+
+        with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                return_value=types.SimpleNamespace(
+                    model_hub=types.SimpleNamespace(
+                        agents={
+                            "opencode": types.SimpleNamespace(mode="hub"),
+                        }
+                    )
+                ),
+            ),
+            patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                return_value=types.SimpleNamespace(
+                    path=Path("/tmp/plugin.js"),
+                    changed=False,
+                ),
+            ),
+            patch.object(
+                SERVER_MODULE,
+                "server_environment",
+                return_value={},
+            ),
+            patch.object(
+                SERVER_MODULE.asyncio,
+                "create_subprocess_exec",
+                side_effect=create_subprocess_exec,
+            ),
         ):
             base_url = await manager.ensure_running()
 
         self.assertEqual(base_url, "http://127.0.0.1:4096")
-        manager._start_server.assert_not_awaited()
+        prepare_overlay.assert_awaited_once_with()
+        self.assertEqual(launched["env"]["OPENCODE_CONFIG"], str(overlay.path))
+        inline_config = json.loads(launched["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(
+            inline_config["provider"]["avibe-openai"]["models"],
+            {"gpt-5": {"id": "gpt-5"}},
+        )
+        self.assertEqual(manager._model_hub_overlay_reservations, {})
+
+    async def test_feature_gate_off_keeps_persisted_hub_in_direct_mode(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._ensure_running_with_current_overlay = AsyncMock(  # type: ignore[method-assign]
+            return_value="http://127.0.0.1:4096"
+        )
+
+        with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=False),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                side_effect=AssertionError("disabled Model Hub must not read its mode"),
+            ),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        manager._ensure_running_with_current_overlay.assert_awaited_once_with()
 
     async def test_ensure_running_defers_plugin_restart_while_run_active(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
@@ -2207,29 +2311,6 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first.resource_governor, governor)
         self.assertEqual(first.binary, "/old/opencode")
         self.assertEqual(first.port, 4096)
-
-    async def test_get_instance_clears_hub_launch_guard_in_direct_mode(self):
-        first = OpenCodeServerManager(
-            binary="opencode",
-            port=4096,
-            model_hub_overlay_required=True,
-        )
-        first._model_hub_overlay_refusal_logged = True
-        previous = OpenCodeServerManager._instance
-        OpenCodeServerManager._instance = first
-
-        try:
-            manager = await OpenCodeServerManager.get_instance(
-                binary="opencode",
-                port=4096,
-                model_hub_overlay_required=False,
-            )
-        finally:
-            OpenCodeServerManager._instance = previous
-
-        self.assertIs(manager, first)
-        self.assertFalse(first._model_hub_overlay_required)
-        self.assertFalse(first._model_hub_overlay_refusal_logged)
 
     async def test_get_instance_preserves_controller_owned_resource_governor(self):
         from core.resource_governance import mark_controller_resource_governor
