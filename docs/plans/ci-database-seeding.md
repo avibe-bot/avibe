@@ -97,6 +97,9 @@ Before review, integrate master `b5972b68c` (#1891, #1893, #1895). Inspection
 of changed Model Hub/prompt APIs and consuming tests, and the chat paging
 consumer confirms no overlap with this scope. Retest relevant Python consumers
 after integration; production UI and all installation gates run in CI.
+Post-integration chat/Harness/migration/Model Hub/prompt validation: 542 passed
+in 63.32s. All local test processes finished; the task uses a private virtualenv
+and temporary dependency cache, with no production environment changes.
 
 Initial findings-bearing review heads: zero. Keep one durable PR/CI watch and
 its cursor through all heads; require exact-head review, all 17 checks, every
