@@ -55,6 +55,11 @@ inputs, use the same command with `--context-file context.json`:
 
 `options` are the keyword inputs of `build_system_prompt_blocks`; omitted
 options use that builder's defaults. Image guidance defaults to Codex only.
+In JSON, `enabled_agents` is an array of Agent objects or `null`, not an arbitrary
+Python iterable. Each object must have a usable `name` or `normalized_name`;
+optional fields use the production defaults. An empty array, `null`, or omission
+renders no Agent table. Invalid input returns a localized error, not a rendering
+with silently discarded Agent rows.
 Callers reproducing a turn must supply its effective options (for example,
 quick replies disabled on WeChat), Agent instructions, and enabled Agent list;
 the command does not infer them from the Session ID. Normal path and Show

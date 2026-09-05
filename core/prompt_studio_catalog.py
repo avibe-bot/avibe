@@ -154,13 +154,16 @@ class PromptRenderInputError(ValueError):
 
 
 def _render_options(raw: object) -> dict[str, Any]:
-    from core.system_prompt_injection import build_system_prompt_blocks
+    from core.system_prompt_injection import _coerce_agent_prompt_info, build_system_prompt_blocks
     from modules.im import MessageContext
 
     if not isinstance(raw, dict):
         raise PromptRenderInputError("invalidField", field="options")
     parameters = inspect.signature(build_system_prompt_blocks).parameters
     types = get_type_hints(build_system_prompt_blocks)
+    # Python callers can supply domain objects and arbitrary iterables. JSON
+    # callers supply an array of named objects, never strings or object keys.
+    types["enabled_agents"] = list[dict[str, Any]] | None
     options: dict[str, Any] = {}
     for name, value in raw.items():
         field = f"options.{name}"
@@ -177,6 +180,12 @@ def _render_options(raw: object) -> dict[str, Any]:
         except ValidationError as exc:
             location = ".".join(str(part) for part in exc.errors()[0]["loc"])
             raise PromptRenderInputError("invalidField", field=f"{field}.{location}" if location else field) from exc
+        if name == "enabled_agents":
+            for index, agent in enumerate(options[name] or []):
+                try:
+                    _coerce_agent_prompt_info(agent)
+                except ValueError as exc:
+                    raise PromptRenderInputError("invalidField", field=f"{field}.{index}") from exc
     return options
 
 

@@ -191,19 +191,78 @@ def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys
     ({"unknown": True}, "options.unknown", "unknownField"),
 ])
 def test_cli_localizes_validation_before_rendering(monkeypatch, tmp_path, capsys, language, options, field, kind):
-    def unexpected_render(**_kwargs):
+    def unexpected_render(*_args, **_kwargs):
         pytest.fail("Invalid input reached production rendering")
 
     monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(managed_skills, "resolve_skills", unexpected_render)
     context_file = tmp_path / "context.json"
-    context_file.write_text(json.dumps({"backend": "codex", "options": options}), encoding="utf-8")
+    context_file.write_text(json.dumps({
+        "backend": "codex", "options": {"skills_cwd": "/fixture/project", **options},
+    }), encoding="utf-8")
     args = cli.build_parser().parse_args(["debug", "prompt", "export", "--context-file", str(context_file)])
     assert cli.cmd_debug_prompt(args) == 1
     output = capsys.readouterr()
     assert output.out == ""
     error = cli.i18n_t(f"debug.cli.error.{kind}", language, field=field)
     assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("agents,location", [
+    ("codex", ""), ("", ""), ({"name": "codex"}, ""), ({}, ""),
+    (True, ""), (123, ""), (1.5, ""),
+    (["codex"], ".0"), ([None], ".0"), ([42], ".0"), ([[]], ".0"),
+    ([{}], ".0"), ([{"description": "Code review"}], ".0"),
+    ([{"name": "   "}], ".0"), ([{"name": "!!!"}], ".0"),
+    ([{"name": "codex"}, {}], ".1"),
+])
+def test_cli_rejects_invalid_json_agent_inputs(monkeypatch, tmp_path, capsys, language, agents, location):
+    def unexpected_discovery(*_args, **_kwargs):
+        pytest.fail("Invalid Agent input reached production rendering")
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(managed_skills, "resolve_skills", unexpected_discovery)
+    request = _inputs()
+    request["options"]["enabled_agents"] = agents
+    context_file = tmp_path / "context.json"
+    context_file.write_text(json.dumps(request), encoding="utf-8")
+    args = cli.build_parser().parse_args(["debug", "prompt", "export", "--context-file", str(context_file)])
+    assert cli.cmd_debug_prompt(args) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    error = cli.i18n_t("debug.cli.error.invalidField", language, field=f"options.enabled_agents{location}")
+    assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
+
+
+@pytest.mark.parametrize("agents,expected_rows", [
+    (None, []), ([], []),
+    ([{"name": "codex"}], ["| codex | unknown | (no description) |"]),
+    ([{"normalized_name": "Custom_Agent", "description": "Review"}], ["| Custom_Agent | unknown | Review |"]),
+    ([{"name": "zeta"}, {"name": "alpha", "backend": "codex"}], [
+        "| alpha | codex | (no description) |", "| zeta | unknown | (no description) |",
+    ]),
+])
+def test_cli_renders_valid_json_agent_arrays(monkeypatch, tmp_path, capsys, agents, expected_rows):
+    _environment(monkeypatch)
+    request = _inputs()
+    request["options"]["enabled_agents"] = agents
+    context_file = tmp_path / "context.json"
+    context_file.write_text(json.dumps(request), encoding="utf-8")
+    args = cli.build_parser().parse_args(["debug", "prompt", "export", "--context-file", str(context_file)])
+    assert cli.cmd_debug_prompt(args) == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    rendered = json.loads(output.out)["rendered"]
+    tables = [block for block in rendered["blocks"] if block["id"] == "harness-agents-prompt"]
+    assert bool(tables) == bool(expected_rows)
+    if tables:
+        rows = [line for line in tables[0]["text"].splitlines() if line.startswith("| ")][2:]
+        assert rows == expected_rows
+    omitted = _inputs()
+    del omitted["options"]["enabled_agents"]
+    if agents is None:
+        assert render_prompt_context(omitted) == rendered
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])
