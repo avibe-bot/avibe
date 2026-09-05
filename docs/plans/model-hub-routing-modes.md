@@ -185,9 +185,51 @@ Approved design: `avibe-docs/design.pen`, frames `bmi25` (dark), `ziils` (light)
 - No eligible defaults show Unconfigured and a Configure default routing action.
   An explicit empty override stays empty and offers Restore automatic in the dialog.
 - Request errors are separate from route origin. Model-not-found keeps Passthrough
-  and shows the existing request detail surface; do not mark the whole source failed.
+  and shows the recorded-turn detail surface below; do not mark the whole source failed.
 - Apply complete EN/ZH localization and keyboard/touch behavior. Documentation
   remains English; public user documentation has matching English/Chinese pages.
+
+### Recorded Error Detail Closure
+
+The approved error panel must use real history. The existing bounded
+`BoundedProvenanceStore` is the sole retained outcome owner; its records describe
+exactly attributed, settled turns, not every upstream request. Keep its existing
+500-entry retention, atomic writes, and exclusion of ambiguous attribution. Do not
+introduce a second history store or turn request failures into Source health events.
+
+Add GET `/api/models/agents/<backend>/provenance?model=<id>` through the existing
+service, RPC, client, and UI-server path. Validate the backend and its canonical
+catalog model identifier. Return `{success:true,provenance:TurnProvenance|null}`
+for the most recently persisted retained record matching both backend and requested
+model, regardless of outcome; no record means null, not a fabricated success.
+This is a read-only, on-demand dialog read and never starts or syncs the engine.
+The existing GET `/api/models/turns/<turn_id>/provenance` remains unchanged.
+Do not add history to the pure effective-route owner or every chain-list response.
+
+For newly observed terminal errors, retain optional `http_status` (valid HTTP
+status integer or null) and `upstream_error_code` (known machine code or null)
+inside the existing `terminal_error` object. Derive the latter only from codes
+recognized by the existing classification authority, using its specificity order;
+never persist arbitrary upstream strings, raw bodies, messages, headers, or
+credentials for this panel. Preserve exact observed `model_not_found` when present,
+without reconstructing it from the broader `invalid_parameter` classification.
+Historical records may omit both fields and must remain readable unchanged.
+These observations do not alter classification, fallback, or source health.
+
+The route dialog loads this projection independently of its route draft. Show an
+error panel only if the latest retained turn has a terminal error; a later served,
+canceled, or other non-terminal-error record must not leave an older error looking
+current. Label it "Latest recorded turn" / "最近已记录回合", with the recorded
+timestamp and exact historical source/model. The details action opens that same
+record's structured fields; do not infer a source from today's route. Missing
+machine codes get generic reason-based copy, never invented model-not-found copy.
+Keep route origin unchanged. Read failures retain an explicit retry state; changing
+models or closing the dialog invalidates pending reads. Cancel/Restore/Save never
+write or rewrite history. Deleted sources remain historical identifiers.
+
+Contract and consuming tests must cover old records without optional metadata,
+model/backend isolation, latest-success clearing, bounded/absent history, unsafe
+upstream text exclusion, read-only retrieval, and real model-not-found display.
 
 ## Engine Proof and Acceptance
 
