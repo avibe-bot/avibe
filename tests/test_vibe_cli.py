@@ -1892,6 +1892,13 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
             "deps": [
                 {"id": "askill", "required": True, "installed": False, "status": "missing"},
                 {"id": "avault", "required": True, "installed": True, "status": "ready", "version": "0.1.6"},
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": False,
+                    "status": "upgrade_required",
+                    "version": "v7.2.105",
+                },
                 {"id": "show-runtime", "required": True, "installed": False, "status": "missing"},
                 {"id": "tmux", "required": False, "installed": False, "status": "missing"},
                 {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
@@ -1907,6 +1914,9 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert offline_calls == [True]
     assert next(item for item in items if item.get("code") == "dependencies.askill.not_ready")["repair"]["target"] == "askill"
     assert next(item for item in items if item.get("code") == "dependencies.avault.ready")["status"] == "pass"
+    assert next(
+        item for item in items if item.get("code") == "dependencies.model-hub-engine.not_ready"
+    )["repair"]["target"] == "model-hub-engine"
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
@@ -2010,6 +2020,97 @@ def test_managed_dependencies_doctor_reports_memory_runtime_states(
     )
 
 
+def test_managed_dependencies_doctor_probes_model_hub_engine_archive(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": False,
+                    "status": "missing",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+    probes = []
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda: SimpleNamespace(
+            probe_archive_reachability=lambda: probes.append(True)
+            or {"ok": True, "checked": True}
+        ),
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    missing = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.model-hub-engine.not_ready"
+    )
+    assert missing["repair"]["target"] == "model-hub-engine"
+    assert probes == [True]
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_label"),
+    [("en", "Model Hub engine (CPA)"), ("zh", "Model Hub 引擎（CPA）")],
+)
+@pytest.mark.parametrize(
+    ("status", "installed", "code"),
+    [("ready", True, "ready"), ("missing", False, "not_ready")],
+)
+def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
+    monkeypatch,
+    language,
+    expected_label,
+    status,
+    installed,
+    code,
+):
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": installed,
+                    "status": status,
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items()
+
+    item = next(
+        item
+        for item in items
+        if item.get("code") == f"dependencies.model-hub-engine.{code}"
+    )
+    assert expected_label in item["message"]
+    if language == "zh":
+        assert "Model Hub engine (CPA)" not in item["message"]
+
+
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
     monkeypatch.setattr(
         cli.api,
@@ -2056,6 +2157,44 @@ def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(
     assert unsupported["status"] == "warn"
     assert "repair" not in unsupported
     assert not any(item.get("code") == "dependencies.tmux.not_ready" for item in items)
+
+
+def test_managed_dependencies_doctor_treats_unsupported_cpa_as_nonfatal(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": False,
+                    "installed": False,
+                    "status": "unsupported",
+                    "reason": "model_hub_engine_platform_unsupported",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    unsupported = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.model-hub-engine.platform_unsupported"
+    )
+    assert unsupported["status"] == "warn"
+    assert "repair" not in unsupported
+    assert not any(
+        item.get("code") == "dependencies.model-hub-engine.not_ready"
+        for item in items
+    )
 
 
 def test_managed_dependencies_doctor_accepts_usable_system_git(monkeypatch):
@@ -2584,6 +2723,7 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
     exit_code = cli.cmd_runtime(
         SimpleNamespace(
@@ -2599,6 +2739,119 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     assert exit_code == 1
     assert "Show Runtime ready" not in captured.out
     assert "VIBE_INSTALL_SKIP_SHOW_RUNTIME" in captured.err
+
+
+def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
+    monkeypatch,
+    capsys,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {
+                "install": {
+                    "state": "installed",
+                    "install_dir": "/runtime/show",
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "_ensure_model_hub_engine_during_prepare",
+        lambda **_kwargs: {
+            "ok": False,
+            "reason": "model_hub_engine_archive_download_failed",
+        },
+    )
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=False,
+            json=True,
+            strict=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["model_hub_engine"] == {
+        "ok": False,
+        "reason": "model_hub_engine_archive_download_failed",
+    }
+
+
+@pytest.mark.parametrize(
+    ("cpa_result", "expected", "stream"),
+    (
+        ({"ok": True, "changed": True}, "Model Hub 引擎已安装。", "out"),
+        ({"ok": True, "changed": False}, "Model Hub 引擎已就绪。", "out"),
+        (
+            {"ok": False, "skipped": True, "reason": "offline"},
+            "Model Hub 引擎：已跳过（offline）。",
+            "out",
+        ),
+        (
+            {"ok": False, "reason": "download_failed"},
+            "Model Hub 引擎尚未就绪：download_failed",
+            "err",
+        ),
+    ),
+)
+def test_runtime_prepare_localizes_cpa_output(
+    monkeypatch,
+    capsys,
+    cpa_result,
+    expected,
+    stream,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"install": {"state": "installed", "install_dir": None}},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "_ensure_model_hub_engine_during_prepare",
+        lambda **_kwargs: cpa_result,
+    )
+
+    assert (
+        cli.cmd_runtime(
+            SimpleNamespace(
+                runtime_command="prepare",
+                offline=False,
+                force=False,
+                json=False,
+                strict=False,
+            )
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert expected in getattr(captured, stream)
+    assert "Model Hub engine" not in captured.out + captured.err
 
 
 def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
@@ -2620,6 +2873,7 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
     exit_code = cli.cmd_runtime(
         SimpleNamespace(

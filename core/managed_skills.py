@@ -1167,10 +1167,9 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
         if any(skill.disable_model_invocation for skill in skills):
             return (
                 "\n\n## Skills\n\n"
-                "If the user requests a skill by exact name, run "
+                "If the user requests a Skill by exact name, ensure its content is in context: "
+                "reuse an earlier successful load that remains in context; otherwise run "
                 "`vibe skill load -- <name>` before proceeding.\n"
-                "When these rules require an Avibe-managed Skill, reuse an earlier successful "
-                "`vibe skill load -- <name>` result for that name if it remains in the current context.\n"
                 "Otherwise, do not guess skill names."
             )
         return ""
@@ -1184,11 +1183,12 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
     return (
         "\n\n## Skills\n\n"
         "Skills provide specialized instructions and workflows for specific tasks.\n"
-        "When a task matches a skill's description, run `vibe skill load -- <name>` before proceeding.\n"
-        "If the user requests a skill by exact name, load that name directly.\n"
-        "When these rules require an Avibe-managed Skill, reuse an earlier successful "
-        "`vibe skill load -- <name>` result for that name if it remains in the current context.\n"
-        "Otherwise, only load skill names listed here or returned by `vibe skill list`; do not guess names.\n\n"
+        "Before acting on a task covered by a listed Skill, ensure its content is in context: "
+        "reuse an earlier successful load that remains in context; otherwise run "
+        "`vibe skill load -- <name>`.\n"
+        "If the user requests a Skill by exact name, apply this rule to that name.\n"
+        "For non-explicit requests, only load Skill names listed here or returned by "
+        "`vibe skill list`; do not guess names.\n\n"
         f"{later_page_guidance}"
         "### Available skills\n"
         f"{rows}"

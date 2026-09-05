@@ -129,6 +129,7 @@ DOCTOR_REPAIR_TARGETS = (
     "stale-restart-state",
     "askill",
     "avault",
+    "model-hub-engine",
     "git-runtime",
     "memory-runtime",
     "show-runtime",
@@ -143,6 +144,7 @@ DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
     "stale-restart-state": "doctor.repair.dryStaleRestart",
     "askill": "doctor.repair.dryAskill",
     "avault": "doctor.repair.dryAvault",
+    "model-hub-engine": "doctor.repair.dryModelHubEngine",
     "git-runtime": "doctor.repair.dryGitRuntime",
     "memory-runtime": "doctor.repair.dryMemoryRuntime",
     "show-runtime": "doctor.repair.dryShowRuntime",
@@ -11160,6 +11162,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     labels = {
         "askill": "askill",
         "avault": "avault",
+        "model-hub-engine": i18n_t("doctor.value.modelHubEngine", language),
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
         "memory-runtime": i18n_t("doctor.value.memoryRuntime", language),
@@ -11168,6 +11171,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     repair_targets = {
         "askill": "askill",
         "avault": "avault",
+        "model-hub-engine": "model-hub-engine",
         "git-runtime": "git-runtime",
         "memory-runtime": "memory-runtime",
         "tmux": "tmux",
@@ -11285,6 +11289,10 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             from core.tmux_runtime import TmuxRuntimeManager
 
             probe = TmuxRuntimeManager().probe_archive_reachability()
+        elif deep and dependency_id == "model-hub-engine":
+            from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+            probe = EngineRuntimeManager().probe_archive_reachability()
         elif deep and dependency_id == "git-runtime":
             from core.git_runtime import GitRuntimeManager
 
@@ -12953,6 +12961,14 @@ def _repair_avault(*, dry_run: bool = False) -> dict:
     return _repair_managed_dependency("avault", api.ensure_avault_installed, dry_run=dry_run)
 
 
+def _repair_model_hub_engine(*, dry_run: bool = False) -> dict:
+    return _repair_managed_dependency(
+        "model-hub-engine",
+        api.ensure_model_hub_engine_installed,
+        dry_run=dry_run,
+    )
+
+
 def _repair_tmux(*, dry_run: bool = False) -> dict:
     from core.tmux_runtime import ensure_tmux_installed
 
@@ -13158,6 +13174,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
         "stale-restart-state": _repair_stale_restart_state,
         "askill": _repair_askill,
         "avault": _repair_avault,
+        "model-hub-engine": _repair_model_hub_engine,
         "git-runtime": _repair_git_runtime,
         "memory-runtime": _repair_memory_runtime,
         "show-runtime": _repair_show_runtime,
@@ -15177,8 +15194,13 @@ def cmd_runtime(args) -> int:
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
         git = _ensure_git_during_prepare(offline=offline, force=force)
         avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
+        model_hub_engine = _ensure_model_hub_engine_during_prepare(
+            offline=bool(offline),
+            force=force,
+        )
         payload["askill"] = askill
         payload["avault"] = avault
+        payload["model_hub_engine"] = model_hub_engine
         payload["tmux"] = tmux
         payload["git"] = git
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
@@ -15229,6 +15251,38 @@ def cmd_runtime(args) -> int:
                 print("avault installed." if avault.get("changed") else "avault ready.")
             else:
                 print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
+            if model_hub_engine.get("skipped"):
+                print(
+                    i18n_t(
+                        "runtime.prepare.modelHubEngineSkipped",
+                        language,
+                        reason=model_hub_engine.get("reason") or "skipped",
+                    )
+                )
+            elif model_hub_engine.get("ok"):
+                print(
+                    i18n_t(
+                        (
+                            "runtime.prepare.modelHubEngineInstalled"
+                            if model_hub_engine.get("changed")
+                            else "runtime.prepare.modelHubEngineReady"
+                        ),
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.modelHubEngineNotReady",
+                        language,
+                        reason=(
+                            model_hub_engine.get("message")
+                            or model_hub_engine.get("reason")
+                            or "install failed"
+                        ),
+                    ),
+                    file=sys.stderr,
+                )
             if tmux.get("skipped") or tmux.get("status") == "skipped":
                 print(f"tmux: skipped ({tmux.get('reason') or 'skipped'}).")
             elif tmux.get("ok"):
@@ -15709,6 +15763,21 @@ def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) ->
         if force:
             return api.ensure_avault_installed(force=True)
         return api.refresh_avault_if_stale()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _ensure_model_hub_engine_during_prepare(
+    offline: bool = False,
+    force: bool = False,
+) -> dict:
+    """Converge CPA to the Avibe pin without making upgrade success depend on it."""
+
+    try:
+        return api.ensure_model_hub_engine_installed(
+            force=force,
+            offline=True if offline else None,
+        )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 

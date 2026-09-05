@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -14,6 +15,8 @@ from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
 
+
+logger = logging.getLogger(__name__)
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
@@ -120,11 +123,18 @@ class EngineStateStore:
 
     def list_sources(self) -> list[SourceRecord]:
         with self._lock:
-            payload = self._read_json(self.root / "sources.json") or {}
-            raw_sources = payload.get("sources", [])
-            if not isinstance(raw_sources, list):
-                raise EngineStateError("invalid engine source state")
-            return [SourceRecord.from_payload(item) for item in raw_sources if isinstance(item, dict)]
+            try:
+                payload = self._read_json(self.root / "sources.json") or {}
+                raw_sources = payload.get("sources", [])
+                if not isinstance(raw_sources, list):
+                    raise EngineStateError("invalid engine source state")
+                return [
+                    SourceRecord.from_payload(item)
+                    for item in raw_sources
+                    if isinstance(item, dict)
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EngineStateError(f"invalid engine source state: {exc}") from exc
 
     def get_source(self, source_id: str) -> SourceRecord | None:
         return next((source for source in self.list_sources() if source.source_id == source_id), None)
@@ -198,7 +208,12 @@ class EngineStateStore:
     def sync_sources(self, bindings: Sequence[Any]) -> list[SourceRecord]:
         """Atomically replace the engine projection using opaque credential refs."""
         with self._lock:
-            existing = {source.source_id: source for source in self.list_sources()}
+            path = self.root / "sources.json"
+            try:
+                existing = {source.source_id: source for source in self.list_sources()}
+            except EngineStateError as exc:
+                self._discard_invalid_state_file(path, exc)
+                existing = {}
             records: list[SourceRecord] = []
             seen: set[str] = set()
             for binding in bindings:
@@ -500,6 +515,19 @@ class EngineStateStore:
             if not stat.S_ISDIR(mode):
                 raise EngineStateError("engine instance directory is unsafe")
             shutil.rmtree(instance_dir)
+
+    @staticmethod
+    def _discard_invalid_state_file(path: Path, error: EngineStateError) -> None:
+        invalid_path = path.with_name(f"{path.name}.invalid")
+        try:
+            path.replace(invalid_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise EngineStateError(
+                f"unable to discard invalid engine state file: {path.name}"
+            ) from exc
+        logger.warning("Discarded invalid engine state file %s: %s", path.name, error)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:

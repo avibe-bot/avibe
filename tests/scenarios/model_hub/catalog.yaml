@@ -10,6 +10,7 @@ capability:
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
+    - tests/test_local_deps.py
     - tests/test_opencode_server.py
     - tests/test_runtime_activation.py
     # The user-visible half of metering. A vitest case is the only place these
@@ -221,6 +222,12 @@ scenarios:
     kind: concurrency
     layer: unit
     test: tests/test_runtime_activation.py::test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner
+  - id: MH-RUNTIME-008
+    name: Avibe startup converges CPA to its packaged pin without enabling or starting Model Hub
+    status: covered
+    kind: lifecycle
+    layer: unit
+    test: tests/test_local_deps.py::test_reconcile_startup_dependencies_uses_automatic_runtime_admission
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered

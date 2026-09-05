@@ -1249,3 +1249,32 @@ async def health(socket_path: Optional[Path] = None) -> bool:
             return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
     except Exception:
         return False
+
+
+def health_sync(
+    socket_path: Optional[Path] = None,
+    *,
+    timeout: float = 2.0,
+) -> bool:
+    """Synchronously probe the controller health endpoint.
+
+    Dependency reconciliation runs in a worker thread and must distinguish a
+    connectable controller from a stale Unix-socket pathname left by a crashed
+    process.
+    """
+
+    try:
+        target = _verified_socket_path(socket_path)
+    except InternalServerUnavailable:
+        return False
+    transport = httpx.HTTPTransport(uds=str(target))
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 1.0)),
+        ) as client:
+            resp = client.get("/internal/health")
+            return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
+    except Exception:
+        return False

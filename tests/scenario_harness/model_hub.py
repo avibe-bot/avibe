@@ -26,6 +26,7 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -131,8 +132,13 @@ class ModelHubScenarioAdapter:
         self.invocations: list[tuple[str, str, str]] = []
         self.requests: list[Mapping[str, object]] = []
 
-    async def ensure_installed(self) -> EngineStatus:
-        return await self.status()
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
+        return EngineEnsureResult(status=await self.status(), changed=force)
 
     async def start(self) -> EngineStatus:
         return await self.status()

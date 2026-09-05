@@ -1256,6 +1256,23 @@ def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
     monkeypatch.setattr(
         api,
+        "_model_hub_engine_dependency_status",
+        lambda: {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": True,
+            "version": "v7.2.149",
+            "latest_version": "v7.2.149",
+            "has_update": False,
+            "status": "ready",
+            "action_class": "none",
+            "reason": None,
+            "download_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        api,
         "_memory_dependencies_status",
         lambda **_: (
             {
@@ -1296,6 +1313,7 @@ def test_dependencies_status_shape(monkeypatch):
         "askill",
         "avault",
         "show-runtime",
+        "model-hub-engine",
         "memory-package",
         "memory-runtime",
         "tmux",
@@ -1309,6 +1327,9 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
     assert by["show-runtime"]["latest_version"] == "1.4.0"
     assert by["show-runtime"]["has_update"] is False
+    assert by["model-hub-engine"]["version"] == "v7.2.149"
+    assert by["model-hub-engine"]["latest_version"] == "v7.2.149"
+    assert by["model-hub-engine"]["status"] == "ready"
     assert by["memory-package"]["readiness"] == "ready"
     assert by["memory-runtime"] == {
         "id": "memory-runtime",
@@ -1325,6 +1346,517 @@ def test_dependencies_status_shape(monkeypatch):
         "download_error": None,
     }
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+@pytest.mark.parametrize(
+    ("managed", "platform_supported", "expected"),
+    (
+        pytest.param(
+            {
+                "installed": True,
+                "version": "v7.2.149",
+                "selected_version": "v7.2.149",
+                "matches_manifest": True,
+                "status": "ready",
+                "reason": None,
+            },
+            True,
+            ("ready", "none", False),
+            id="pinned-target-ready",
+        ),
+        pytest.param(
+            {
+                "installed": True,
+                "version": "v7.2.105",
+                "selected_version": "v7.2.149",
+                "matches_manifest": False,
+                "status": "ready",
+                "reason": None,
+            },
+            True,
+            ("upgrade_required", "repairable", True),
+            id="older-avibe-pin-installed",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "missing",
+                "reason": None,
+            },
+            True,
+            ("missing", "repairable", False),
+            id="not-installed",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "missing",
+                "reason": "model_hub_engine_platform_unsupported",
+            },
+            False,
+            ("unsupported", "none", False),
+            id="unsupported-platform",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_install_inspection_failed",
+            },
+            True,
+            ("error", "repairable", False),
+            id="repairable-inspection-failure",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_install_inspection_failed",
+            },
+            False,
+            ("unsupported", "none", False),
+            id="foreign-pointer-cannot-hide-unsupported-host",
+        ),
+        pytest.param(
+            {
+                "installed": True,
+                "version": "v7.2.105",
+                "selected_version": "v7.2.149",
+                "matches_manifest": False,
+                "status": "error",
+                "reason": "model_hub_engine_archive_download_failed",
+            },
+            True,
+            ("error", "repairable", True),
+            id="failed-upgrade-preserves-installed-version",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": None,
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_manifest_invalid",
+            },
+            True,
+            ("error", "operator_only", False),
+            id="unresolved-target",
+        ),
+    ),
+)
+def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
+    monkeypatch,
+    managed,
+    platform_supported,
+    expected,
+):
+    class Manager:
+        def __init__(self, *, offline):
+            assert offline is True
+
+        def status(self):
+            return managed
+
+        def supports_host_platform(self):
+            return platform_supported
+
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    dependency = api._model_hub_engine_dependency_status()
+
+    status, action_class, has_update = expected
+    assert dependency["required"] is platform_supported
+    assert dependency["latest_version"] == managed["selected_version"]
+    assert dependency["status"] == status
+    assert dependency["action_class"] == action_class
+    assert dependency["has_update"] is has_update
+
+
+@pytest.mark.parametrize("locale", ("en", "zh"))
+def test_every_model_hub_dependency_failure_reason_is_localized(
+    tmp_path,
+    locale,
+):
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    translations = json.loads(
+        (Path("ui/src/i18n") / f"{locale}.json").read_text(encoding="utf-8")
+    )["errors"]
+    reasons = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+    ).dependency_failure_reasons()
+
+    missing = sorted(reason for reason in reasons if not translations.get(reason))
+    assert missing == []
+
+
+def test_model_hub_engine_ensure_uses_direct_manager_without_a_controller(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    class Manager:
+        def __init__(self, *, offline):
+            calls.append(("manager", offline))
+
+        def ensure(self, *, force):
+            calls.append(("ensure", force))
+            return {"ok": True, "version": "v7.2.149"}
+
+    monkeypatch.setattr(
+        "vibe.internal_client.default_socket_path",
+        lambda: tmp_path / "missing-controller.sock",
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: None,
+    )
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is True
+    assert calls == [("manager", None), ("ensure", True)]
+
+
+def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+    calls = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            calls.append((force, offline))
+            return {
+                "changed": True,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                    "health": "not_started",
+                },
+            }
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True, offline=True)
+
+    assert result == {
+        "ok": True,
+        "installed": True,
+        "changed": True,
+        "version": "v7.2.149",
+        "status": {
+            "verified": True,
+            "installed_version": "v7.2.149",
+            "health": "not_started",
+        },
+        "reason": None,
+    }
+    assert calls == [(True, True)]
+
+
+@pytest.mark.parametrize("controller_error", ("feature_disabled", "source_not_found"))
+def test_model_hub_engine_ensure_does_not_bypass_a_live_older_controller(
+    monkeypatch,
+    tmp_path,
+    controller_error,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError(controller_error, status=404)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == controller_error
+
+
+def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError(
+                "engine_down",
+                status=503,
+                data={"reason": "model_hub_engine_archive_download_failed"},
+            )
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a failed download must not be repeated"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is False
+    assert result["reason"] == "model_hub_engine_archive_download_failed"
+
+
+def test_model_hub_engine_ensure_waits_for_a_starting_controller(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "controller.sock"
+    calls = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            calls.append((force, offline))
+            return {
+                "changed": False,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                },
+            }
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr(
+        "vibe.internal_client.health_sync",
+        lambda path, **_kwargs: path.exists(),
+    )
+    monkeypatch.setattr(
+        api.time,
+        "sleep",
+        lambda _seconds: socket_path.touch(),
+    )
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("the starting controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is True
+    assert calls == [(False, False)]
+
+
+def test_model_hub_engine_ensure_waits_past_a_stale_socket(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "stale-controller.sock"
+    socket_path.touch()
+    readiness = iter((False, True))
+    probes = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            return {
+                "changed": False,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                },
+            }
+
+    def probe(path, **_kwargs):
+        probes.append(path)
+        return next(readiness)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", probe)
+    monkeypatch.setattr(api.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("the starting controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is True
+    assert probes == [socket_path, socket_path]
+
+
+def test_model_hub_engine_ensure_never_falls_back_while_controller_owns_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "missing-controller.sock"
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError("engine_down", status=503)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a controller owner excludes direct replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "engine_down"
+
+
+def test_model_hub_engine_ensure_treats_an_unsupported_host_as_nonfatal(
+    monkeypatch,
+    tmp_path,
+):
+    class Manager:
+        def __init__(self, *, offline):
+            assert offline is None
+
+        def ensure(self, *, force):
+            assert force is False
+            return {
+                "ok": False,
+                "installed": False,
+                "changed": False,
+                "skipped": False,
+                "reason": "model_hub_engine_platform_unsupported",
+                "version": "v7.2.149",
+            }
+
+    monkeypatch.setattr(
+        "vibe.internal_client.default_socket_path",
+        lambda: tmp_path / "missing-controller.sock",
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: None,
+    )
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result == {
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "skipped": True,
+        "reason": "model_hub_engine_platform_unsupported",
+        "version": "v7.2.149",
+        "status": "unsupported",
+    }
+
+
+def test_model_hub_engine_ensure_treats_controller_unsupported_as_nonfatal(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError("runtime_platform_unsupported", status=422)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns dependency admission"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result == {
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "reason": "model_hub_engine_platform_unsupported",
+        "message": "modelHub.errors.runtime_platform_unsupported",
+        "skipped": True,
+        "status": "unsupported",
+    }
 
 
 @pytest.mark.parametrize(
@@ -2175,8 +2707,11 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 
 
 def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
+    """MH-RUNTIME-008: startup converges CPA without changing run intent."""
+
     askill_calls = []
     avault_calls = []
+    model_hub_calls = []
     memory_calls = []
 
     def reconcile_memory_package():
@@ -2196,6 +2731,12 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
         return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
 
     monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure_avault)
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda *, force=False: model_hub_calls.append(force)
+        or {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"},
+    )
 
     import core.show_runtime as srt_mod
 
@@ -2234,6 +2775,8 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     assert out["memory_package"]["reason"] == "memory_not_required"
     assert askill_calls == [False]
     assert avault_calls == [False]
+    assert model_hub_calls == [False]
+    assert out["model_hub_engine"]["version"] == "v7.2.149"
     assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"
     assert out["show_runtime"]["ok"] is True
@@ -2310,6 +2853,11 @@ def test_startup_memory_repair_continues_other_dependencies_before_service_resta
         "ensure_avault_installed",
         lambda **_kwargs: events.append("avault") or {"ok": True},
     )
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda **_kwargs: events.append("model-hub-engine") or {"ok": True},
+    )
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
 
     import core.show_runtime as srt_mod
@@ -2326,7 +2874,7 @@ def test_startup_memory_repair_continues_other_dependencies_before_service_resta
 
     result = api.reconcile_startup_dependencies()
 
-    assert events == ["askill", "avault"]
+    assert events == ["askill", "avault", "model-hub-engine"]
     assert result["memory_package"]["restarting"] is True
     assert result["show_runtime"]["status"] == "failed"
 
@@ -2371,6 +2919,11 @@ def test_memory_indep_028_startup_retries_after_restart_admission(monkeypatch):
         "ensure_avault_installed",
         lambda **_kwargs: events.append("avault") or {"ok": True},
     )
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda **_kwargs: events.append("model-hub-engine") or {"ok": True},
+    )
     restart_pending = iter((True, False))
     monkeypatch.setattr(api, "restart_is_pending", lambda: next(restart_pending))
     monkeypatch.setattr(api.time, "sleep", lambda _seconds: events.append("wait"))
@@ -2394,6 +2947,7 @@ def test_memory_indep_028_startup_retries_after_restart_admission(monkeypatch):
         "memory_package_upgrade_busy",
         "askill",
         "avault",
+        "model-hub-engine",
         "wait",
         "memory_package_ready",
     ]
@@ -2490,6 +3044,11 @@ def test_startup_memory_repair_failure_keeps_other_dependency_reconcile_running(
         "ensure_avault_installed",
         lambda *, force: events.append("avault") or {"ok": True},
     )
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda *, force: events.append("model-hub-engine") or {"ok": True},
+    )
 
     import core.show_runtime as srt_mod
 
@@ -2502,7 +3061,7 @@ def test_startup_memory_repair_failure_keeps_other_dependency_reconcile_running(
 
     result = api.reconcile_startup_dependencies()
 
-    assert events == ["askill", "avault"]
+    assert events == ["askill", "avault", "model-hub-engine"]
     assert result["ok"] is False
     assert result["memory_package"]["reason"] == "memory_package_install_failed"
 
@@ -2510,6 +3069,11 @@ def test_startup_memory_repair_failure_keeps_other_dependency_reconcile_running(
 def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda force=False: {"ok": True, "installed": True},
+    )
 
     import core.show_runtime as srt_mod
 
@@ -2547,6 +3111,11 @@ def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VIBE_STARTUP_DEPENDENCY_RECONCILE", "0")
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not reconcile"))
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: pytest.fail("should not reconcile"))
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda force=False: pytest.fail("should not reconcile"),
+    )
 
     out = api.reconcile_startup_dependencies()
 
@@ -3189,3 +3758,34 @@ def test_start_dependency_install_job_runs_avault(monkeypatch):
         _t.sleep(0.02)
     assert flag["called"] is True
     assert cur["status"] == "succeeded" and cur["ok"] is True
+
+
+def test_start_dependency_install_job_runs_model_hub_engine(monkeypatch):
+    import time as _t
+
+    calls = []
+
+    def fake_ensure(*, force=False):
+        calls.append(force)
+        return {
+            "ok": True,
+            "installed": True,
+            "changed": True,
+            "version": "v7.2.149",
+        }
+
+    monkeypatch.setattr(api, "ensure_model_hub_engine_installed", fake_ensure)
+    job = api.start_dependency_install_job("model-hub-engine")
+    cur = job
+    for _ in range(100):
+        cur = api.get_agent_install_job(
+            job["job_id"],
+            backend="model-hub-engine",
+        )
+        if cur.get("status") != "running":
+            break
+        _t.sleep(0.02)
+
+    assert calls == [True]
+    assert cur["status"] == "succeeded"
+    assert cur["version"] == "v7.2.149"

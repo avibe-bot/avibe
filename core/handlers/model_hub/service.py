@@ -49,6 +49,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
 from .adapter import (
     DiscoveredModel,
     EngineAdapter,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     InvokeHandle,
@@ -296,8 +297,13 @@ class UnavailableEngineAdapter:
     async def recover_installation(self) -> EngineStatus:
         return await self.status()
 
-    async def ensure_installed(self) -> EngineStatus:
-        return await self.status()
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
+        return EngineEnsureResult(status=await self.status(), changed=False)
 
     async def start(self) -> EngineStatus:
         raise EngineUnavailableError
@@ -727,6 +733,54 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
     }
 
 
+async def ensure_runtime_dependency(
+    adapter: EngineAdapter,
+    *,
+    force: bool = False,
+    offline: bool = False,
+) -> EngineEnsureResult:
+    """Converge the pinned engine through a controller-owned adapter."""
+
+    ensure = getattr(adapter, "ensure_installed", None)
+    if not callable(ensure):
+        raise ModelHubError("engine_down", status=503)
+    try:
+        return await ensure(force=force, offline=offline)
+    except RuntimePlatformUnsupportedError:
+        raise ModelHubError("runtime_platform_unsupported", status=422) from None
+    except EngineUnavailableError as exc:
+        reason = getattr(exc, "reason", None)
+        raise ModelHubError(
+            "engine_down",
+            status=503,
+            data={"reason": reason} if isinstance(reason, str) and reason else None,
+        ) from None
+    except ModelHubError:
+        raise
+    except Exception as exc:
+        reason = getattr(exc, "reason", None)
+        safe_reason = (
+            reason
+            if isinstance(reason, str) and reason.startswith("model_hub_engine_")
+            else None
+        )
+        raise ModelHubError(
+            "engine_down",
+            status=503,
+            data={"reason": safe_reason} if safe_reason else None,
+        ) from None
+
+
+def runtime_dependency_payload(
+    result: EngineEnsureResult,
+    *,
+    enabled: bool,
+) -> dict:
+    payload = _runtime_payload(result.status, enabled=enabled)
+    payload["changed"] = result.changed
+    return payload
+
+
 class ModelHubService:
     def __init__(
         self,
@@ -1116,6 +1170,7 @@ class ModelHubService:
 
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
+            await self._ensure_runtime_dependency()
             if already_synced:
                 self._engine_preparation_failed = False
                 return
@@ -1155,6 +1210,18 @@ class ModelHubService:
                 return
             await self._prepare_engine_for_demand()
             await self._engine_call(self.adapter.start())
+
+    async def _ensure_runtime_dependency(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult:
+        return await ensure_runtime_dependency(
+            self.adapter,
+            force=force,
+            offline=offline,
+        )
 
     async def stop(self) -> None:
         async with self._runtime_lifecycle_lock:
@@ -5798,6 +5865,25 @@ class ModelHubService:
             return _runtime_payload(
                 await self._engine_call(install()),
                 enabled=enabled,
+            )
+
+    async def runtime_ensure_dependency(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> dict:
+        """Converge the pinned engine without changing persisted run intent."""
+
+        async with self._runtime_lifecycle_lock:
+            await self.reconcile_runtime_installation()
+            result = await self._ensure_runtime_dependency(
+                force=force,
+                offline=offline,
+            )
+            return runtime_dependency_payload(
+                result,
+                enabled=self.store.load().enabled,
             )
 
     async def runtime_start(self) -> dict:

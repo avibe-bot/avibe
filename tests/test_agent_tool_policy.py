@@ -291,6 +291,7 @@ def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
     assert captured["hooks"] == [handler._guard_session_only_background_tools]
     # The precise hook path owns enforcement, so nothing extra is denied by name.
     assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
+    assert "Skill" in handler._claude_disallowed_tools(hooks)
 
 
 def test_removed_environment_override_cannot_disable_claude_hooks(monkeypatch):

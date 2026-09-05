@@ -550,13 +550,15 @@ class Controller:
             pending.clear()
 
     def _init_model_hub(self) -> None:
-        """Create the Model Hub aggregate only for an explicit release opt-in."""
+        """Own the CPA dependency and opt in to the full Model Hub aggregate."""
 
         from config.v2_config import V2Config, is_model_hub_enabled
+        from vibe.model_hub_runtime import get_model_hub_engine_adapter
 
         self.model_hub_service = None
         self.model_hub_turn_gateway = None
         self.model_hub_runtime = None
+        self.model_hub_engine_adapter = get_model_hub_engine_adapter()
         self._model_hub_snapshot_refresh_pending = threading.Event()
         self._model_hub_snapshot_reconcile_task = None
         self._model_hub_snapshot_reconcile_loop_task = None
@@ -674,6 +676,7 @@ class Controller:
             await coordinator.request_restart(backend)
 
         self.model_hub_service = create_default_service(
+            adapter=self.model_hub_engine_adapter,
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,

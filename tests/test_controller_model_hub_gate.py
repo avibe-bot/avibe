@@ -15,8 +15,10 @@ from modules.agents.model_hub import resolve_model_hub_launch, resolve_opencode_
 
 def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
     import core.handlers.model_hub as model_hub
+    import vibe.model_hub_runtime as model_hub_runtime
 
     factory_calls = 0
+    adapter = object()
 
     def create_service():
         nonlocal factory_calls
@@ -25,6 +27,11 @@ def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
 
     monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
+    monkeypatch.setattr(
+        model_hub_runtime,
+        "get_model_hub_engine_adapter",
+        lambda: adapter,
+    )
     controller = Controller.__new__(Controller)
 
     controller._init_model_hub()
@@ -32,6 +39,7 @@ def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
     assert controller.model_hub_service is None
     assert controller.model_hub_turn_gateway is None
     assert controller.model_hub_runtime is None
+    assert controller.model_hub_engine_adapter is adapter
     assert factory_calls == 0
 
 
@@ -39,6 +47,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
+    import vibe.model_hub_runtime as model_hub_runtime
     from vibe import api, backend_model_catalog
 
     service = SimpleNamespace(
@@ -59,6 +68,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
             self.turn_gateway = turn_gateway
 
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    adapter = object()
     captured = {}
 
     def create_service(**kwargs):
@@ -66,6 +76,11 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
         return service
 
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
+    monkeypatch.setattr(
+        model_hub_runtime,
+        "get_model_hub_engine_adapter",
+        lambda: adapter,
+    )
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
     refresh_callbacks = []
@@ -114,6 +129,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert controller.model_hub_turn_gateway.service is service
     assert controller.model_hub_runtime.service is service
     assert controller.model_hub_runtime.turn_gateway is controller.model_hub_turn_gateway
+    assert captured["adapter"] is adapter
     assert captured["requested_model_override"]("codex") == "agent-model"
     assert captured["requested_model_override"]("claude") is None
     assert captured["cli_present_override"]("codex") is True

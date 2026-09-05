@@ -1887,6 +1887,8 @@ export type DependencyItem = {
   required: boolean | null;
   installed: boolean | null;
   version: string | null;
+  latest_version?: string | null;
+  has_update?: boolean;
   status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
   readiness?: 'ready' | 'not_required' | 'not_ready' | 'memory_requirement_unreadable';
   action_class?: 'none' | 'repairable' | 'operator_only';
@@ -3521,7 +3523,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const jobId = typeof started?.job_id === 'string' ? started.job_id : null;
     if (!jobId) return started;
 
-    const deadline = Date.now() + 310_000;
+    // Covers the 120s controller readiness bound plus the 300s CPA RPC bound.
+    const deadline = Date.now() + 430_000;
     let last = started;
     while (Date.now() < deadline) {
       await sleep(1000);

@@ -7893,6 +7893,7 @@ def backend_restart(name):
 _ALLOWED_DEPENDENCIES = {
     "askill",
     "avault",
+    "model-hub-engine",
     "show-runtime",
     "memory-package",
     "memory-runtime",
@@ -16257,19 +16258,29 @@ async def _reconcile_startup_dependencies_task() -> None:
             logger.info("Startup dependencies reconciled in %sms", duration_ms)
         else:
             askill = result.get("askill") if isinstance(result.get("askill"), dict) else {}
+            model_hub_engine = (
+                result.get("model_hub_engine")
+                if isinstance(result.get("model_hub_engine"), dict)
+                else {}
+            )
             memory_package = (
                 result.get("memory_package")
                 if isinstance(result.get("memory_package"), dict)
                 else {}
             )
             logger.warning(
-                "Startup dependency reconcile completed with issues in %sms: memory_package=%s askill=%s show_runtime=%s",
+                "Startup dependency reconcile completed with issues in %sms: "
+                "memory_package=%s askill=%s model_hub_engine=%s show_runtime=%s",
                 duration_ms,
                 memory_package.get("message")
                 or memory_package.get("reason")
                 or memory_package.get("status")
                 or memory_package.get("ok"),
                 askill.get("message") or askill.get("status") or askill.get("ok"),
+                model_hub_engine.get("message")
+                or model_hub_engine.get("reason")
+                or model_hub_engine.get("status")
+                or model_hub_engine.get("ok"),
                 show_runtime.get("reason") or show_runtime.get("status") or show_runtime.get("ok"),
             )
     except Exception:
