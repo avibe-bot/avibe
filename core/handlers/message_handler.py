@@ -310,7 +310,7 @@ class MessageHandler(BaseHandler):
             if is_human:
                 sender_name_for_context = getattr(self.controller, "memory_sender_name_for_context", None)
                 if callable(sender_name_for_context):
-                    capture_sender_name = sender_name_for_context(context)
+                    capture_sender_name = await sender_name_for_context(context)
                 capture_lifecycle_snapshot = lifecycle_snapshot
                 if capture_lifecycle_snapshot is None:
                     snapshot = getattr(

@@ -18,6 +18,8 @@ The separate owner-identity investigation is background, not this PR's contract.
 - Resolve once before an accepted capture can queue, including before delayed
   attachment materialization. Lookup failure falls back; disabled Memory does
   not resolve names. The adapter offer hot path continues performing no IO.
+  The async handler awaits the snapshot; existing `run_blocking` keeps bound-user
+  settings reads off the shared event loop, before any accepted event is offered.
 - Normalize the label once: remove controls, surrogates and formatting controls
   (retain Unicode joiners), trim and bound to 128 code points. Preserve ordinary
   Unicode. Empty/missing labels use localized User or Agent. Labels are metadata,
@@ -75,3 +77,15 @@ until clean gate. No merge, deployment, or local service restart.
   fails because local Lima instance `avibe-incus-regression` is stopped.
   No container/service was started or restarted. Incus behavioral regression
   remains unverified; host tests use synthetic/test-owned state only.
+
+### Review round 1
+
+P2 on `2bac2928ea`: IM settings revision reads could block the async handler.
+The snapshot method now awaits existing `run_blocking` for the bound-user read;
+the handler awaits its result before creating any capture event. Web/disabled
+paths still avoid settings reads. A hermetic threaded-wait regression proves
+event-loop callback progress while the simulated settings read is blocked,
+and verifies the lookup runs on a different thread. All new name call sites
+were checked; the explicit Agent path only reads an in-memory i18n fallback.
+Focused validation: 401 passed, 2 known baseline failures deselected; changed
+Python Ruff and whitespace checks passed. No new cache or framework.

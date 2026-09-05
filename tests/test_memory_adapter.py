@@ -322,38 +322,77 @@ def _sender_name_controller(*, enabled=True, language="en", user=None):
 
 
 @pytest.mark.parametrize("platform", ["slack", "avibe"])
-def test_sender_name_uses_only_bound_records_not_browser_claims(platform) -> None:
+@pytest.mark.asyncio
+async def test_sender_name_uses_only_bound_records_not_browser_claims(platform) -> None:
     user = SimpleNamespace(display_name="  小王\n ", enabled=True)
     controller, store, manager = _sender_name_controller(user=user)
     context = MessageContext(
         user_id="native-1", channel_id="channel-1", platform=platform,
         platform_specific={"author_id": "remote:subject", "author_name": "Untrusted"},
     )
-    assert controller.memory_sender_name_for_context(context) == ("小王" if platform == "slack" else "User")
+    assert await controller.memory_sender_name_for_context(context) == ("小王" if platform == "slack" else "User")
     if platform == "slack":
         store.get_user.assert_called_once_with("native-1", platform="slack")
     else:
         manager.get_store.assert_not_called()
 
 
-def test_sender_name_lookup_failure_and_disabled_capture_are_best_effort() -> None:
+@pytest.mark.asyncio
+async def test_sender_name_lookup_failure_and_disabled_capture_are_best_effort() -> None:
     controller, store, manager = _sender_name_controller(language="zh")
     context = MessageContext(user_id="raw-id", channel_id="channel", platform="slack")
     store.maybe_reload.side_effect = OSError("settings unavailable")
-    assert controller.memory_sender_name_for_context(context) == "用户"
+    assert await controller.memory_sender_name_for_context(context) == "用户"
     manager.reset_mock()
     controller.config.memory.enabled = False
-    assert controller.memory_sender_name_for_context(context) is None
+    assert await controller.memory_sender_name_for_context(context) is None
     manager.get_store.assert_not_called()
 
 
 @pytest.mark.parametrize("name", [None, "", " \x00 "])
-def test_missing_bound_name_falls_back_without_using_native_id(name) -> None:
+@pytest.mark.asyncio
+async def test_missing_bound_name_falls_back_without_using_native_id(name) -> None:
     controller, _store, _manager = _sender_name_controller(
         user=SimpleNamespace(display_name=name, enabled=True)
     )
     context = MessageContext(user_id="raw-id", channel_id="channel", platform="slack")
-    assert controller.memory_sender_name_for_context(context) == "User"
+    assert await controller.memory_sender_name_for_context(context) == "User"
+
+
+@pytest.mark.asyncio
+async def test_sender_name_lookup_wait_does_not_block_event_loop() -> None:
+    import threading
+
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started = asyncio.Event()
+    release = threading.Event()
+    lookup_threads = []
+    controller, store, _manager = _sender_name_controller(
+        user=SimpleNamespace(display_name="小王", enabled=True)
+    )
+
+    def blocked_reload():
+        lookup_threads.append(threading.get_ident())
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=3), "event loop could not release the lookup"
+
+    store.maybe_reload.side_effect = blocked_reload
+    context = MessageContext(user_id="user-1", channel_id="channel", platform="slack")
+    task = asyncio.create_task(controller.memory_sender_name_for_context(context))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert lookup_threads and lookup_threads[0] != loop_thread
+        assert not task.done()
+        # A separate loop callback must progress while the settings read waits.
+        heartbeat = asyncio.Event()
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=1)
+    finally:
+        release.set()
+        name = await task
+    assert name == "小王"
+    store.maybe_reload.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -366,7 +405,7 @@ async def test_sender_name_snapshot_survives_rename_before_async_admission() -> 
         platform_specific={"is_dm": True}, is_original_human_text=True,
     )
     text = "原文\n`u-synthetic` https://example.invalid/u-synthetic"
-    name = controller.memory_sender_name_for_context(context)
+    name = await controller.memory_sender_name_for_context(context)
     event = memory_turn_event(context, text, "session-1", 1, sender_name=name)
     module = _Module()
     adapter, _lifecycle = _adapter(module)

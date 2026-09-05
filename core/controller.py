@@ -3292,7 +3292,7 @@ class Controller:
     # The policy lives in ``avibe_memory.admission``. The controller only
     # collects the facts one turn carries and acts on the verdict.
 
-    def memory_sender_name_for_context(self, context: MessageContext) -> str | None:
+    async def memory_sender_name_for_context(self, context: MessageContext) -> str | None:
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return None
         from core.memory_adapter import normalize_memory_sender_name
@@ -3302,9 +3302,13 @@ class Controller:
             payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
             platform = context.platform or payload.get("platform")
             if platform != "avibe":
-                name = _SettingsUserBindings(
-                    getattr(self, "platform_settings_managers", None)
-                ).display_name(platform, context.user_id)
+                name = await run_blocking(
+                    _SettingsUserBindings(
+                        getattr(self, "platform_settings_managers", None)
+                    ).display_name,
+                    platform,
+                    context.user_id,
+                )
         except Exception:
             pass
         return normalize_memory_sender_name(name) or i18n_t(

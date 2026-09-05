@@ -131,7 +131,7 @@ def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_pa
                 )
                 event = memory_turn_event(
                     context, text, "shared-project-session", 1,
-                    sender_name=controller.memory_sender_name_for_context(context),
+                    sender_name=await controller.memory_sender_name_for_context(context),
                 )
                 adapter.offer(event)
                 expected_owners.append(store.principal_for_user_key(f"{platform}:{source}"))
