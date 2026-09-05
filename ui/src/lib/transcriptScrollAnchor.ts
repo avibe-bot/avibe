@@ -15,11 +15,9 @@
 // group are worse still — the spinner is unmounted by the very commit that adds
 // the page, so the restore is skipped for a disconnected node.
 //
-// The restore is also what ENDS a page load: the older-page trigger asks whether
-// a sentinel at the head of the transcript is still near the viewport top, and
-// pushing the reader's row back down is what carries that sentinel out of range.
-// An anchor that restores nothing leaves the reader pinned at the top of the
-// loaded window, asking for page after page.
+// Restore after the message DOM commits, even when trimming the retained window
+// cancels out the prepended height. A ResizeObserver alone cannot detect that
+// change. Only the reader's next upward input asks for another page.
 //
 // So the rule below is structural rather than a list of elements to avoid: the
 // search starts at the first message row and never looks above it. Chrome added

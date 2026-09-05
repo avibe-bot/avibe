@@ -704,15 +704,6 @@ describe('ChatPage transcript hydration', () => {
     async ({ arrival, view }) => {
       // No browser layout in jsdom; reader placement is driven explicitly below.
       vi.stubGlobal('requestAnimationFrame', () => 0);
-      let scrollRoot: HTMLElement | null = null;
-      vi.stubGlobal('IntersectionObserver', class {
-        constructor(_callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
-          if (options?.root instanceof HTMLElement) scrollRoot = options.root;
-        }
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      });
       const previous: TurnActivityGroupWire = {
         id: 'previous-phase', anchor_message_id: null, anchor_position: 'after',
         open: true, status: 'interrupted', steps: 1, duration_ms: null,
@@ -784,7 +775,7 @@ describe('ChatPage transcript hydration', () => {
       } else if (view === 'capped tail') {
         // Enter through the real scroll handler; the boundary itself will detach
         // the capped transcript rather than append an unseen tail message.
-        if (!scrollRoot) throw new Error('transcript scroll root not observed');
+        const scrollRoot = screen.getByTestId('chat-transcript');
         Object.defineProperties(scrollRoot, {
           scrollHeight: { value: 10_000, configurable: true },
           clientHeight: { value: 800, configurable: true },

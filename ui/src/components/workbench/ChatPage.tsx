@@ -1,4 +1,4 @@
-import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
@@ -3765,12 +3765,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // immediately yank it back to the row it had remembered. A ref (not state) so
   // the scroll handler + observer read it synchronously with no re-render.
   const suppressAnchorRef = useRef(false);
-  // ``true`` while the viewport is FOLLOWING the bottom (at/near it) — drives the
-  // auto-follow of new content and hides the jump button. A ref so the scroll
-  // handler + ResizeObserver read it mid-layout without stale closures, and owned
-  // by ChatPage (see followingTailRef) so its retained-window trim reads the same
-  // follow state. It is the shadow of ``followingTail`` below and is written ONLY
-  // by that state's setter — see the note there for why.
+  // Shared with ChatPage so retained-window trimming and scroll restoration
+  // agree synchronously on whether the reader is following the live tail.
   const pinnedRef = followingTailRef;
   // While the user has scrolled UP to read history (not pinned), remember the
   // topmost row still in view and how far its top sits below the viewport top, so
@@ -3789,60 +3785,18 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // adds no content, so nothing moves and the trigger below has no change to react
   // to. The explicit retry is the affordance for a reader who stays put.
   const [olderLoadFailed, setOlderLoadFailed] = useState(false);
-  // The older-page trigger below is a question about the PRESENT, and every one
-  // of its inputs has to be able to re-ask it. The sentinel's intersection does
-  // so by itself, and so does anything the component renders from — props and
-  // state re-create the observer through the effect's dependency list. A ref
-  // does not: it changes silently, so a guard that goes false behind a ref is a
-  // deadlock exactly like a latch that never re-arms, which is the defect this
-  // change exists to remove, one layer down.
-  //
-  // So the only ref the trigger reads is the intersection itself, which arrives
-  // with its own re-ask. Where the scroll handler and the ResizeObserver also
-  // need to read a guard synchronously mid-layout, the ref is kept as a shadow
-  // of the state and written ONLY through the setter beside it; where a prop
-  // already says the same thing, the prop is read directly rather than mirrored.
-  // What matters is that the trigger reads reactive values, so
-  // react-hooks/exhaustive-deps fails the build on an input left out of the
-  // dependency list — completeness enforced rather than remembered.
-
-  // Whether an older page WE started is still outstanding. ``loadingOlder``
-  // reports the same thing but lags: it only arrives after ChatPage has
-  // re-rendered, and until it does the trigger would happily start a second
-  // request for the page already on the wire. Owning it here closes that window,
-  // and settling is also the honest moment to re-ask — a page has landed, so the
-  // level condition has a new answer.
-  const [loadInFlight, setLoadInFlight] = useState(false);
-  const [followingTail, setFollowingTailState] = useState(true);
+  // Input can arrive again before the parent's loading prop commits.
+  const loadInFlightRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  const touchYRef = useRef<number | null>(null);
   const setFollowingTail = useCallback(
     (next: boolean) => {
       pinnedRef.current = next;
-      setFollowingTailState(next);
     },
     [pinnedRef],
   );
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
-  // Older pages are triggered by whether a zero-height sentinel at the head of the
-  // transcript is within OLDER_TRIGGER_BAND_PX of the viewport top — a question
-  // about the PRESENT, which the browser re-answers on every geometry change.
-  //
-  // What this replaces: a latch that disarmed on trigger and re-armed only from a
-  // scroll event that had settled for 150ms with ``scrollTop > 300``. Both halves
-  // describe a FUTURE event, and the reader most likely to want another page —
-  // parked at the very top — can produce neither: an upward gesture at scrollTop 0
-  // moves nothing, so the browser emits no scroll event at all. One fling that
-  // rode past the post-load anchor restore back to the top therefore left paging
-  // dead — no spinner, no request, older messages still on the server — until the
-  // reader happened to scroll >300px back down and up again.
-  //
-  // Cascade prevention (the reason that latch existed) no longer needs a position
-  // threshold: a successful page prepends content and the anchor restore pushes
-  // the sentinel out of the band, so the condition goes false on its own. If it is
-  // still true afterwards, the reader really is still at the top of the loaded
-  // window, and loading again is the correct answer rather than a cascade.
-  const topSentinelRef = useRef<HTMLDivElement | null>(null);
-  const atTopRef = useRef(false);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -3928,6 +3882,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = Math.max(0, el.scrollTop);
     setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
@@ -3947,100 +3902,37 @@ export const Transcript: React.FC<TranscriptProps> = ({
     });
   }, [needsLatestReload, scrollToBottom]);
 
-  // The one path that starts an older-page load, so the sentinel trigger and the
+  // The one path that starts an older-page load, so upward input and the
   // retry affordance cannot drift apart on how a failure is recorded.
   const runLoadOlder = useCallback(() => {
-    setLoadInFlight(true);
+    if (!hasOlder || loadingOlder || loadInFlightRef.current || jumpTarget) return;
+    const requestingSession = session.id;
+    loadInFlightRef.current = true;
+    setFollowingTail(false);
+    captureAnchor();
     setOlderLoadFailed(false);
     void Promise.resolve(loadOlderRef.current()).then((ok) => {
-      setLoadInFlight(false);
-      // A failed page adds no content, so the sentinel stays exactly where it
-      // was and every later re-evaluation would see the same "reader wants more"
-      // answer and re-ask — a retry storm against a server that is still
-      // failing. Recording the failure both holds the automatic trigger off and
-      // offers the retry line, which is the way forward for a reader who stays
-      // put.
-      //
-      // Only if they DID stay put. A reader who left the band while the request
-      // was in flight never saw this failure, and latching it behind their back
-      // would refuse the automatic retry they are owed on returning — the exit
-      // that would have cleared it happened before there was anything to clear.
-      if (ok === false && atTopRef.current) setOlderLoadFailed(true);
+      if (lastSessionRef.current !== requestingSession) return;
+      loadInFlightRef.current = false;
+      const el = scrollRef.current;
+      if (ok === false && el && el.scrollTop <= OLDER_TRIGGER_BAND_PX) setOlderLoadFailed(true);
     });
-  }, []);
+  }, [captureAnchor, hasOlder, jumpTarget, loadingOlder, session.id, setFollowingTail]);
 
-  // Start an older page when the sentinel is in the band and there is more to
-  // load. Reads props directly — the effect below re-creates the observer when
-  // they change — so it can never act on a stale snapshot.
+  // Only upward input asks for another page. Settling a request or changing
+  // layout is not a new request, even if the viewport remains near the top.
   const maybeLoadOlder = useCallback(() => {
-    if (!atTopRef.current || !hasOlder || loadingOlder || loadInFlight || olderLoadFailed) return;
-    // Sentinel in view is only a REQUEST for older history if the reader went
-    // looking for it. A transcript that fits its viewport — tall display, zoomed
-    // out, enlarged window — puts the sentinel in the band while the reader is
-    // still following the live tail, and paging there would walk backwards
-    // through history nobody asked to see, on open and on every resize.
-    if (followingTail) return;
-    // A pending deep-link jump owns scrollTop, and the anchor restore is
-    // suppressed along with it. Prepending under the jump would have nothing
-    // holding the reader's row in place. A jump that lands near the head of the
-    // loaded window arrives IN the band, so this is a real state to leave rather
-    // than a momentary one — and ``jumpTarget`` IS that state: the effect below
-    // acks the jump at the same moment it lifts suppression, which clears the
-    // prop and re-asks. Reading it directly is why there is no mirror to keep in
-    // step, and it holds from the moment the jump is requested rather than from
-    // the frame the effect happens to run in.
-    if (jumpTarget) return;
+    const el = scrollRef.current;
+    if (!el || el.scrollTop > OLDER_TRIGGER_BAND_PX || olderLoadFailed || suppressAnchorRef.current) return;
     runLoadOlder();
-  }, [
-    followingTail,
-    hasOlder,
-    jumpTarget,
-    loadInFlight,
-    loadingOlder,
-    olderLoadFailed,
-    runLoadOlder,
-  ]);
-
-  // Older-page trigger. The observer answers "is the reader within
-  // OLDER_TRIGGER_BAND_PX of the top of the loaded window?" and re-answers on
-  // every geometry change the browser already tracks. Every OTHER input — more
-  // history to fetch, a page already in flight, following the tail, a jump
-  // holding scrollTop, a failure already recorded — is not geometry, so it
-  // arrives as a dep of ``maybeLoadOlder``: re-creating the observer re-observes
-  // the sentinel, and ``observe()`` always reports the CURRENT state instead of
-  // waiting for the next crossing. That is what makes the loader level-triggered
-  // in ALL of its inputs rather than only in the one the browser watches.
-  // In particular a settled page re-evaluates the settled geometry (React has
-  // committed the prepended rows and the ResizeObserver has restored the anchor
-  // by the time this passive effect runs), so a reader who is still at the top
-  // gets the next page without having to produce a scroll event they may be
-  // unable to produce at all. That edge is ``loadInFlight``, which we own, not
-  // the ``loadingOlder`` prop, which only mirrors it.
-  // ``empty`` is in the deps for the same reason as the ResizeObserver below: the
-  // scroll container mounts when the empty state goes away.
-  useEffect(() => {
-    const root = scrollRef.current;
-    const sentinel = topSentinelRef.current;
-    if (!root || !sentinel) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        const atTop = entries[entries.length - 1]?.isIntersecting ?? false;
-        atTopRef.current = atTop;
-        // Leaving the band is the reader telling us they moved on. Drop the
-        // failure latch so returning to the top retries once, instead of leaving
-        // the retry line as the only way forward for the rest of the session.
-        if (!atTop) setOlderLoadFailed(false);
-        maybeLoadOlder();
-      },
-      { root, rootMargin: `${OLDER_TRIGGER_BAND_PX}px 0px 0px 0px` },
-    );
-    io.observe(sentinel);
-    return () => io.disconnect();
-  }, [maybeLoadOlder, empty]);
+  }, [olderLoadFailed, runLoadOlder]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    const top = Math.max(0, el.scrollTop);
+    const movingUp = top < lastScrollTopRef.current;
+    lastScrollTopRef.current = top;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     // Small tolerance keeps us "following" through sub-pixel rounding; a
     // historical search window cannot be considered pinned to live tail until
@@ -4052,9 +3944,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
     if (pinned) anchorRef.current = null;
     else captureAnchor();
-    // Older-page loading is deliberately NOT triggered here: scroll events are the
-    // one thing a reader already at the top cannot produce. See the sentinel
-    // observer above.
+    if (top > OLDER_TRIGGER_BAND_PX) setOlderLoadFailed(false);
+    if (movingUp) maybeLoadOlder();
   };
 
   // Open each session pinned to the latest message (instant, no animation) —
@@ -4070,6 +3961,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // previous session would otherwise greet the next one with a retry line for
     // a page it never asked for, and hold its loader off with it.
     setOlderLoadFailed(false);
+    loadInFlightRef.current = false;
+    touchYRef.current = null;
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
   }, [session.id, scrollToBottom, setFollowingTail]);
@@ -4108,6 +4001,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const row = el.querySelector(`[data-message-id="${CSS.escape(jumpTarget)}"]`);
       if (row) {
         row.scrollIntoView({ block: 'center' });
+        lastScrollTopRef.current = Math.max(0, el.scrollTop);
         setShowJump(true); // not at the bottom anymore — offer the way back down
       }
       // Re-capture the anchor at the jumped-to position on the NEXT frame (after
@@ -4134,22 +4028,29 @@ export const Transcript: React.FC<TranscriptProps> = ({
     setFollowingTail,
   ]);
 
-  // The one place scroll position reacts to content size changes — two modes,
-  // never conflated. (Conflating them WAS the bug: any resize while "at bottom"
-  // forced scrollTop=scrollHeight, and the snap's own scroll event re-armed the
-  // "at bottom" flag, so a history image loading as the user scrolled up kept
-  // yanking them back to the latest message.)
-  //   • following → stay pinned to the exact bottom as content grows (new message,
-  //     thinking bubble, the latest message's own image finishing to load).
-  //   • reading history → restore the saved anchor so the row under the reader's
-  //     eyes stays fixed wherever the growth happened: an image above expands and
-  //     the anchor moves down with it (scrollTop tracks it), while growth below the
-  //     anchor leaves it alone.
-  // ``[overflow-anchor:none]`` on the container hands anchoring entirely to us, so
-  // behavior is identical on every browser instead of fighting Chrome/Firefox's
-  // native anchoring; ResizeObserver delivers before paint, so the restore is
-  // flicker-free. ``empty`` is in the deps so the observer (re)attaches when the
-  // scroll container mounts after the empty state.
+  const restoreScrollPosition = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || suppressAnchorRef.current || jumpTarget) return;
+    if (pinnedRef.current) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      const anchor = anchorRef.current;
+      if (!anchor || !anchor.el.isConnected) return;
+      const currentTop = anchor.el.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const delta = currentTop - anchor.top;
+      if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
+    }
+    // A programmatic adjustment must not look like upward input when its
+    // queued scroll event is delivered.
+    lastScrollTopRef.current = Math.max(0, el.scrollTop);
+  }, [jumpTarget, pinnedRef]);
+
+  // Prepending and trimming can leave the total height unchanged. Restore after
+  // every DOM commit, before paint or a queued scroll can capture a different
+  // row. This also covers the loading slot being inserted or removed.
+  useLayoutEffect(restoreScrollPosition);
+
+  // Images and viewport changes can resize outside a React commit.
   useEffect(() => {
     const el = scrollRef.current;
     const content = contentRef.current;
@@ -4160,27 +4061,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
       // has expanded, an on-screen keyboard, or a resized window. Recomputed ahead
       // of the anchor branches below so no early return can leave it stale.
       setHistoryOverflows(el.scrollHeight > el.clientHeight + 1);
-      // A programmatic jump owns scrollTop right now — neither pin-to-bottom nor
-      // anchor-restore should move it, or it would fight the jump.
-      if (suppressAnchorRef.current) return;
-      if (pinnedRef.current) {
-        el.scrollTop = el.scrollHeight;
-        return;
-      }
-      const anchor = anchorRef.current;
-      if (!anchor || !anchor.el.isConnected) return;
-      const currentTop = anchor.el.getBoundingClientRect().top - el.getBoundingClientRect().top;
-      const delta = currentTop - anchor.top;
-      // Sub-pixel rect noise would otherwise write scrollTop on every fire; only
-      // correct a real (≥0.5px) drift so reading history stays perfectly still.
-      if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
+      restoreScrollPosition();
     });
     ro.observe(content);
     // The viewport shrinking under the reader is a resize too: pin-to-bottom has to
     // re-pin and the anchor has to hold, exactly as when the content itself grew.
     ro.observe(el);
     return () => ro.disconnect();
-  }, [empty]);
+  }, [empty, restoreScrollPosition]);
 
   if (empty) {
     // Even with no transcript-visible messages, a session can have pending vault requests —
@@ -4221,12 +4109,36 @@ export const Transcript: React.FC<TranscriptProps> = ({
           onAskInNew={selectionActions.askInNew ? onAskInNewSession : undefined}
         />
       )}
-      <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
-        {/* Marker for the very top of the loaded window: whether it is in view IS
-            the "load older" condition (see the observer above). Outside
-            ``contentRef`` so it joins neither the column's gap spacing nor the
-            children pickScrollAnchor searches. */}
-        <div ref={topSentinelRef} aria-hidden className="h-px" />
+      <div
+        ref={scrollRef}
+        data-testid="chat-transcript"
+        onScroll={handleScroll}
+        onWheel={(event) => {
+          // At the hard top an upward gesture emits no scroll event.
+          if (event.deltaY < 0 && event.currentTarget.scrollTop <= 0) maybeLoadOlder();
+        }}
+        onTouchStart={(event) => {
+          touchYRef.current = event.touches.length === 1 ? event.touches[0].clientY : null;
+        }}
+        onTouchMove={(event) => {
+          const y = event.touches.length === 1 ? event.touches[0].clientY : null;
+          const previousY = touchYRef.current;
+          touchYRef.current = y;
+          if (y !== null && previousY !== null && y > previousY && event.currentTarget.scrollTop <= 0) {
+            maybeLoadOlder();
+          }
+        }}
+        onTouchEnd={() => { touchYRef.current = null; }}
+        onTouchCancel={() => { touchYRef.current = null; }}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || event.currentTarget.scrollTop > 0) return;
+          if ((event.target as HTMLElement).closest('input, textarea, [contenteditable="true"], [role="textbox"]')) return;
+          if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home' || (event.key === ' ' && event.shiftKey)) {
+            maybeLoadOlder();
+          }
+        }}
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8"
+      >
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
           {forkSourceBanner}
           {/* One slot at the head of the history for every way paging can end, so
