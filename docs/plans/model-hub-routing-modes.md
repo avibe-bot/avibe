@@ -178,6 +178,37 @@ checks alone is insufficient. Do not fabricate source inventory, silently upgrad
 CPA, restart it per request, or let CPA select another source. An engine capability
 gap is escalated to the orchestrator before a substitute transport is implemented.
 
+### Engine Registration Amendment
+
+The pinned CPA proof at source `2a6b87aca083a5bf498ac1f68a1b636c500d7aaa`
+confirmed that unregistered source-prefixed targets are rejected before upstream
+egress for all three API protocols. Explicitly registered positive controls
+preserved the exact upstream id and selected source. This is a transport registry
+constraint, not evidence about upstream model availability.
+
+Add `SourceBinding.route_model_ids: tuple[str, ...] = ()` and the corresponding
+internal SourceRecord field, loading its absence as empty. The service produces
+this deterministic, deduplicated, sorted set from effective Hub-channel route
+targets across all backend catalog models. It is independent of health and of
+backend direct/hub mode, and never changes per request. Every actual mapped target,
+including a manual target missing from inventory, must be represented before use.
+
+`model_ids` continues to carry truthful non-retired source inventory. The engine
+config compiler may register the stable union of inventory ids and route target
+ids for transport. The latter never enter Source.models, discovery results,
+capability metadata, candidate matching evidence, or user inventory. Only actual
+inventory declarations supply reasoning capability information. This is an
+engine transport projection of configured route intent, not model discovery.
+
+All relevant config commits/reconciliation and load-time synchronization must
+refresh this projection through the existing source-sync owner. Preview remains
+side-effect-free, and order-only changes with an unchanged target set do not
+restart the engine. Registration updates must preserve in-flight invocations.
+The synchronization mechanism and Hub OAuth target registration require the
+pinned-engine proof before implementation; no per-request restart, invented
+inventory, silent engine upgrade, or alternate transport is authorized by this
+amendment.
+
 Acceptance states properties, with fixtures covering the supported shapes:
 
 1. Persisted manual intent survives every unrelated configuration, catalog, health
