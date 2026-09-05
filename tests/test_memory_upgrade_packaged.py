@@ -63,11 +63,19 @@ def _venv(path: Path) -> Path:
 
 
 @pytest.fixture(scope="module")
-def packaged_dependency_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def packaged_release_wheels(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    wheelhouse = tmp_path_factory.mktemp("packaged-release-wheels")
+    for version in ("3.0.14", "3.0.15"):
+        _build_release_wheels(version, wheelhouse)
+    return wheelhouse
+
+
+@pytest.fixture(scope="module")
+def packaged_dependency_seed(
+    tmp_path_factory: pytest.TempPathFactory, packaged_release_wheels: Path
+) -> Path:
     seed_root = tmp_path_factory.mktemp("packaged-dependency-seed")
-    source_wheelhouse = seed_root / "source"
-    source_wheelhouse.mkdir()
-    _build_release_wheels("3.0.14", source_wheelhouse)
+    source_wheelhouse = packaged_release_wheels
     dependency_seed = seed_root / "dependencies"
     dependency_seed.mkdir()
     seed = subprocess.run(
@@ -91,6 +99,28 @@ def packaged_dependency_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     assert seed.returncode == 0, seed.stdout + seed.stderr
     return dependency_seed
+
+
+@pytest.fixture
+def wheelhouse(tmp_path: Path, packaged_release_wheels: Path) -> Path:
+    # Builds are immutable inputs; removals and installs stay local to each case.
+    return Path(shutil.copytree(packaged_release_wheels, tmp_path / "wheelhouse"))
+
+
+def test_wheelhouse_mutations_do_not_change_shared_builds_or_other_cases(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    for name in ("avibe_os-3.0.14.whl", "avibe_memory-3.0.14.whl", "future-package.whl"):
+        (shared / name).write_bytes(name.encode())
+    before = {path.name: path.read_bytes() for path in shared.iterdir()}
+    first = wheelhouse.__wrapped__(tmp_path / "first", shared)
+    second = wheelhouse.__wrapped__(tmp_path / "second", shared)
+    for path in first.iterdir():
+        path.write_bytes(b"changed")
+        path.unlink()
+
+    assert {path.name: path.read_bytes() for path in shared.iterdir()} == before
+    assert {path.name: path.read_bytes() for path in second.iterdir()} == before
 
 
 def _install_initial(python: Path, wheelhouse: Path, *, memory: bool, dependency_seed: Path) -> None:
@@ -124,10 +154,8 @@ def _plan_env(wheelhouse: Path) -> dict[str, str]:
 def test_memory_indep_021_packaged_core_only_status_blocks_optional_imports(
     tmp_path: Path,
     packaged_dependency_seed: Path,
+    wheelhouse: Path,
 ) -> None:
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    _build_release_wheels("3.0.14", wheelhouse)
     python = _venv(tmp_path / "core-only-status-venv")
     _install_initial(
         python,
@@ -192,16 +220,12 @@ assert not any(
 def test_packaged_memory_shape_survives_synchronous_upgrade(
     tmp_path: Path,
     packaged_dependency_seed: Path,
+    wheelhouse: Path,
 ) -> None:
     """Run the public planner and executor across a paired package upgrade."""
 
     if not (ROOT / "vibe" / "show_runtime_manifest.json").is_file():
         pytest.fail("packaged wheel smoke requires the prepared local Show Runtime manifest")
-
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    for version in ("3.0.14", "3.0.15"):
-        _build_release_wheels(version, wheelhouse)
 
     environment = tmp_path / "memory-venv"
     python = _venv(environment)
@@ -229,12 +253,8 @@ def test_packaged_memory_shape_survives_synchronous_upgrade(
 
 @pytest.mark.integration
 def test_packaged_core_only_upgrade_preserves_core_only_shape(
-    tmp_path: Path, packaged_dependency_seed: Path
+    tmp_path: Path, packaged_dependency_seed: Path, wheelhouse: Path
 ) -> None:
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    for version in ("3.0.14", "3.0.15"):
-        _build_release_wheels(version, wheelhouse)
     python = _venv(tmp_path / "core-only-venv")
     _install_initial(python, wheelhouse, memory=False, dependency_seed=packaged_dependency_seed)
     plan = build_upgrade_plan(
@@ -252,11 +272,9 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(
 
 
 @pytest.mark.integration
-def test_packaged_missing_memory_fails_before_install(tmp_path: Path, packaged_dependency_seed: Path) -> None:
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    _build_release_wheels("3.0.14", wheelhouse)
-    _build_release_wheels("3.0.15", wheelhouse)
+def test_packaged_missing_memory_fails_before_install(
+    tmp_path: Path, packaged_dependency_seed: Path, wheelhouse: Path
+) -> None:
     python = _venv(tmp_path / "missing-memory-venv")
     _install_initial(python, wheelhouse, memory=True, dependency_seed=packaged_dependency_seed)
     for wheel in wheelhouse.glob("avibe_memory-*.whl"):
