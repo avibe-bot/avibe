@@ -223,3 +223,11 @@ The orchestrator inspected the new prompt-rendering/media consumers and verified
 no overlap with this PR's 13 files. Integrate that base before the next push and
 rerun the affected consumers. It adds one new test file, covered by the existing
 planner's measured-scale fallback; do not invent a timing measurement for it.
+
+After integrating `fae5f421c`, the clean-environment 66-file shard passed in full.
+The Show consumer separately passed all 562 tests in 22.42s; prompt-export
+integration passed 130 tests, and four focused UI files passed 62 tests. The
+32 fixture/workflow/shard contracts passed again. AST comparison confirms all
+1,092 original top-level functions/classes across the four behavioral test
+modules are unchanged. No test assertions were removed. Dependency compatibility
+and Ruff checks passed; main-checkout dirty-file checksums remain unchanged.
