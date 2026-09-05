@@ -10,6 +10,16 @@ const INSTALLABLE_DEPENDENCIES = new Set([
   'tmux',
 ]);
 
+/** Source-only repair policy is not a verdict on runtime health. */
+export const memoryPackageIsSourceManaged = (
+  dependency: Pick<DependencyItem, 'id' | 'status' | 'action_class' | 'reason'>,
+): boolean => (
+  dependency.id === 'memory-package'
+  && dependency.status === 'error'
+  && dependency.action_class === 'operator_only'
+  && dependency.reason === 'memory_package_source_build'
+);
+
 export const dependencyHasInstallAction = (
   dependency: Pick<DependencyItem, 'id' | 'status' | 'action_class'>,
 ): boolean => {

@@ -1,6 +1,49 @@
 import { describe, expect, it } from 'vitest';
 
-import { dependencyHasInstallAction, memoryRuntimeSidecarRunning } from './SettingsDependenciesPage.logic';
+import type { DependencyItem } from '@/context/ApiContext';
+import {
+  dependencyHasInstallAction,
+  memoryPackageIsSourceManaged,
+  memoryRuntimeSidecarRunning,
+} from './SettingsDependenciesPage.logic';
+
+describe('memoryPackageIsSourceManaged', () => {
+  const sourcePolicy = Object.freeze({
+    id: 'memory-package',
+    status: 'error',
+    action_class: 'operator_only',
+    reason: 'memory_package_source_build',
+  } as const);
+
+  it('recognizes source policy without changing dependency evidence or repair admission', () => {
+    expect(memoryPackageIsSourceManaged(sourcePolicy)).toBe(true);
+    expect(dependencyHasInstallAction(sourcePolicy)).toBe(false);
+    expect(sourcePolicy).toEqual({
+      id: 'memory-package',
+      status: 'error',
+      action_class: 'operator_only',
+      reason: 'memory_package_source_build',
+    });
+  });
+
+  it.each([
+    { id: 'memory-runtime' },
+    { status: 'missing' },
+    { status: 'not_required' },
+    { action_class: 'repairable' },
+    { action_class: 'none' },
+    { action_class: undefined },
+    { reason: 'memory_package_missing' },
+    { reason: 'memory_package_runtime_unavailable' },
+    { reason: 'memory_package_unpublished_build' },
+    { reason: null },
+  ] satisfies Partial<DependencyItem>[])(
+    'requires the complete source-only policy, not %j',
+    (differentEvidence) => {
+      expect(memoryPackageIsSourceManaged({ ...sourcePolicy, ...differentEvidence })).toBe(false);
+    },
+  );
+});
 
 describe('dependencyHasInstallAction', () => {
   it('hides install and repair actions for unsupported dependencies', () => {
