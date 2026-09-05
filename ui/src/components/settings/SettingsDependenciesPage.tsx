@@ -25,7 +25,11 @@ import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
 import type { DependencyItem, InstallResult, MemoryStatusResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { dependencyHasInstallAction, memoryRuntimeSidecarRunning } from './SettingsDependenciesPage.logic';
+import {
+  dependencyHasInstallAction,
+  memoryPackageIsSourceManaged,
+  memoryRuntimeSidecarRunning,
+} from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
@@ -123,6 +127,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusText = (d: DependencyItem) => {
+    if (memoryPackageIsSourceManaged(d)) return t('settings.dependencies.statusSourceManaged');
     // Closed non-installed failure states render distinctly, ahead
     // of the generic "not installed" fallback.
     if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
@@ -138,6 +143,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusVariant = (d: DependencyItem): 'secondary' | 'success' | 'warning' | 'destructive' => {
+    if (memoryPackageIsSourceManaged(d)) return 'secondary';
     if (d.status === 'not_required') return 'secondary';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
@@ -186,7 +192,13 @@ export const SettingsDependenciesPage: React.FC = () => {
             const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
             const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
             const dependencyOperationBusy = busy !== null;
-            const persistedFailure = d.status === 'error' && d.reason
+            const sourceManaged = memoryPackageIsSourceManaged(d);
+            const notice = sourceManaged
+              ? t('settings.dependencies.memoryPackageSourceManaged')
+              : isMemoryRuntime && sidecarRunning
+                ? t('settings.dependencies.memoryRuntimeDisableBeforeRepair')
+                : null;
+            const persistedFailure = !sourceManaged && d.status === 'error' && d.reason
               ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
               : null;
             return (
@@ -247,9 +259,9 @@ export const SettingsDependenciesPage: React.FC = () => {
                     )}
                   </>
                 }
-                footer={isMemoryRuntime && sidecarRunning ? (
+                footer={notice ? (
                   <div className="border-t border-border pt-3 text-[11px] leading-snug text-muted">
-                    {t('settings.dependencies.memoryRuntimeDisableBeforeRepair')}
+                    {notice}
                   </div>
                 ) : persistedFailure ? (
                   <div
