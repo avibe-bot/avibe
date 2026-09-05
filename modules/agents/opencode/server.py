@@ -33,6 +33,7 @@ from modules.agents.opencode.caller_context import ensure_plugin_installed, serv
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
 from vibe.opencode_config import (
+    OPENCODE_REASONING_VARIANTS,
     OpenCodeRuntimeConfigInvalidError,
     get_opencode_custom_provider_adapter,
     load_first_opencode_user_config,
@@ -2564,14 +2565,14 @@ class OpenCodeServerManager:
         if not config:
             return None
 
-        # Valid reasoning effort values
-        valid_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        # Accept exactly the tiers the save path can write, so a variant the
+        # user just persisted is never dropped here as "unknown".
 
         # Try agent-specific reasoningEffort first
         agent_config = self._get_agent_config(config, agent_name)
         reasoning_effort = agent_config.get("reasoningEffort")
         if isinstance(reasoning_effort, str) and reasoning_effort:
-            if reasoning_effort in valid_efforts:
+            if reasoning_effort in OPENCODE_REASONING_VARIANTS:
                 logger.debug(f"Found reasoningEffort '{reasoning_effort}' for agent '{agent_name}' in opencode.json")
                 return reasoning_effort
             else:
@@ -2580,7 +2581,7 @@ class OpenCodeServerManager:
         # Fall back to global default reasoningEffort
         reasoning_effort = config.get("reasoningEffort")
         if isinstance(reasoning_effort, str) and reasoning_effort:
-            if reasoning_effort in valid_efforts:
+            if reasoning_effort in OPENCODE_REASONING_VARIANTS:
                 logger.debug(f"Using global default reasoningEffort '{reasoning_effort}' from opencode.json")
                 return reasoning_effort
             else:

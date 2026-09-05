@@ -7,11 +7,30 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Final, Optional
 
 logger = logging.getLogger(__name__)
 
-_VALID_REASONING_VARIANTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+# Every reasoning tier OpenCode accepts, in ascending order: the unified Model
+# Hub vocabulary (``vibe.backend_model_catalog.REASONING_EFFORT_VOCABULARY``)
+# plus OpenCode's own ``none``, which names the absence of reasoning rather
+# than a level.
+#
+# Mirrored rather than imported: this module is stdlib-only so the OpenCode
+# read path can stay cheap, while the catalog module pulls in the whole
+# ``config`` / ``modules`` import graph. A contract test asserts the mirror, so
+# a tier added to the vocabulary cannot silently fall out of OpenCode's save
+# path again — which is how catalog-declared ``ultra`` became unsavable (#1840).
+OPENCODE_REASONING_VARIANTS: Final[tuple[str, ...]] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
 _CUSTOM_PROVIDER_META_KEY = "vibe_remote"
 _CUSTOM_PROVIDER_ADAPTERS = {
     "openai-compatible": "@ai-sdk/openai-compatible",
@@ -667,7 +686,7 @@ def _normalize_reasoning_variants(
         effort = raw.strip()
         if not effort:
             continue
-        if effort not in _VALID_REASONING_VARIANTS:
+        if effort not in OPENCODE_REASONING_VARIANTS:
             raise ValueError(f"unsupported reasoning effort: {effort}")
         if uses_anthropic_thinking:
             variants[effort] = {"thinking": {"type": "enabled", "effort": effort}}
