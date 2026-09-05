@@ -696,6 +696,85 @@ describe('ChatPage transcript hydration', () => {
     expect(mocks.api.getSessionActivityGroup).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['before summary', 'during detail', 'after hydration'] as const)(
+    'isolates Activity phases when output arrives %s without ending the Turn',
+    async (arrival) => {
+      const previous: TurnActivityGroupWire = {
+        id: 'previous-phase', anchor_message_id: null, anchor_position: 'after',
+        open: true, status: 'interrupted', steps: 1, duration_ms: null,
+      };
+      const settled: TurnActivityGroupWire = {
+        ...previous, open: false, status: 'done',
+        anchor_message_id: 'phase-output', anchor_position: 'before',
+      };
+      const current: TurnActivityGroupWire = {
+        ...previous, id: 'current-phase', anchor_message_id: 'phase-output',
+      };
+      const oldSummary = deferred<{ groups: TurnActivityGroupWire[] }>();
+      const oldDetail = deferred<TurnActivityGroupWire>();
+      let phaseAdvanced = false;
+      const previousRow = {
+        id: previous.id, kind: 'assistant' as const, text: 'previous phase step',
+        created_at: '2026-09-05T00:00:00Z',
+      };
+      const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        config: { ui: { show_agent_activity: true } }, turn_state: running,
+      });
+      mocks.api.getTurnState.mockResolvedValue(running);
+      mocks.api.getSessionActivity.mockImplementation(() => (
+        phaseAdvanced ? Promise.resolve({ groups: [settled, current] }) : oldSummary.promise
+      ));
+      mocks.api.getSessionActivityGroup.mockImplementation((_sid: string, groupId: string) => (
+        groupId === previous.id ? oldDetail.promise : Promise.resolve({
+          ...current,
+          rows: [{ id: current.id, kind: 'assistant', text: 'current phase history', created_at: '2026-09-05T00:00:02Z' }],
+        })
+      ));
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalled());
+      if (arrival !== 'before summary') {
+        await act(async () => oldSummary.resolve({ groups: [previous] }));
+        await waitFor(() => expect(mocks.api.getSessionActivityGroup).toHaveBeenCalledWith('session-new', previous.id));
+      }
+      if (arrival === 'after hydration') {
+        await act(async () => oldDetail.resolve({ ...previous, rows: [previousRow] }));
+        await screen.findByText(previousRow.text);
+      }
+      phaseAdvanced = true;
+      act(() => {
+        mocks.events?.onMessageNew({
+          ...projectedMessage('phase-output', 'phase result'),
+          author: 'agent', type: 'output', source: 'agent', created_at: '2026-09-05T00:00:01Z',
+        });
+        mocks.events?.onMessageNew({
+          ...projectedMessage('current-live', 'current phase live step'),
+          author: 'agent', type: 'assistant', source: 'agent', created_at: '2026-09-05T00:00:03Z',
+        });
+      });
+      await act(async () => {
+        oldSummary.resolve({ groups: [previous] });
+        oldDetail.resolve({ ...previous, rows: [previousRow] });
+      });
+      await screen.findByText('current phase history');
+      expect(screen.getByText('current phase live step')).toBeTruthy();
+      expect(screen.getByText('chat.agentActivity.running')).toBeTruthy();
+      expect(screen.queryByText(previousRow.text)).toBeNull();
+      // The old phase remains available only in its durable, settled chip.
+      act(() => screen.getByTitle('chat.agentActivity.expand').click());
+      await screen.findByText(previousRow.text);
+      expect(screen.getAllByText(previousRow.text)).toHaveLength(1);
+      expect(screen.getByText('current phase live step')).toBeTruthy();
+    },
+  );
+
   it('keeps completed Activity history lazy and separate from the running card', async () => {
     const group: TurnActivityGroupWire = {
       id: 'completed', anchor_message_id: null, anchor_position: 'before',

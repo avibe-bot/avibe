@@ -18,7 +18,7 @@ import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { setConfigField } from '../../lib/configMutations';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
+import { isAgentActivityBoundaryMessage, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -1651,10 +1651,12 @@ export const ChatPage: React.FC = () => {
         // Harness live rows can precede read-side provenance enrichment. Pull
         // the enriched REST row so trigger/source chips update without reload.
         if (needsHarnessProvenanceReconcile(msg)) void reconcile();
-        // Rebuild durable Activity groups for a phase boundary, terminal reply, or
-        // detached completion. Only a terminal reply owns this live generation.
+        // A phase boundary advances the live group while the Turn keeps running.
+        // Invalidate its old history read before accepting the next phase's rows;
+        // detached completions only refresh storage, never reset the live group.
         if (showAgentActivityRef.current && shouldRefreshAgentActivityForMessage(msg)) {
           if (isTerminalAgentMessage(msg)) dispatchLive({ type: 'settle' });
+          else if (isAgentActivityBoundaryMessage(msg)) dispatchLive({ type: 'reset' });
           scheduleActivityRefresh();
         }
         // Don't clear ``working`` from a result row here: with the queue, a

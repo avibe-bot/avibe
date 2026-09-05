@@ -18,8 +18,10 @@ steps, and hydration must retain the earliest start time.
 Equal emission times use the endpoint's deterministic ID tie-break, including
 legacy IDs without a clock prefix; snapshot arrival order is not a sort key.
 
-Generation checks must reject detail responses after settlement, a new turn, a
-visibility reset, or a Session switch, including returning to the same Session.
+Generation checks must reject detail responses after settlement, a new turn, an
+output phase boundary, a visibility reset, or a Session switch, including returning
+to the same Session. The live generation belongs to one Activity phase, not the
+entire logical Turn; detached completions do not advance that generation.
 Detail failures use the existing bounded refresh retry.
 
 ## Validation
@@ -38,3 +40,10 @@ Detail failures use the existing bounded refresh retry.
   no API or data-model change. Regression tests cover every window split with
   overlap and without it, both arrival orders, and both legacy and clock-bearing
   IDs whose emission times tie.
+- Head `0f54955369`: one P2 finding, a distinct root-cause class (phase boundaries
+  changed durable group ownership without invalidating the live generation).
+  Two findings-bearing heads total; no repeated root-cause class.
+- Scope decision: reuse the existing generation reset at the shared effective
+  boundary-role policy. Keep controller Turn state unchanged and keep detached
+  completion handling refresh-only. Exercise old summary/detail responses and
+  already-hydrated rows across the boundary; preserve settled-chip ownership.

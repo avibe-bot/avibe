@@ -107,7 +107,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
 
 // ===== Live running-card buffer: a pure state machine (state, not timing) =====
 // The live buffer drives ONLY the in-flight running card; all SETTLED groups come
-// from the durable endpoint. Each turn is tagged with a monotonic GENERATION so
+// from the durable endpoint. Each Activity phase is tagged with a monotonic GENERATION so
 // that a stale buffer is invisible by construction and a late settle-refresh is a
 // structural no-op for a newer turn:
 //   - the running card renders only while ``working`` AND ``rows`` are non-empty,
@@ -117,7 +117,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
 //     resolution is dropped). This subsumes the "stale/late buffer" class without
 //     promise-cancellation or grace-timer bookkeeping.
 export type LiveActivityState = {
-  gen: number; // current turn generation (monotonic)
+  gen: number; // current Activity phase generation (monotonic)
   settled: boolean; // the current generation has settled (terminal / turn.end seen)
   rows: ActivityRow[]; // current-generation buffer (empty ⇒ nothing to show)
   startedAt: number | null; // elapsed-clock start for the running card
@@ -160,8 +160,8 @@ export const liveActivityReducer = (
       // previous generation are dropped by construction).
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'reset':
-      // Turning Activity off invalidates every in-flight refresh from the visible
-      // generation. Re-enabling may then hydrate only the current durable turn.
+      // Visibility changes, navigation and output phase boundaries invalidate
+      // every in-flight read from the previous visible group without settling work.
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'row':
       // Storage hydration can include a row before its SSE envelope arrives.

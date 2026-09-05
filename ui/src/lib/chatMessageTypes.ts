@@ -62,6 +62,12 @@ export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): 
   return spec.transcript && activityRoleForMessage(message) === 'terminal';
 };
 
+// A phase boundary advances the Activity group without settling the Turn.
+// Presentation's isBoundaryMessage also includes detached legacy completions,
+// which must not invalidate the foreground group's live rows or hydration.
+export const isAgentActivityBoundaryMessage = (message: TerminalAgentMessageCandidate): boolean =>
+  message.author === 'agent' && activityRoleForMessage(message) === 'boundary';
+
 // Terminal replies, nonterminal phase boundaries, and detached completions all
 // require a durable Activity refresh. Only terminal replies settle the live Turn.
 export const shouldRefreshAgentActivityForMessage = (
