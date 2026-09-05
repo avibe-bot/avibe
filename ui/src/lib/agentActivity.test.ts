@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
+import orderFixture from './agentActivity.order.fixture.json';
 import {
   activityGroupsForForeground,
   activityRowFromMessage,
@@ -496,5 +497,37 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(liveActivityReducer(state, late)).toBe(state);
     state = liveActivityReducer(state, { type: 'turn_start' });
     expect(liveActivityReducer(state, late)).toBe(state);
+  });
+});
+
+describe('durable Activity order contract', () => {
+  // This same fixture is asserted against real SQLite grouping by the Python
+  // service test, including migrated tool hashes whose clocks are metadata-only.
+  const wireRows = orderFixture.rows.map(({ id, kind, text, created_at, order_micros }) => ({
+    id, kind: kind as ActivityRow['kind'], text, created_at, order_micros,
+  }));
+  const rows = groupFromWire({
+    id: wireRows[0].id, anchor_message_id: null, anchor_position: 'after',
+    open: true, status: 'interrupted', steps: wireRows.length, duration_ms: null,
+    rows: wireRows,
+  }).rows!;
+
+  it.each(['forward', 'reverse'] as const)('preserves server ordering across %s hydration windows and live overlap', (arrival) => {
+    for (let split = 0; split <= rows.length; split += 1) {
+      const snapshots = [rows.slice(0, split), rows.slice(Math.max(0, split - 1))];
+      if (arrival === 'reverse') snapshots.reverse();
+      const migrated = wireRows[3];
+      let state = liveActivityReducer(initialLiveActivity(), {
+        type: 'row', now: 100,
+        row: { id: migrated.id, kind: migrated.kind, text: migrated.text, created_at: migrated.created_at },
+      });
+      for (const snapshot of snapshots) {
+        state = liveActivityReducer(state, {
+          type: 'rehydrate_for_gen', gen: state.gen, rows: snapshot, startedAt: 100,
+        });
+      }
+      expect(state.rows).toEqual(wireRows);
+      expect(liveActivityReducer(state, { type: 'row', row: rows[3], now: 200 })).toBe(state);
+    }
   });
 });

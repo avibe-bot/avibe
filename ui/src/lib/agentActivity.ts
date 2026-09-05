@@ -11,11 +11,13 @@ export type ActivityRow = {
   kind: 'assistant' | 'tool_call';
   text: string;
   created_at: string;
+  order_micros?: number; // authoritative durable key; absent on live SSE rows
 };
 
-// Match the Activity endpoint's emission clock across Message and event ids.
-// created_at alone loses the order of multiple tool/assistant rows in one second.
+// Storage owns persisted order, including clocks recovered from migration metadata.
+// Live rows without a durable key still carry their emission clock in the id.
 const activityRowTimeMs = (row: ActivityRow): number => {
+  if (row.order_micros !== undefined) return row.order_micros / 1000;
   const clock = /^[^_]{3}_([0-9a-f]{15})/i.exec(row.id)?.[1];
   if (clock) {
     const micros = Number.parseInt(clock, 16);
@@ -81,7 +83,7 @@ export type TurnActivityGroupWire = {
   duration_ms: number | null;
   started_at?: string | null;
   ended_at?: string | null;
-  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string }>;
+  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string; order_micros?: number }>;
 };
 
 export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
@@ -93,7 +95,9 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   steps: wire.steps,
   durationMs: wire.duration_ms ?? null,
   startedAt: wire.started_at ?? null,
-  rows: wire.rows?.map((r) => ({ id: r.id, kind: r.kind, text: r.text, created_at: r.created_at })),
+  rows: wire.rows?.map((r) => ({
+    id: r.id, kind: r.kind, text: r.text, created_at: r.created_at, order_micros: r.order_micros,
+  })),
 });
 
 // A live ``message.new`` of type assistant/tool_call → an activity row (the live
@@ -186,9 +190,10 @@ export const liveActivityReducer = (
       if (event.gen !== state.gen || state.settled) return state;
       // Match storage's (emission time, id) order even when its bounded window
       // advances. Stable timestamp-only sorting would move retained tied rows last.
+      // Durable rows win overlap so SSE cannot erase storage-only ordering keys.
       return {
         ...state,
-        rows: [...new Map([...event.rows, ...state.rows].map((row) => [row.id, row])).values()]
+        rows: [...new Map([...state.rows, ...event.rows].map((row) => [row.id, row])).values()]
           .sort((a, b) => {
             const timeOrder = activityRowTimeMs(a) - activityRowTimeMs(b);
             return timeOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);

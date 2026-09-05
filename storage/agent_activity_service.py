@@ -470,6 +470,8 @@ def _make_group(
                 "kind": item["row_kind"],
                 "text": item.get("text") or "",
                 "created_at": item["created_at"],
+                # Migrated event ids are hashes; only storage has the original clock.
+                "order_micros": item["sort"],
             }
             for item in pending
         ]

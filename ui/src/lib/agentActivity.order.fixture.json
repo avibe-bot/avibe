@@ -1,0 +1,48 @@
+{
+  "rows": [
+    {
+      "id": "evt_opaque_A",
+      "kind": "tool_call",
+      "text": "opaque tool A",
+      "created_at": "2026-09-05T00:00:00Z",
+      "order_micros": 1788566400000000
+    },
+    {
+      "id": "evt_opaque_a",
+      "kind": "tool_call",
+      "text": "opaque tool a",
+      "created_at": "2026-09-05T00:00:00Z",
+      "order_micros": 1788566400000000
+    },
+    {
+      "id": "msg_0065ab110ede3e812345678",
+      "kind": "assistant",
+      "text": "assistant step",
+      "created_at": "2026-09-05T00:00:00Z",
+      "order_micros": 1788566400001000
+    },
+    {
+      "id": "evt_legacy_ffffffffffffffffffffffff",
+      "kind": "tool_call",
+      "text": "earlier migrated tool",
+      "created_at": "2026-09-05T00:00:00Z",
+      "order_micros": 1788566400002000,
+      "legacy_message_id": "msg_0065ab110ede7d012345678"
+    },
+    {
+      "id": "evt_0065ab110edebb812345678",
+      "kind": "tool_call",
+      "text": "current tool",
+      "created_at": "2026-09-05T00:00:00Z",
+      "order_micros": 1788566400003000
+    },
+    {
+      "id": "evt_legacy_000000000000000000000000",
+      "kind": "tool_call",
+      "text": "later migrated tool",
+      "created_at": "2026-09-05T00:00:00Z",
+      "order_micros": 1788566400004000,
+      "legacy_message_id": "msg_0065ab110edefa012345678"
+    }
+  ]
+}
