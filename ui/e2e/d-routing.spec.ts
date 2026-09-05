@@ -23,7 +23,7 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await expect(dialog).toBeVisible();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toHaveCount(0);
       await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true })).toHaveCount(0);
-      await labelledButton(dialog, copy('routeDialog.cancel')).click();
+      await labelledButton(dialog, copy('routing.close')).click();
       await expect(dialog).toHaveCount(0);
 
       const row = hub.routeRow(gateway.backend, gateway.model);
