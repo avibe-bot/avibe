@@ -55,6 +55,12 @@ environments for project testing.
 
 ## Setup
 
+Source synchronization requires `rsync` on the operator machine and in the
+container. The regression base image already includes it; on a Linux operator
+machine, install the distribution's `rsync` package if needed. The macOS system
+rsync is supported. Transfers use Incus exec as the existing service user, not
+an SSH daemon or host ownership metadata.
+
 1. Configure the local Incus host.
 
    ```bash
@@ -107,6 +113,27 @@ The compatibility entry point now uses Incus by default:
 ```bash
 ./scripts/run_regression.sh
 ```
+
+Normal updates synchronize source incrementally using rsync's size/mtime quick
+check. Unchanged files are not rewritten; stale source is deleted. Excluded
+dependency/cache/runtime directories are pruned and preserved. `--no-build-ui`
+includes local `ui/dist` in synchronization, so stale assets are deleted there
+too. `--clean` remains an explicit full source reset, including generated files;
+it does not reset product state. If a tool deliberately changes source while
+preserving both its size and timestamp, use `--clean` to force replacement.
+
+Show Runtime resolves the upstream commit on each update, but builds only when
+that commit, the target Node/platform/npm versions, the build recipe, or the
+archive checksum changes. The archive and its build receipt are kept together
+in the regression cache. Network resolution failures remain errors, not silent
+permission to deploy a stale build. Runtime preparation and validation still run
+on every update.
+
+Updates and base-image builds from worktrees of the same primary checkout share
+one heavy-I/O slot per daemon. An update waits for that slot before creating an
+instance or stopping its existing service, and holds it through recovery if the
+update fails. Other environments keep serving while it waits. Old runner versions
+and independently cloned repositories do not participate in this shared lock.
 
 Direct runner commands:
 
