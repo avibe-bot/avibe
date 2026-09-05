@@ -103,6 +103,79 @@ describe('toolRecipe (tier 1: known-tool recipes, backend-agnostic)', () => {
     });
   });
 
+  describe('shell command summaries preserve the literal command body', () => {
+    const bodies = [
+      'git status --short',
+      'npm test',
+      'printf "%s\\n" "it\'s ready"',
+      'printf "%s" "$HOME"; echo `pwd` && cat *.txt | head -n 2',
+      'printf "你好"\nprintf "done"',
+      '/bin/bash -c "npm test"',
+    ];
+    const quoteForms = [
+      (body: string) => `'${body.replace(/'/g, `'"'"'`)}'`,
+      (body: string) => `'${body.replace(/'/g, `'\\''`)}'`,
+      (body: string) => `"${body.replace(/["\\$`]/g, '\\$&')}"`,
+    ];
+
+    it.each(bodies)('decodes only the outer wrapper around %j', (body) => {
+      for (const shell of ['zsh', '/bin/zsh', '/bin/bash', '/usr/bin/sh', '/opt/homebrew/bin/bash']) {
+        for (const flag of ['-lc', '-c']) {
+          for (const quote of quoteForms) {
+            const command = `${shell} ${flag} ${quote(body)}`;
+            const args = Object.freeze({ command, status: 'completed', exit_code: 0, output: 'done' });
+            const raw = `🔧 \`bash\` \`${JSON.stringify(args)}\``;
+            const parsed = parseToolCall(raw);
+
+            expect(toolRecipe(parsed.name, args)).toEqual({ kind: 'command', command: body });
+            expect(parsed.args).toEqual(args);
+            expect(parsed.raw).toBe(raw);
+            expect(toolParams(args).find((param) => param.key === 'command')?.value).toBe(command);
+          }
+        }
+      }
+    });
+
+    it.each([
+      ['/bin/zsh -lc pwd', 'pwd'],
+      ['/bin/zsh -lc npm\\ test', 'npm test'],
+      ['/bin/zsh -lc npm" test"', 'npm test'],
+      ['/bin/zsh -lc "printf \\q"', 'printf \\q'],
+    ])('decodes equivalent literal-word forms: %s', (command, expected) => {
+      expect(toolRecipe('exec_command', { cmd: command })).toEqual({ kind: 'command', command: expected });
+    });
+
+    it.each([
+      ' extra-argument', ' --flag', ' > output.txt', ' 2>&1', ' | cat',
+      ' && npm test', '; npm test', '\nnpm test', ' # comment', '\u00a0', '\u2003',
+    ])('retains the full invocation when a wrapper has a suffix %j', (suffix) => {
+      const command = `/bin/zsh -lc 'git status --short'${suffix}`;
+      expect(toolRecipe('bash', { command })).toEqual({ kind: 'command', command });
+    });
+
+    it.each([
+      'git status --short',
+      'echo /bin/zsh -lc pwd',
+      'env NAME=value /bin/zsh -lc pwd',
+      'sudo /bin/zsh -lc pwd',
+      '/bin/fish -c pwd',
+      '/bin/zsh -e -lc pwd',
+      '/bin/zsh -lc $COMMAND',
+      '/bin/zsh -lc "$COMMAND"',
+      '/bin/zsh -lc "${COMMAND}"',
+      '/bin/zsh -lc "$(cat script.sh)"',
+      '/bin/zsh -lc "`cat script.sh`"',
+      '/bin/zsh -lc *.sh',
+      '/bin/zsh -lc "unterminated',
+      '/bin/zsh -lc trailing\\',
+      '/bin/zsh -lc',
+      '/bin/zsh -lc ""',
+      '/bin/zsh -lc "  "',
+    ])('falls back unchanged outside the literal-wrapper contract: %s', (command) => {
+      expect(toolRecipe('bash', { command })).toEqual({ kind: 'command', command });
+    });
+  });
+
   it('read/list family → dir muted + basename (probes file_path → path → file)', () => {
     expect(toolRecipe('Read', { file_path: '研报/中金_CATL_2026展望.pdf' })).toEqual({
       kind: 'read',
