@@ -16,6 +16,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
+from core.prompt_registry import RenderedPromptBlock, prompt_text
 from vibe.message_types import input_author_type_pairs
 
 logger = logging.getLogger(__name__)
@@ -71,18 +72,8 @@ _INPUT_TURN_MESSAGE_TYPES = tuple(
     dict.fromkeys(message_type for _, message_type in input_author_type_pairs())
 )
 
-SHOW_GIT_AGENT_CONTRACT = (
-    "History is saved automatically around each turn; do not manage versions yourself.",
-    "Read freely: `git -C <workspace> status / log / diff / show`.",
-    "Restore only via `git restore --source=<ref> -- <path>`; the turn-end checkpoint records it as a forward commit.",
-    "Never move HEAD, switch branches, rewrite history, or run gc; if you do, the platform self-heals with the worktree as truth.",
-    "Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks.",
-)
-SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT = (
-    "Avibe's shadow history continues automatically in the background; you don't manage it.",
-    "`git -C <workspace>` addresses the **user's repo**, not Avibe history: never commit, push, or publish on their behalf, and never use it for Avibe restore.",
-    "Never locate or mutate Avibe's shadow gitdir on your own initiative. Only if the user explicitly asks to recover from Avibe history, use standard git with explicit `--git-dir` and `--work-tree` against the session's shadow gitdir for read or restore only; never commit to it.",
-)
+SHOW_GIT_AGENT_CONTRACT = tuple(prompt_text("show-history-managed").splitlines())
+SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT = tuple(prompt_text("show-history-self-managed").splitlines())
 class ShowGitError(RuntimeError):
     """A platform Git operation failed."""
 
@@ -193,17 +184,33 @@ def format_agent_contract(
     checkpointing_available: bool | None = None,
     session_id: str | None = None,
 ) -> str:
+    block = agent_contract_block(
+        numbered=numbered, checkpointing_available=checkpointing_available, session_id=session_id,
+    )
+    return block.text if block else ""
+
+
+def agent_contract_block(
+    *,
+    numbered: bool = False,
+    checkpointing_available: bool | None = None,
+    session_id: str | None = None,
+) -> RenderedPromptBlock | None:
     if checkpointing_available is None:
         checkpointing_available = show_git_checkpointing_active()
     if not checkpointing_available:
-        return ""
+        return None
     if session_id is not None and _workspace_is_self_managed(session_id):
         lines = SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT
+        module_id = "show-history-self-managed"
     else:
         lines = SHOW_GIT_AGENT_CONTRACT
+        module_id = "show-history-managed"
     if numbered:
-        return "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
-    return "\n".join(f"- {line}" for line in lines)
+        text = "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
+    else:
+        text = "\n".join(f"- {line}" for line in lines)
+    return RenderedPromptBlock(module_id, text)
 
 
 def _single_line(value: Any) -> str:

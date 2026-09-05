@@ -138,6 +138,89 @@ describe('SettingsDependenciesPage Model Hub engine', () => {
 });
 
 describe('SettingsDependenciesPage Memory runtime', () => {
+  it.each([false, null, true])(
+    'presents source management neutrally without claiming installation or readiness (%s)',
+    async (installed) => {
+      const row = Object.freeze(dependency({
+        id: 'memory-package',
+        required: true,
+        installed,
+        status: 'error',
+        readiness: 'not_ready',
+        action_class: 'operator_only',
+        version: null,
+        reason: 'memory_package_source_build',
+      }));
+      api.listDependencies.mockResolvedValue({ ok: true, deps: [row] });
+      api.getMemoryStatus.mockRejectedValue(new Error('Status is unavailable'));
+      renderPage();
+
+      const badge = await screen.findByText('settings.dependencies.statusSourceManaged');
+      expect(badge.className).not.toContain('destructive');
+      expect(badge.className).toContain('text-muted');
+      expect(screen.getByText('settings.dependencies.memoryPackageSourceManaged').className).toContain('text-muted');
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.queryByText('settings.dependencies.statusReady')).toBeNull();
+      expect(screen.queryByText('settings.dependencies.statusMissing')).toBeNull();
+      expect(screen.queryByText('settings.dependencies.statusError')).toBeNull();
+      expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
+        'settings.dependencies.recheckAll',
+      ]);
+      expect(api.installDependency).not.toHaveBeenCalled();
+      expect(row).toMatchObject({ installed, status: 'error', readiness: 'not_ready' });
+    },
+  );
+
+  it.each([
+    'memory_package_runtime_unavailable',
+    'memory_package_artifact_unavailable',
+    'memory_runtime_install_failed',
+  ])('keeps the actual runtime failure visible next to a source-managed package: %s', async (reason) => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [
+        dependency({
+          id: 'memory-package',
+          installed: false,
+          status: 'error',
+          action_class: 'operator_only',
+          reason: 'memory_package_source_build',
+        }),
+        dependency({ installed: false, status: 'error', action_class: 'none', reason }),
+      ],
+    });
+    renderPage();
+
+    expect(await screen.findByText('settings.dependencies.statusSourceManaged')).toBeTruthy();
+    expect(screen.getByText('settings.dependencies.statusError').className).toContain('destructive');
+    expect(screen.getByRole('alert').textContent).toBe(`errors.${reason}`);
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'memory_package_unpublished_build',
+    'memory_package_metadata_unreadable',
+    'memory_package_metadata_ambiguous',
+    'memory_package_install_failed',
+  ])('does not reclassify a different package failure: %s', async (reason) => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [dependency({
+        id: 'memory-package',
+        installed: false,
+        status: 'error',
+        action_class: 'operator_only',
+        reason,
+      })],
+    });
+    renderPage();
+
+    expect((await screen.findByText('settings.dependencies.statusError')).className).toContain('destructive');
+    expect(screen.getByRole('alert').textContent).toBe(`errors.${reason}`);
+    expect(screen.queryByText('settings.dependencies.statusSourceManaged')).toBeNull();
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
   it('routes repairable Python package bootstrap through its own dependency action', async () => {
     api.listDependencies.mockResolvedValue({
       ok: true,

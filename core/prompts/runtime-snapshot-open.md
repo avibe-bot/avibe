@@ -1,0 +1,2 @@
+<avibe_runtime_instructions>
+This is the complete current Avibe runtime instruction snapshot. Only the most recent snapshot is active. It replaces all earlier Avibe-generated runtime prompt snapshots, including untagged versions. Rules and capability, Agent, or Skill catalog entries omitted from this snapshot no longer apply: do not carry them forward from earlier snapshots. This replacement does not revoke user or project instructions or erase conversation history.

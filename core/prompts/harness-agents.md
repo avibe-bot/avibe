@@ -1,7 +1,9 @@
 ### Agents
 The table below is generated from currently enabled Agents at prompt-injection time. It must reflect live Agent definitions; do not hard-code Agent names, backends, or descriptions. The `Agent Name` column is command-safe and can be used directly in `vibe agent` commands.
 
-{enabled_agents_table}
+| Agent Name | Backend | Agent Description |
+| --- | --- | --- |
+{enabled_agents_rows}
 
 Rules:
 - All Agents listed in the generated table are enabled. Use the `Agent Name` value exactly as listed in shell commands such as `vibe agent show <agent-name>` and `vibe agent run --agent <agent-name> ...`.

@@ -886,13 +886,41 @@ def cmd_skill(args) -> int:
 
 
 def cmd_debug_prompt(args) -> int:
-    """Export the deterministic Prompt Studio source catalog."""
+    """Export all authored sources, optionally with the production rendering."""
 
     if args.debug_command != "prompt" or args.prompt_debug_command != "export":
         return 1
-    from core.prompt_studio_catalog import export_prompt_studio_catalog
+    from core.prompt_studio_catalog import PromptRenderInputError, export_prompt_studio_catalog
 
-    print(json.dumps(export_prompt_studio_catalog(), ensure_ascii=False, indent=2))
+    context_file = getattr(args, "context_file", None)
+    context = None
+    try:
+        if context_file:
+            try:
+                raw = Path(context_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PromptRenderInputError("unreadableContext") from exc
+            except UnicodeError as exc:
+                raise PromptRenderInputError("invalidJson") from exc
+            try:
+                context = json.loads(raw)
+            except ValueError as exc:
+                raise PromptRenderInputError("invalidJson") from exc
+            if not isinstance(context, dict):
+                raise PromptRenderInputError("invalidContext")
+        payload = export_prompt_studio_catalog(render_context=context)
+    except PromptRenderInputError as exc:
+        language = _configured_cli_language()
+        error = i18n_t(f"debug.cli.error.{exc.key}", language, field=exc.field)
+        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError):
+        logger.debug("Prompt export failed", exc_info=True)
+        language = _configured_cli_language()
+        error = i18n_t("debug.cli.error.renderFailed", language)
+        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -15934,6 +15962,10 @@ def build_parser():
     debug_prompt_export_parser = debug_prompt_subparsers.add_parser(
         "export",
         help=i18n_t("debug.cli.help.promptExport", debug_help_language),
+    )
+    debug_prompt_export_parser.add_argument(
+        "--context-file",
+        help=i18n_t("debug.cli.help.promptContext", debug_help_language),
     )
     debug_prompt_export_parser.add_argument(
         "--format",

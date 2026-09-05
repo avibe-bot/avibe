@@ -1774,7 +1774,9 @@ class SessionHandler(BaseHandler):
         )
 
         if base_prompt:
-            return f"{base_prompt}\n\n{system_prompt_injection}"
+            from core.prompt_registry import render_prompt
+
+            return render_prompt("agent-instructions", agent_instructions=base_prompt) + system_prompt_injection
         return {
             "type": "preset",
             "preset": "claude_code",
