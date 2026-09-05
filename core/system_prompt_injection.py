@@ -11,8 +11,8 @@ from typing import Any, Iterable, Optional
 
 from config import paths
 from core.message_context import resolve_context_platform
-from core.prompt_registry import prompt_text, render_prompt
-from core.show_git import format_agent_contract
+from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, render_prompt, render_prompt_block
+from core.show_git import agent_contract_block
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 #   health. Runtime policy belongs in the enforcing layer, not in its description.
 # - Keep every generated collection deterministic, including Agent and Skill order.
 # - Required built-in Skill routing is unconditional; installation guarantees it.
+# - Author all injected prose in the registry. Production text and debug JSON
+#   must consume the same ordered rendered blocks; Studio never assembles prose.
 
 
 @dataclass(frozen=True)
@@ -35,36 +37,10 @@ class AgentPromptInfo:
     backend: str = "unknown"
 
 
-_BASE_CAPABILITIES_INTRO = prompt_text("base-capabilities-intro")
-
-_BASE_CAPABILITIES_BODY = prompt_text("base-capabilities-body")
-
-_SHOW_PAGES_PROMPT = prompt_text("show-pages-prompt")
-
-_VAULT_ROUTING_PROMPT = prompt_text("vault-routing-prompt")
-
-_HARNESS_ROUTING_PROMPT = prompt_text("harness-routing-prompt")
-
-_HARNESS_AGENTS_PROMPT = prompt_text("harness-agents-prompt")
-
-_SESSION_START_PROMPT = prompt_text("session-start-prompt")
-
-_FORKED_SESSION_PROMPT = prompt_text("forked-session-prompt")
-
-
-def _build_codex_generated_images_prompt() -> str:
+def _codex_generated_images_block() -> RenderedPromptBlock:
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
     example_uri = (codex_home / "generated_images" / "thread-id" / "image-file.png").as_uri()
-    return render_prompt("codex-generated-images", example_uri=example_uri)
-
-
-_QUICK_REPLIES_PROMPT = prompt_text("quick-replies-prompt")
-
-_SESSION_TITLE_PROMPT = prompt_text("session-title-prompt")
-
-_PREFERENCES_CONTEXT_PROMPT = prompt_text("preferences-context-prompt")
-
-_MEMORY_CONTEXT_PROMPT = prompt_text("memory-context-prompt")
+    return render_prompt_block("codex-generated-images", example_uri=example_uri)
 
 
 def _extract_default_session_id(context: MessageContext) -> str:
@@ -141,7 +117,7 @@ def _escape_markdown_table_cell(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _format_enabled_agents_table(enabled_agents: Optional[Iterable[Any]]) -> str:
+def _format_enabled_agents_rows(enabled_agents: Optional[Iterable[Any]]) -> str:
     if enabled_agents is None:
         return ""
 
@@ -155,7 +131,7 @@ def _format_enabled_agents_table(enabled_agents: Optional[Iterable[Any]]) -> str
     if not rows:
         return ""
 
-    lines = ["| Agent Name | Backend | Agent Description |", "| --- | --- | --- |"]
+    lines = []
     for agent in sorted(
         rows,
         key=lambda item: (
@@ -192,75 +168,23 @@ def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptI
     return rows
 
 
-def _build_session_start_prompt(context: MessageContext) -> str:
-    default_session_id = _extract_default_session_id(context)
-    prompt = render_prompt("session-start-prompt", default_session_id=default_session_id)
-    fork_correction = build_forked_session_correction_prompt(context)
-    if fork_correction:
-        prompt += fork_correction
-    return prompt
-
-
-def _build_harness_prompt(
-    *,
-    enabled_agents: Optional[Iterable[Any]] = None,
-) -> str:
-    prompt = _HARNESS_ROUTING_PROMPT
-    table = _format_enabled_agents_table(enabled_agents)
-    if table:
-        prompt += render_prompt("harness-agents-prompt", enabled_agents_table=table)
-    return prompt
-
-
-def _build_show_pages_prompt(
-    context: MessageContext,
-) -> str:
-    default_session_id = _extract_default_session_id(context)
-    prompt = _SHOW_PAGES_PROMPT
-    history_contract = format_agent_contract(numbered=True, session_id=default_session_id)
-    if history_contract:
-        prompt += f"\nHistory contract:\n{history_contract}\n"
-    return prompt
-
-
-def _build_vault_prompt(
-    context: Optional[MessageContext],
-    *,
-    fallback_platform: Optional[str] = None,
-) -> str:
-    del context, fallback_platform
-    return _VAULT_ROUTING_PROMPT
-
-
-def _build_session_end_prompt(
-    context: MessageContext,
-    *,
-    fallback_platform: Optional[str] = None,
-) -> str:
-    prompt = ""
-    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
-    if _is_web_platform(platform):
-        prompt += _SESSION_TITLE_PROMPT
-    return prompt
-
-
-def _build_context_prompt(
+def _context_block(
     context: Optional[MessageContext],
     *,
     fallback_platform: Optional[str] = None,
     memory_enabled: bool = False,
-) -> str:
+) -> RenderedPromptBlock:
     if memory_enabled:
-        return _MEMORY_CONTEXT_PROMPT
+        return render_prompt_block("memory-context-prompt")
     platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
-    return render_prompt(
+    return render_prompt_block(
         "preferences-context-prompt",
         preferences_path=f"`{paths.get_user_preferences_path()}`",
         platform=platform,
     )
 
 
-def build_system_prompt_injection(
+def build_system_prompt_blocks(
     *,
     include_quick_replies: bool = True,
     include_show_pages: bool = True,
@@ -273,8 +197,8 @@ def build_system_prompt_injection(
     skills_cwd: str | Path | None = None,
     skills_project_base: str | Path | None = None,
     skills_claude_cli_path: str | None = None,
-) -> str:
-    """Build avibe system prompt additions for an agent backend."""
+) -> list[RenderedPromptBlock]:
+    """The production composition, also exported by the debug command."""
 
     skills = None
     if skills_cwd is not None:
@@ -293,32 +217,47 @@ def build_system_prompt_injection(
         skill.name == "use-avibe-vault" for skill in advertisable_skills
     )
 
-    prompt = _BASE_CAPABILITIES_INTRO
+    blocks = [render_prompt_block("base-capabilities-intro")]
     if context is not None:
-        prompt += _build_session_start_prompt(context)
-    prompt += _BASE_CAPABILITIES_BODY
+        blocks.append(render_prompt_block("session-start-prompt", default_session_id=_extract_default_session_id(context)))
+        correction = build_forked_session_correction_prompt(context)
+        if correction:
+            blocks.append(RenderedPromptBlock("forked-session-prompt", correction))
+    blocks.append(render_prompt_block("base-capabilities-body"))
     if include_codex_generated_images:
-        prompt += _build_codex_generated_images_prompt()
+        blocks.append(_codex_generated_images_block())
     if include_show_pages and context is not None:
-        prompt += _build_show_pages_prompt(context)
+        blocks.append(render_prompt_block("show-pages-prompt"))
+        history = agent_contract_block(numbered=True, session_id=_extract_default_session_id(context))
+        if history:
+            blocks.append(render_prompt_block("show-history-heading"))
+            blocks.append(RenderedPromptBlock(history.module_id, history.text + "\n"))
     if include_quick_replies:
-        prompt += _QUICK_REPLIES_PROMPT
+        blocks.append(render_prompt_block("quick-replies-prompt"))
     if vault_skill_available:
-        prompt += _build_vault_prompt(context, fallback_platform=fallback_platform)
+        blocks.append(render_prompt_block("vault-routing-prompt"))
     if context is not None:
-        prompt += _build_harness_prompt(
-            enabled_agents=enabled_agents,
-        )
+        blocks.append(render_prompt_block("harness-routing-prompt"))
+        agent_rows = _format_enabled_agents_rows(enabled_agents)
+        if agent_rows:
+            blocks.append(render_prompt_block("harness-agents-prompt", enabled_agents_rows=agent_rows))
     if include_context_guidance:
-        prompt += _build_context_prompt(
+        blocks.append(_context_block(
             context,
             fallback_platform=fallback_platform,
             memory_enabled=memory_enabled,
-        )
+        ))
     if skills is not None:
-        from core.managed_skills import render_skill_catalog_prompt
+        from core.managed_skills import render_skill_catalog_blocks
 
-        prompt += render_skill_catalog_prompt(skills)
+        blocks.extend(render_skill_catalog_blocks(skills))
     if context is not None:
-        prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)
-    return prompt
+        platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
+        if _is_web_platform(platform):
+            blocks.append(render_prompt_block("session-title-prompt"))
+    return blocks
+
+
+def build_system_prompt_injection(**kwargs: Any) -> str:
+    """Render the production blocks without changing their byte boundaries."""
+    return join_prompt_blocks(build_system_prompt_blocks(**kwargs))

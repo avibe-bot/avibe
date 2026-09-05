@@ -782,8 +782,19 @@
       "help": {
         "command": "查看 Avibe 内部状态",
         "prompt": "查看维护中的 Prompt 源",
-        "promptExport": "导出 Prompt Studio 源目录",
+        "promptExport": "导出完整 Prompt 源区块，可附带生产渲染结果",
+        "promptContext": "包含 backend、可选 agent_instructions 和生产构建参数 options 的 JSON 文件",
         "promptFormat": "导出格式"
+      },
+      "error": {
+        "promptExport": "Prompt 导出失败：{error}",
+        "invalidContext": "上下文必须是 JSON 对象，且只能包含 backend、agent_instructions 和 options。",
+        "invalidBackend": "backend 必须为 claude、codex 或 opencode。",
+        "invalidField": "字段类型无效或缺少必填字段：{field}",
+        "unknownField": "未知字段：{field}",
+        "unreadableContext": "无法读取上下文文件，请检查路径和权限。",
+        "invalidJson": "上下文文件必须包含有效的 UTF-8 JSON。",
+        "renderFailed": "无法渲染提示词来源，请检查源文件和渲染输入。"
       }
     }
   },

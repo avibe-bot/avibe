@@ -23,6 +23,61 @@ Git or choose a branch. A contributor reviews the branch they have checked out.
 Catalog order and revisions are content-derived and deterministic; the export
 contains no generation timestamp.
 
+Completeness is defined by the production injection, not by a manually selected
+set of files. All authored prose, including Skill invocation/pagination rules,
+Show history contracts, and Codex snapshot boundaries, belongs in the registry.
+Agent instructions and generated Skill/Agent catalogs have declared input slots;
+their machine/session-specific values are not alternative English sources.
+
+The default export is the complete **source catalog**, including mutually
+exclusive branches. It is not a rendered session prompt. To render explicit
+inputs, use the same command with `--context-file context.json`:
+
+```json
+{
+  "backend": "codex",
+  "agent_instructions": "Review changes carefully.",
+  "options": {
+    "context": {
+      "user_id": "reviewer",
+      "channel_id": "review",
+      "platform": "avibe",
+      "platform_specific": {"agent_session_id": "sesreview"}
+    },
+    "memory_enabled": true,
+    "skills_cwd": "/path/to/project",
+    "enabled_agents": [
+      {"name": "codex", "backend": "codex", "description": "Code review"}
+    ]
+  }
+}
+```
+
+`options` are the keyword inputs of `build_system_prompt_blocks`; omitted
+options use that builder's defaults. Image guidance defaults to Codex only.
+In JSON, `enabled_agents` is an array of Agent objects or `null`, not an arbitrary
+Python iterable. Each object must have a usable `name` or `normalized_name`;
+optional fields use the production defaults. An empty array, `null`, or omission
+renders no Agent table. Invalid input returns a localized error, not a rendering
+with silently discarded Agent rows.
+Callers reproducing a turn must supply its effective options (for example,
+quick replies disabled on WeChat), Agent instructions, and enabled Agent list;
+the command does not infer them from the Session ID. Normal path and Show
+history resolution still use the invoking environment. Providing `skills_cwd`
+uses production discovery, including ordinary built-in snapshot maintenance.
+
+The additive `rendered` field contains ordered, source-addressable `blocks`,
+their exact concatenated `text`, and its content-derived `revision`. This calls
+the same block builder used by all three production backends. Codex includes its
+snapshot envelope; native backend presets, project files, tool schemas and
+conversation history are outside this Avibe-injection scope. The export is a
+rendering of supplied inputs, not a claim to have captured a live model request.
+It starts no backend and does not grant Memory access or change configuration.
+
+Studio must consume this interface rather than select files or assemble prompt
+text itself. Source-document token estimates and rendered-injection token
+estimates are different measurements; never present the former as the latter.
+
 ## Runtime compatibility
 
 Markdown files omit composition-only leading and trailing newlines. The registry

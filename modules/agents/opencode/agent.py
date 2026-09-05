@@ -1573,7 +1573,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 ),
             )
             if request.vibe_agent_system_prompt:
-                system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
+                from core.prompt_registry import render_prompt
+
+                system_prompt_injection = render_prompt(
+                    "agent-instructions", agent_instructions=request.vibe_agent_system_prompt,
+                ) + system_prompt_injection
 
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
