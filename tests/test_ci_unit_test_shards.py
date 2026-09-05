@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ci_unit_test_shards import load_timings, plan_shards
+from scripts.ci_unit_test_shards import discover_unit_test_files, load_timings, plan_shards
 
 
 def _test_file(root: Path, name: str, *, tests: int = 1, lines: int = 1) -> Path:
@@ -54,3 +54,10 @@ def test_load_timings_ignores_malformed_values(tmp_path: Path) -> None:
 def test_plan_shards_rejects_invalid_shard_total(tmp_path: Path, shard_total: int) -> None:
     with pytest.raises(ValueError, match="shard_total"):
         plan_shards([_test_file(tmp_path, "test_one.py")], shard_total)
+
+
+def test_measured_plan_runs_every_discovered_file_exactly_once() -> None:
+    files = discover_unit_test_files()
+    shards = plan_shards(files, 6, load_timings())
+
+    assert sorted(path for _, selected in shards for path in selected) == files

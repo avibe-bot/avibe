@@ -31,6 +31,26 @@ jobs:
           pip install pre-commit
           pre-commit run --all-files
 
+  ui-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Validate and test UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run validate:theme
+          npm run lint
+          # Production tsc excludes test files, and vitest only strips types.
+          npm run typecheck:tests
+          npm test
+
   build-linux-artifacts:
     runs-on: ubuntu-latest
     steps:
@@ -50,13 +70,6 @@ jobs:
         working-directory: ui
         run: |
           npm ci
-          npm run validate:theme
-          npm run lint
-          # `npm run build` runs `tsc -b`, whose projects exclude every
-          # `*.test.ts(x)`, and vitest strips types without checking them. So no
-          # gate below reads a test file's types; this one does.
-          npm run typecheck:tests
-          npm test
           npm run build
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
@@ -139,16 +152,23 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
-    needs: unit-test-shards
+    # Keep UI validation in the existing required gate while allowing artifact
+    # consumers to start as soon as their production bundle is built.
+    needs: [unit-test-shards, ui-checks]
     if: always()
     steps:
-      - name: Verify unit test shards
+      - name: Verify unit test shards and UI checks
+        env:
+          UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
+          UI_RESULT: ${{ needs['ui-checks'].result }}
         run: |
-          if [ "${{ needs['unit-test-shards'].result }}" != "success" ]; then
-            echo "Unit test shards finished with result: ${{ needs['unit-test-shards'].result }}"
-            exit 1
-          fi
-          echo "All unit test shards passed."
+          for result in "$UNIT_RESULT" "$UI_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "Unit/UI checks finished with result: $result"
+              exit 1
+            fi
+          done
+          echo "All unit test shards and UI checks passed."
 
   memory-insight-contract:
     runs-on: ubuntu-latest
