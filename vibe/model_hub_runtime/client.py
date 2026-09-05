@@ -13,7 +13,7 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any, AsyncIterator, BinaryIO, Mapping, TypeVar, cast
+from typing import Any, AsyncIterator, BinaryIO, Literal, Mapping, TypeVar, cast
 
 import aiohttp
 import ijson
@@ -229,6 +229,14 @@ class EngineConnection:
     gateway_token: str = field(repr=False)
 
 
+@dataclass(frozen=True)
+class EngineHealthFailure:
+    path: str
+    reason: Literal["timeout", "http_error", "invalid_response", "unavailable"]
+    elapsed_seconds: float
+    http_status: int | None = None
+
+
 class EngineInvokeHandle:
     """Concrete InvokeHandle with one-shot streaming ownership."""
 
@@ -290,26 +298,36 @@ class EngineClient:
             raise ValueError("engine client requires a credential-free 127.0.0.1 URL")
         self.connection = connection
         self.timeout = timeout
+        self.health_failure: EngineHealthFailure | None = None
 
     def health(self) -> bool:
-        try:
-            models_ok = self._request_json_projection(
-                "GET",
-                "/v1/models",
-                _project_models_health,
-                headers={"Authorization": f"Bearer {self.connection.gateway_token}"},
-                timeout=min(self.timeout, 1.0),
-            )
-            config_ok = self._request_json_projection(
-                "GET",
-                "/v0/management/config",
-                _project_root_map,
-                headers={"X-Management-Key": self.connection.management_key},
-                timeout=min(self.timeout, 1.0),
-            )
-        except EngineClientError:
-            return False
-        return models_ok and config_ok
+        self.health_failure = None
+        for path, projector, headers in (
+            ("/v1/models", _project_models_health, {"Authorization": f"Bearer {self.connection.gateway_token}"}),
+            ("/v0/management/config", _project_root_map, {"X-Management-Key": self.connection.management_key}),
+        ):
+            started_at = time.monotonic()
+            try:
+                valid = self._request_json_projection(
+                    "GET", path, projector, headers=headers, timeout=min(self.timeout, 1.0),
+                )
+            except EngineClientError as exc:
+                reason = (
+                    "http_error" if exc.status_code is not None
+                    else "timeout" if exc.error_type == "TimeoutError"
+                    else "invalid_response" if exc.error_type == "invalid_json"
+                    else "unavailable"
+                )
+                self.health_failure = EngineHealthFailure(
+                    path, reason, time.monotonic() - started_at, exc.status_code,
+                )
+                return False
+            if not valid:
+                self.health_failure = EngineHealthFailure(
+                    path, "invalid_response", time.monotonic() - started_at,
+                )
+                return False
+        return True
 
     def management_request(
         self,

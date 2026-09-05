@@ -1308,6 +1308,30 @@ def regression_service_unit() -> str:
     ).rstrip()
 
 
+def prepare_service_directories_command() -> str:
+    """Establish writable roots without visiting existing runtime contents."""
+    directories = shlex.join((SERVICE_HOME, "/opt/avibe", SOURCE_DIR, VENV_DIR, METADATA_DIR, AVIBE_HOME))
+    return f"mkdir -p {directories} && chown -h {SERVICE_USER}:{SERVICE_USER} {directories}"
+
+
+def legacy_image_ownership_command() -> str:
+    """Repair root-owned backend installs from old images on first boot only."""
+    paths = shlex.join(f"{SERVICE_HOME}/{name}" for name in (".local/bin", ".npm-global", ".npmrc", ".npm", ".opencode"))
+    return textwrap.dedent(
+        f"""\
+        set -eu
+        if [ -d {SERVICE_HOME}/.local ]; then
+            chown -h {SERVICE_USER}:{SERVICE_USER} {SERVICE_HOME}/.local
+        fi
+        for path in {paths}; do
+            if [ -e "$path" ] && [ "$(stat -c %u "$path")" = 0 ]; then
+                chown -hR {SERVICE_USER}:{SERVICE_USER} "$path"
+            fi
+        done
+        """
+    ).strip()
+
+
 def cloud_init_user_data() -> str:
     service = regression_service_unit()
     helper = textwrap.dedent(
@@ -1352,8 +1376,8 @@ def cloud_init_user_data() -> str:
         "    content: |",
         yaml_block(helper),
         "runcmd:",
-        f"  - [mkdir, -p, {SOURCE_DIR}, {VENV_DIR}, {METADATA_DIR}, {AVIBE_HOME}]",
-        f"  - [chown, -R, {SERVICE_USER}:{SERVICE_USER}, {SERVICE_HOME}, /opt/avibe, {METADATA_DIR}]",
+        f"  - {json.dumps(prepare_service_directories_command())}",
+        f"  - {json.dumps(legacy_image_ownership_command())}",
         f"  - [ln, -sfn, {AVIBE_HOME}, {LEGACY_HOME}]",
         "  - [systemctl, daemon-reload]",
         f'final_message: "Avibe regression base is ready."',
@@ -1523,9 +1547,8 @@ def ensure_project_and_instance(
             target,
             (
                 "if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait || true; fi; "
-                f"mkdir -p {SOURCE_DIR} {VENV_DIR} {METADATA_DIR} {AVIBE_HOME}; "
-                f"chown -R {SERVICE_USER}:{SERVICE_USER} {SERVICE_HOME} /opt/avibe {METADATA_DIR}; "
-                f"ln -sfn {AVIBE_HOME} {LEGACY_HOME}; "
+                f"{prepare_service_directories_command()} && "
+                f"ln -sfn {AVIBE_HOME} {LEGACY_HOME} && "
                 "systemctl daemon-reload"
             ),
             remote=remote,
@@ -1702,13 +1725,11 @@ def sync_source(
             f"if [ -d {quoted_ui} ]; then find {quoted_ui} -mindepth 1 -maxdepth 1 {keep} -exec rm -rf {{}} +; fi"
         )
     runner.run(root_exec(target, f"mkdir -p {quoted_source} && {wipe}", remote=remote))
-    runner.run(root_exec(target, f"mkdir -p {quoted_source} && chown -R {SERVICE_USER}:{SERVICE_USER} /opt/avibe", remote=remote))
     tar_bytes = b"" if runner.dry_run else build_source_tar(repo_root, include_ui_dist=include_ui_dist)
     runner.run(
-        incus("exec", remote_ref(remote, target.instance), "--", "tar", "-C", SOURCE_DIR, "-xf", "-", project=target.project),
+        tenant_exec(target, f"tar --no-same-owner -C {quoted_source} -xf -", remote=remote),
         input_bytes=tar_bytes,
     )
-    runner.run(root_exec(target, f"chown -R {SERVICE_USER}:{SERVICE_USER} {shlex.quote(SOURCE_DIR)}", remote=remote))
 
 
 def stop_service_for_update(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
@@ -2182,12 +2203,11 @@ def run_prepare_state(runner: Runner, target: RegressionTarget, *, reset_mode: s
             )
         )
     runner.run(
-        root_exec(
+        tenant_exec(
             target,
             f"mkdir -p {AVIBE_HOME} && "
-            f"cp -a /home/{SERVICE_USER}/.regression-seed/home/. {SERVICE_HOME}/ && "
-            f"chown -R {SERVICE_USER}:{SERVICE_USER} {SERVICE_HOME} && "
-            f"ln -sfn {AVIBE_HOME} {LEGACY_HOME} && chown -h {SERVICE_USER}:{SERVICE_USER} {LEGACY_HOME}",
+            f"cp -a --no-preserve=ownership /home/{SERVICE_USER}/.regression-seed/home/. {SERVICE_HOME}/ && "
+            f"ln -sfn {AVIBE_HOME} {LEGACY_HOME}",
             remote=remote,
         )
     )
@@ -2266,10 +2286,20 @@ def update_dependencies_and_build(
     precisely because the fingerprint already matched. A key is absent only when
     the run never looked, which is what ``--no-build-ui`` does to the UI.
     """
-    runner.run(root_exec(target, f"python3 -m venv {shlex.quote(VENV_DIR)} || true", remote=remote))
-    runner.run(root_exec(target, f"chown -R {SERVICE_USER}:{SERVICE_USER} {shlex.quote(VENV_DIR)}", remote=remote))
+    venv = shlex.quote(VENV_DIR)
+    venv_exists = runner.run(
+        tenant_exec(
+            target,
+            f"test -f {venv}/pyvenv.cfg && test -x {venv}/bin/python && test -x {venv}/bin/pip",
+            remote=remote,
+        ),
+        check=False,
+    ).returncode == 0
+    if not venv_exists:
+        runner.run(tenant_exec(target, f"python3 -m venv {venv}", remote=remote))
     python_changed = (
         force_deps
+        or not venv_exists
         or previous_fingerprints.get("python") != next_fingerprints.get("python")
         or not previous_fingerprints
     )
@@ -2449,37 +2479,33 @@ def cmd_build_base(args: argparse.Namespace) -> int:
                 apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
                 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
                 apt-get install -y nodejs
-                # Install the agent backends under the service user's home so the
-                # non-root avibe service can self-update them (`claude update`, etc.).
-                # Root-global installs under /usr are not writable by the avibe user,
-                # which is exactly what breaks self-update in regression. These land
-                # root-owned at build time and are made avibe-owned per instance by the
-                # `chown -R avibe:avibe /home/avibe` in cloud-init runcmd /
-                # ensure_project_and_instance; the service PATH already prefers
-                # /home/avibe/.local/bin over /usr.
-                avibe_home=/home/avibe
+                # Backends must be service-owned at creation so their updaters
+                # stay writable without a recursive ownership repair at deployment.
+                id -u avibe >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo avibe
+                sudo -H -u avibe -- bash -s <<'AVIBE_BACKENDS'
+                set -euo pipefail
+                avibe_home="$HOME"
                 mkdir -p "$avibe_home/.local/bin" "$avibe_home/.npm-global"
                 # Persist a user-writable npm prefix so claude-code/codex install here
                 # AND future npm-based self-updates by the avibe user stay writable.
                 printf 'prefix=%s/.npm-global\n' "$avibe_home" > "$avibe_home/.npmrc"
-                HOME="$avibe_home" npm install -g @anthropic-ai/claude-code @openai/codex
+                npm install -g @anthropic-ai/claude-code @openai/codex
                 ln -sf "$avibe_home/.npm-global/bin/claude" "$avibe_home/.local/bin/claude"
                 ln -sf "$avibe_home/.npm-global/bin/codex" "$avibe_home/.local/bin/codex"
                 # OpenCode installs into the service user's home via its own updater.
-                # HOME must be set on the piped `bash` (the installer), not on `curl`.
-                curl -fsSL https://opencode.ai/install | HOME="$avibe_home" bash -s -- --no-modify-path
+                curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
                 if [ ! -x "$avibe_home/.opencode/bin/opencode" ]; then
                     echo "OpenCode installer did not produce an opencode binary" >&2
                     exit 1
                 fi
                 ln -sf "$avibe_home/.opencode/bin/opencode" "$avibe_home/.local/bin/opencode"
-                # askill stays system-global: it is a bootstrap dependency, not a
-                # self-updated agent backend.
-                curl -fsSL https://askill.sh | sh -s -- -b /usr/local/bin
                 export PATH="$avibe_home/.local/bin:$PATH"
                 claude --version
                 codex --version
                 opencode --version
+                AVIBE_BACKENDS
+                # askill is a system-global bootstrap dependency, not a backend.
+                curl -fsSL https://askill.sh | sh -s -- -b /usr/local/bin
                 askill --version
                 node --version
                 npm --version
