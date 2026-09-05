@@ -550,6 +550,41 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         manager._start_server.assert_not_awaited()
 
+    async def test_launch_rechecks_mode_inside_lock_immediately_before_spawn(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        events = []
+        modes = iter((False, True))
+
+        def current_mode():
+            events.append(("mode", manager._get_lock().locked()))
+            return next(modes)
+
+        async def cleanup():
+            events.append(("cleanup", manager._get_lock().locked()))
+
+        manager._model_hub_mode_enabled = Mock(side_effect=current_mode)  # type: ignore[method-assign]
+        manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock(side_effect=cleanup)  # type: ignore[method-assign]
+        manager._is_port_available = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(
+                path=Path("/tmp/plugin.js"),
+                changed=False,
+            ),
+        ):
+            with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
+                await manager.ensure_running()
+
+        self.assertEqual(
+            events,
+            [("mode", False), ("cleanup", True), ("mode", True)],
+        )
+        manager._start_server.assert_not_awaited()
+
     async def test_controller_probe_prepares_overlay_before_launch(self):
         from core.resource_governance import mark_controller_resource_governor
 

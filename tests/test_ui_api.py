@@ -3,13 +3,14 @@ import json
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from config.v2_config import (
     AgentsConfig,
     CodexConfig,
+    ModelHubBackendModelConfig,
     PlatformsConfig,
     RuntimeConfig,
     SlackConfig,
@@ -200,9 +201,26 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
         runtime=RuntimeConfig(default_cwd="."),
     )
     v2_config.model_hub.agents["opencode"].mode = "hub"
+    v2_config.model_hub.agents["opencode"].models = [
+        ModelHubBackendModelConfig(
+            id="deepseek-v3.2",
+            display_name="DeepSeek V3.2",
+            supports_reasoning=True,
+            reasoning_efforts=["high"],
+            native_protocol="openai_responses",
+        ),
+        ModelHubBackendModelConfig(
+            id="claude-opus-5",
+            display_name="Claude Opus 5",
+            supports_reasoning=True,
+            reasoning_efforts=["max"],
+            native_protocol="anthropic",
+        ),
+    ]
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
-    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    load_config = Mock(return_value=v2_config)
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(load_config))
     monkeypatch.setattr(
         v2_compat,
         "to_app_config",
@@ -220,27 +238,10 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
         _ForbiddenServerManager,
     )
 
-    result = asyncio.run(
-        api.opencode_options_async(
-            "~/workspace",
-            model_hub_models={
-                "deepseek-v3.2": {
-                    "id": "deepseek-v3.2",
-                    "name": "DeepSeek V3.2",
-                    "native_protocol": "openai_responses",
-                    "variants": {"high": {"reasoningEffort": "high"}},
-                },
-                "claude-opus-5": {
-                    "id": "claude-opus-5",
-                    "name": "Claude Opus 5",
-                    "native_protocol": "anthropic",
-                    "variants": {"max": {"effort": "max"}},
-                },
-            },
-        )
-    )
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
 
     assert result["ok"] is True
+    load_config.assert_called_once_with()
     assert result["data"]["agents"] == []
     assert result["data"]["defaults"] == {}
     assert result["data"]["source"] == "model hub projection (persisted)"
@@ -527,23 +528,19 @@ def test_opencode_options_does_not_fall_back_across_model_hub_projections(
     assert result == {"ok": False, "error": "daemon unavailable"}
 
 
-def test_sync_opencode_options_loads_persisted_model_hub_projection(monkeypatch):
-    from core.handlers import model_hub
-
-    projection = {"custom/current": {"id": "custom/current"}}
+def test_sync_opencode_options_delegates_snapshot_loading(monkeypatch):
     calls = []
 
-    async def options(cwd, *, model_hub_models=None):
-        calls.append((cwd, model_hub_models))
+    async def options(cwd):
+        calls.append(cwd)
         return {"ok": True, "data": {"models": {"providers": []}}}
 
-    monkeypatch.setattr(model_hub, "load_opencode_public_models", lambda: projection)
     monkeypatch.setattr(api, "opencode_options_async", options)
 
     result = api.opencode_options("/tmp/workspace")
 
     assert result["ok"] is True
-    assert calls == [("/tmp/workspace", projection)]
+    assert calls == ["/tmp/workspace"]
 
 
 def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):

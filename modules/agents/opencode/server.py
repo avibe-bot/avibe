@@ -726,6 +726,18 @@ class OpenCodeServerManager:
             self._model_hub_overlay_refusal_logged = True
         raise OpenCodeModelHubOverlayRequiredError(message)
 
+    async def _start_server_for_current_model_hub_mode_locked(self) -> None:
+        # Known by design: a settings PATCH may commit while the OS spawn is in
+        # progress. Reading here bounds that cross-process race to the spawn;
+        # the next controller Hub use configures the overlay and restarts any
+        # unoverlaid server through the normal overlay-change path.
+        if self._model_hub_mode_enabled() and (
+            not is_controller_resource_governor(self.resource_governor)
+            or not self._configured_model_hub_overlay()
+        ):
+            self._refuse_unconfigured_model_hub_launch()
+        await self._start_server()
+
     async def _prepare_model_hub_launch_boundary(self) -> object | None:
         hub_mode = self._model_hub_mode_enabled()
         if not hub_mode:
@@ -1716,7 +1728,7 @@ class OpenCodeServerManager:
                         plugin_install.path,
                     )
                     await self._restart_for_auth_refresh_locked()
-                    await self._start_server()
+                    await self._start_server_for_current_model_hub_mode_locked()
                     self._caller_context_plugin_refresh_pending = False
                     return self.base_url
                 if runtime_policy_stale:
@@ -1762,7 +1774,7 @@ class OpenCodeServerManager:
 
             if self._runtime_generation_token is not None:
                 self._retire_runtime_generation_for_replacement()
-            await self._start_server()
+            await self._start_server_for_current_model_hub_mode_locked()
             self._caller_context_plugin_refresh_pending = False
             return self.base_url
 

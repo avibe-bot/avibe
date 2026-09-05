@@ -4358,26 +4358,15 @@ def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
     assert not hasattr(service, "adapter")
 
 
-def test_opencode_options_route_passes_controller_projection(monkeypatch):
+def test_opencode_options_route_delegates_snapshot_loading(monkeypatch):
     from vibe import api
 
-    projection = {
-        "current-model": {
-            "id": "current-model",
-            "native_protocol": "openai_responses",
-        },
-    }
     calls = []
 
-    class RemoteService:
-        def opencode_public_models(self):
-            return projection
-
-    async def options(cwd, *, model_hub_models=None):
-        calls.append((cwd, model_hub_models))
+    async def options(cwd):
+        calls.append(cwd)
         return {"ok": True, "data": {"models": {}}}
 
-    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: RemoteService())
     monkeypatch.setattr(api, "opencode_options_async", options)
 
     with app.test_request_context(
@@ -4388,36 +4377,7 @@ def test_opencode_options_route_passes_controller_projection(monkeypatch):
         response = asyncio.run(ui_server.opencode_options())
 
     assert response.status_code == 200
-    assert calls == [("/tmp/workspace", projection)]
-
-
-def test_opencode_options_route_keeps_native_catalog_when_projection_is_unavailable(
-    monkeypatch,
-):
-    from vibe import api
-
-    calls = []
-
-    class UnavailableService:
-        def opencode_public_models(self):
-            raise ModelHubError("engine_down", status=503)
-
-    async def options(cwd, *, model_hub_models=None):
-        calls.append((cwd, model_hub_models))
-        return {"ok": True, "data": {"models": {}}}
-
-    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: UnavailableService())
-    monkeypatch.setattr(api, "opencode_options_async", options)
-
-    with app.test_request_context(
-        "/api/opencode/options",
-        method="POST",
-        json={"cwd": "/tmp/workspace"},
-    ):
-        response = asyncio.run(ui_server.opencode_options())
-
-    assert response.status_code == 200
-    assert calls == [("/tmp/workspace", {})]
+    assert calls == ["/tmp/workspace"]
 
 
 def test_ui_model_hub_rpc_preserves_controller_error_contract():

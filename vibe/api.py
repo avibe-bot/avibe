@@ -5745,16 +5745,10 @@ def discord_list_channels_live(bot_token: str, guild_id: str) -> dict:
 
 
 def opencode_options(cwd: str) -> dict:
-    from core.handlers.model_hub import load_opencode_public_models
     from vibe.async_bridge import run_coroutine_blocking
 
     try:
-        return run_coroutine_blocking(
-            opencode_options_async(
-                cwd,
-                model_hub_models=load_opencode_public_models(),
-            )
-        )
+        return run_coroutine_blocking(opencode_options_async(cwd))
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -5952,21 +5946,16 @@ async def opencode_options_async(
     cache_data = cache_entry.get("data")
     updated_at = cache_entry.get("updated_at", 0.0)
     cache_age = time.monotonic() - updated_at
-    projection_key = json.dumps(
-        model_hub_models or {},
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    cache_projection_matches = (
-        cache_entry.get("model_hub_projection") == projection_key
-    )
+    model_hub_models_were_supplied = model_hub_models is not None
+    projection_key = ""
+    cache_projection_matches = False
     cache_mode_matches = cache_entry.get("mode") == "direct"
     model_hub_mode = None
     server = None
     try:
         from config.v2_compat import to_app_config
         from config.v2_config import is_model_hub_enabled
+        from core.handlers.model_hub import load_opencode_public_models
         from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
             OpenCodeServerManager,
@@ -5976,6 +5965,22 @@ async def opencode_options_async(
         from modules.agents.opencode.utils import opencode_model_picker_value
 
         v2_config = V2Config.load()
+        if model_hub_models is None:
+            model_hub_config = getattr(v2_config, "model_hub", None)
+            model_hub_models = (
+                load_opencode_public_models(model_hub_config)
+                if model_hub_config is not None
+                else {}
+            )
+        projection_key = json.dumps(
+            model_hub_models,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cache_projection_matches = (
+            cache_entry.get("model_hub_projection") == projection_key
+        )
         model_hub_agents = getattr(getattr(v2_config, "model_hub", None), "agents", {})
         model_hub_agent = (
             model_hub_agents.get("opencode")
@@ -6060,7 +6065,7 @@ async def opencode_options_async(
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
         model_request = (
             server.get_available_models(expanded_cwd)
-            if model_hub_models is None
+            if not model_hub_models_were_supplied
             else server.get_available_models(
                 expanded_cwd,
                 model_hub_models=model_hub_models,
