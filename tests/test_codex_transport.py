@@ -204,6 +204,12 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("features.shell_tool=false", disabled)
         self.assertNotIn("web_search=disabled", disabled)
 
+    def test_app_server_policy_preserves_client_developer_messages(self):
+        self.assertIn(
+            "features.retain_client_developer_messages=true",
+            AVIBE_APP_SERVER_CONFIG_OVERRIDES,
+        )
+
     async def test_reader_task_failure_marks_transport_not_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")
         transport._process = SimpleNamespace(returncode=None)

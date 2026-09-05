@@ -3687,7 +3687,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["modelProvider"], "openai-managed")
         self.assertNotIn("developerInstructions", params)
 
-    async def test_start_turn_applies_stable_developer_instructions_with_collaboration_mode(self):
+    async def test_start_turn_injects_stable_developer_instructions_once(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             get_codex_overrides=Mock(return_value=(None, None, None)),
@@ -3735,26 +3735,26 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             developer_instructions="stable prompt",
         )
 
-        first = transport.send_request.await_args_list[0].args[1]
-        second = transport.send_request.await_args_list[1].args[1]
-        expected_mode = {
-            "mode": "default",
-            "settings": {
-                "model": "gpt-5.4",
-                "reasoning_effort": "high",
-                "developer_instructions": "stable prompt",
-            },
-        }
-        self.assertEqual(first["collaborationMode"], expected_mode)
-        self.assertEqual(second["collaborationMode"], expected_mode)
-        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+        calls = transport.send_request.await_args_list
+        self.assertEqual(
+            [entry.args[0] for entry in calls],
+            ["thread/inject_items", "turn/start", "turn/start"],
+        )
+        self.assertEqual(calls[0].args[1]["items"][0]["role"], "developer")
+        self.assertEqual(calls[0].args[1]["items"][0]["content"][0]["text"], "stable prompt")
+        for entry in calls[1:]:
+            self.assertNotIn("collaborationMode", entry.args[1])
+            self.assertEqual(entry.args[1]["model"], "gpt-5.4")
+            self.assertEqual(entry.args[1]["effort"], "high")
+        self.assertEqual(agent.sessions.set_agent_session_runtime_marker.call_count, 2)
+        agent.sessions.set_agent_session_runtime_marker.assert_called_with(
             "ses-runtime",
             backend="codex",
             native_session_id="thread-1",
             key="codex_prompt_strategy",
             value={
                 "thread_id": "thread-1",
-                "strategy": "collaboration",
+                "strategy": "fallback",
                 "sha256": agent._prompt_fingerprint("stable prompt"),
             },
         )
@@ -3808,14 +3808,15 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "session-1:subagent:reviewer",
             "codex",
         )
-        agent.sessions.set_agent_session_runtime_marker.assert_called_once_with(
+        self.assertEqual(agent.sessions.set_agent_session_runtime_marker.call_count, 2)
+        agent.sessions.set_agent_session_runtime_marker.assert_called_with(
             "ses-backend",
             backend="codex",
             native_session_id="thread-subagent",
             key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
             value={
                 "thread_id": "thread-subagent",
-                "strategy": "collaboration",
+                "strategy": "fallback",
                 "sha256": agent._prompt_fingerprint("stable prompt"),
             },
         )
@@ -4125,7 +4126,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 agent_session_id="ses-runtime",
             )
 
-    async def test_start_turn_reuses_persisted_collaboration_after_inconclusive_probe(self):
+    async def test_start_turn_migrates_persisted_collaboration_after_inconclusive_probe(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
@@ -4172,17 +4173,20 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [call.args[0] for call in transport.send_request.await_args_list],
-            ["collaborationMode/list", "turn/start"],
+            ["collaborationMode/list", "thread/inject_items", "turn/start"],
         )
-        params = transport.send_request.await_args_list[1].args[1]
+        params = transport.send_request.await_args_list[2].args[1]
+        self.assertIsNone(params["collaborationMode"])
+        self.assertEqual(params["model"], "gpt-5.4")
+        self.assertEqual(params["effort"], "high")
         self.assertEqual(
-            params["collaborationMode"]["settings"]["developer_instructions"],
+            transport.send_request.await_args_list[1].args[1]["items"][0]["content"][0]["text"],
             "stable prompt",
         )
-        agent.sessions.set_agent_session_runtime_marker.assert_not_called()
+        self.assertEqual(agent.sessions.set_agent_session_runtime_marker.call_count, 3)
         self.assertEqual(
             agent._thread_prompt_strategies["session-1"],
-            ("thread-1", "collaboration"),
+            ("thread-1", "fallback"),
         )
 
     async def test_start_turn_fails_closed_when_collaboration_reprobe_is_negative(self):
@@ -4679,8 +4683,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         params = transport.send_request.await_args.args[1]
         self.assertEqual(params["model"], "gpt-5.5")
         self.assertNotIn("effort", params)
-        self.assertEqual(params["collaborationMode"]["settings"]["model"], "gpt-5.5")
-        self.assertIsNone(params["collaborationMode"]["settings"]["reasoning_effort"])
+        self.assertNotIn("collaborationMode", params)
 
     async def test_start_turn_preserves_explicit_effort_while_restoring_cached_model(self):
         agent = object.__new__(CodexAgent)
@@ -4723,10 +4726,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         params = transport.send_request.await_args.args[1]
         self.assertEqual(params["model"], "gpt-5.4")
         self.assertEqual(params["effort"], "xhigh")
-        self.assertEqual(params["collaborationMode"]["settings"]["model"], "gpt-5.4")
-        self.assertEqual(params["collaborationMode"]["settings"]["reasoning_effort"], "xhigh")
+        self.assertNotIn("collaborationMode", params)
 
-    async def test_start_turn_changes_only_collaboration_instructions_when_prompt_changes(self):
+    async def test_start_turn_injects_updated_instructions_when_prompt_changes(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
@@ -4762,15 +4764,16 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 developer_instructions=prompt,
             )
 
-        first = transport.send_request.await_args_list[0].args[1]
-        second = transport.send_request.await_args_list[1].args[1]
-        first_mode = first.pop("collaborationMode")
-        second_mode = second.pop("collaborationMode")
-        self.assertEqual(first, second)
-        self.assertEqual(first_mode["settings"]["developer_instructions"], "prompt one")
-        self.assertEqual(second_mode["settings"]["developer_instructions"], "prompt two")
+        calls = transport.send_request.await_args_list
+        self.assertEqual(
+            [entry.args[0] for entry in calls],
+            ["thread/inject_items", "turn/start", "thread/inject_items", "turn/start"],
+        )
+        self.assertEqual(calls[1].args[1], calls[3].args[1])
+        self.assertEqual(calls[0].args[1]["items"][0]["content"][0]["text"], "prompt one")
+        self.assertEqual(calls[2].args[1]["items"][0]["content"][0]["text"], "prompt two")
 
-    async def test_start_turn_falls_back_once_when_collaboration_mode_is_unsupported(self):
+    async def test_start_turn_does_not_reinject_when_explicit_model_reset_is_unsupported(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             get_codex_overrides=Mock(return_value=(None, "gpt-5.4", "high")),
@@ -4797,12 +4800,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             supports_turn_collaboration_mode=True,
             send_request=AsyncMock(
                 side_effect=[
-                    RuntimeError("unknown field collaborationMode: experimental API unsupported"),
                     {},
+                    RuntimeError("unknown field collaborationMode: experimental API unsupported"),
                     {"turn": {"id": "turn-1"}},
                 ]
             ),
         )
+        request.vibe_agent_model_explicit = True
+        request.vibe_agent_model = None
 
         await agent._start_turn(
             transport,
@@ -4812,12 +4817,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
 
         calls = transport.send_request.await_args_list
-        self.assertIn("collaborationMode", calls[0].args[1])
-        self.assertEqual(calls[1].args[0], "thread/inject_items")
+        self.assertEqual(calls[0].args[0], "thread/inject_items")
         self.assertEqual(
-            calls[1].args[1]["items"][0]["content"][0]["text"],
+            calls[0].args[1]["items"][0]["content"][0]["text"],
             "stable prompt",
         )
+        self.assertEqual(calls[1].args[0], "turn/start")
+        self.assertIsNone(calls[1].args[1]["collaborationMode"])
+        self.assertEqual(calls[2].args[0], "turn/start")
         self.assertNotIn("collaborationMode", calls[2].args[1])
         self.assertFalse(transport.supports_turn_collaboration_mode)
 

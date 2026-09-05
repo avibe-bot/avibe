@@ -46,6 +46,8 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.plugins=false",
     "features.recommended_plugins=false",
     "features.remote_plugin=false",
+    # Preserve Avibe's injected developer items in Codex remote compaction v2.
+    "features.retain_client_developer_messages=true",
     "features.skill_mcp_dependency_install=false",
     "features.terminal_visualization_instructions=false",
     "features.tool_call_mcp_elicitation=false",
@@ -163,9 +165,9 @@ class CodexTransport:
                         "title": "Avibe",
                         "version": "1.0.0",
                     },
-                    # Dynamic developer instructions for an existing native
-                    # thread use turn/start.collaborationMode. Omitted
-                    # server-request capabilities remain disabled.
+                    # Developer item injection and legacy collaboration-mode
+                    # cleanup use experimental APIs. Omitted server-request
+                    # capabilities remain disabled.
                     "capabilities": {"experimentalApi": True},
                 },
             )
@@ -174,10 +176,8 @@ class CodexTransport:
             try:
                 await self.send_request("collaborationMode/list", {})
             except Exception as exc:
-                # Older app-servers accept unknown turn fields, so the catalog
-                # method is the capability probe. Fall back to item injection
-                # on any inconclusive result rather than risk dropping the
-                # developer instructions silently.
+                # Only legacy-thread cleanup depends on collaboration support.
+                # A catalog response does not prove custom prompt delivery.
                 logger.info(
                     "Codex turn collaboration mode is unavailable; using developer item injection: %s",
                     exc,
