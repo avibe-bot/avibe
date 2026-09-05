@@ -46,7 +46,7 @@ const source: Source = {
   billing: 'metered',
   credential_ref: 'cred_detail',
   state: { status: 'active', retry_at: null, detail_key: null },
-  models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
+  models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'], reasoning_efforts_source: 'user' }],
 };
 
 const heldHops = [{
@@ -223,7 +223,13 @@ const EchoPanel: React.FC<{
   );
 };
 
-const renderEchoPanel = (reconcile = vi.fn(), scheduler?: MutationScheduler) => render(
+// Typed off the prop rather than off `vi.fn()`: the default would otherwise
+// narrow the parameter to a mock and turn away the plain deferred-backed
+// reconcilers the settlement tests hand it.
+const renderEchoPanel = (
+  reconcile: React.ComponentProps<typeof EchoPanel>['reconcile'] = vi.fn(),
+  scheduler?: MutationScheduler,
+) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
       <EchoPanel reconcile={reconcile} scheduler={scheduler} />
@@ -942,7 +948,7 @@ describe('SourceDetailPanel', () => {
   it('applies the refetch Source echo before the collection refresh settles', async () => {
     const echoed = {
       ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [] }],
+      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }],
     };
     const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, discovered: echoed.models.length });
     const reconcile = vi.fn().mockResolvedValue(undefined);
@@ -960,7 +966,7 @@ describe('SourceDetailPanel', () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockReturnValueOnce(tierResponse.promise);
     const refreshed = {
       ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [] }],
+      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }],
     };
     const refetch = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: refreshed, discovered: refreshed.models.length });
     renderEchoPanel(vi.fn(), serializedTrack());
@@ -1033,7 +1039,7 @@ describe('SourceDetailPanel', () => {
   it('applies the manual-create Source echo without waiting for a collection read', async () => {
     const echoed = {
       ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, origin: 'manual' as const, reasoning_efforts: [] }],
+      models: [...source.models, { id: 'model-b', display_name: null, origin: 'manual' as const, reasoning_efforts: [], reasoning_efforts_source: null }],
     };
     vi.spyOn(modelsApi, 'addCustomModel').mockResolvedValueOnce(echoed);
     renderEchoPanel();
@@ -1279,7 +1285,7 @@ describe('SourceDetailPanel', () => {
   it('hands the editor to the row that was clicked instead of opening a second one', async () => {
     renderProtocol('openai_responses', [
       source.models[0],
-      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
     ]);
     await userEvent.click(screen.getByRole('button', { name: /high/i }));
     expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
@@ -1332,7 +1338,7 @@ describe('SourceDetailPanel', () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
     renderProtocol('openai_responses', [
       source.models[0],
-      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
     ]);
     await userEvent.click(screen.getByRole('button', { name: /high/i }));
     await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
@@ -1386,7 +1392,7 @@ describe('SourceDetailPanel', () => {
     // for one without — CSS nobody wears is not a hit area.
     renderProtocol('openai_responses', [
       source.models[0],
-      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
     ]);
     for (const name of [/high/i, /No tiers set|未设置档位/i]) {
       expect(screen.getByRole('button', { name }).className).toContain('model-hub-source-tier-cell');

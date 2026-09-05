@@ -39,7 +39,7 @@ const localeInstance = (lng: 'en' | 'zh') => {
 const source = (id: string, name: string): Source => ({
   id, last_discovered_at: null, kind: 'api_key', vendor: 'anthropic', display_name: name,
   protocol: 'anthropic', supply_channel: 'hub', billing: 'metered', state: { status: 'active', retry_at: null, detail_key: null },
-  models: [{ id: 'claude-opus-4-6', origin: 'discovered', reasoning_efforts: [] }],
+  models: [{ id: 'claude-opus-4-6', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null }],
 });
 const hubAgent: AgentSupply = {
   backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', selected_model_id: 'claude-opus-4-6', selected_model_explicit: true,

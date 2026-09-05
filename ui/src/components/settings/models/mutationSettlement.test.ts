@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { modelChainKey } from './modelRows';
+import { modelChainKey, type ModelChainIndex } from './modelRows';
 import type { SourceCreated } from './modelsApi';
 import {
   createContinuationSettlement,
@@ -13,9 +13,18 @@ import {
   SOURCE_MUTATION_REPORT_PROJECTIONS,
   sourceMutationLanding,
   sourceMutationReadScope,
+  type SourceMutationLandingReads,
 } from './mutationSettlement';
 import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
+
+// Fails exactly one projection, keyed generically so each key carries its own
+// value type into `failRegionRead`. Indexing the reads with a union key hands
+// the compiler four candidate types for one inference site and it picks one.
+const degradeProjection = <K extends keyof SourceMutationLandingReads>(
+  reads: SourceMutationLandingReads,
+  projection: K,
+): SourceMutationLandingReads => ({ ...reads, [projection]: failRegionRead(reads[projection]) });
 
 describe('mutation settlement fences', () => {
   it('atomically rejects every effect belonging to an invalidated attempt', () => {
@@ -82,22 +91,19 @@ describe('mutation settlement fences', () => {
       SOURCE_MUTATION_REPORT_PROJECTIONS,
     ) as (keyof typeof SOURCE_MUTATION_REPORT_PROJECTIONS)[]) {
       expect(
-        sourceMutationLanding({
-          ...reads,
-          [projection]: failRegionRead(reads[projection]),
-        }, affectedChains, true).verdict,
+        sourceMutationLanding(degradeProjection(reads, projection), affectedChains, true).verdict,
         projection,
       ).toBe('degraded');
     }
 
     for (const request of affectedChains) {
       const key = modelChainKey(request.backend, request.modelId);
-      const missing = readyRegion({
+      const missing = readyRegion<ModelChainIndex>({
         ...Object.fromEntries(affectedChains.map(({ backend, modelId }) => [
           modelChainKey(backend, modelId),
           readyRegion({} as AgentChain),
-        ])),
-        [key]: unreadRegion(),
+        ] as const)),
+        [key]: unreadRegion<AgentChain>(),
       });
       expect(sourceMutationLanding({ ...reads, chains: missing }, affectedChains, true).verdict, key)
         .toBe('degraded');
