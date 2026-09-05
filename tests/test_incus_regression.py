@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import io
 import importlib.util
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
-import tarfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -891,13 +890,13 @@ def test_root_build_output_is_excluded_without_capturing_ui_dist() -> None:
     assert not incus_regression.should_exclude("vibe/dist_helpers.py")
 
 
-def test_source_tar_drops_a_virtualenv_whatever_it_is_named(tmp_path: Path) -> None:
+def test_source_sync_drops_a_virtualenv_whatever_it_is_named(tmp_path: Path, monkeypatch) -> None:
     """Virtualenvs are recognised by ``pyvenv.cfg``, not by a list of names.
 
     They hold host-native binaries that are useless inside the container, and
     the repository has carried both ``venv`` and ``.venv`` at the same time.
     """
-    for name in ("venv", ".venv", "env", "tools/sandbox"):
+    for name in ("venv", ".venv", "env", "tools/sandbox", "tools/[virtual]*env"):
         root = tmp_path / name
         (root / "lib").mkdir(parents=True)
         (root / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
@@ -905,19 +904,17 @@ def test_source_tar_drops_a_virtualenv_whatever_it_is_named(tmp_path: Path) -> N
     (tmp_path / "vibe").mkdir()
     (tmp_path / "vibe" / "cli.py").write_text("print('ok')\n", encoding="utf-8")
 
-    with tarfile.open(fileobj=io.BytesIO(incus_regression.build_source_tar(tmp_path))) as tar:
-        names = set(tar.getnames())
+    names = copied_source_names(monkeypatch, tmp_path)
 
     assert "vibe/cli.py" in names
     assert not [name for name in names if "pyvenv.cfg" in name or "libpython" in name]
 
 
-def test_source_tar_keeps_a_plain_directory_that_merely_looks_like_a_virtualenv(tmp_path: Path) -> None:
+def test_source_sync_keeps_a_plain_directory_that_merely_looks_like_a_virtualenv(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "env").mkdir()
     (tmp_path / "env" / "settings.py").write_text("DEBUG = False\n", encoding="utf-8")
 
-    with tarfile.open(fileobj=io.BytesIO(incus_regression.build_source_tar(tmp_path))) as tar:
-        assert "env/settings.py" in tar.getnames()
+    assert "env/settings.py" in copied_source_names(monkeypatch, tmp_path)
 
 
 def write_ui_builder_stage(root: Path, *, external: Sequence[str] = ()) -> None:
@@ -1026,23 +1023,18 @@ def test_declaring_nothing_outside_ui_is_an_answer_but_an_unreadable_stage_is_no
         incus_regression.ui_external_build_inputs(tmp_path)
 
 
-def test_source_tar_excludes_regression_secret_file(tmp_path: Path) -> None:
+def test_source_sync_excludes_regression_secret_file(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".env.regression").write_text("OPENAI_API_KEY=secret\n", encoding="utf-8")
     (tmp_path / "vibe").mkdir()
     (tmp_path / "vibe" / "ui_server.py").write_text("print('ok')\n", encoding="utf-8")
 
-    payload = incus_regression.build_source_tar(tmp_path)
-    with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as archive:
-        names = set(archive.getnames())
-        ui_server = archive.extractfile("vibe/ui_server.py")
-        assert ui_server is not None
-        content = ui_server.read()
+    names = copied_source_names(monkeypatch, tmp_path)
 
     assert ".env.regression" not in names
-    assert b"print('ok')" in content
+    assert "vibe/ui_server.py" in names
 
 
-def test_source_tar_excludes_all_local_env_files(tmp_path: Path) -> None:
+def test_source_sync_excludes_all_local_env_files(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".env.e2e").write_text("SECRET=1\n", encoding="utf-8")
     (tmp_path / ".env.preview.local").write_text("SECRET=2\n", encoding="utf-8")
     (tmp_path / "ui").mkdir()
@@ -1050,23 +1042,54 @@ def test_source_tar_excludes_all_local_env_files(tmp_path: Path) -> None:
     (tmp_path / "vibe").mkdir()
     (tmp_path / "vibe" / "ui_server.py").write_text("print('ok')\n", encoding="utf-8")
 
-    payload = incus_regression.build_source_tar(tmp_path)
-    with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as archive:
-        names = set(archive.getnames())
+    names = copied_source_names(monkeypatch, tmp_path)
 
     assert ".env.e2e" not in names
     assert ".env.preview.local" not in names
     assert "ui/.env.local" not in names
 
 
-def test_source_tar_can_include_existing_ui_dist_when_build_is_skipped(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shape", ["file", "directory", "symlink"])
+def test_source_sync_removes_stale_environment_entries_but_preserves_runtime_trees(tmp_path, monkeypatch, shape):
+    source, deployed, outside = (tmp_path / name for name in ("source", "deployed", "outside"))
+    for root in (source, deployed, outside):
+        root.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("not deployed source")
+    obsolete = [".env", "ui/.env.local", "nested/source/.env.preview.local"]
+    for relative in obsolete:
+        host = source / relative
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_text("host-only fixture secret")
+        receiver = deployed / relative
+        receiver.parent.mkdir(parents=True, exist_ok=True)
+        if shape == "directory":
+            receiver.mkdir()
+            (receiver / "old-secret").write_text("old fixture secret")
+        elif shape == "symlink":
+            receiver.symlink_to(outside, target_is_directory=True)
+        else:
+            receiver.write_text("old fixture secret")
+    protected = [deployed / "ui/node_modules/pkg/.env", deployed / ".runtime/.env.local"]
+    for path in protected:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("runtime-owned fixture")
+    before = {path: path.stat().st_ctime_ns for path in [sentinel, *protected]}
+
+    local_source_sync(monkeypatch, source, deployed)
+
+    assert all(not os.path.lexists(deployed / relative) for relative in obsolete)
+    assert all((source / relative).read_text() == "host-only fixture secret" for relative in obsolete)
+    assert all(path.stat().st_ctime_ns == timestamp for path, timestamp in before.items())
+    assert sentinel.read_text() == "not deployed source"
+
+
+def test_source_sync_can_include_existing_ui_dist_when_build_is_skipped(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "ui" / "dist" / "assets").mkdir(parents=True)
     (tmp_path / "ui" / "dist" / "index.html").write_text("<html></html>\n", encoding="utf-8")
     (tmp_path / "ui" / "dist" / "assets" / "app.js").write_text("console.log('ok')\n", encoding="utf-8")
 
-    payload = incus_regression.build_source_tar(tmp_path, include_ui_dist=True)
-    with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as archive:
-        names = set(archive.getnames())
+    names = copied_source_names(monkeypatch, tmp_path, include_ui_dist=True)
 
     assert "ui/dist/index.html" in names
     assert "ui/dist/assets/app.js" in names
@@ -1095,13 +1118,16 @@ def test_sync_source_clears_stale_files_even_without_clean(tmp_path: Path) -> No
     incus_regression.sync_source(RecordingRunner(), target, tmp_path, remote=None, clean=False)
 
     joined = "\n".join(" ".join(command) for command in commands)
-    assert f"find {incus_regression.SOURCE_DIR} -mindepth 1 -maxdepth 1 ! -name ui -exec rm -rf" in joined
-    assert f"find {incus_regression.SOURCE_DIR}/ui -mindepth 1 -maxdepth 1 " in joined
+    assert "rsync -rltp --delete --stats" in joined
+    assert "rm -rf" not in joined
+    assert "--checksum" not in joined
     for kept in incus_regression.UI_NON_SOURCE_DIRS:
-        assert f"! -name {kept}" in joined
+        assert f"--exclude=ui/{kept}" in joined or f"--exclude={kept}" in joined
 
 
-def test_source_sync_writes_as_service_user_and_preserves_unshipped_trees(tmp_path: Path) -> None:
+def test_source_sync_writes_as_service_user_and_preserves_unshipped_trees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = tmp_path / "source"
     deployed = tmp_path / "deployed"
     source.mkdir()
@@ -1117,25 +1143,11 @@ def test_source_sync_writes_as_service_user_and_preserves_unshipped_trees(tmp_pa
         for name in incus_regression.UI_NON_SOURCE_DIRS
         for path in (deployed / "ui" / name).rglob("*")
     }
-    archive_commands = []
+    transport = local_source_sync(monkeypatch, source, deployed)
 
-    class LocalRunner:
-        dry_run = False
-
-        def run(self, command, **kwargs):
-            shell_index = command.index("-lc") + 1
-            script = command[shell_index].replace(incus_regression.SOURCE_DIR, str(deployed))
-            if "input_bytes" in kwargs:
-                archive_commands.append(command)
-                # Only the generated extraction runs locally, inside the fixture root.
-                script = script[script.index("tar --no-same-owner"):]
-            return subprocess.run(["bash", "-c", script], input=kwargs.get("input_bytes"), check=True)
-
-    target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
-    incus_regression.sync_source(LocalRunner(), target, source, remote=None, clean=False)
-
-    assert len(archive_commands) == 1
-    assert ["sudo", "-H", "-u", "avibe"] == archive_commands[0][archive_commands[0].index("sudo"):][:4]
+    assert ["sudo", "-H", "-u", "avibe"] == list(transport[transport.index("sudo"):][:4])
+    assert transport[transport.index("--mode") + 1] == "non-interactive"
+    assert "-T" not in transport  # Incus rejects -T together with --mode.
     assert (deployed / "ui" / "entry.js").read_text() == "new source"
     assert stat.S_IMODE((deployed / "tool").stat().st_mode) == 0o755
     assert (deployed / "tool-link").readlink() == Path("tool")
@@ -1144,53 +1156,55 @@ def test_source_sync_writes_as_service_user_and_preserves_unshipped_trees(tmp_pa
     assert all(path.lstat().st_ctime_ns == before.st_ctime_ns for path, before in preserved.items())
 
 
-def test_sync_source_without_clean_keeps_every_ui_non_source_dir(tmp_path: Path) -> None:
+def test_sync_source_without_clean_keeps_every_ui_non_source_dir(tmp_path: Path, monkeypatch) -> None:
     """A sync must leave ui/node_modules and ui/dist for the fingerprints to judge.
 
     Deleting them makes ``npm ci`` and ``npm run build`` unconditional, which is
     the single largest cost of an update whose front end did not change.
     """
-    script = run_sync_wipe(tmp_path, clean=False)
+    source = tmp_path / "source"
+    deployed = tmp_path / "deployed"
+    source.mkdir()
+    seed_source_tree(deployed)
+    local_source_sync(monkeypatch, source, deployed)
 
-    assert sorted(p.name for p in (tmp_path / "ui").iterdir()) == sorted(incus_regression.UI_NON_SOURCE_DIRS)
-    assert not (tmp_path / "stale.py").exists()
-    assert not (tmp_path / "stale-dir").exists()
-    assert not (tmp_path / "ui" / "src").exists()
-    assert script  # the wipe really ran rather than silently matching nothing
+    assert sorted(p.name for p in (deployed / "ui").iterdir()) == sorted(incus_regression.UI_NON_SOURCE_DIRS)
+    assert not (deployed / "stale.py").exists()
+    assert not (deployed / "stale-dir").exists()
+    assert not (deployed / "ui" / "src").exists()
 
 
-def test_sync_source_with_clean_wipes_the_ui_dirs_too(tmp_path: Path) -> None:
-    run_sync_wipe(tmp_path, clean=True)
+def test_sync_source_with_clean_wipes_the_ui_dirs_too(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    deployed = tmp_path / "deployed"
+    source.mkdir()
+    seed_source_tree(deployed)
+    local_source_sync(monkeypatch, source, deployed, clean=True)
 
-    assert list(tmp_path.iterdir()) == []
+    assert list(deployed.iterdir()) == []
 
 
 @pytest.mark.parametrize("include_ui_dist", [False, True])
-def test_a_sync_only_preserves_what_its_own_archive_does_not_ship(tmp_path: Path, include_ui_dist: bool) -> None:
-    """Preservation is for what the sync does not carry; equality is for what it does.
+def test_a_sync_only_preserves_what_it_does_not_ship(tmp_path: Path, include_ui_dist: bool, monkeypatch) -> None:
+    """Preservation is for what the sync does not carry; equality is for what it does."""
+    source = tmp_path / "source"
+    deployed = tmp_path / "deployed"
+    seed_source_tree(source)
+    seed_source_tree(deployed)
+    names = copied_source_names(monkeypatch, source, include_ui_dist=include_ui_dist)
+    shipped = {name for name in incus_regression.UI_NON_SOURCE_DIRS if f"ui/{name}" in names}
 
-    ``tar`` extracts over what is already there and never deletes, so preserving
-    a directory the archive also ships leaves whatever the host deleted -- a
-    renamed chunk, a dropped public asset -- served next to the new bundle. Both
-    sides are read out of the real code: the shipped set from the archive the
-    same call would send, the preserved set from the wipe command it emits. A
-    change to either one alone breaks this.
-    """
-    seed_source_tree(tmp_path)
-    with tarfile.open(
-        fileobj=io.BytesIO(incus_regression.build_source_tar(tmp_path, include_ui_dist=include_ui_dist))
-    ) as tar:
-        shipped = {name for name in incus_regression.UI_NON_SOURCE_DIRS if f"ui/{name}" in tar.getnames()}
-
-    script = run_sync_wipe(tmp_path, clean=False, include_ui_dist=include_ui_dist)
-    preserved = {name for name in incus_regression.UI_NON_SOURCE_DIRS if f"! -name {name}" in script}
+    for name in incus_regression.UI_NON_SOURCE_DIRS:
+        (source / "ui" / name / "marker").unlink()
+    local_source_sync(monkeypatch, source, deployed, include_ui_dist=include_ui_dist)
+    preserved = {name for name in incus_regression.UI_NON_SOURCE_DIRS if (deployed / "ui" / name / "marker").exists()}
 
     assert preserved == set(incus_regression.UI_NON_SOURCE_DIRS) - shipped
-    assert shipped or not include_ui_dist  # the archive really carries ui/dist in that mode
+    assert shipped or not include_ui_dist
     for name in shipped:
-        assert not (tmp_path / "ui" / name).exists(), f"ui/{name} survived a sync that overwrites it"
+        assert not (deployed / "ui" / name / "marker").exists(), f"ui/{name} kept stale source"
     for name in preserved:
-        assert (tmp_path / "ui" / name / "marker").exists(), f"ui/{name} was wiped for the build to recreate"
+        assert (deployed / "ui" / name / "marker").exists(), f"ui/{name} was wiped for the build to recreate"
 
 
 def seed_source_tree(source_root: Path) -> None:
@@ -1204,52 +1218,130 @@ def seed_source_tree(source_root: Path) -> None:
         (source_root / "ui" / name / "marker").write_text("x", encoding="utf-8")
 
 
-def run_sync_wipe(source_root: Path, *, clean: bool, include_ui_dist: bool = False) -> str:
-    """Run sync_source's wipe command against a real directory tree.
+def copied_source_names(monkeypatch, source: Path, **options) -> set[str]:
+    deployed = source.with_name(source.name + "-copy")
+    deployed.mkdir()
+    local_source_sync(monkeypatch, source, deployed, **options)
+    return {path.relative_to(deployed).as_posix() for path in deployed.rglob("*")}
 
-    The wipe is a shell one-liner, so asserting on its text only proves we
-    wrote what we meant to write. Executing it against a populated tree is what
-    proves it deletes the stale files and keeps the expensive ones.
-    """
-    seed_source_tree(source_root)
 
-    commands: list[list[str]] = []
+def local_source_sync(monkeypatch, source: Path, deployed: Path, **options) -> tuple[str, ...]:
+    """Exercise real rsync and its argv transport, replacing only Incus itself."""
+    transports = []
 
-    class RecordingRunner:
-        dry_run = True
+    def local_transport(*args, **kwargs):
+        transports.append(args)
+        return ["env"]
 
-        def run(self, command, **kwargs):
-            commands.append(command)
-            return subprocess.CompletedProcess(command, 0)
+    with monkeypatch.context() as patch:
+        patch.setattr(incus_regression, "SOURCE_DIR", str(deployed))
+        patch.setattr(incus_regression, "incus", local_transport)
+        patch.setattr(incus_regression, "root_exec", lambda target, command, **kw: ["bash", "-c", command])
+        target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
+        incus_regression.sync_source(
+            incus_regression.Runner(), target, source, remote=None,
+            clean=options.pop("clean", False), **options,
+        )
+    return transports[0]
 
-    target = incus_regression.RegressionTarget(
-        target="master",
-        slug="master",
-        project="avr-master",
-        instance="avibe-master",
-        host_port=15130,
-        ui_host="127.0.0.1",
-        ui_port=5123,
-    )
-    incus_regression.sync_source(
-        RecordingRunner(),
-        target,
-        source_root,
-        remote=None,
-        clean=clean,
-        include_ui_dist=include_ui_dist,
-    )
 
-    script = next(
-        command[-1]
-        for command in commands
-        if command[-1].startswith("mkdir -p") and "-exec rm -rf" in command[-1]
-    )
-    subprocess.run(
-        ["bash", "-lc", script.replace(incus_regression.SOURCE_DIR, str(source_root))],
-        check=True,
-    )
-    return script
+def test_repeated_source_sync_leaves_unchanged_files_untouched(tmp_path, monkeypatch):
+    source, deployed = tmp_path / "source", tmp_path / "deployed"
+    source.mkdir()
+    deployed.mkdir()
+    (source / "unchanged.py").write_text("same source\n")
+    (source / "changed.py").write_text("before\n")
+    local_source_sync(monkeypatch, source, deployed)
+    def file_identity(path):
+        value = path.stat()
+        return value.st_ino, value.st_mtime_ns, value.st_size
+
+    before = {path.name: file_identity(path) for path in deployed.iterdir()}
+    local_source_sync(monkeypatch, source, deployed)
+    assert all(file_identity(path) == before[path.name] for path in deployed.iterdir())
+    (source / "changed.py").write_text("after, with new contents\n")
+    local_source_sync(monkeypatch, source, deployed)
+    assert (deployed / "changed.py").read_text() == "after, with new contents\n"
+    assert file_identity(deployed / "unchanged.py") == before["unchanged.py"]
+
+
+def test_source_sync_prunes_virtualenv_and_protects_symlink_targets(tmp_path, monkeypatch):
+    source, deployed, outside = (tmp_path / name for name in ("source", "deployed", "outside"))
+    for directory in (source, deployed, outside):
+        directory.mkdir()
+    (outside / "sentinel").write_text("do not change")
+    (deployed / "package").symlink_to(outside, target_is_directory=True)
+    (source / "package").mkdir()
+    (source / "package" / "new.py").write_text("new")
+    (source / "custom-env").mkdir()
+    (source / "custom-env" / "pyvenv.cfg").write_text("home = test")
+    (source / "custom-env" / "private").write_text("not source")
+    (source / ".env.regression").write_text("not source")
+    local_source_sync(monkeypatch, source, deployed)
+    assert (deployed / "package" / "new.py").read_text() == "new"
+    assert not (deployed / "package").is_symlink()
+    assert list(outside.iterdir()) == [outside / "sentinel"]
+    assert (outside / "sentinel").read_text() == "do not change"
+    assert not (deployed / "custom-env").exists()
+    assert not (deployed / ".env.regression").exists()
+
+
+@pytest.mark.parametrize("initial,updated", [("file", "directory"), ("directory", "file"), ("file", "link"), ("link", "file")])
+def test_source_sync_converges_type_changes(tmp_path, monkeypatch, initial, updated):
+    source, deployed = tmp_path / "source", tmp_path / "deployed"
+    source.mkdir()
+    deployed.mkdir()
+
+    def make(kind):
+        entry = source / "entry"
+        if kind == "file":
+            entry.write_text("source contents")
+        elif kind == "directory":
+            entry.mkdir()
+            (entry / "child").write_text("child contents")
+        else:
+            entry.symlink_to("link-target")
+
+    make(initial)
+    local_source_sync(monkeypatch, source, deployed)
+    if initial == "directory":
+        shutil.rmtree(source / "entry")
+    else:
+        (source / "entry").unlink()
+    make(updated)
+    local_source_sync(monkeypatch, source, deployed)
+    entry = deployed / "entry"
+    if updated == "file":
+        assert not entry.is_symlink()
+        assert entry.read_text() == "source contents"
+    elif updated == "directory":
+        assert (entry / "child").read_text() == "child contents"
+    else:
+        assert entry.readlink() == Path("link-target")
+
+
+def test_io_slot_serializes_environments_and_releases_after_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda root: tmp_path)
+    with pytest.raises(RuntimeError, match="update failed"):
+        with incus_regression.regression_io_lock(tmp_path / "branch-a", None, dry_run=False):
+            with pytest.raises(incus_regression.RegressionError, match="Another run holds"):
+                with incus_regression.target_update_lock(
+                    tmp_path / "branch-b", None, "shared-io", dry_run=False, blocking=False,
+                ):
+                    pytest.fail("overlapping heavy update")
+            # Independent daemon slots do not contend.
+            with incus_regression.regression_io_lock(tmp_path, "other-daemon", dry_run=False):
+                pass
+            raise RuntimeError("update failed")
+    with incus_regression.target_update_lock(tmp_path, None, "shared-io", dry_run=False, blocking=False):
+        pass
+
+
+def test_io_slot_dry_run_has_no_lock_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda root: tmp_path)
+    with incus_regression.regression_io_lock(tmp_path, None, dry_run=True):
+        pass
+    assert not (tmp_path / ".runtime").exists()
 
 
 def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None:
@@ -3335,6 +3427,16 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     env_file = tmp_path / ".env.regression"
     env_file.write_text("OPENAI_API_KEY=set\n", encoding="utf-8")
 
+    @contextlib.contextmanager
+    def io_slot(*args, **kwargs):
+        calls.append("io_slot_acquired")
+        try:
+            yield
+        finally:
+            calls.append("io_slot_released")
+
+    monkeypatch.setattr(incus_regression, "regression_io_lock", io_slot)
+
     class ExistingRunner:
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
@@ -3397,7 +3499,8 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     )
 
     assert incus_regression.cmd_up(args) == 0
-    assert calls[:4] == [
+    assert calls[:5] == [
+        "io_slot_acquired",
         "ensure_project_and_instance",
         "stop_service_for_update",
         "write_runtime_env",
@@ -3408,6 +3511,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     assert calls.index("sync_source") < calls.index("update_dependencies_and_build")
     assert calls.index("normalize_runtime_config") < calls.index("restart_and_verify")
     assert calls.index("prepare_show_runtime") < calls.index("restart_and_verify")
+    assert calls[-1] == "io_slot_released"
 
 
 def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3676,7 +3780,7 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
 
     assert incus_regression.cmd_up(args) == 0
 
-    assert calls[:3] == ["target_lock_enter", "mapping_lock_enter", "reserve_worktree_metadata"]
+    assert calls[:4] == ["target_lock_enter", "target_lock_enter", "mapping_lock_enter", "reserve_worktree_metadata"]
     # The reservation and the completion stamp are two writes, and `up` releases
     # the mapping lock between them, so the mapping's own writer has to take it.
     # Both depths are asserted for every write: whoever performs it, no write to
@@ -3691,7 +3795,7 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
     assert "updated_at" in mapping
     # The lock is named before the row exists, so it is asserted against the row:
     # a lock on any other name would be held while a different environment built.
-    assert locked == [mapping["project"]]
+    assert locked == [mapping["project"], "shared-io"]
 
 
 @pytest.mark.parametrize("holds_project", [False, True], ids=["daemon-empty", "daemon-holds-project"])
@@ -4782,7 +4886,7 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install(
         def run(self, command, **kwargs):
             joined = " ".join(command)
             commands.append(joined)
-            if "git clone --depth 1" in joined:
+            if "git fetch --depth 1" in joined:
                 build_timeouts.append(kwargs.get("timeout"))
             if "vibe runtime prepare --strict" in joined:
                 self.prepare_attempts += 1
@@ -4805,12 +4909,13 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install(
     incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
 
     joined = "\n".join(commands)
-    assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
+    assert "git ls-remote --exit-code" in joined
+    assert 'git fetch --depth 1 origin "$revision"' in joined
     assert "npm run bundle:vibe-remote" in joined
-    assert 'install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"' in joined
+    assert 'install -m 0644 "$1" "$archive_temp"' in joined
     assert build_timeouts == [expected_timeout]
-    build_command = next(command for command in commands if "git clone --depth 1" in command)
-    assert build_command.index("VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required") < build_command.index("git clone")
+    build_command = next(command for command in commands if "git fetch --depth 1" in command)
+    assert build_command.index("VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required") < build_command.index("git fetch")
     assert joined.count("vibe runtime prepare --strict") == 2
     assert "rm -rf ~/.avibe/runtime/show-runtime/prebuilt/current" in joined
     assert "vibe runtime status --json" in joined
@@ -4846,6 +4951,145 @@ def test_prepare_show_runtime_retry_keeps_the_npm_cache() -> None:
     joined = "\n".join(commands)
     assert "_cacache" not in joined
     assert "npm cache clean" not in joined
+
+
+@pytest.fixture
+def show_archive_builder(tmp_path, monkeypatch):
+    """Use a real local Git upstream and hermetic build tools, without network."""
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    git = shutil.which("git")
+    assert git
+
+    def commit(contents):
+        (upstream / "source").write_text(contents)
+        subprocess.run([git, "-C", str(upstream), "add", "source"], check=True, capture_output=True)
+        subprocess.run([
+            git, "-C", str(upstream), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "fixture",
+        ], check=True, capture_output=True)
+
+    subprocess.run([git, "init", "--quiet", str(upstream)], check=True)
+    commit("first version")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    build_log = tmp_path / "build.log"
+    monkeypatch.setenv("PATH", str(binaries) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("BUILD_LOG", str(build_log))
+    monkeypatch.setenv("NODE_ID", "node-platform-arch-version")
+    monkeypatch.setenv("NPM_ID", "10.0.0")
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", "archive")
+    archive = tmp_path / "cache" / "runtime.tgz"
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_ARCHIVE_PATH", str(archive))
+    (binaries / "node").write_text('#!/bin/sh\nprintf "%s\\n" "$NODE_ID"\n')
+    (binaries / "npm").write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, subprocess, sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print(os.environ['NPM_ID']); sys.exit(0)\n"
+        "with open(os.environ['BUILD_LOG'], 'a') as log: log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('FAIL_BUILD'): sys.exit(19)\n"
+        "if sys.argv[1:] == ['run', 'bundle:vibe-remote']:\n"
+        "    pathlib.Path('dist').mkdir(exist_ok=True)\n"
+        "    pathlib.Path('dist/vibe-show-runtime-node-test.tgz').write_bytes(\n"
+        f"        subprocess.check_output([{git!r}, 'rev-parse', 'HEAD']))\n"
+    )
+    for binary in binaries.iterdir():
+        binary.chmod(0o700)
+    script = incus_regression.show_runtime_archive_script().replace(
+        "upstream=https://github.com/avibe-bot/vibe-show-runtime.git", "upstream=" + shlex.quote(str(upstream)),
+    )
+
+    def run(recipe=None, *, check=True):
+        return subprocess.run(["bash", "-c", recipe or script], check=check, capture_output=True, text=True)
+
+    return run, commit, archive, build_log, script
+
+
+def test_show_archive_reuses_verified_artifact_without_rewriting(show_archive_builder):
+    run, _commit, archive, log, _script = show_archive_builder
+    run()
+    receipt = Path(str(archive) + ".build-key")
+
+    def write_identity(path):
+        value = path.stat()
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    # Reading to verify a cache hit may advance atime on Linux relatime mounts.
+    # Make that eligible even when the two builds run in the same clock tick.
+    for path in (archive, receipt):
+        value = path.stat()
+        os.utime(path, ns=(value.st_mtime_ns - 172_800_000_000_000, value.st_mtime_ns))
+    before = {path: write_identity(path) for path in (archive, receipt)}
+    result = run()
+    assert "reusing verified build" in result.stdout
+    assert all(write_identity(path) == identity for path, identity in before.items())
+    assert log.read_text().splitlines() == ["ci", "run build", "run bundle:vibe-remote"]
+
+
+@pytest.mark.parametrize("change", ["revision", "node", "npm", "recipe", "missing", "corrupt", "receipt"])
+def test_show_archive_rebuilds_when_reuse_proof_changes(show_archive_builder, monkeypatch, change):
+    run, commit, archive, log, script = show_archive_builder
+    run()
+    if change == "revision":
+        commit("second version")
+    elif change == "node":
+        monkeypatch.setenv("NODE_ID", "different-node-platform")
+    elif change == "npm":
+        monkeypatch.setenv("NPM_ID", "11.0.0")
+    elif change == "recipe":
+        script = script.replace("show-build-v1", "show-build-v2")
+    elif change == "missing":
+        archive.unlink()
+    elif change == "corrupt":
+        archive.write_bytes(b"corrupt artifact")
+    else:
+        Path(str(archive) + ".build-key").write_text("invalid receipt")
+    result = run(script)
+    assert "archive built from" in result.stdout
+    assert log.read_text().splitlines().count("ci") == 2
+    assert "reusing verified build" in run(script).stdout
+
+
+def test_show_archive_failed_build_keeps_previous_artifact_and_receipt(show_archive_builder, monkeypatch):
+    run, commit, archive, _log, _script = show_archive_builder
+    run()
+    receipt = Path(str(archive) + ".build-key")
+    before = archive.read_bytes(), receipt.read_bytes()
+    commit("new version which fails to build")
+    monkeypatch.setenv("FAIL_BUILD", "1")
+    assert run(check=False).returncode != 0
+    assert (archive.read_bytes(), receipt.read_bytes()) == before
+    monkeypatch.delenv("FAIL_BUILD")
+    assert "archive built from" in run().stdout
+
+
+def test_show_archive_builds_resolved_commit_when_upstream_head_moves(show_archive_builder):
+    run, commit, archive, _log, script = show_archive_builder
+    run()
+    resolved_revision = archive.read_text().strip()
+    commit("head moved after resolution")
+    archive.unlink()
+    script = script.replace(
+        'revision=$(git ls-remote --exit-code "$upstream" HEAD | cut -f1)',
+        "revision=" + resolved_revision,
+    )
+    assert "archive built from" in run(script).stdout
+    assert archive.read_text().strip() == resolved_revision
+    assert "archive built from" in run().stdout
+    assert archive.read_text().strip() != resolved_revision
+
+
+@pytest.mark.parametrize("probe", ["revision", "node_identity", "npm_version"])
+def test_show_archive_does_not_reuse_when_an_input_cannot_be_resolved(show_archive_builder, probe):
+    run, _commit, archive, _log, script = show_archive_builder
+    run()
+    before = archive.read_bytes()
+    lines = script.splitlines()
+    script = "\n".join(f"{probe}=$(false)" if line.startswith(probe + "=") else line for line in lines)
+    assert run(script, check=False).returncode != 0
+    assert archive.read_bytes() == before
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
@@ -4887,7 +5131,7 @@ def test_retired_runtime_source_is_recognized_by_product_and_regression(
 
     joined = "\n".join(commands)
     assert "cat > /etc/avibe-regression.env" not in joined
-    assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
+    assert 'git fetch --depth 1 origin "$revision"' in joined
     assert joined.count("VIBE_SHOW_RUNTIME_SOURCE=archive") == 4
     archive_path = f"{incus_regression.SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz"
     assert joined.count(f"VIBE_SHOW_RUNTIME_ARCHIVE_PATH={archive_path}") == 4
