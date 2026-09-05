@@ -126,3 +126,58 @@ FSM 178 cases, 5.91s wall/1.00s setup; lifecycle 74 cases, 2.21s wall/0.51s
 setup. These include the two new equivalence contracts and are local samples,
 not hosted-CI speedup estimates. The lifecycle baseline profile independently
 attributed 14.05s to 41 real migration calls out of 15.88s profiled execution.
+
+Hosted step-two run 33974210485 on `925722ae9` passed all 17 checks in 7m22s,
+again with all 399 files, successful shell exits and metrics exactly once.
+FSM fell from 33.28s to 15.11s, setup 19.44s to 1.78s, recorded writes 571MB
+to 175MB. Lifecycle fell from 29.11s to 4.97s, setup 26.02s to 1.06s, writes
+282MB to 58MB. Their original call-phase work remains exercised, with one new
+equivalence test each. The unchanged shard 4 rose from 393s to 427s, while its
+summed CPU fell from 337s to 263s. This is not evidence of a faster whole run
+or proof of a particular host bottleneck; the two fixture reductions are the
+demonstrated result. Automatic review completed with new reaction 490371521
+on the unchanged head; complete review/thread collections were empty.
+
+## Artifact-chain scope decision
+
+Run 33973069748 spent 99.55s in the 21 distribution contracts before uploading
+artifacts. The producer took 218s, then the installer/Memory/Windows consumers
+took 123s/149s/176s. This is independent validation work, not a build prerequisite.
+
+Extend scope only to `.github/workflows/lint.yml` and the existing pipeline
+contracts. Move the unchanged distribution suite into the existing installer
+matrix member, still under the required fail-closed install aggregate. Do not
+add runners or combine mutable environments. Keep the producer's exact core
+wheel artifact unchanged; publish an additional same-run artifact containing
+both sdists and the Memory wheel with their directory layout preserved. Only
+the installer member downloads that companion artifact. Distribution tests
+continue to use the exact producer wheel pair and explicit contract version,
+with all real isolated installs and sdist resolution tests intact. Any skipped
+contract or nonzero pytest result must fail the job and existing aggregate.
+
+This trades approximately 100s of all-consumer waiting for approximately 100s
+of work on the shorter installer branch; it is not a promise of 100s saved on
+the whole workflow. The old timestamps suggest about 50s less artifact-chain
+tail, subject to download/setup/runner variance. Only a complete new green run
+can supply an actual result. Real migration tests remain unchanged: repeated
+reference construction is not this iteration's scope.
+
+The companion layout follows the artifact action's documented
+[multiple-path common-ancestor behavior](https://github.com/actions/upload-artifact#upload-using-multiple-paths-and-exclusions).
+
+Local workflow/fixture/shard/source-package validation passed 59 cases. Actual
+core and Memory wheels plus sdists were built at contract version 3.0.99rc1;
+all 21 unchanged distribution cases passed across the initial 20 successes and
+one targeted recovery after provisioning missing `pip` in the private test venv.
+The original failure occurred before sdist resolution because `uv venv` does
+not seed pip; hosted setup-python already provides it. No package/runtime
+dependency was added. The local wheels use the unit-test UI placeholder, while
+the unchanged hosted production UI build and exact same-run artifact transfer
+still require full new-head CI. Ruff 0.4.9 and dependency consistency passed.
+
+Before integration, master advanced to `a8145d683b302a1d5411db8e97bf3db5d462ebe1`
+through #1888. The orchestrator inspected its API change and consuming dependency
+tests: no overlap with this PR's nine-file scope, no allocated artifact-name
+collision. Integrate that source and run its new dependency-consumer tests with
+the changed fixture/workflow contracts; the new file uses the existing shard
+planner fallback, with no invented timing entry.

@@ -253,6 +253,71 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
 
 
+def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other_installers() -> None:
+    jobs = _jobs()
+    build = jobs["build-linux-artifacts"]
+    installers = jobs["install-upgrade-shards"]
+    uploads = {
+        step["with"]["name"]: step
+        for step in build["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")
+    }
+    assert uploads["vibe-wheel-linux"]["with"]["path"] == "dist/*.whl"
+    companion = uploads["vibe-package-contracts-linux"]
+    assert set(companion["with"]["path"].splitlines()) == {
+        "dist/*.tar.gz", "memory-dist/*.whl", "memory-dist/*.tar.gz",
+    }
+    assert companion["with"]["if-no-files-found"] == "error"
+    assert not companion.get("if") and not companion.get("continue-on-error")
+    downloads = [
+        step for step in installers["steps"]
+        if step.get("with", {}).get("name") == "vibe-package-contracts-linux"
+    ]
+    download, = downloads
+    assert download["uses"].startswith("actions/download-artifact@")
+    assert download["if"] == "matrix.suite == 'installer'"
+    assert download["with"] == {"name": "vibe-package-contracts-linux", "path": "."}
+    assert not download.get("continue-on-error")
+    owners = [
+        (name, step) for name, job in jobs.items() for step in job["steps"]
+        if "tests/test_memory_distribution.py" in step.get("run", "")
+    ]
+    (owner, contracts), = owners
+    assert owner == "install-upgrade-shards"
+    assert contracts["if"] == "matrix.suite == 'installer'"
+    assert installers["strategy"]["matrix"]["suite"].count("installer") == 1
+    assert installers["steps"].index(download) < installers["steps"].index(contracts)
+    build_environment = next(step["env"] for step in build["steps"] if step.get("name") == "Build package artifact")
+    assert contracts["env"] == {"AVIBE_PACKAGE_CONTRACT_VERSION": build_environment["AVIBE_PACKAGE_CONTRACT_VERSION"]}
+    assert 'AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)"' in contracts["run"]
+    assert 'AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)"' in contracts["run"]
+    assert "pytest tests/test_memory_distribution.py -v -ra" in contracts["run"]
+    assert not contracts.get("continue-on-error")
+    assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
+    assert jobs["windows-install-smoke"]["needs"] == "build-linux-artifacts"
+
+
+@pytest.mark.parametrize(("pytest_exit", "summary"), [(0, "21 passed"), (1, "1 failed"), (0, "14 passed, 7 skipped")])
+def test_distribution_contract_command_fails_on_errors_and_skips(tmp_path, pytest_exit, summary):
+    for directory, filename in (("dist", "avibe_os-test.whl"), ("memory-dist", "avibe_memory-test.whl")):
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / filename).touch()
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    pytest_stub = binary / "pytest"
+    pytest_stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{summary}'\nexit {pytest_exit}\n")
+    pytest_stub.chmod(0o755)
+    step = next(
+        step for step in _jobs()["install-upgrade-shards"]["steps"]
+        if step.get("name") == "Verify built distribution contracts"
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]], cwd=tmp_path,
+        env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)},
+        capture_output=True, text=True,
+    )
+    assert (result.returncode == 0) == (pytest_exit == 0 and "skipped" not in summary), result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", ""])
 def test_install_gate_fails_unless_all_suites_succeeded(tmp_path: Path, result: str) -> None:
     gate = _jobs()["install-upgrade-regression"]
