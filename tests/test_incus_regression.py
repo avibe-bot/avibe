@@ -1049,6 +1049,41 @@ def test_source_sync_excludes_all_local_env_files(tmp_path: Path, monkeypatch) -
     assert "ui/.env.local" not in names
 
 
+@pytest.mark.parametrize("shape", ["file", "directory", "symlink"])
+def test_source_sync_removes_stale_environment_entries_but_preserves_runtime_trees(tmp_path, monkeypatch, shape):
+    source, deployed, outside = (tmp_path / name for name in ("source", "deployed", "outside"))
+    for root in (source, deployed, outside):
+        root.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("not deployed source")
+    obsolete = [".env", "ui/.env.local", "nested/source/.env.preview.local"]
+    for relative in obsolete:
+        host = source / relative
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_text("host-only fixture secret")
+        receiver = deployed / relative
+        receiver.parent.mkdir(parents=True, exist_ok=True)
+        if shape == "directory":
+            receiver.mkdir()
+            (receiver / "old-secret").write_text("old fixture secret")
+        elif shape == "symlink":
+            receiver.symlink_to(outside, target_is_directory=True)
+        else:
+            receiver.write_text("old fixture secret")
+    protected = [deployed / "ui/node_modules/pkg/.env", deployed / ".runtime/.env.local"]
+    for path in protected:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("runtime-owned fixture")
+    before = {path: path.stat().st_ctime_ns for path in [sentinel, *protected]}
+
+    local_source_sync(monkeypatch, source, deployed)
+
+    assert all(not os.path.lexists(deployed / relative) for relative in obsolete)
+    assert all((source / relative).read_text() == "host-only fixture secret" for relative in obsolete)
+    assert all(path.stat().st_ctime_ns == timestamp for path, timestamp in before.items())
+    assert sentinel.read_text() == "not deployed source"
+
+
 def test_source_sync_can_include_existing_ui_dist_when_build_is_skipped(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "ui" / "dist" / "assets").mkdir(parents=True)
     (tmp_path / "ui" / "dist" / "index.html").write_text("<html></html>\n", encoding="utf-8")

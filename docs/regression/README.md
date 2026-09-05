@@ -122,6 +122,11 @@ too. `--clean` remains an explicit full source reset, including generated files;
 it does not reset product state. If a tool deliberately changes source while
 preserving both its size and timestamp, use `--clean` to force replacement.
 
+Environment files are different from reusable caches: host `.env` and `.env.*`
+entries are never sent, and stale entries in the receiver's source directories
+are deleted during normal synchronization. Excluded runtime/dependency trees
+remain outside this cleanup boundary.
+
 Show Runtime resolves the upstream commit on each update, but builds only when
 that commit, the target Node/platform/npm versions, the build recipe, or the
 archive checksum changes. The archive and its build receipt are kept together

@@ -1687,7 +1687,7 @@ def sync_source(
     # rsync owns reconciliation, including deletions and type changes. Excluded
     # trees are protected on the receiver and pruned on both sides, not scanned
     # for checksums. Ownership is established by the receiving service user.
-    excludes = list(source_excludes(include_ui_dist=include_ui_dist)) + [".env", ".env.*"]
+    excludes = list(source_excludes(include_ui_dist=include_ui_dist))
     for current, dirs, _files in os.walk(repo_root, followlinks=False):
         for name in dirs[:]:
             path = Path(current) / name
@@ -1710,6 +1710,9 @@ def sync_source(
         shell.chmod(0o700)
         runner.run([
             "rsync", "-rltp", "--delete", "--stats",
+            # Hide secrets only on the sender. A receiver-side exclude would
+            # retain stale .env files that can change Vite's build environment.
+            "--filter=H .env", "--filter=H .env.*",
             *(f"--exclude={pattern}" for pattern in excludes),
             "--rsh", str(shell), "--", str(repo_root) + "/", f"incus:{SOURCE_DIR}/",
         ])
