@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -63,6 +63,33 @@ afterEach(() => {
 });
 
 describe('BackendModelPickerDialog', () => {
+  it('keeps the visible dialog unready until the candidate read completes', async () => {
+    const user = userEvent.setup();
+    let finishRead!: (value: BackendModelCandidates) => void;
+    const pendingRead = new Promise<BackendModelCandidates>((resolve) => { finishRead = resolve; });
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockReturnValue(pendingRead);
+    const { onAdd } = renderPicker();
+
+    expect(screen.getByRole('heading', { name: 'Add Claude Code models' })).toBeTruthy();
+    expect(confirm().textContent).toBe('Add models');
+    expect(confirm().disabled).toBe(true);
+    expect((search() as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole('group')).toBeNull();
+    expect(screen.queryByText('No model matches.')).toBeNull();
+    await user.type(search(), 'ignored while loading');
+    expect((search() as HTMLInputElement).value).toBe('');
+
+    await act(async () => {
+      finishRead(read({ builtin: [candidate('gpt-6', { origin: 'builtin' })] }));
+    });
+
+    expect(group(BUILT_IN).getByRole('checkbox', { name: 'gpt-6' })).toBeTruthy();
+    expect((search() as HTMLInputElement).disabled).toBe(false);
+    expect(confirm().textContent).toBe('Add models');
+    expect(confirm().disabled).toBe(true);
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
   it('shows each group as the server served it, and every row as what it can say', async () => {
     answers({
       builtin: [candidate('gpt-6', { origin: 'builtin' }), candidate('gpt-6-mini', { origin: 'builtin' })],
@@ -77,6 +104,7 @@ describe('BackendModelPickerDialog', () => {
     renderPicker();
 
     expect(await screen.findByRole('heading', { name: 'Add Claude Code models' })).toBeTruthy();
+    await screen.findByRole('group', { name: BUILT_IN });
     // A built-in row has nothing but an id, so the id is its label rather than a
     // sub-line under an empty one.
     expect(group(BUILT_IN).getAllByRole('checkbox').map((row) => row.textContent))
@@ -132,7 +160,8 @@ describe('BackendModelPickerDialog', () => {
     answers({ builtin: [candidate('gpt-6', { origin: 'builtin' })] });
     const { onAdd } = renderPicker();
 
-    await waitFor(() => expect(confirm().textContent).toBe('Add models'));
+    await screen.findByRole('checkbox', { name: 'gpt-6' });
+    expect(confirm().textContent).toBe('Add models');
     expect(confirm().disabled).toBe(true);
 
     await user.click(screen.getByRole('checkbox', { name: 'gpt-6' }));
@@ -185,7 +214,8 @@ describe('BackendModelPickerDialog', () => {
     answers({ builtin: [candidate('gpt-6', { origin: 'builtin' })] });
     const { onCustom } = renderPicker();
 
-    await user.type(await screen.findByLabelText('Search models or providers'), '  gemini-4  ');
+    await waitFor(() => expect((search() as HTMLInputElement).disabled).toBe(false));
+    await user.type(search(), '  gemini-4  ');
     expect(screen.getByText('No model matches.')).toBeTruthy();
     // The query is the id the user has already typed once. Asking for it again
     // in the next dialog would be this one forgetting.
