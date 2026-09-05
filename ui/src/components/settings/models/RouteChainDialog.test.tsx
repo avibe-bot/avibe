@@ -105,16 +105,16 @@ const stocked = () => ({
     {
       ...sources[0],
       models: [
-        { id: "claude-opus-5", origin: "discovered", reasoning_efforts: [] },
-        { id: "claude-sonnet-5", origin: "discovered", reasoning_efforts: [] },
-        { id: "claude-haiku-5", origin: "discovered", reasoning_efforts: [] },
+        { id: "claude-opus-5", origin: "discovered", reasoning_efforts: [], reasoning_efforts_source: null },
+        { id: "claude-sonnet-5", origin: "discovered", reasoning_efforts: [], reasoning_efforts_source: null },
+        { id: "claude-haiku-5", origin: "discovered", reasoning_efforts: [], reasoning_efforts_source: null },
       ],
     },
     {
       ...sources[1],
       models: [
-        { id: "opus-5", origin: "discovered", reasoning_efforts: [] },
-        { id: "sonnet-5", origin: "discovered", reasoning_efforts: [] },
+        { id: "opus-5", origin: "discovered", reasoning_efforts: [], reasoning_efforts_source: null },
+        { id: "sonnet-5", origin: "discovered", reasoning_efforts: [], reasoning_efforts_source: null },
       ],
     },
   ] satisfies Source[],

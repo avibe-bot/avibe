@@ -32,6 +32,9 @@ function failureConsumers(url: URL): FailureConsumer[] {
       && ts.isIdentifier(node.name)
       && isCallTo(node.initializer, 'apiFailure')
     ) {
+      // Read out here, where the guard above still holds: a narrowing on
+      // `node.name` does not survive into the nested closure below.
+      const declared = node.name.text;
       let scope: ts.Node | undefined = node.parent;
       while (scope && !ts.isBlock(scope)) scope = scope.parent;
       let classifies = false;
@@ -39,7 +42,7 @@ function failureConsumers(url: URL): FailureConsumer[] {
         if (
           isCallTo(child, 'classifyOAuthFailure')
           && child.arguments.some(
-            (argument) => ts.isIdentifier(argument) && argument.text === node.name.text,
+            (argument) => ts.isIdentifier(argument) && argument.text === declared,
           )
         ) {
           classifies = true;

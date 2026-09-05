@@ -15,7 +15,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type RuntimeDependency, type Source, type UsageSummary } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -24,9 +24,17 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
   menu_kind: backend === 'opencode' ? 'open' : 'fixed',
 });
 
+// Named separately from `runtime` so it keeps the arm of `RuntimeManifest` it
+// was written as. Reached through `runtime.manifest` it is the whole union, and
+// re-resolving a spread of that lands on the `unresolved` arm, which carries no
+// version or source_sha for a resolution that requires both.
+const manifest = {
+  name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [],
+} satisfies RuntimeManifest;
+
 const runtime: RuntimeDependency = {
   contract_version: 8,
-  manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [] },
+  manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
 
@@ -497,7 +505,7 @@ describe('SettingsModelsPage surface branches', () => {
     const unsupported = {
       ...runtime,
       enabled: true,
-      manifest: { ...runtime.manifest, resolution: 'unsupported' as const },
+      manifest: { ...manifest, resolution: 'unsupported' as const },
       status: { ...runtime.status, health: 'not_installed' as const },
     };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
@@ -572,7 +580,7 @@ describe('SettingsModelsPage surface branches', () => {
   it('keeps tier-editor Escape local to the provider dialog', async () => {
     const editableSource: Source = {
       ...retainedSource,
-      models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
+      models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'], reasoning_efforts_source: 'user' }],
     };
     renderPage([editableSource]);
     const user = userEvent.setup();
@@ -737,7 +745,7 @@ describe('SettingsModelsPage surface branches', () => {
       presentation: { expects: 'none' as const },
     };
     const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
-    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: started, created: null, repaired: null });
     renderPage([blockedSubscription]);
 
     await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
@@ -763,7 +771,7 @@ describe('SettingsModelsPage surface branches', () => {
       presentation: { expects: 'paste_callback_url' as const, auth_url: authUrl },
     };
     vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
-    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: started, created: null, repaired: null });
     const tab = { closed: false, opener: {} as unknown, location: { href: '' } };
     const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
     renderPage([blockedSubscription]);
@@ -794,7 +802,7 @@ describe('SettingsModelsPage surface branches', () => {
       .spyOn(modelsApi, 'reauthSource')
       .mockRejectedValueOnce(new Error('start failed'))
       .mockResolvedValue(started);
-    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: started, created: null, repaired: null });
     renderPage([blockedSubscription]);
 
     await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));

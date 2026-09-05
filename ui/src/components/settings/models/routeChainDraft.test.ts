@@ -21,6 +21,7 @@ const source = (id: string, models: string[]): Source => ({
     id: modelId,
     origin: "discovered",
     reasoning_efforts: [],
+    reasoning_efforts_source: null,
   })),
 });
 

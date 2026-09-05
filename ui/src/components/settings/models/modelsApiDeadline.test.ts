@@ -35,8 +35,12 @@ describe('Model Hub request deadlines', () => {
         signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
       }));
     vi.stubGlobal('fetch', fetchMock);
+    // Narrowed to a call the compiler accepts for every member of the method
+    // union: no parameters, and a result assignable to each method's own return.
+    // The test calls each one with nothing — what it asserts is that a request
+    // goes out under a deadline, not what any method resolves to.
     const methods = Object.entries(modelsApi).filter(
-      (entry): entry is [string, (...args: never[]) => Promise<unknown>] =>
+      (entry): entry is [string, () => Promise<never>] =>
         typeof entry[1] === 'function',
     );
     const issuedSignals: AbortSignal[] = [];

@@ -52,6 +52,10 @@ jobs:
           npm ci
           npm run validate:theme
           npm run lint
+          # `npm run build` runs `tsc -b`, whose projects exclude every
+          # `*.test.ts(x)`, and vitest strips types without checking them. So no
+          # gate below reads a test file's types; this one does.
+          npm run typecheck:tests
           npm test
           npm run build
 

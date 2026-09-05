@@ -15,6 +15,7 @@
     "lint:baseline": "node scripts/lint-baseline.mjs --update",
     "preview": "vite preview",
     "test": "vitest run",
+    "typecheck:tests": "tsc -p src/components/settings/models/tsconfig.tests.json --noEmit",
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
