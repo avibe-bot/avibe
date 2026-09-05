@@ -1187,7 +1187,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 7,
+            "contract_version": 8,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
