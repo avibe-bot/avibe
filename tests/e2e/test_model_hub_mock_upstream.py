@@ -254,7 +254,11 @@ def _send_through_opencode_gateway_engine(
     binary = shutil.which("opencode")
     if binary is None:
         pytest.skip("OpenCode executable is unavailable")
-    menu_model = "menu-model"
+    menu_model = (
+        "claude-opus-5"
+        if native_protocol == "anthropic"
+        else "deepseek-v3.2"
+    )
     upstream_path = (
         "/v1/messages"
         if upstream_protocol == "anthropic"
@@ -301,16 +305,25 @@ def _send_through_opencode_gateway_engine(
         current_body = current_models.json()
         assert current_models.status == 200, current_body
         baseline = current_body["agent"]["catalog_models"]
-        row = {
-            "id": menu_model,
-            "origin": "manual",
-            "supports_reasoning": True,
-            "reasoning_efforts": ["high"],
-            "native_protocol": native_protocol,
-        }
+        rows = [
+            {
+                "id": "deepseek-v3.2",
+                "origin": "manual",
+                "supports_reasoning": True,
+                "reasoning_efforts": ["high"],
+                "native_protocol": "openai_responses",
+            },
+            {
+                "id": "claude-opus-5",
+                "origin": "manual",
+                "supports_reasoning": True,
+                "reasoning_efforts": ["high"],
+                "native_protocol": "anthropic",
+            },
+        ]
         models = app.client.put(
             "/api/models/agents/opencode/models",
-            {"baseline": baseline, "models": [row]},
+            {"baseline": baseline, "models": rows},
         )
         assert models.status == 200, models.json()
         mode = app.client.patch(
@@ -327,6 +340,30 @@ def _send_through_opencode_gateway_engine(
             },
         )
         assert chain.status == 200, chain.json()
+
+        options = app.client.post(
+            "/api/opencode/options",
+            {"cwd": "~"},
+        )
+        options_body = options.json()
+        assert options.status == 200, options_body
+        assert options_body["ok"] is True
+        projected_providers = {
+            provider["id"]: provider
+            for provider in options_body["data"]["models"]["providers"]
+        }
+        assert set(projected_providers) == {
+            "avibe-openai",
+            "avibe-anthropic",
+        }
+        assert set(projected_providers["avibe-openai"]["models"]) == {
+            "deepseek-v3.2"
+        }
+        assert set(projected_providers["avibe-anthropic"]["models"]) == {
+            "claude-opus-5"
+        }
+        assert not (app.avibe_home / "logs" / "opencode_server.json").exists()
+
         started = app.client.post("/api/models/runtime/start", {})
         assert started.status == 200, started.json()
 
@@ -401,9 +438,52 @@ def _send_through_opencode_gateway_engine(
             "anthropic": "avibe-anthropic",
             "openai_responses": "avibe-openai",
         }[native_protocol]
+        assert overlay["enabled_providers"] == [
+            "avibe-openai",
+            "avibe-anthropic",
+        ]
+        assert set(overlay["provider"]) == {
+            "avibe-openai",
+            "avibe-anthropic",
+        }
+        assert set(overlay["provider"]["avibe-openai"]["models"]) == {
+            "deepseek-v3.2"
+        }
+        assert set(overlay["provider"]["avibe-anthropic"]["models"]) == {
+            "claude-opus-5"
+        }
         assert overlay["provider"][provider_id]["models"][menu_model]["variants"][
             "high"
         ] == variant
+
+        pid_info = json.loads(
+            (app.avibe_home / "logs" / "opencode_server.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert app._controller is not None
+        assert pid_info["owner_pid"] == app._controller.pid
+        providers_status, _, providers_payload = _json_request(
+            f"http://{pid_info['host']}:{pid_info['port']}",
+            "/config/providers",
+            headers={"x-opencode-directory": str(app.runtime_root)},
+            timeout=10,
+        )
+        assert providers_status == 200, providers_payload
+        live_providers = {
+            provider["id"]: provider
+            for provider in providers_payload["providers"]
+        }
+        assert set(live_providers) == {
+            "avibe-openai",
+            "avibe-anthropic",
+        }
+        assert set(live_providers["avibe-openai"]["models"]) == {
+            "deepseek-v3.2"
+        }
+        assert set(live_providers["avibe-anthropic"]["models"]) == {
+            "claude-opus-5"
+        }
         return captured[0]["body"]
 
 

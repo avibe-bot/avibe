@@ -175,9 +175,89 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
     result = asyncio.run(api.opencode_options_async("~/workspace"))
 
     assert result["ok"] is True
+    assert captured_kwargs["model_hub_overlay_required"] is False
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "ui-agents"
+
+
+def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _ForbiddenServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            raise AssertionError("Hub options must not acquire the OpenCode server")
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        opencode_module,
+        "OpenCodeServerManager",
+        _ForbiddenServerManager,
+    )
+
+    result = asyncio.run(
+        api.opencode_options_async(
+            "~/workspace",
+            model_hub_models={
+                "deepseek-v3.2": {
+                    "id": "deepseek-v3.2",
+                    "name": "DeepSeek V3.2",
+                    "native_protocol": "openai_responses",
+                    "variants": {"high": {"reasoningEffort": "high"}},
+                },
+                "claude-opus-5": {
+                    "id": "claude-opus-5",
+                    "name": "Claude Opus 5",
+                    "native_protocol": "anthropic",
+                    "variants": {"max": {"effort": "max"}},
+                },
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["agents"] == []
+    assert result["data"]["defaults"] == {}
+    providers = {
+        provider["id"]: provider
+        for provider in result["data"]["models"]["providers"]
+    }
+    assert set(providers) == {"avibe-openai", "avibe-anthropic"}
+    assert set(providers["avibe-openai"]["models"]) == {"deepseek-v3.2"}
+    assert set(providers["avibe-anthropic"]["models"]) == {"claude-opus-5"}
+    assert "native_protocol" not in providers["avibe-openai"]["models"]["deepseek-v3.2"]
+    assert result["data"]["reasoning_options"] == {
+        "deepseek-v3.2": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "high", "label": "High"},
+        ],
+        "claude-opus-5": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "max", "label": "Max"},
+        ],
+    }
 
 
 def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
@@ -381,9 +461,52 @@ def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatc
 
     assert server is fake_manager
     fake_manager.ensure_running.assert_awaited_once()
+    assert captured_kwargs["model_hub_overlay_required"] is False
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "provider-ui-agents"
+
+
+def test_opencode_get_server_requires_controller_overlay_in_hub_mode(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    captured_kwargs = {}
+    fake_manager = SimpleNamespace(ensure_running=AsyncMock())
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            captured_kwargs.update(kwargs)
+            return fake_manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    server = asyncio.run(api._opencode_get_server())
+
+    assert server is fake_manager
+    assert captured_kwargs["model_hub_overlay_required"] is True
+    fake_manager.ensure_running.assert_awaited_once()
 
 
 def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_path):

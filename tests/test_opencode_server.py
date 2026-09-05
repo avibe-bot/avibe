@@ -42,6 +42,9 @@ SERVER_MODULE = _load_server_module()
 OpenCodeManagedPolicyRefreshPendingError = (
     SERVER_MODULE.OpenCodeManagedPolicyRefreshPendingError
 )
+OpenCodeModelHubOverlayRequiredError = (
+    SERVER_MODULE.OpenCodeModelHubOverlayRequiredError
+)
 OpenCodeRuntimeConfigInvalidError = SERVER_MODULE.OpenCodeRuntimeConfigInvalidError
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
 
@@ -480,6 +483,58 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted, [True])
         self.assertEqual(started, [True])
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
+
+    async def test_hub_mode_refuses_unconfigured_launch_and_logs_once(self):
+        manager = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            model_hub_overlay_required=True,
+        )
+        manager._read_pid_file = Mock(return_value=None)  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+        with (
+            patch.object(SERVER_MODULE.logger, "error") as log_error,
+            patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                side_effect=AssertionError("Hub refusal must precede server setup"),
+            ),
+        ):
+            for _attempt in range(2):
+                with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
+                    await manager.ensure_running()
+
+        log_error.assert_called_once()
+        manager._start_server.assert_not_awaited()
+
+    async def test_hub_mode_adopts_controller_owned_overlaid_server_without_restart(self):
+        manager = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            model_hub_overlay_required=True,
+        )
+        pid_info = {
+            "pid": 123,
+            "port": 4096,
+            "model_hub_overlay_path": "/tmp/opencode-overlay.json",
+            "model_hub_overlay_hash": "overlay-hash",
+            "model_hub_overlay_provider_ids": ["avibe-openai"],
+        }
+        manager._read_pid_file = Mock(return_value=pid_info)  # type: ignore[method-assign]
+        manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            side_effect=AssertionError("UI adoption must not restart OpenCode"),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        manager._start_server.assert_not_awaited()
 
     async def test_ensure_running_defers_plugin_restart_while_run_active(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
@@ -2152,6 +2207,29 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first.resource_governor, governor)
         self.assertEqual(first.binary, "/old/opencode")
         self.assertEqual(first.port, 4096)
+
+    async def test_get_instance_clears_hub_launch_guard_in_direct_mode(self):
+        first = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            model_hub_overlay_required=True,
+        )
+        first._model_hub_overlay_refusal_logged = True
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance(
+                binary="opencode",
+                port=4096,
+                model_hub_overlay_required=False,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertFalse(first._model_hub_overlay_required)
+        self.assertFalse(first._model_hub_overlay_refusal_logged)
 
     async def test_get_instance_preserves_controller_owned_resource_governor(self):
         from core.resource_governance import mark_controller_resource_governor

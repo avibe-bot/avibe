@@ -731,6 +731,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if restored_server is not None:
                 return restored_server
         server = await self._client_manager.get_server()
+        model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
+        turn_mode = getattr(model_hub_runtime, "turn_mode", None)
+        server.set_model_hub_overlay_required(
+            callable(turn_mode) and turn_mode("opencode") == "hub"
+        )
         server.set_active_poll_session_ids_provider(
             lambda: set(self.sessions.get_all_active_polls())
         )

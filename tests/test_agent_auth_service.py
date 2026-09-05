@@ -2022,9 +2022,49 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         self.assertIs(result, server)
         server.ensure_running.assert_awaited_once()
+        self.assertFalse(
+            get_instance.await_args.kwargs["model_hub_overlay_required"]
+        )
         governor = get_instance.await_args.kwargs["resource_governor"]
         self.assertEqual(governor.mode, "enabled")
         self.assertEqual(governor.config["agent_group_name"], "web-oauth-agents")
+
+    async def test_web_opencode_server_requires_controller_overlay_in_hub_mode(self):
+        from config.v2_config import (
+            AgentsConfig,
+            RuntimeConfig,
+            SlackConfig,
+            V2Config,
+        )
+        from modules.agents.opencode.server import OpenCodeServerManager
+
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        v2_config = V2Config(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(),
+            agents=AgentsConfig(),
+            runtime=RuntimeConfig(default_cwd="."),
+        )
+        v2_config.model_hub.agents["opencode"].mode = "hub"
+        server = SimpleNamespace(ensure_running=AsyncMock())
+
+        with (
+            patch("config.v2_config.V2Config.load", return_value=v2_config),
+            patch.object(
+                OpenCodeServerManager,
+                "get_instance",
+                AsyncMock(return_value=server),
+            ) as get_instance,
+        ):
+            result = await service._opencode_server()
+
+        self.assertIs(result, server)
+        self.assertTrue(
+            get_instance.await_args.kwargs["model_hub_overlay_required"]
+        )
+        server.ensure_running.assert_awaited_once()
 
     async def test_opencode_agent_refresh_runtime_config_restarts_uncached_adopted_server_on_refresh_miss(self):
         from config.v2_compat import OpenCodeCompatConfig

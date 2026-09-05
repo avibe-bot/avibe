@@ -5968,6 +5968,7 @@ async def opencode_options_async(
         from modules.agents.opencode import (
             OpenCodeServerManager,
             build_reasoning_effort_options,
+            project_opencode_model_hub_models,
         )
         from modules.agents.opencode.utils import opencode_model_picker_value
 
@@ -6020,11 +6021,36 @@ async def opencode_options_async(
                     options[model_key] = builder(models, model_key)
             return options
 
+        if model_hub_mode == "hub":
+            models = {
+                "providers": project_opencode_model_hub_models(
+                    [],
+                    model_hub_models or {},
+                ),
+                "default": {},
+            }
+            data = {
+                "agents": [],
+                "models": models,
+                "defaults": {},
+                "reasoning_options": _build_reasoning_options(
+                    models,
+                    build_reasoning_effort_options,
+                ),
+            }
+            _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
+                "data": data,
+                "updated_at": time.monotonic(),
+                "model_hub_projection": projection_key,
+            }
+            return {"ok": True, "data": data}
+
         server = await OpenCodeServerManager.get_instance(
             binary=opencode_config.binary,
             port=opencode_config.port,
             request_timeout_seconds=opencode_config.request_timeout_seconds,
             resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
+            model_hub_overlay_required=False,
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
@@ -11855,13 +11881,13 @@ def save_claude_auth(payload: dict) -> dict:
 
 
 async def _opencode_get_server():
-    """Spin up a transient OpenCodeServerManager instance for HTTP calls.
+    """Get the OpenCode server manager for UI-process HTTP calls.
 
     Mirrors the pattern used by ``opencode_options_async``: pull the
-    OpenCode config from V2Config, request a manager instance, ensure
-    the daemon is reachable, and let the caller drive its HTTP methods.
-    Returns ``None`` if OpenCode is disabled — callers translate that
-    into a UI-friendly error.
+    OpenCode config from V2Config and ensure the daemon is reachable.
+    In Hub mode only the controller may launch the daemon; this caller
+    can adopt an already-running overlaid server. Returns ``None`` if
+    OpenCode is disabled.
     """
     from config.v2_compat import to_app_config
     from core.resource_governance import AgentResourceGovernor, config_from_runtime
@@ -11872,11 +11898,19 @@ async def _opencode_get_server():
     if not config.opencode:
         return None
     opencode_config = config.opencode
+    model_hub_agents = getattr(getattr(v2_config, "model_hub", None), "agents", {})
+    model_hub_agent = (
+        model_hub_agents.get("opencode")
+        if isinstance(model_hub_agents, dict)
+        else None
+    )
     server = await OpenCodeServerManager.get_instance(
         binary=opencode_config.binary,
         port=opencode_config.port,
         request_timeout_seconds=opencode_config.request_timeout_seconds,
         resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
+        model_hub_overlay_required=getattr(model_hub_agent, "mode", "direct")
+        == "hub",
     )
     await server.ensure_running()
     return server

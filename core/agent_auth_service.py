@@ -3175,7 +3175,10 @@ class AgentAuthService:
             from config.v2_compat import to_app_config
             from config.v2_config import V2Config
             from core.resource_governance import AgentResourceGovernor, config_from_runtime
-            from modules.agents.opencode import OpenCodeServerManager
+            from modules.agents.opencode import (
+                OpenCodeModelHubOverlayRequiredError,
+                OpenCodeServerManager,
+            )
         except ImportError:
             return None
         try:
@@ -3187,15 +3190,33 @@ class AgentAuthService:
         opencode_cfg = getattr(compat, "opencode", None)
         if opencode_cfg is None:
             return None
+        model_hub_agents = getattr(
+            getattr(v2_config, "model_hub", None),
+            "agents",
+            {},
+        )
+        model_hub_agent = (
+            model_hub_agents.get("opencode")
+            if isinstance(model_hub_agents, dict)
+            else None
+        )
         try:
             server = await OpenCodeServerManager.get_instance(
                 binary=opencode_cfg.binary,
                 port=opencode_cfg.port,
                 request_timeout_seconds=opencode_cfg.request_timeout_seconds,
                 resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
+                model_hub_overlay_required=getattr(
+                    model_hub_agent,
+                    "mode",
+                    "direct",
+                )
+                == "hub",
             )
             await server.ensure_running()
             return server
+        except OpenCodeModelHubOverlayRequiredError:
+            return None
         except Exception as err:  # noqa: BLE001
             logger.warning("OpenCodeServerManager.get_instance failed for web OAuth: %s", err)
             return None
