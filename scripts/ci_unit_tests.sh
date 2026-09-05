@@ -75,13 +75,18 @@ fi
 # Keep one interpreter per file. The watchdog also covers collection and
 # interpreter shutdown; pytest's per-test faulthandler timer would replace it.
 PYTEST=("$PYTHON_BIN" -u -c '
-import faulthandler, os, sys
+import faulthandler, os, sys, time
+started_at = time.perf_counter()
 # Retain the original output even while pytest redirects descriptor 2.
 diagnostics = os.fdopen(os.dup(sys.stderr.fileno()), "w")
 faulthandler.enable(file=diagnostics)
 faulthandler.dump_traceback_later(int(sys.argv.pop(1)), file=diagnostics, exit=True)
 import pytest
-sys.exit(pytest.main(sys.argv[1:]))
+from scripts.ci_pytest_metrics import FileMetrics
+metrics = FileMetrics(sys.argv[1], started_at)
+exit_code = pytest.main(sys.argv[1:], plugins=[metrics])
+metrics.emit(diagnostics, int(exit_code))
+sys.exit(exit_code)
 ' "$FILE_TIMEOUT")
 
 select_unit_test_files() {

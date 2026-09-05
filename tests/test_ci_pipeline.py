@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import itertools
+import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -24,6 +26,7 @@ def _run_isolated_unit_files(tmp_path: Path, sources: dict[str, str], *, timeout
     for name, source in sources.items():
         (tmp_path / "tests" / name).write_text(source, encoding="utf-8")
     shutil.copyfile(ROOT / "scripts/ci_unit_test_shards.py", tmp_path / "scripts/ci_unit_test_shards.py")
+    shutil.copyfile(ROOT / "scripts/ci_pytest_metrics.py", tmp_path / "scripts/ci_pytest_metrics.py")
     return subprocess.run(
         ["bash", str(ROOT / "scripts/ci_unit_tests.sh")], cwd=tmp_path,
         env={**os.environ, "PYTHON": sys.executable, "CI_TEST_FILE_TIMEOUT_SECONDS": timeout,
@@ -63,6 +66,13 @@ def test_unit_file_watchdog_dumps_stacks_and_continues_fail_closed(tmp_path: Pat
     assert "test_after_stuck_file PASSED" in result.stdout
     assert "FAILED files:\n  tests/test_a_stuck.py" in result.stdout
     assert "All unit test files passed." not in result.stdout
+    records = _metrics(result)
+    assert records[-1]["file"] == "tests/test_b_pass.py"
+    if phase == "shutdown":
+        assert records[0]["file"] == "tests/test_a_stuck.py"
+        assert records[0]["boundary"] == "pytest_returned_before_interpreter_shutdown"
+    else:
+        assert len(records) == 1
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -74,6 +84,108 @@ def test_unit_file_runner_preserves_assertions_and_integration_selection(tmp_pat
     assert result.returncode == int(failed), result.stdout + result.stderr
     assert "Ran 2 unit test file(s), one process each" in result.stdout
     assert "No unit tests collected (skipped):\n  tests/test_integration.py" in result.stdout
+    records = _metrics(result)
+    assert [(row["file"], row["exit_code"]) for row in records] == [
+        ("tests/test_assertion.py", int(failed)), ("tests/test_integration.py", 5),
+    ]
+
+
+def _metrics(result) -> list[dict]:
+    prefix = "CI_TEST_METRICS "
+    return [json.loads(line.removeprefix(prefix)) for line in result.stderr.splitlines() if line.startswith(prefix)]
+
+
+def test_file_metrics_observe_real_phases_and_waited_child_cpu(tmp_path: Path) -> None:
+    result = _run_isolated_unit_files(tmp_path, {"test_metrics.py": (
+        "import subprocess, sys, time, pytest\n"
+        "time.sleep(0.03)\n"
+        "@pytest.fixture\n"
+        "def prepared():\n"
+        "    time.sleep(0.03)\n"
+        "    yield\n"
+        "    time.sleep(0.03)\n"
+        "def test_work(prepared):\n"
+        "    started = time.process_time()\n"
+        "    while time.process_time() - started < 0.03: pass\n"
+        "    subprocess.run([sys.executable, '-c', "
+        "'import time; start=time.process_time()\\nwhile time.process_time()-start<0.03: pass'], check=True)\n"
+    )})
+    assert result.returncode == 0, result.stdout + result.stderr
+    record, = _metrics(result)
+    assert record["schema_version"] == 1
+    assert record["boundary"] == "pytest_returned_before_interpreter_shutdown"
+    assert record["file"] == "tests/test_metrics.py"
+    assert record["exit_code"] == 0
+    assert record["phase_counts"] == {"collection": 1, "setup": 1, "call": 1, "teardown": 1}
+    assert all(value >= 0.02 for value in record["phase_seconds"].values())
+    assert record["outside_phases_seconds"] >= 0
+    assert record["wall_seconds"] >= sum(record["phase_seconds"].values())
+    if sys.platform != "win32":
+        usage = record["process_usage"]
+        for scope in ("self", "waited_children"):
+            assert usage[scope]["user_cpu_seconds"] + usage[scope]["system_cpu_seconds"] >= 0.02
+        assert usage["self"]["peak_rss_bytes"] > 0
+    if sys.platform == "linux":
+        assert record["linux_proc_io"]["rchar"] > 0
+        assert record["cpu_affinity_count"] >= 1
+    assert {row["phase"] for row in record["slowest_phases"]} == {"setup", "call", "teardown"}
+
+
+def test_file_metrics_do_not_double_count_subtests_or_grow_with_test_count(tmp_path: Path) -> None:
+    result = _run_isolated_unit_files(tmp_path, {"test_subtests.py": (
+        "import pytest\n"
+        "@pytest.mark.parametrize('case', range(8))\n"
+        "def test_subtests(case, subtests):\n"
+        "    for item in range(4):\n"
+        "        with subtests.test(item=item):\n"
+        "            assert item < 4\n"
+    )})
+    assert result.returncode == 0, result.stdout + result.stderr
+    record, = _metrics(result)
+    assert record["phase_counts"] == {"collection": 1, "setup": 8, "call": 8, "teardown": 8}
+    assert len(record["slowest_phases"]) == 5
+
+
+def test_file_metrics_do_not_turn_collection_errors_into_success(tmp_path: Path) -> None:
+    result = _run_isolated_unit_files(tmp_path, {"test_collection.py": "raise RuntimeError('collection failed')\n"})
+    assert result.returncode == 1
+    record, = _metrics(result)
+    assert record["exit_code"] == 2
+    assert record["phase_counts"] == {"collection": 1, "setup": 0, "call": 0, "teardown": 0}
+
+
+@pytest.mark.parametrize("phase", ["setup", "teardown"])
+def test_file_metrics_preserve_fixture_failures(tmp_path: Path, phase: str) -> None:
+    setup = "    raise RuntimeError('setup failed')\n" if phase == "setup" else ""
+    teardown = "    raise RuntimeError('teardown failed')\n" if phase == "teardown" else ""
+    result = _run_isolated_unit_files(tmp_path, {"test_fixture.py": (
+        "import pytest\n@pytest.fixture\ndef broken():\n" + setup + "    yield\n" + teardown
+        + "def test_fixture(broken): pass\n"
+    )})
+    assert result.returncode == 1
+    record, = _metrics(result)
+    assert record["exit_code"] == 1
+    assert record["phase_counts"]["call"] == (0 if phase == "setup" else 1)
+    assert record["phase_counts"][phase] == 1
+
+
+def test_file_metrics_mark_unavailable_platform_counters_explicitly(monkeypatch) -> None:
+    from scripts import ci_pytest_metrics
+
+    monkeypatch.setattr(ci_pytest_metrics, "resource", None)
+    assert ci_pytest_metrics.process_usage() is None
+
+    def denied(_path):
+        raise PermissionError("proc is unavailable")
+
+    monkeypatch.setattr(ci_pytest_metrics.Path, "read_text", denied)
+    monkeypatch.setattr(ci_pytest_metrics.os, "sched_getaffinity", denied, raising=False)
+    assert ci_pytest_metrics.linux_io() is None
+    stream = io.StringIO()
+    metrics = ci_pytest_metrics.FileMetrics("tests/test_unavailable.py", ci_pytest_metrics.time.perf_counter())
+    metrics.emit(stream, 0)
+    payload = json.loads(stream.getvalue().removeprefix("CI_TEST_METRICS "))
+    assert payload["cpu_affinity_count"] is None
 
 
 @pytest.mark.parametrize("timeout", ["0", "00", "-1", "invalid"])
