@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import type { AgentSupply } from '../components/settings/models/types';
-import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
+import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
@@ -574,7 +574,7 @@ export type ApiContextType = {
   getFirstBindCode: () => Promise<any>;
   detectCli: (binary: string) => Promise<any>;
   installAgent: (name: string) => Promise<InstallResult>;
-  listDependencies: () => Promise<DependenciesResult>;
+  listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
@@ -1889,7 +1889,7 @@ export type DependencyItem = {
   version: string | null;
   latest_version?: string | null;
   has_update?: boolean;
-  status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
+  status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error' | 'unknown';
   readiness?: 'ready' | 'not_required' | 'not_ready' | 'memory_requirement_unreadable';
   action_class?: 'none' | 'repairable' | 'operator_only';
   reason?: string | null;
@@ -1899,6 +1899,7 @@ export type DependencyItem = {
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
+export type DependencyReadOptions = { ids?: readonly string[]; signal?: AbortSignal };
 
 // Current Memory contract: docs/MEMORY.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
@@ -2739,9 +2740,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const getJson = async (
     path: string,
-    { handleError = true, expectedCodes }: { handleError?: boolean; expectedCodes?: readonly string[] } = {},
+    { handleError = true, expectedCodes, signal }: {
+      handleError?: boolean;
+      expectedCodes?: readonly string[];
+      signal?: AbortSignal;
+    } = {},
   ) => {
-    const res = await apiFetch(path);
+    const res = await (signal ? apiFetch(path, { signal }) : apiFetch(path));
     if (!res.ok && handleError) {
       await handleApiError(res, path, { expectedCodes });
     }
@@ -3729,7 +3734,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getFirstBindCode: () => getJson('/api/setup/first-bind-code'),
     detectCli: (binary) => getJson(`/api/cli/detect?binary=${encodeURIComponent(binary)}`),
     installAgent: (name) => startAndPollAgentInstall(name),
-    listDependencies: () => getJson('/api/dependencies'),
+    listDependencies: ({ ids, signal } = {}) => {
+      const params = new URLSearchParams();
+      for (const id of ids ?? []) params.append('id', id);
+      const path = `/api/dependencies${params.size ? `?${params}` : ''}`;
+      return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
+    },
     installDependency: (dep) => startAndPollDependencyInstall(dep),
     // handleError: false — every route returns closed `{status:'failed',error}` bodies (never a
     // thrown ApiError/toast) so the Memory page can render its own inline state per code.

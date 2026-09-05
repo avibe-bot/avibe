@@ -382,6 +382,11 @@
     "dependencies": {
       "autoBanner": "这些依赖由 Avibe 自动安装与更新。下面可手动重新检查、修复或更新。",
       "recheckAll": "全部重新检查",
+      "recheck": "重新检查",
+      "checking": "检查中",
+      "checkFailed": "检查失败",
+      "checkTimeout": "检查超时",
+      "statusUnknown": "未知",
       "required": "必装",
       "statusReady": "就绪",
       "statusDetected": "已检测",
