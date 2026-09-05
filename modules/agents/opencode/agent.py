@@ -109,6 +109,10 @@ _CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
 _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
 _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY = "opencode_managed_skill_builtin_snapshot"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
+# A successful prompt_async response transfers ownership to a forked worker,
+# but does not prove that worker will publish its first message. Keep this
+# handoff bounded independently of the optional whole-turn timeout.
+_ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS = 120.0
 # OpenCode can report idle just before the completed assistant message becomes
 # visible through the message-list endpoint.
 _ASYNC_PROMPT_RESULT_CONFIRMATION_TIMEOUT_SECONDS = 5.0
@@ -160,6 +164,7 @@ class _OpenCodeSteerState:
     awaiting_after_message_ids: set[str] | None = None
     awaiting_user_text: str | None = None
     awaiting_prompt_accepted: bool = False
+    awaiting_prompt_activity_deadline: float | None = None
     awaiting_active_status_observed: bool = False
     awaiting_result_confirmation_deadline: float | None = None
     idle_reconciliation_message: str = ""
@@ -362,6 +367,7 @@ class _SteeringAwareOpenCodeServer:
         self._state.awaiting_after_message_ids = None
         self._state.awaiting_user_text = None
         self._state.awaiting_prompt_accepted = False
+        self._state.awaiting_prompt_activity_deadline = None
         self._state.awaiting_active_status_observed = False
         self._state.awaiting_result_confirmation_deadline = None
 
@@ -586,7 +592,27 @@ class _SteeringAwareOpenCodeServer:
                                     # A successful prompt_async response transfers
                                     # ownership before OpenCode must publish a
                                     # message or mark the session busy.
-                                    wait_for_insert = True
+                                    activity_deadline = (
+                                        self._state.awaiting_prompt_activity_deadline
+                                    )
+                                    if activity_deadline is None:
+                                        activity_deadline = (
+                                            time.monotonic()
+                                            + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
+                                        )
+                                        self._state.awaiting_prompt_activity_deadline = (
+                                            activity_deadline
+                                        )
+                                    if time.monotonic() < activity_deadline:
+                                        wait_for_insert = True
+                                    else:
+                                        self._clear_awaiting_reconciliation()
+                                        return self._terminal_reconciliation_failure(
+                                            session_id,
+                                            messages,
+                                            name="NativeSessionEndedBeforeResult",
+                                            message=self._idle_reconciliation_error_text(),
+                                        )
                                 else:
                                     self._clear_awaiting_reconciliation()
                                     return self._terminal_reconciliation_failure(
@@ -655,11 +681,16 @@ class _SteeringAwareOpenCodeServer:
                 self._state.awaiting_after_message_ids = set(snapshot_ids)
                 self._state.awaiting_user_text = prompt_text or None
                 self._state.awaiting_prompt_accepted = False
+                self._state.awaiting_prompt_activity_deadline = None
                 self._state.awaiting_active_status_observed = False
                 self._state.awaiting_result_confirmation_deadline = None
             await self._server.prompt_async(*args, **{k: v for k, v in kwargs.items() if k != "awaiting_after_ids"})
             if snapshot_ids is not None:
                 self._state.awaiting_prompt_accepted = True
+                self._state.awaiting_prompt_activity_deadline = (
+                    time.monotonic()
+                    + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
+                )
 
     async def abort_session(self, *args, **kwargs) -> bool:
         async with self._state.lock:
@@ -1668,6 +1699,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 awaiting_after_message_ids=set(baseline_message_ids),
                 awaiting_user_text=prompt_text,
                 awaiting_prompt_accepted=True,
+                awaiting_prompt_activity_deadline=(
+                    time.monotonic()
+                    + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
+                ),
                 idle_reconciliation_message=self._idle_reconciliation_message(
                     display_model_dict,
                     reasoning_effort,
@@ -2046,11 +2081,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     state.awaiting_after_message_ids = before_insert
                     state.awaiting_user_text = request.text
                     state.awaiting_prompt_accepted = False
+                    state.awaiting_prompt_activity_deadline = None
                     state.awaiting_active_status_observed = False
                     raise
                 state.awaiting_after_message_ids = before_insert
                 state.awaiting_user_text = request.text
                 state.awaiting_prompt_accepted = True
+                state.awaiting_prompt_activity_deadline = (
+                    time.monotonic()
+                    + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
+                )
                 state.awaiting_active_status_observed = False
                 await asyncio.sleep(_STEER_POST_WRITE_STATUS_SETTLE_SECONDS)
                 try:

@@ -648,6 +648,8 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
         state = agent._steering_states[primary.base_session_id]
         assert state.awaiting_user_text == STEER_TEXT
         assert state.awaiting_prompt_accepted is True
+        assert state.awaiting_prompt_activity_deadline is not None
+        assert state.awaiting_prompt_activity_deadline > time.monotonic()
         assert state.awaiting_active_status_observed is False
         assert server.prompt_calls == [
             {
@@ -694,6 +696,7 @@ async def test_opencode_keeps_reconciliation_armed_after_post_write_idle() -> No
         assert state.awaiting_user_text == STEER_TEXT
         assert state.awaiting_after_message_ids == {"primary-user"}
         assert state.awaiting_prompt_accepted is True
+        assert state.awaiting_prompt_activity_deadline is not None
         assert server.abort_calls == []
     finally:
         await _cancel_tasks(gate_task)
@@ -1045,6 +1048,8 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     state = agent._steering_states[primary.base_session_id]
     assert state.awaiting_user_text == primary.message
     assert state.awaiting_prompt_accepted is True
+    assert state.awaiting_prompt_activity_deadline is not None
+    assert state.awaiting_prompt_activity_deadline > time.monotonic()
     assert state.awaiting_active_status_observed is False
     target = ActiveSteerTarget(
         runtime_key=primary.base_session_id,
@@ -2100,6 +2105,33 @@ async def test_opencode_accepted_prompt_stays_owned_until_delayed_result() -> No
         assert state.awaiting_after_message_ids is None
         assert state.closing is True
         assert server.list_calls == 2
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_accepted_prompt_without_activity_is_bounded() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(status={"type": "idle"})
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = "follow-up"
+    state.awaiting_prompt_accepted = True
+    state.awaiting_prompt_activity_deadline = time.monotonic() - 1
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        messages = await poll_server.list_messages(
+            "opencode-session",
+            primary.working_path,
+        )
+
+        assert messages[-1]["info"]["error"]["name"] == (
+            "NativeSessionEndedBeforeResult"
+        )
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is True
     finally:
         await _cancel_tasks(gate_task)
 
