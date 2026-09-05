@@ -52,7 +52,7 @@ from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.session import CodexSessionManager
-from modules.agents.codex.transport import CodexTransport
+from modules.agents.codex.transport import CodexRPCError, CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
 from vibe.i18n import t as i18n_t
@@ -2818,6 +2818,10 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Append model-visible instructions, with durable at-most-once recovery."""
 
+        previous_marker = self._read_persisted_prompt_strategy_marker(
+            thread_id,
+            agent_session_id=agent_session_id,
+        )
         pending_strategy = (
             "fallback_pending_clear_injection"
             if strategy == "fallback_pending_clear"
@@ -2847,24 +2851,46 @@ class CodexAgent(BaseAgent):
             thread_id,
             pending_strategy,
         )
-        await transport.send_request(
-            "thread/inject_items",
-            {
-                "threadId": thread_id,
-                "items": [
-                    {
-                        "type": "message",
-                        "role": "developer",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": self._render_developer_prompt_snapshot(developer_instructions),
-                            }
-                        ],
-                    }
-                ],
-            },
-        )
+        try:
+            await transport.send_request(
+                "thread/inject_items",
+                {
+                    "threadId": thread_id,
+                    "items": [
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": self._render_developer_prompt_snapshot(developer_instructions),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        except CodexRPCError as exc:
+            if not exc.request_rejected:
+                raise
+            # The server rejected the request before dispatch, so restore the
+            # pre-injection state instead of recording an unknowable mutation.
+            previous_marker = previous_marker or {}
+            if not self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=previous_marker.get("strategy"),
+                prompt_sha256=previous_marker.get("sha256"),
+                agent_session_id=agent_session_id,
+            ):
+                raise CodexPromptRefreshUnavailableError(
+                    "Could not restore the prompt strategy after rejected injection"
+                ) from exc
+            self._thread_prompt_strategies.pop(request.base_session_id, None)
+            raise CodexPromptRefreshUnavailableError(
+                "Codex rejected developer prompt injection; check app-server API compatibility"
+            ) from exc
         if not self._persist_prompt_strategy(
             request,
             thread_id,
@@ -2907,9 +2933,10 @@ class CodexAgent(BaseAgent):
             strategy,
         )
 
-    @staticmethod
-    def _prompt_fingerprint(developer_instructions: str) -> str:
-        return hashlib.sha256(developer_instructions.encode("utf-8")).hexdigest()
+    @classmethod
+    def _prompt_fingerprint(cls, developer_instructions: str) -> str:
+        snapshot = cls._render_developer_prompt_snapshot(developer_instructions)
+        return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
 
     def _read_persisted_prompt_strategy_marker(
         self,
@@ -3041,11 +3068,12 @@ class CodexAgent(BaseAgent):
         thread_id: str,
         developer_instructions: Optional[str],
         *,
-        strategy: str,
+        strategy: Optional[str],
         agent_session_id: Optional[str],
         prompt_sha256: Optional[str] = None,
     ) -> bool:
         if strategy not in {
+            None,
             "collaboration",
             "fallback",
             "fallback_pending_clear",
@@ -3059,10 +3087,10 @@ class CodexAgent(BaseAgent):
             or any(character not in "0123456789abcdef" for character in prompt_sha256)
         ):
             raise ValueError("Codex prompt fingerprint must be lowercase SHA-256")
-        if strategy == "unavailable" and (
+        if strategy in {None, "unavailable"} and (
             developer_instructions or prompt_sha256 is not None
         ):
-            raise ValueError("Unavailable prompt strategy cannot carry prompt identity")
+            raise ValueError("Absent or unavailable prompt strategy cannot carry prompt identity")
         if strategy == "fallback" and not developer_instructions and not prompt_sha256:
             raise ValueError("Fallback prompt strategy requires developer instructions")
         if not agent_session_id:
@@ -3093,7 +3121,7 @@ class CodexAgent(BaseAgent):
                     backend=self.name,
                     native_session_id=thread_id,
                     key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
-                    value=marker,
+                    value=marker if strategy is not None else None,
                 )
             )
 

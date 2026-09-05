@@ -65,6 +65,20 @@ def _avibe_app_server_config_args() -> list[str]:
     ]
 
 
+class CodexRPCError(RuntimeError):
+    """A structured server error, distinct from an ambiguous transport failure."""
+
+    def __init__(self, error: Any) -> None:
+        super().__init__(f"Codex RPC error: {error}")
+        self.code = error.get("code") if isinstance(error, dict) else None
+
+    @property
+    def request_rejected(self) -> bool:
+        # Protocol validation failures precede dispatch. Internal/server errors
+        # do not prove that a mutation was rejected before it took effect.
+        return self.code in {-32600, -32601, -32602}
+
+
 class CodexTransport:
     """Manages a persistent ``codex app-server`` subprocess.
 
@@ -401,7 +415,7 @@ class CodexTransport:
             fut = self._pending.pop(req_id, None)
             if fut and not fut.done():
                 if "error" in msg:
-                    fut.set_exception(RuntimeError(f"Codex RPC error: {msg['error']}"))
+                    fut.set_exception(CodexRPCError(msg["error"]))
                 else:
                     fut.set_result(msg.get("result", {}))
             return

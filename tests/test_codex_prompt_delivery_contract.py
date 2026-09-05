@@ -7,6 +7,7 @@ or a real model. The catalog deliberately owns the default collaboration text.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -66,7 +67,7 @@ def _developer_texts(body):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy", [False, True], ids=["new-thread", "legacy-collaboration"])
+@pytest.mark.parametrize("legacy", [None, "collaboration", "fallback"])
 async def test_native_model_receives_prompt_once_across_turns_and_restart(tmp_path, legacy):
     requests = []
     completed = asyncio.Queue()
@@ -164,7 +165,7 @@ async def test_native_model_receives_prompt_once_across_turns_and_restart(tmp_pa
         thread = await native.send_request("thread/start", {"cwd": str(tmp_path), "model": MODEL})
         thread_id = thread["thread"]["id"]
         marker = {}
-        if legacy:
+        if legacy == "collaboration":
             await native.send_request(
                 "turn/start",
                 {
@@ -180,7 +181,16 @@ async def test_native_model_receives_prompt_once_across_turns_and_restart(tmp_pa
             # Characterize the upstream precedence that broke the old route.
             assert any(CATALOG_PROMPT in text for text in _developer_texts(requests[-1]))
             assert PROMPT not in _developer_texts(requests[-1])
-            marker.update(thread_id=thread_id, strategy="collaboration", sha256=CodexAgent._prompt_fingerprint(PROMPT))
+            marker.update(thread_id=thread_id, strategy="collaboration", sha256=hashlib.sha256(PROMPT.encode()).hexdigest())
+        elif legacy == "fallback":
+            await native.send_request("thread/inject_items", {
+                "threadId": thread_id,
+                "items": [
+                    {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+                    for text in ("An obsolete Skill is enabled.", PROMPT)
+                ],
+            })
+            marker.update(thread_id=thread_id, strategy="fallback", sha256=hashlib.sha256(PROMPT.encode()).hexdigest())
 
         request = SimpleNamespace(
             session_key="contract",

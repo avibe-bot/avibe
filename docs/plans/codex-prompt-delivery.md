@@ -25,7 +25,16 @@ and project instructions are outside this replacement boundary.
 The existing durable `fallback` marker name and write-ahead states
 remain unchanged. Legacy `collaboration` threads migrate through the existing
 pending-clear path, even when their model and prompt fingerprint are unchanged.
+Fingerprints cover the rendered snapshot, including its replacement declaration.
+Legacy raw-prompt hashes therefore migrate once through resume or fork, while
+unchanged current snapshots remain deduplicated across restarts.
 Model and reasoning overrides remain top-level turn parameters.
+
+Protocol validation rejections (`-32600`, `-32601`, `-32602`) restore the durable
+pre-injection marker and fail the turn before model dispatch, allowing a later
+attempt after API compatibility is repaired. Transport failures and internal
+server errors remain ambiguous and retain the write-ahead marker. If restoring
+the marker itself fails, the turn fails and that unresolved marker is retained.
 
 `features.retain_client_developer_messages=true` preserves these messages through
 Codex remote compaction v2. This replaces the collaboration-based delivery
@@ -54,3 +63,14 @@ prompt composition are unchanged.
 
 No existing scenario catalog owns prompt delivery. This change adds a native
 contract rather than assigning an unrelated capability's scenario ID.
+
+## Review Scope Decision
+
+Head `22a948af70` had one finding: historical prompt snapshots lacked supersession.
+Head `d96c18a115` had two findings: legacy-marker migration in that same class,
+and definitive RPC rejections being treated as ambiguous mutations. The repeated
+class triggered the orchestrator circuit breaker before the next edit. Inspection
+covered marker production, resume, fork, cached recovery, and the native consumer
+test. The smallest complete decision is to fingerprint actual snapshot bytes and
+restore prior state only for protocol-level rejection. No new thread lifecycle,
+marker schema, storage migration, backend routing, or broad retry policy is needed.
