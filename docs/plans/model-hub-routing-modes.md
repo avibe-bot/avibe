@@ -19,6 +19,26 @@ The upstream inventory is evidence for matching, not an invocation whitelist.
 Credentials, protocol and channel compatibility, backend model admission, source
 membership, explicit retirement, and live health remain separate boundaries.
 
+### Owner Scope Decision
+
+The owner selected API-key passthrough for this delivery on 2026-09-06.
+Unknown-model passthrough is available only to eligible Hub sources whose
+`kind` is `api_key`. Subscription sources, including Hub-held OAuth and native
+CLI subscriptions, retain their existing model admission and exact invocation
+capabilities. They still participate in automatic matching and manual routes;
+they are not speculative unknown-model candidates. An empty subscription-only
+default set for an unmatched model is Unconfigured, never falsely Passthrough.
+
+For manual writes, API-key targets may be absent from inventory; subscription
+targets keep the existing membership/retirement admission and stale-hop retention
+rules. Preserve subscription compatibility and normal errors, and do not imply
+that changing route labels upgrades the underlying engine's model support.
+Source inventory and reasoning metadata stay truthful for both kinds. All broad
+inventory-independence and unknown-target statements below apply to API-key
+sources under this explicit scope; the same shared route owner handles both.
+No underlying CPA extension, engine upgrade, OAuth alias substitution, or
+alternate subscription transport is part of this delivery.
+
 ## Persistent Intent and Compatibility
 
 Existing `model_hub.agents[backend].sources.order` is the sole backend-default
@@ -60,8 +80,9 @@ draft configuration; no public sentinel or duplicate matching algorithm is neede
 1. A manual key returns the exact saved hops and order.
 2. Otherwise scan configuration-eligible sources in backend default order for
    matching evidence. Include all accepted matching pairs in that order.
-3. If there are no matching pairs, use each eligible default source with the
-   exact requested id. Do not append speculative candidates to a matched tier.
+3. If there are no matching pairs, use each eligible API-key default source with
+   the exact requested id. Do not append speculative candidates to a matched tier
+   or include subscription sources as unknown-model passthrough candidates.
 4. An empty resulting chain has null origin. A nonempty chain has its chosen
    origin regardless of current health or native process readiness.
 
@@ -204,10 +225,30 @@ All relevant config commits/reconciliation and load-time synchronization must
 refresh this projection through the existing source-sync owner. Preview remains
 side-effect-free, and order-only changes with an unchanged target set do not
 restart the engine. Registration updates must preserve in-flight invocations.
-The synchronization mechanism and Hub OAuth target registration require the
-pinned-engine proof before implementation; no per-request restart, invented
-inventory, silent engine upgrade, or alternate transport is authorized by this
-amendment.
+Hub OAuth registration is not expanded by this field. Only API-key sources need
+unknown route targets; subscriptions keep their existing registration behavior.
+No per-request restart, invented inventory, silent engine upgrade, or alternate
+transport is authorized by this amendment.
+
+### Registration Synchronization Decision
+
+Pinned-engine experiments proved file/atomic/management configuration hot reload
+with unchanged PID and uninterrupted existing streams for all three protocols.
+However, neither the management acknowledgment nor `/v1/models` provides an
+atomic scheduler/config-generation completion barrier. The feature therefore
+retains the existing supervised restart transaction with explicit in-flight
+protection instead of introducing an unproven readiness heuristic.
+
+The adapter owns invocation leases and drains existing transport operations
+before a configuration-triggered engine restart. New invocations wait behind the
+same configuration barrier. Lease release belongs to transport completion,
+close, or cancellation, independently of service settlement and its mutation
+lock. A synchronization cancellation or exception cannot leak a barrier or
+lease. Do not cancel unrelated active requests just to save configuration.
+Pure reordering with unchanged registration remains restart-free, and ordinary
+invocations never trigger registration changes. Exercise buffered and streaming
+completion, early close, cancellation, sync failure/rollback, and concurrent Save
+to prove there is no deadlock or partial-output interruption.
 
 Acceptance states properties, with fixtures covering the supported shapes:
 
