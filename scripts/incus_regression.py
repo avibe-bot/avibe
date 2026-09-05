@@ -301,6 +301,15 @@ def env_int(name: str) -> int | None:
         raise RegressionError(f"{name} must be an integer.") from exc
 
 
+def show_runtime_build_timeout() -> int:
+    timeout = env_int("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS")
+    if timeout is None:
+        return SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS
+    if timeout <= 0:
+        raise RegressionError("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS must be a positive integer.")
+    return timeout
+
+
 def current_repo_root() -> Path:
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -1707,6 +1716,8 @@ def stop_service_for_update(runner: Runner, target: RegressionTarget, *, remote:
 
 
 def restart_service_after_failed_update(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    # Start a possibly stopped unit without restarting one that is already active.
+    # A failed restart_and_verify remains an error; recovery does not retry health checks.
     runner.run(root_exec(target, f"systemctl start {SERVICE_NAME}", remote=remote))
 
 
@@ -2331,6 +2342,7 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
 
 
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    build_timeout = show_runtime_build_timeout()
     source_result = runner.run(
         tenant_exec(target, 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"', remote=remote),
         capture=True,
@@ -2362,7 +2374,7 @@ fi
 """.strip(),
             remote=remote,
         ),
-        timeout=env_int("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS") or SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS,
+        timeout=build_timeout,
     )
     result = runner.run(
         tenant_exec(target, f"{runtime_env_prefix} {VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote),
@@ -2499,6 +2511,7 @@ def cmd_build_base(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     loaded_env_file = load_env_file(repo_root, args.env_file)
+    show_runtime_build_timeout()
     if not args.dry_run:
         require_incus()
     metadata = WorktreeMetadata(repo_root, args.remote)
