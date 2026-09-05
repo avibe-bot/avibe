@@ -163,3 +163,63 @@ After the interaction-boundary change: 17 focused shortcut/listener tests and
 all 283 UI files / 3766 tests passed. Theme validation, lint baseline, test type
 checking and production build passed. In the prior failed run, archive measured
 9s (86s before the private fixture); all 398 Python files still ran exactly once.
+
+### Stalled shard and finalizer deadlock
+
+Run 33961006183 passed UI and all other independent jobs, but shard 4 stopped
+inside `test_ui_show_pages.py` after its 77% progress line at 10:41:25Z. The
+orchestrator cancelled the run at 12:33Z after the log API returned BlobNotFound
+and the unauthenticated Web page could not expose live logs. Cancellation was
+acknowledged immediately and archived logs became available: this was a stuck
+test process, not a runner that could no longer receive commands. No blind
+rerun was requested. This cancelled run is not performance evidence.
+
+The normal local 559-test Show suite passed. A deterministic fault-injection
+probe then collected an unreachable cyclic ShowRuntimeManager during
+`_retain_install_dir_locked`. Its weakref finalizer synchronously called
+`_release_install_reference_owner`, which tried to acquire the same non-reentrant
+registry lock. A three-second faulthandler deadline captured both frames on the
+same thread. This proves a production deadlock in the affected test region;
+the original CI run had no stack dump, so its exact stopped instruction remains
+unavailable. Increased garbage-collection frequency alone did not reproduce it.
+
+The orchestrator extends scope to the existing Show registry owner and its
+consumer tests: use a reentrant guard for synchronous finalizers, and use direct
+key membership instead of iterating the registry to find one install. Preserve
+cross-thread exclusion, file-lock ownership and retention of live installations.
+Regression coverage forces collection inside reference publication and verifies
+that stale references are released while live references remain protected.
+
+Independently close the unbounded CI wait: the existing per-file launcher prints
+the current file/test, arms a 300-second process watchdog that dumps all Python
+threads and exits nonzero, and keeps running subsequent files to collect failures.
+It covers collection, test execution and interpreter shutdown without a new
+dependency or retry. A 20-minute outer job limit also bounds runner or native
+process failures. Existing aggregates still reject failure and cancellation.
+These limits are safety bounds, not reduced test coverage or speedup claims.
+
+Review inventory was re-fetched before this scope extension: all four heads have
+bot PASS, complete reviews and all paginated threads are empty, zero
+findings-bearing review heads. The CI failures do not trip the review breaker.
+The same durable PR watch and cursor are retained through the next exact-head
+review/CI cycle; the cancelled head cannot merge.
+
+Local validation: 32 workflow/fixture/shard contracts passed, including real
+subprocess hangs during collection, a test body, and interpreter shutdown.
+The initial diagnostic assertion caught pytest redirecting stderr; the launcher
+now duplicates the original descriptor before pytest starts, and all three stack
+visibility checks pass. Four focused lifetime tests, 58 archive-cleanup tests,
+188 local-dependency tests, Ruff 0.4.9 and shell syntax checks passed.
+
+The complete 66-file shard terminated normally, including all 562 Show cases.
+One unrelated Skill CLI assertion saw the current Agent's inherited skill bindings
+instead of its fixture catalog; the unchanged `python -m pytest` command reproduced
+it too. Clearing only those nine `AVIBE_*SKILL*` bindings for the subprocess made
+all four Skill CLI tests pass. Do not change production config or claim that
+mixed result as a fully green shard; the next clean-environment run verifies it.
+
+While diagnosing, master advanced to `fae5f421c` through #1880, #1881 and #1884.
+The orchestrator inspected the new prompt-rendering/media consumers and verified
+no overlap with this PR's 13 files. Integrate that base before the next push and
+rerun the affected consumers. It adds one new test file, covered by the existing
+planner's measured-scale fallback; do not invent a timing measurement for it.

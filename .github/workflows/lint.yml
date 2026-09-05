@@ -114,6 +114,7 @@ jobs:
   unit-test-shards:
     name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

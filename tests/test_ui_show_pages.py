@@ -10279,6 +10279,82 @@ def test_show_runtime_candidate_reference_failure_never_publishes_pointer(
     assert list(runtime_dir.rglob(".vibe-show-runtime.json")) == []
 
 
+@pytest.mark.parametrize("shared_owner", [False, True])
+def test_show_runtime_finalizer_can_collect_inside_reference_publication(tmp_path, shared_owner):
+    # A subprocess deadline turns a regressed deadlock into a useful failure.
+    probe = textwrap.dedent("""
+        import faulthandler
+        import gc
+        import sys
+        import weakref
+        from pathlib import Path
+        from core.show_runtime import ShowRuntimeManager
+
+        faulthandler.dump_traceback_later(10, exit=True)
+        gc.disable()
+        root = Path(sys.argv[1])
+        runtime = root / "runtime"
+        old_install = runtime / "versions" / "old"
+        new_install = runtime / "versions" / "new"
+        old_install.mkdir(parents=True)
+        new_install.mkdir(parents=True)
+        def manager():
+            return ShowRuntimeManager(runtime_dir=runtime, workspace_root=root / "show", offline=True)
+
+        previous = manager()
+        assert previous._retain_install_dir_locked(old_install)
+        old_marker, = previous._install_reference_dir(old_install.resolve()).glob("*.lock")
+        survivor = manager()
+        shared = sys.argv[2] == "True"
+        if shared:
+            assert survivor._retain_install_dir_locked(old_install)
+        previous.cycle = previous
+        old_ref = weakref.ref(previous)
+        del previous
+
+        current = manager()
+        original = current._install_reference_dir
+        def collect_during_publication(path):
+            gc.collect()
+            assert old_ref() is None
+            return original(path)
+        current._install_reference_dir = collect_during_publication
+        assert current._retain_install_dir_locked(new_install)
+        assert current._install_dir_has_live_reference(new_install)
+        assert current._install_dir_has_live_reference(old_install) is shared
+        assert old_marker.exists() is shared
+        survivor._install_reference_finalizer()
+        assert not current._install_dir_has_live_reference(old_install)
+        assert not old_marker.exists()
+        current._install_reference_finalizer()
+        assert not current._install_dir_has_live_reference(new_install)
+        print("finalizer completed; live ownership preserved")
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(tmp_path), str(shared_owner)],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "live ownership preserved" in result.stdout
+
+
+def test_show_runtime_reference_guard_still_excludes_other_threads():
+    acquired = []
+
+    def attempt():
+        locked = show_runtime._INSTALL_REFERENCE_LOCKS_GUARD.acquire(timeout=0.05)
+        acquired.append(locked)
+        if locked:
+            show_runtime._INSTALL_REFERENCE_LOCKS_GUARD.release()
+
+    with show_runtime._INSTALL_REFERENCE_LOCKS_GUARD:
+        thread = threading.Thread(target=attempt)
+        thread.start()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert acquired == [False]
+
+
 def test_show_runtime_live_cached_install_survives_distinct_identity_cleanup(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     monkeypatch.setattr(
