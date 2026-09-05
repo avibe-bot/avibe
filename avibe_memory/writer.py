@@ -255,6 +255,7 @@ class BestEffortMemoryWriter:
         text: str,
         attachments: tuple[CaptureAttachment, ...],
         bundle: PinnedBundle | None,
+        sender_name: str | None = None,
     ) -> CaptureOfferOutcome:
         """Queue one already-admitted capture without waiting for worker space."""
 
@@ -278,6 +279,7 @@ class BestEffortMemoryWriter:
                 text=text,
                 provider_timestamp_ms=admission.provider_timestamp_ms,
                 attachments=attachments,
+                sender_name=sender_name,
             ),
             bundle=bundle,
             reservation=reservation,
@@ -488,6 +490,7 @@ class BestEffortMemoryWriter:
             text=capture.text,
             provider_timestamp_ms=capture.provider_timestamp_ms,
             attachments=attachments,
+            sender_name=capture.sender_name,
         )
         attempt = 0
         while attempt < MAX_ATTEMPTS:
@@ -549,6 +552,7 @@ class BestEffortMemoryWriter:
                         session_ref=capture.session_ref,
                         text=capture.text,
                         provider_timestamp_ms=capture.provider_timestamp_ms,
+                        sender_name=capture.sender_name,
                     )
                     continue
                 await self._terminal_failure(item, "memory_processing_failed")

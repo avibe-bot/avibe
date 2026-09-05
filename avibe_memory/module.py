@@ -656,6 +656,7 @@ class MemoryModule:
                         admission,
                         text=normalized_text,
                         bundle=None,
+                        sender_name=request.sender_name,
                     )
             await self._release_unadmitted_capture(reservation, pinned_bundle)
             if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
@@ -671,6 +672,7 @@ class MemoryModule:
             admission,
             text=normalized_text,
             bundle=pinned_bundle,
+            sender_name=request.sender_name,
         )
 
     async def _complete_capture_admission(
@@ -680,6 +682,7 @@ class MemoryModule:
         *,
         text: str,
         bundle: PinnedBundle | None,
+        sender_name: str | None = None,
     ) -> CaptureReceipt:
         if admission.outcome == "accepted":
             return await self._offer_admitted_capture(
@@ -687,6 +690,7 @@ class MemoryModule:
                 admission,
                 text=text,
                 bundle=bundle,
+                sender_name=sender_name,
             )
 
         await self._release_unadmitted_capture(reservation, bundle)
@@ -703,6 +707,7 @@ class MemoryModule:
         *,
         text: str,
         bundle: PinnedBundle | None,
+        sender_name: str | None = None,
     ) -> CaptureReceipt:
         outcome: CaptureOfferOutcome = self._writer.offer_capture(
             reservation,
@@ -710,6 +715,7 @@ class MemoryModule:
             text=text,
             attachments=(),
             bundle=bundle,
+            sender_name=sender_name,
         )
         if outcome == "queued":
             return CaptureAccepted(

@@ -87,6 +87,23 @@ async def test_capture_is_accepted_and_duplicate_is_process_local(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provenance", ["user_input", "agent"])
+async def test_sender_name_reaches_writer_without_changing_capture_identity(tmp_path, provenance) -> None:
+    module, store, provider = _module(tmp_path)
+    principal = store.principal_for_user_key("avibe:local")
+    text = "原文\n`u-synthetic` https://example.invalid/u-synthetic"
+    name = "小王 Élodie 🌱" if provenance == "user_input" else "Agent"
+    request = _request(principal_id=principal, provenance=provenance, text=text, sender_name=name)
+    assert await module.capture(request) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    capture = provider.captures[0]
+    assert capture.sender_name == name
+    assert capture.text == text
+    assert capture.session_ref.principal_id == principal + ("-agent" if provenance == "agent" else "")
+    await module.close_writer()
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_barrier_does_not_wait_for_writer(tmp_path: Path) -> None:
     """MEMORY-SEARCH-017: a lifecycle barrier is offered without a drain."""
 

@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol, TypeAlias
+import unicodedata
+
+
+def normalize_memory_sender_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = "".join(
+        character
+        for character in value
+        if unicodedata.category(character) not in {"Cc", "Cs"}
+        and (unicodedata.category(character) != "Cf" or character in {"\u200c", "\u200d"})
+    ).strip()[:128].rstrip()
+    return name or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +70,7 @@ class TurnAccepted:
     is_ordinary_attachment: bool | None
     lifecycle_snapshot: object
     attachment_lease: object | None = None
+    sender_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
