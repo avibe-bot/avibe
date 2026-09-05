@@ -5,7 +5,8 @@ cannot live in the server process environment. Instead Avibe installs a tiny
 OpenCode plugin that resolves each shell call's OpenCode session id through an
 Avibe-managed binding file and injects the AVIBE_* env vars for that call. The
 same process-scoped plugin removes OpenCode's native Skill Catalog after its
-system prompt is assembled; Avibe supplies the managed Catalog instead.
+system prompt is assembled and restores exact Hub provider definitions after
+native configuration merging; Avibe owns both projections.
 """
 
 from __future__ import annotations
@@ -72,6 +73,16 @@ function stripNativeSkillCatalog(text) {
 }
 
 export const AvibeCallerContextPlugin = async () => ({
+  "config": async (config) => {
+    if (process.env.AVIBE_OPENCODE_MODEL_HUB !== "1") return
+    const overlay = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || "null")
+    if (!overlay || !overlay.provider || !Array.isArray(overlay.enabled_providers)) {
+      throw new Error("Avibe Model Hub launch config is unavailable")
+    }
+    // OpenCode deep-merges native config, retaining unowned headers and model
+    // transport fields. Replace each Hub provider after that merge instead.
+    config.provider = { ...config.provider, ...structuredClone(overlay.provider) }
+  },
   "shell.env": async (input, output) => {
     const sessionID = input && typeof input.sessionID === "string" ? input.sessionID : ""
     if (!sessionID) return

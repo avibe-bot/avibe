@@ -1,6 +1,12 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-007
+    source: opencode-1.18.18-codex-0.153.2-local-http-regression-2026-09-06
+    summary: OpenCode inline config deep-merges provider and model headers, allowing native Authorization headers to replace the Hub token even when baseURL and apiKey are pinned. The managed runtime config hook must replace complete Hub provider definitions. Codex native and same-name provider fixtures retained the configured Source credential and upstream model on the wire.
+    affects:
+      - MH-CODEX-LAUNCH-001
+      - MH-OPENCODE-LAUNCH-001
   - id: MH-OBS-006
     source: claude-sdk-0.2.93-local-http-regression-2026-09-06
     summary: Native project and local settings override subprocess environment; when cwd is HOME the user settings file is also a project source. Hub connection settings require a higher-priority launch override, and SDK sandbox merging must not expand credentials into argv.

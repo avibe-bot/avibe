@@ -90,6 +90,50 @@ process.stdout.write(JSON.stringify(output.system))
     assert json.loads(direct.stdout) == [native, managed]
 
 
+@pytest.mark.parametrize("hub_mode", [True, False])
+def test_plugin_keeps_hub_provider_definitions_exact_after_native_merge(tmp_path, monkeypatch, hub_mode):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the OpenCode runtime plugin")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    plugin = bridge.ensure_plugin_installed().path
+    overlay = {
+        "enabled_providers": ["avibe-openai"],
+        "provider": {"avibe-openai": {
+            "npm": "@ai-sdk/openai",
+            "options": {"baseURL": "http://127.0.0.1:18443/v1", "apiKey": "fixture-token"},
+            "models": {"menu-model": {"id": "menu-model"}},
+        }},
+    }
+    native = {
+        "provider": {
+            "avibe-openai": {
+                "options": {"headers": {"AUTHORIZATION": "stale-key"}},
+                "models": {"menu-model": {"headers": {"x-api-key": "stale-key"}}},
+                "future_transport_field": "unowned",
+            },
+            "user-owned": {"options": {"apiKey": "native-token"}},
+        },
+        "permission": "ask",
+        "agent": {"custom": {"prompt": "Keep native configuration"}},
+    }
+    script = f"""
+import {{ AvibeCallerContextPlugin }} from {json.dumps(plugin.as_uri())}
+const hooks = await AvibeCallerContextPlugin()
+const config = {json.dumps(native)}
+await hooks.config(config)
+process.stdout.write(JSON.stringify(config))
+"""
+    completed = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        check=True, capture_output=True, text=True, timeout=10,
+        env={**os.environ, "AVIBE_OPENCODE_MODEL_HUB": "1" if hub_mode else "0",
+             "OPENCODE_CONFIG_CONTENT": json.dumps(overlay)},
+    )
+    expected = {**native, "provider": {**native["provider"], **overlay["provider"]}} if hub_mode else native
+    assert json.loads(completed.stdout) == expected
+
+
 def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     avibe_home = tmp_path / "avibe"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))

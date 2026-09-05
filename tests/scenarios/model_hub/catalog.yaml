@@ -32,6 +32,7 @@ capability:
     - tests/e2e/test_model_hub_migration.py
     - tests/e2e/test_model_hub_mock_upstream.py
     - tests/e2e/test_model_hub_routing.py
+    - tests/e2e/test_model_hub_backend_settings.py
     - tests/e2e/test_model_hub_runtime.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
@@ -179,6 +180,18 @@ scenarios:
     kind: injection
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
+  - id: MH-CODEX-LAUNCH-001
+    name: Native Codex provider settings preserve the configured Hub Source and upstream model
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_backend_settings.py::test_codex_native_provider_settings_cannot_change_hub_egress
+  - id: MH-OPENCODE-LAUNCH-001
+    name: Native OpenCode settings preserve the exact Hub provider transport and authentication
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_backend_settings.py::test_opencode_native_settings_cannot_change_hub_transport
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered

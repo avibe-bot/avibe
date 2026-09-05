@@ -196,7 +196,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 61.0]),
             patch.object(SERVER_MODULE, "server_environment", return_value={}),
             patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
-            patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config}),
+            patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config, "AVIBE_OPENCODE_MODEL_HUB": "1"}),
         ):
             with self.assertRaisesRegex(RuntimeError, "failed to start within 60s"):
                 await manager._start_server()
@@ -208,6 +208,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             terminate_timeout=5,
         )
         self.assertEqual(manager._clear_pid_file.call_count, 2)
+        self.assertEqual(create_process.await_args.kwargs["env"]["AVIBE_OPENCODE_MODEL_HUB"], "0")
         self.assertIsNone(manager._process)
         self.assertIsNone(manager._process_loop)
         self.assertEqual(
@@ -650,6 +651,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base_url, "http://127.0.0.1:4096")
         prepare_overlay.assert_awaited_once_with()
         self.assertEqual(launched["env"]["OPENCODE_CONFIG"], str(overlay.path))
+        self.assertEqual(launched["env"]["AVIBE_OPENCODE_MODEL_HUB"], "1")
         inline_config = json.loads(launched["env"]["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(
             inline_config["provider"]["avibe-openai"]["models"],

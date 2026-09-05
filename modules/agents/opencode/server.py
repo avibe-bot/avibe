@@ -1844,6 +1844,7 @@ class OpenCodeServerManager:
         env["OPENCODE_ENABLE_EXA"] = "1"
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
         env.update(server_environment())
+        env["AVIBE_OPENCODE_MODEL_HUB"] = "1" if self._model_hub_overlay_path else "0"
         if self._model_hub_overlay_path:
             env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
             content = self._model_hub_overlay_content
