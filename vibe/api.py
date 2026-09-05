@@ -5961,6 +5961,8 @@ async def opencode_options_async(
     cache_projection_matches = (
         cache_entry.get("model_hub_projection") == projection_key
     )
+    cache_mode_matches = cache_entry.get("mode") == "direct"
+    model_hub_mode = None
     server = None
     try:
         from config.v2_compat import to_app_config
@@ -5985,6 +5987,7 @@ async def opencode_options_async(
             and cache_data
             and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
             and cache_projection_matches
+            and cache_mode_matches
         ):
             return {"ok": True, "data": cache_data, "cached": True}
         config = to_app_config(v2_config)
@@ -6037,11 +6040,8 @@ async def opencode_options_async(
                     models,
                     build_reasoning_effort_options,
                 ),
-            }
-            _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
-                "data": data,
-                "updated_at": time.monotonic(),
-                "model_hub_projection": projection_key,
+                "source": "model hub projection (persisted)",
+                "live": False,
             }
             return {"ok": True, "data": data}
 
@@ -6110,16 +6110,24 @@ async def opencode_options_async(
             "models": models,
             "defaults": defaults,
             "reasoning_options": reasoning_options,
+            "source": "opencode server (live) + user config overlay",
+            "live": True,
         }
         _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
             "data": data,
             "updated_at": time.monotonic(),
             "model_hub_projection": projection_key,
+            "mode": "direct",
         }
         return {"ok": True, "data": data}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
-        if cache_data and cache_projection_matches:
+        if (
+            model_hub_mode != "hub"
+            and cache_data
+            and cache_projection_matches
+            and cache_mode_matches
+        ):
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:
@@ -6955,14 +6963,20 @@ def _opencode_model_options(
     notes: list[str] = []
     if provider_filter and not matched_provider_filter:
         notes.append(f"no configured OpenCode provider matches '{provider}'")
+    catalog_source = data.get("source")
+    if not isinstance(catalog_source, str) or not catalog_source:
+        catalog_source = "opencode server (live) + user config overlay"
+    catalog_live = data.get("live")
+    if not isinstance(catalog_live, bool):
+        catalog_live = True
     return {
         "ok": True,
         "backend": "opencode",
         "default_provider": default_provider or None,
         "providers": providers_out,
         "models": models_out,
-        "source": "opencode server (live) + user config overlay",
-        "live": True,
+        "source": catalog_source,
+        "live": catalog_live,
         "notes": notes or None,
     }
 
@@ -11887,11 +11901,14 @@ async def _opencode_get_server():
     OpenCode config from V2Config and ensure the daemon is reachable.
     In Hub mode only the controller may launch the daemon; this caller
     can adopt an already-running overlaid server. Returns ``None`` if
-    OpenCode is disabled.
+    OpenCode is disabled or the controller-owned Hub overlay is not ready.
     """
     from config.v2_compat import to_app_config
     from core.resource_governance import AgentResourceGovernor, config_from_runtime
-    from modules.agents.opencode import OpenCodeServerManager
+    from modules.agents.opencode import (
+        OpenCodeModelHubOverlayRequiredError,
+        OpenCodeServerManager,
+    )
 
     v2_config = V2Config.load()
     config = to_app_config(v2_config)
@@ -11912,7 +11929,10 @@ async def _opencode_get_server():
         model_hub_overlay_required=getattr(model_hub_agent, "mode", "direct")
         == "hub",
     )
-    await server.ensure_running()
+    try:
+        await server.ensure_running()
+    except OpenCodeModelHubOverlayRequiredError:
+        return None
     return server
 
 

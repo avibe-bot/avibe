@@ -402,6 +402,7 @@
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请切回原来的工作目录继续该会话，或在当前目录开始一个新的 Claude Code 会话。",
     "sessionGeneric": "发生错误：{error}",
     "codexPromptRefreshUnavailable": "Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
+    "opencodeModelHubOverlayRequired": "OpenCode 仍在准备 Gateway 模式，请稍后重试。",
     "opencodePolicyRefreshPending": "OpenCode 仍在完成已有回合，暂时无法按 Avibe 当前的 Skill 策略重启。请在该回合结束后重试。",
     "opencodeRuntimeConfigInvalid": "OpenCode 无法启动，因为 OPENCODE_CONFIG_CONTENT 无效。请修正运行时配置后重试。",
     "resultAttachmentUploadFailed": "附件上传失败。要我改成拆分成多条消息发送吗？",

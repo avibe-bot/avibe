@@ -28,6 +28,7 @@ from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.server import (
     OpenCodeManagedPolicyRefreshPendingError,
+    OpenCodeModelHubOverlayRequiredError,
     OpenCodeRuntimeConfigInvalidError,
 )
 from modules.agents.opencode.poll_loop import (
@@ -75,6 +76,22 @@ def test_opencode_runtime_config_failure_is_localized() -> None:
     )
 
     assert "运行时配置" in display
+    assert "internal diagnostic" not in display
+
+
+def test_opencode_model_hub_overlay_failure_is_localized() -> None:
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = type(
+        "Controller",
+        (),
+        {"config": type("Config", (), {"language": "zh"})()},
+    )()
+
+    display = agent._server_start_error_display_text(
+        OpenCodeModelHubOverlayRequiredError("internal diagnostic")
+    )
+
+    assert "准备 Gateway 模式" in display
     assert "internal diagnostic" not in display
 
 

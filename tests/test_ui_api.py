@@ -240,6 +240,9 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
     assert result["ok"] is True
     assert result["data"]["agents"] == []
     assert result["data"]["defaults"] == {}
+    assert result["data"]["source"] == "model hub projection (persisted)"
+    assert result["data"]["live"] is False
+    assert api._OPENCODE_OPTIONS_CACHE == {}
     providers = {
         provider["id"]: provider
         for provider in result["data"]["models"]["providers"]
@@ -258,6 +261,78 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
             {"value": "max", "label": "Max"},
         ],
     }
+
+
+def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _FakeManager:
+        ensure_calls = 0
+
+        async def ensure_running(self):
+            self.ensure_calls += 1
+
+        async def get_available_agents(self, directory):
+            return [{"name": "build"}]
+
+        async def get_available_models(self, directory, *, model_hub_models=None):
+            return {"providers": []}
+
+        async def get_providers(self):
+            return {"all": [], "connected": []}
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            return None
+
+    manager = _FakeManager()
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(api, "_read_opencode_custom_provider_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(api, "_read_opencode_user_model_index", AsyncMock(return_value={}))
+
+    hub_result = asyncio.run(
+        api.opencode_options_async("/tmp/workspace", model_hub_models={})
+    )
+    v2_config.model_hub.agents["opencode"].mode = "direct"
+    direct_result = asyncio.run(
+        api.opencode_options_async("/tmp/workspace", model_hub_models={})
+    )
+
+    assert hub_result["data"]["agents"] == []
+    assert direct_result["data"]["agents"] == [{"name": "build"}]
+    assert manager.ensure_calls == 1
+    assert api._OPENCODE_OPTIONS_CACHE["/tmp/workspace"]["mode"] == "direct"
 
 
 def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
@@ -507,6 +582,48 @@ def test_opencode_get_server_requires_controller_overlay_in_hub_mode(monkeypatch
     assert server is fake_manager
     assert captured_kwargs["model_hub_overlay_required"] is True
     fake_manager.ensure_running.assert_awaited_once()
+
+
+def test_opencode_provider_settings_return_structured_hub_refusal(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    refusal = opencode_module.OpenCodeModelHubOverlayRequiredError(
+        "controller overlay is not ready"
+    )
+    fake_manager = SimpleNamespace(ensure_running=AsyncMock(side_effect=refusal))
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return fake_manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    result = asyncio.run(api.get_opencode_providers_async())
+
+    assert result["ok"] is False
+    assert fake_manager.ensure_running.await_count == 1
 
 
 def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_path):
@@ -2734,6 +2851,47 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
     filtered = api.agent_model_options("opencode", provider="deepseek")
     assert [p["id"] for p in filtered["providers"]] == ["deepseek"]
     assert all(m["provider"] == "deepseek" for m in filtered["models"])
+
+
+def test_agent_model_options_preserves_hub_projection_provenance(monkeypatch):
+    import vibe.opencode_config as opencode_config
+
+    monkeypatch.setattr(
+        api,
+        "opencode_options",
+        lambda cwd: {
+            "ok": True,
+            "data": {
+                "models": {
+                    "providers": [
+                        {
+                            "id": "avibe-openai",
+                            "models": {
+                                "deepseek-v3.2": {
+                                    "vibe_remote": {"model_hub_projected": True}
+                                }
+                            },
+                        }
+                    ],
+                    "default": {},
+                },
+                "reasoning_options": {},
+                "source": "model hub projection (persisted)",
+                "live": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        opencode_config,
+        "read_opencode_custom_providers",
+        lambda **kwargs: {},
+    )
+
+    result = api.agent_model_options("opencode")
+
+    assert result["source"] == "model hub projection (persisted)"
+    assert result["live"] is False
+    assert [model["value"] for model in result["models"]] == ["deepseek-v3.2"]
 
 
 def test_codex_agents_merges_global_and_project(monkeypatch, tmp_path):
