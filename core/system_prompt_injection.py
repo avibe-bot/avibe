@@ -117,7 +117,7 @@ def _escape_markdown_table_cell(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _format_enabled_agents_table(enabled_agents: Optional[Iterable[Any]]) -> str:
+def _format_enabled_agents_rows(enabled_agents: Optional[Iterable[Any]]) -> str:
     if enabled_agents is None:
         return ""
 
@@ -131,7 +131,7 @@ def _format_enabled_agents_table(enabled_agents: Optional[Iterable[Any]]) -> str
     if not rows:
         return ""
 
-    lines = ["| Agent Name | Backend | Agent Description |", "| --- | --- | --- |"]
+    lines = []
     for agent in sorted(
         rows,
         key=lambda item: (
@@ -230,16 +230,17 @@ def build_system_prompt_blocks(
         blocks.append(render_prompt_block("show-pages-prompt"))
         history = agent_contract_block(numbered=True, session_id=_extract_default_session_id(context))
         if history:
-            blocks.append(RenderedPromptBlock(history.module_id, f"\nHistory contract:\n{history.text}\n"))
+            blocks.append(render_prompt_block("show-history-heading"))
+            blocks.append(RenderedPromptBlock(history.module_id, history.text + "\n"))
     if include_quick_replies:
         blocks.append(render_prompt_block("quick-replies-prompt"))
     if vault_skill_available:
         blocks.append(render_prompt_block("vault-routing-prompt"))
     if context is not None:
         blocks.append(render_prompt_block("harness-routing-prompt"))
-        table = _format_enabled_agents_table(enabled_agents)
-        if table:
-            blocks.append(render_prompt_block("harness-agents-prompt", enabled_agents_table=table))
+        agent_rows = _format_enabled_agents_rows(enabled_agents)
+        if agent_rows:
+            blocks.append(render_prompt_block("harness-agents-prompt", enabled_agents_rows=agent_rows))
     if include_context_guidance:
         blocks.append(_context_block(
             context,

@@ -787,7 +787,14 @@
         "promptFormat": "Export format"
       },
       "error": {
-        "promptExport": "Prompt export failed: {error}"
+        "promptExport": "Prompt export failed: {error}",
+        "invalidContext": "The context must be a JSON object containing only backend, agent_instructions and options.",
+        "invalidBackend": "backend must be claude, codex or opencode.",
+        "invalidField": "Invalid field type or missing required field: {field}",
+        "unknownField": "Unknown field: {field}",
+        "unreadableContext": "Cannot read the context file. Check its path and permissions.",
+        "invalidJson": "The context file must contain valid UTF-8 JSON.",
+        "renderFailed": "Cannot render the prompt sources. Check the sources and rendering inputs."
       }
     }
   },

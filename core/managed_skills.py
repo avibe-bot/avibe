@@ -1154,7 +1154,7 @@ def render_skill_list(
     more_notice: str | None = None,
 ) -> str:
     entries, next_page = _page(skills, page)
-    lines = [f"- {skill.name}: {skill.description}" for skill in entries]
+    lines = _skill_list_rows(entries)
     if next_page is not None:
         lines.append(
             more_notice or render_prompt("skills-more-notice", next_page=next_page)
@@ -1162,21 +1162,28 @@ def render_skill_list(
     return "\n".join(lines)
 
 
+def _skill_list_rows(entries: Sequence[ManagedSkill]) -> list[str]:
+    return [f"- {skill.name}: {skill.description}" for skill in entries]
+
+
 def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
     return join_prompt_blocks(render_skill_catalog_blocks(skills))
 
 
 def render_skill_catalog_blocks(skills: Sequence[ManagedSkill]) -> list[RenderedPromptBlock]:
-    rows = render_skill_list(skills, page=1)
+    entries, next_page = _page(skills, 1)
+    rows = "\n".join(_skill_list_rows(entries))
     if not rows:
         if any(skill.disable_model_invocation for skill in skills):
             return [render_prompt_block("skills-manual-prompt")]
         return []
-    _, next_page = _page(skills, 1)
     blocks = [render_prompt_block("skills-prompt")]
     if next_page is not None:
         blocks.append(render_prompt_block("skills-pagination-prompt"))
     blocks.append(render_prompt_block("skills-catalog", skill_rows=rows))
+    if next_page is not None:
+        notice = render_prompt_block("skills-more-notice", next_page=next_page)
+        blocks.append(RenderedPromptBlock(notice.module_id, "\n" + notice.text))
     return blocks
 
 

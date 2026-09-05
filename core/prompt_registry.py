@@ -78,7 +78,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("show-pages-prompt", "Show Pages Prompt", "show-pages.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("vault-routing-prompt", "Vault Routing Prompt", "vault.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-routing-prompt", "Harness Routing Prompt", "harness.md", leading_newlines=1, trailing_newlines=1),
-    PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("enabled_agents_table",)),
+    PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("enabled_agents_rows",)),
     PromptModule("session-start-prompt", "Session Start Prompt", "session-start.md", trailing_newlines=2, placeholders=("default_session_id",)),
     PromptModule("forked-session-prompt", "Forked Session Prompt", "forked-session.md", trailing_newlines=2, placeholders=("source_session_id", "default_session_id")),
     PromptModule("quick-replies-prompt", "Quick Replies Prompt", "quick-replies.md", leading_newlines=1, trailing_newlines=1),
@@ -95,6 +95,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("runtime-snapshot-open", "Codex Runtime Snapshot Start", "runtime-snapshot-open.md", trailing_newlines=2),
     PromptModule("runtime-snapshot-close", "Codex Runtime Snapshot End", "runtime-snapshot-close.md", leading_newlines=1),
     PromptModule("agent-instructions", "Agent Custom Instructions", "agent-instructions.md", trailing_newlines=2, placeholders=("agent_instructions",)),
+    PromptModule("show-history-heading", "Show History Heading", "show-history-heading.md", leading_newlines=1, trailing_newlines=1),
 )
 
 _MODULES_BY_ID = {module.id: module for module in PROMPT_MODULES}

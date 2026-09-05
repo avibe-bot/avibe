@@ -890,17 +890,35 @@ def cmd_debug_prompt(args) -> int:
 
     if args.debug_command != "prompt" or args.prompt_debug_command != "export":
         return 1
-    from core.prompt_studio_catalog import export_prompt_studio_catalog
+    from core.prompt_studio_catalog import PromptRenderInputError, export_prompt_studio_catalog
 
     context_file = getattr(args, "context_file", None)
+    context = None
     try:
-        context = json.loads(Path(context_file).read_text(encoding="utf-8")) if context_file else None
-        if context_file and not isinstance(context, dict):
-            raise ValueError("Render context must be a JSON object")
+        if context_file:
+            try:
+                raw = Path(context_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PromptRenderInputError("unreadableContext") from exc
+            except UnicodeError as exc:
+                raise PromptRenderInputError("invalidJson") from exc
+            try:
+                context = json.loads(raw)
+            except ValueError as exc:
+                raise PromptRenderInputError("invalidJson") from exc
+            if not isinstance(context, dict):
+                raise PromptRenderInputError("invalidContext")
         payload = export_prompt_studio_catalog(render_context=context)
-    except (OSError, ValueError, TypeError) as exc:
+    except PromptRenderInputError as exc:
         language = _configured_cli_language()
-        print(i18n_t("debug.cli.error.promptExport", language, error=str(exc)), file=sys.stderr)
+        error = i18n_t(f"debug.cli.error.{exc.key}", language, field=exc.field)
+        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError):
+        logger.debug("Prompt export failed", exc_info=True)
+        language = _configured_cli_language()
+        error = i18n_t("debug.cli.error.renderFailed", language)
+        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
         return 1
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
