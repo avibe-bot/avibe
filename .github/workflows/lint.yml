@@ -303,7 +303,6 @@ jobs:
           uv pip install --system dist/*.whl pytest
 
       - name: Prepare Show Runtime manifest for fixture wheels
-        if: matrix.suite == 'packaged-memory'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/prepare_local_show_runtime_manifest.py

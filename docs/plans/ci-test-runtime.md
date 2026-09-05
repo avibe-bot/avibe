@@ -76,3 +76,37 @@ contracts require CI-built distributions. Ruff 0.4.9 and dependency checks passe
 Record complete CI job timestamps and exact-head review inventory before final
 delivery. A runner-specific cause for the observed slowdown remains unproven until
 measured directly. Local reductions are not a prediction of CI wall-time savings.
+
+### First CI correction
+
+Run 33959161877 exposed a missing shared prerequisite after the matrix split:
+the installer suite's released-generation upgrade test also builds source wheels,
+so it needs the Show Runtime manifest just like the packaged Memory suite.
+Manifest preparation must run unconditionally on both isolated runners. Keep the
+real source-wheel build and the failure, rather than replacing it with an artifact
+shortcut or allowing that case to skip. The workflow contract now asserts this
+shared preparation explicitly. This is a CI finding; review-head counts are
+recorded separately from CI failures.
+
+The consuming upgrade helper was then run locally with the verified release
+manifest and built both real `9999.0.0` core and Memory wheels successfully.
+Workflow/fixture contracts passed again (16 tests). The unauthenticated manifest
+fetch hit a GitHub rate limit locally; the existing validator was used with an
+authenticated `gh` transport, preserving release digest and schema validation.
+
+### Measured rebalance
+
+All six unit shards in run 33959161877 passed. Their complete logs contain all
+398 discovered files exactly once and no failing file exit codes. Harness took
+51s and scheduling 88s, versus 232s and 188s in run 33955817335. Per-file totals
+across the six runners were 289s, 318s, 335s, 354s, 364s and 373s. The whole
+workflow was **not** green because of the manifest failure above.
+
+The orchestrator extends scope to `scripts/ci_unit_test_timings.json`, refreshing
+the complete measured snapshot from those successful unit jobs. The existing
+planner replays that sample at 339-340s per shard; this is a balancing estimate,
+not an observed CI duration. The algorithm and discovery rules remain unchanged.
+
+Review inventory: head `cfe16d930f` passed via bot comment 5551035775, complete
+review/thread collections empty. Zero findings-bearing review heads. The next
+push needs its own exact-head review and fully successful CI.

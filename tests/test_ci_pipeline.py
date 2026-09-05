@@ -58,7 +58,11 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     for suite in suites:
         selected = [step for step in test_steps if step["if"] == f"matrix.suite == '{suite}'"]
         assert len(selected) == 1, f"Every suite must select exactly one regression command: {suite}"
-    assert steps["Prepare Show Runtime manifest for fixture wheels"]["if"] == test_steps[0]["if"]
+    # Both suites build real source wheels, including the released-generation
+    # bridge inside the Docker upgrade test.
+    prepare = steps["Prepare Show Runtime manifest for fixture wheels"]
+    assert not prepare.get("if")
+    assert "python scripts/prepare_local_show_runtime_manifest.py" in prepare["run"]
     assert "tests/test_memory_upgrade_packaged.py -m integration" in test_steps[0]["run"]
     assert "SKIPPED" in test_steps[0]["run"] and "exit 1" in test_steps[0]["run"]
     for test_file in (
