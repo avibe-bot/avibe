@@ -1019,6 +1019,26 @@ def test_socket_verifier_skips_posix_mode_check_on_windows(monkeypatch, socket_p
     assert internal_client._verified_socket_path(socket_path) == socket_path
 
 
+def test_health_sync_rejects_a_stale_socket_path(socket_path) -> None:
+    assert internal_client.health_sync(socket_path, timeout=0.05) is False
+
+
+def test_health_sync_accepts_a_healthy_controller(socket_path) -> None:
+    class HealthyClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, path):
+            assert path == "/internal/health"
+            return httpx.Response(200, json={"ok": True})
+
+    with patch("vibe.internal_client.httpx.Client", return_value=HealthyClient()):
+        assert internal_client.health_sync(socket_path, timeout=0.05) is True
+
+
 def test_show_access_clients_round_trip(socket_path):
     app = FastAPI()
     captured: list[tuple[str, dict]] = []

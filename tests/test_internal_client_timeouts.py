@@ -53,6 +53,8 @@ from vibe.internal_client import (
     memory_status_sync,
     memory_wake,
 )
+from vibe.model_hub_client import MODEL_HUB_RPC_TIMEOUT_SECONDS
+from vibe.runtime import SERVICE_SLOW_START_TIMEOUT_SECONDS
 
 
 def _ui_dependency_poll_budget_seconds() -> float:
@@ -165,12 +167,9 @@ def test_memory_operations_have_no_reporting_timeout() -> None:
         assert "timeout" not in inspect.signature(operation).parameters
 
 
-def test_install_client_covers_the_dependency_job_budget() -> None:
-    # The UI polls the install job for its full budget. A shorter transport
-    # deadline marks the job failed while the controller is still downloading,
-    # extracting, and activating.
+def test_dependency_poller_outlasts_every_install_transport() -> None:
+    # The UI must keep polling past both direct Memory installation and CPA's
+    # sequential controller-readiness plus install-RPC bounds.
     budget = _ui_dependency_poll_budget_seconds()
-    assert MEMORY_INSTALL_TIMEOUT_SECONDS >= budget - 30
-    # ...but not beyond it: outliving the poller only moves the false failure to
-    # the UI side.
     assert MEMORY_INSTALL_TIMEOUT_SECONDS <= budget
+    assert SERVICE_SLOW_START_TIMEOUT_SECONDS + MODEL_HUB_RPC_TIMEOUT_SECONDS < budget

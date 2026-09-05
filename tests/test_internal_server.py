@@ -2237,6 +2237,58 @@ def test_model_hub_rpc_is_stably_disabled_without_touching_service(monkeypatch):
     assert controller.model_hub_service.mock_calls == []
 
 
+def test_model_hub_dependency_rpc_remains_available_when_feature_is_disabled(monkeypatch):
+    from core.handlers.model_hub.adapter import (
+        EngineEnsureResult,
+        EngineHealth,
+        EngineStatus,
+    )
+
+    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    controller = _build_controller_double()
+    controller.model_hub_service = None
+    controller.model_hub_engine_adapter = SimpleNamespace(
+        ensure_installed=AsyncMock(
+            return_value=EngineEnsureResult(
+                status=EngineStatus(
+                    health=EngineHealth.NOT_STARTED,
+                    installed_version="v7.2.149",
+                    verified=True,
+                    listen_host="127.0.0.1",
+                    listen_port=None,
+                    last_check_iso="2026-09-05T00:00:00Z",
+                    host_platform="linux-amd64",
+                ),
+                changed=True,
+            )
+        )
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/model-hub",
+                json={
+                    "operation": "runtime_ensure_dependency",
+                    "payload": {"force": True, "offline": True},
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["enabled"] is False
+    assert result["changed"] is True
+    assert result["status"]["installed_version"] == "v7.2.149"
+    controller.model_hub_engine_adapter.ensure_installed.assert_awaited_once_with(
+        force=True,
+        offline=True,
+    )
+
+
 async def _publish_event_round_trip():
     from core import inbox_events
 

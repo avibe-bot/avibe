@@ -614,7 +614,7 @@ vibe doctor
 - checks backend CLI availability
 - checks runtime home migration state
 - checks runtime process, install, and restart metadata state
-- checks askill, avault, Git Runtime, Show Runtime, tmux, and Node.js through one dependency diagnostic group
+- checks askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js through one dependency diagnostic group
 - `vibe doctor --deep` probes missing dependency endpoints without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
 
@@ -629,6 +629,7 @@ vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
 vibe doctor repair git-runtime --yes
+vibe doctor repair model-hub-engine --yes
 vibe doctor repair show-runtime --yes
 vibe doctor repair tmux --yes
 ```

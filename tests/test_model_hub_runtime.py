@@ -774,32 +774,32 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     assert manifest == {
         "name": "cliproxyapi",
         "resolution": "resolved",
-        "version": "v7.2.105",
-        "source_sha": "4a2eb54dc6bf943196be4fb515e6a9407a4db143",
+        "version": "v7.2.149",
+        "source_sha": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_darwin_aarch64.tar.gz",
-                "size_bytes": 18975205,
-                "sha256": "641de855c486d373b3c69704bec55a5c5ce3efa523149cc9bd253f76040470d7",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
+                "size_bytes": 19723285,
+                "sha256": "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_darwin_amd64.tar.gz",
-                "size_bytes": 20513376,
-                "sha256": "c9332b8401cd54d357e7c66e88bce603fdb497701a7fa86ee2f82bb1aad846b9",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
+                "size_bytes": 21334889,
+                "sha256": "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_linux_amd64.tar.gz",
-                "size_bytes": 20558559,
-                "sha256": "f432872815fe85ac4b0f83b5598253725eea70aae4c95025194cf558f6acef31",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
+                "size_bytes": 21385633,
+                "sha256": "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.105/CLIProxyAPI_7.2.105_linux_aarch64.tar.gz",
-                "size_bytes": 18559648,
-                "sha256": "b72245cf1958251330eae9e17f1fc5a077f94146b2eea30e23ab5012c6059981",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
+                "size_bytes": 19287559,
+                "sha256": "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
             },
         ],
     }
@@ -839,9 +839,56 @@ def test_contract_manifest_filters_unsupported_override_assets(
     assert "win32-x64" not in {asset["platform"] for asset in manager.contract_manifest()["assets"]}
 
     monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    assert manager.supports_host_platform() is False
     unsupported = manager.ensure()
     assert unsupported["ok"] is False
     assert unsupported["reason"] == "model_hub_engine_platform_unsupported"
+
+
+def test_host_support_requires_an_asset_in_the_selected_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
+    payload = json.loads(
+        Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "probe", offline=True)
+    host_platform = manager.host_platform()
+    payload["assets"] = [
+        asset for asset in payload["assets"] if asset["platform"] != host_platform
+    ]
+    manifest_path = tmp_path / "missing-host-asset.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    manager = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+        offline=True,
+    )
+
+    assert manager.supports_host_platform() is False
+
+
+def test_foreign_pointer_inspection_cannot_hide_an_unsupported_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "current.json").write_text(
+        json.dumps({"platform": "linux-amd64"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    manager = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+
+    status = manager.status()
+
+    assert status["reason"] == "model_hub_engine_install_inspection_failed"
+    assert manager.supports_host_platform() is False
 
 
 def test_install_admission_fetches_an_uncached_remote_manifest(tmp_path: Path) -> None:
@@ -1248,30 +1295,30 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
         (
             "darwin-arm64",
             "darwin-arm64",
-            18975205,
-            "641de855c486d373b3c69704bec55a5c5ce3efa523149cc9bd253f76040470d7",
-            "e8da44e6bf9d85fe7b98a2843d33ff509156727222d6a1ad5dd1a79709849337",
+            19723285,
+            "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
+            "048c0089aa53948af91249bb97f172b2392cce5968473a5a3dbb06f3d742c2e7",
         ),
         (
             "darwin-x64",
             "darwin-x64",
-            20513376,
-            "c9332b8401cd54d357e7c66e88bce603fdb497701a7fa86ee2f82bb1aad846b9",
-            "07a607965a40f782f63625c557eeeddb39b08e08b1a3057881bb13fe6e887109",
+            21334889,
+            "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
+            "05388e65f58493325aff1e2dfa33e727e7fa732b2d9eb651ec13315689e418e5",
         ),
         (
             "linux-x64",
             "linux-amd64",
-            20558559,
-            "f432872815fe85ac4b0f83b5598253725eea70aae4c95025194cf558f6acef31",
-            "2717656b33a0d76a7c02b451797341e8791f740a72d4e71577140886f42ba628",
+            21385633,
+            "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
+            "b0f163bfd94e8cd64895000662f26f255d2a72b5c3f5009a97e8dc91ed9b8107",
         ),
         (
             "linux-arm64",
             "linux-arm64",
-            18559648,
-            "b72245cf1958251330eae9e17f1fc5a077f94146b2eea30e23ab5012c6059981",
-            "8c389d565b8555d5788314e56258c64d675ff76bb9e32047d339088f2789b07e",
+            19287559,
+            "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
+            "24799863d478579ec3eef5ccc83769f79df749a30282ce1e2063708a03826e5b",
         ),
     ],
 )
@@ -3164,13 +3211,182 @@ def test_adapter_applies_changed_install_to_running_engine(
             state_store=EngineStateStore(tmp_path / "state"),
         )
 
-        status = await adapter.ensure_installed()
+        result = await adapter.ensure_installed()
 
-        assert status.installed_version == "v7.2.95"
-        assert status.verified is True
+        assert result.status.installed_version == "v7.2.95"
+        assert result.status.verified is True
+        assert result.changed is changed
         assert supervisor.restarts == expected_restarts
 
     asyncio.run(run())
+
+
+def test_adapter_routes_offline_dependency_ensure_through_its_supervisor(
+    tmp_path: Path,
+) -> None:
+    calls: list[object] = []
+
+    class OfflineInstaller:
+        def ensure(self, *, force=False):
+            calls.append(("offline-ensure", force))
+            return {"ok": True, "changed": True}
+
+    class Installer:
+        def offline_copy(self):
+            calls.append("offline-copy")
+            return OfflineInstaller()
+
+        def ensure(self, *, force=False):
+            raise AssertionError("offline ensure must not use the online installer")
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.installer = Installer()
+
+        def restart_if_running(self) -> None:
+            calls.append("restart")
+
+        def status(self):
+            return {
+                "status": {
+                    "health": "not_started",
+                    "installed_version": "v7.2.149",
+                    "verified": True,
+                    "listening": None,
+                    "last_check": None,
+                }
+            }
+
+    async def run() -> None:
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=EngineStateStore(tmp_path / "state"),
+        )
+
+        result = await adapter.ensure_installed(force=True, offline=True)
+
+        assert result.changed is True
+        assert result.status.installed_version == "v7.2.149"
+        assert calls == ["offline-copy", ("offline-ensure", True), "restart"]
+
+    asyncio.run(run())
+
+
+def test_direct_ensure_failure_is_durable_across_manager_reload(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    reason = "model_hub_engine_archive_download_failed"
+
+    def fail_ensure(_manager, **kwargs):
+        kwargs["on_resolved"](RUNTIME_INSTALL_TARGET)
+        return {"ok": False, "reason": reason}
+
+    monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", fail_ensure)
+    runtime_dir = tmp_path / "runtime"
+
+    result = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).ensure()
+    reloaded = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+
+    assert result == {"ok": False, "reason": reason}
+    assert reloaded.install_state()["reason"] == reason
+    assert reloaded.status()["status"] == "error"
+    assert reloaded.status()["reason"] == reason
+
+    def succeed_ensure(_manager, **kwargs):
+        kwargs["on_resolved"](RUNTIME_INSTALL_TARGET)
+        return {"ok": True, "changed": False}
+
+    monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", succeed_ensure)
+
+    assert reloaded.ensure()["ok"] is True
+    assert EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).install_state() is None
+
+
+def test_dependency_ensure_settles_an_orphaned_install_claim(
+    tmp_path: Path,
+) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    installer = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    manifest = installer._load_manifest(allow_network=False)
+    assert manifest is not None
+    manifest_archive = installer._manifest_archive_for_platform(manifest)
+    assert manifest_archive is not None
+    target = installer._install_target_identity(manifest, manifest_archive)
+    assert installer.transition_install_claim(
+        InstallClaimTransition.CREATE,
+        generation=RUNTIME_INSTALL_GENERATION_A,
+        target=target,
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=EngineSupervisor(
+            installer=installer,
+            state_store=EngineStateStore(tmp_path / "state"),
+        )
+    )
+
+    result = asyncio.run(adapter.ensure_installed())
+
+    assert result.status.health is EngineHealth.NOT_STARTED
+    assert result.status.verified is True
+    assert installer.install_state() is None
+
+
+def test_direct_ensure_success_preserves_a_newer_install_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    _create_runtime_install_claim(installer)
+
+    def succeed_after_claim_moves(_manager, **kwargs):
+        kwargs["on_resolved"](RUNTIME_INSTALL_TARGET)
+        assert installer.transition_install_claim(
+            InstallClaimTransition.RESUME,
+            generation=RUNTIME_INSTALL_GENERATION_B,
+            previous_generation=RUNTIME_INSTALL_GENERATION_A,
+            target=RUNTIME_INSTALL_TARGET,
+        )
+        return {"ok": True, "changed": False}
+
+    monkeypatch.setattr(
+        managed_runtime.ManagedRuntimeManager,
+        "ensure",
+        succeed_after_claim_moves,
+    )
+
+    assert installer.ensure()["ok"] is True
+    surviving = installer.install_state()
+    assert surviving is not None
+    assert surviving["state"] == "installing"
+    assert surviving["generation"] == RUNTIME_INSTALL_GENERATION_B
+
+
+def test_direct_ensure_lock_contention_is_transient(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def contend(_manager, **_kwargs):
+        return {
+            "ok": False,
+            "changed": False,
+            "reason": "model_hub_engine_install_already_running",
+            "skipped": True,
+        }
+
+    monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", contend)
+    runtime_dir = tmp_path / "runtime"
+
+    result = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).ensure()
+    reloaded = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+
+    assert result["reason"] == "model_hub_engine_install_already_running"
+    assert reloaded.install_state() is None
+    assert reloaded.status()["status"] != "error"
 
 
 def test_runtime_install_state_survives_adapter_reload_and_settles_once(

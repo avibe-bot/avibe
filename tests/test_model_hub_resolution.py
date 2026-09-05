@@ -24,6 +24,7 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -179,8 +180,8 @@ class FakeAdapter:
         self.refreshable_credential_refs: set[str] = set()
         self.capability_queries: list[str] = []
 
-    async def ensure_installed(self):
-        return await self.status()
+    async def ensure_installed(self, *, force=False, offline=False):
+        return EngineEnsureResult(status=await self.status(), changed=force)
 
     async def start(self):
         return await self.status()

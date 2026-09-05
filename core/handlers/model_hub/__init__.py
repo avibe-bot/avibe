@@ -5,7 +5,9 @@ from .service import (
     ModelHubError,
     ModelHubService,
     create_default_service,
+    ensure_runtime_dependency,
     load_opencode_public_models,
+    runtime_dependency_payload,
 )
 
 __all__ = [
@@ -13,5 +15,7 @@ __all__ = [
     "ModelHubError",
     "ModelHubService",
     "create_default_service",
+    "ensure_runtime_dependency",
     "load_opencode_public_models",
+    "runtime_dependency_payload",
 ]

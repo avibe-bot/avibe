@@ -9,6 +9,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Loader2,
+  Network,
   RefreshCw,
   ShieldCheck,
   SquareTerminal,
@@ -30,8 +31,8 @@ import { errorMessage } from '@/lib/errorMessage';
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
 // action), reusing the Backends-page card shape. askill + the Show Page
-// runtime auto-install during `vibe runtime prepare`; this page surfaces their
-// status and offers manual re-check / install / repair. Backend CLIs are
+// runtime and CPA auto-install during `vibe runtime prepare`; this page surfaces
+// their status and offers manual re-check / install / repair. Backend CLIs are
 // managed on the Backends tab — linked, not duplicated.
 
 type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
@@ -39,6 +40,7 @@ type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
+  'model-hub-engine': { icon: Network, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan-ink' },
   'memory-package': { icon: Brain, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
   'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
@@ -127,7 +129,10 @@ export const SettingsDependenciesPage: React.FC = () => {
     if (d.status === 'error') return t('settings.dependencies.statusError');
     if (d.status === 'not_required') return t('settings.dependencies.statusNotRequired');
     if (!d.installed) return t('settings.dependencies.statusMissing');
-    if (d.status === 'upgrade_required') return t('settings.dependencies.statusUpgradeRequired');
+    if (d.status === 'upgrade_required') {
+      const word = t('settings.dependencies.statusUpgradeRequired');
+      return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
+    }
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
     return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
   };
@@ -137,6 +142,19 @@ export const SettingsDependenciesPage: React.FC = () => {
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
     return d.installed ? 'success' : 'destructive';
+  };
+
+  const actionText = (d: DependencyItem, installing: boolean): string => {
+    if (installing) return t('settings.dependencies.installing');
+    if (d.status === 'upgrade_required') return t('settings.dependencies.update');
+    if (d.id === 'model-hub-engine' && d.status === 'error') {
+      return t('settings.dependencies.repair');
+    }
+    if (!d.installed) return t('settings.dependencies.install');
+    if (d.id === 'show-runtime' || d.id === 'memory-runtime') {
+      return t('settings.dependencies.repair');
+    }
+    return t('settings.dependencies.reinstall');
   };
 
   return (
@@ -185,7 +203,18 @@ export const SettingsDependenciesPage: React.FC = () => {
                     </Badge>
                   )
                 }
-                detail={t(`settings.dependencies.items.${d.id}.detail`)}
+                detail={
+                  <>
+                    {t(`settings.dependencies.items.${d.id}.detail`)}
+                    {d.id === 'model-hub-engine' && d.latest_version && (
+                      <span className="mt-1 block font-mono text-[11px]">
+                        {t('settings.dependencies.targetVersion', {
+                          version: String(d.latest_version).replace(/^v/i, ''),
+                        })}
+                      </span>
+                    )}
+                  </>
+                }
                 actions={
                   <>
                     <Badge variant={statusVariant(d)} className="font-mono">
@@ -208,18 +237,12 @@ export const SettingsDependenciesPage: React.FC = () => {
                       >
                         {installing ? (
                           <Loader2 className="size-3.5 animate-spin" />
-                        ) : d.installed ? (
+                        ) : d.installed || d.status === 'error' ? (
                           <RefreshCw className="size-3.5" />
                         ) : (
                           <Download className="size-3.5" />
                         )}
-                        {installing
-                          ? t('settings.dependencies.installing')
-                          : d.installed
-                            ? d.id === 'show-runtime' || d.id === 'memory-runtime'
-                              ? t('settings.dependencies.repair')
-                              : t('settings.dependencies.reinstall')
-                            : t('settings.dependencies.install')}
+                        {actionText(d, installing)}
                       </Button>
                     )}
                   </>

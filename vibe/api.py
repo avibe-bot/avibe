@@ -8676,6 +8676,7 @@ def reconcile_askill_auto_update() -> dict:
 _ALLOWED_DEP_INSTALLS = {
     "askill",
     "avault",
+    "model-hub-engine",
     "show-runtime",
     "memory-package",
     "memory-runtime",
@@ -8688,6 +8689,10 @@ _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
 _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
 _STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
 _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS = 60.0
+_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS = 0.05
+_MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON = (
+    "model_hub_engine_platform_unsupported"
+)
 
 
 @dataclass(frozen=True)
@@ -9093,6 +9098,175 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
     )
 
 
+def _model_hub_engine_dependency_status() -> dict:
+    """Project the pinned CPA runtime into the shared dependency contract."""
+
+    try:
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        manager = EngineRuntimeManager(offline=True)
+        managed = manager.status()
+        platform_supported = manager.supports_host_platform()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not inspect the Model Hub engine dependency", exc_info=True)
+        return {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": None,
+            "version": None,
+            "latest_version": None,
+            "has_update": False,
+            "status": "error",
+            "action_class": "operator_only",
+            "reason": "model_hub_engine_install_inspection_failed",
+            "inspection_error": {"kind": type(exc).__name__, "message": str(exc)},
+        }
+
+    installed = bool(managed.get("installed"))
+    selected_version = managed.get("selected_version")
+    matches_manifest = managed.get("matches_manifest")
+    reason = managed.get("reason")
+    if not platform_supported:
+        status = "unsupported"
+        action_class = "none"
+    elif not selected_version:
+        status = "error"
+        action_class = "operator_only"
+    elif managed.get("status") == "error":
+        status = "error"
+        action_class = "repairable"
+    elif installed and matches_manifest is True:
+        status = "ready"
+        action_class = "none"
+    elif installed:
+        status = "upgrade_required"
+        action_class = "repairable"
+    else:
+        status = "missing"
+        action_class = "repairable"
+    return {
+        "id": "model-hub-engine",
+        "kind": "runtime",
+        "required": platform_supported,
+        "installed": installed,
+        "version": managed.get("version"),
+        "latest_version": selected_version,
+        "has_update": bool(installed and matches_manifest is False),
+        "status": status,
+        "action_class": action_class,
+        "reason": reason,
+        "download_error": managed.get("download_error"),
+    }
+
+
+def _model_hub_controller_owns_engine(socket_path: Path) -> bool:
+    """Wait out controller startup before deciding direct-install ownership.
+
+    A missing dispatch socket means only that the endpoint is not ready. The
+    service pid reservation and instance lock identify the controller owner
+    before durable recovery completes and the socket is bound. If that owner
+    remains alive through the startup deadline, it retains ownership even when
+    the endpoint never becomes ready; returning true prevents a competing
+    direct install from mutating the runtime under it.
+    """
+
+    from vibe import runtime
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+    if owner_pid is None:
+        return False
+
+    deadline = time.monotonic() + runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+    from vibe.internal_client import health_sync
+
+    while True:
+        owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+        if owner_pid is None:
+            return False
+        remaining = deadline - time.monotonic()
+        if health_sync(
+            socket_path,
+            timeout=min(1.0, max(0.05, remaining)),
+        ):
+            return True
+        if remaining <= 0:
+            return True
+        time.sleep(min(_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _model_hub_engine_ensure_result(result: dict) -> dict:
+    """Project an unsupported host as a successful non-applicable ensure."""
+
+    if result.get("reason") != _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON:
+        return result
+    return {
+        **result,
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "skipped": True,
+        "status": "unsupported",
+    }
+
+
+def ensure_model_hub_engine_installed(
+    *,
+    force: bool = False,
+    offline: bool | None = None,
+) -> dict:
+    """Converge CPA to this Avibe release's pin without changing run intent."""
+
+    from core.handlers.model_hub import ModelHubError
+    from vibe.internal_client import default_socket_path
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    def ensure_directly() -> dict:
+        return _model_hub_engine_ensure_result(
+            EngineRuntimeManager(offline=offline).ensure(force=force)
+        )
+
+    socket_path = default_socket_path().expanduser().resolve()
+    if not _model_hub_controller_owns_engine(socket_path):
+        return ensure_directly()
+
+    try:
+        from vibe.model_hub_client import ModelHubRemoteService
+
+        runtime = ModelHubRemoteService().ensure_runtime_dependency(
+            force=force,
+            offline=offline is True,
+        )
+    except ModelHubError as exc:
+        if exc.code == "runtime_platform_unsupported":
+            return _model_hub_engine_ensure_result(
+                {
+                    "ok": False,
+                    "installed": False,
+                    "changed": False,
+                    "reason": _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON,
+                    "message": exc.detail,
+                }
+            )
+        dependency_reason = exc.data.get("reason")
+        return {
+            "ok": False,
+            "reason": dependency_reason or exc.code,
+            "message": exc.detail,
+        }
+
+    status = runtime.get("status") if isinstance(runtime.get("status"), dict) else {}
+    installed = bool(status.get("verified"))
+    return {
+        "ok": installed,
+        "installed": installed,
+        "changed": bool(runtime.get("changed")),
+        "version": status.get("installed_version"),
+        "status": status,
+        "reason": None if installed else status.get("error_key") or "model_hub_engine_install_failed",
+    }
+
+
 def dependencies_status(*, offline: bool = False) -> dict:
     """Status of the required local runtime dependencies for the Dependencies
     settings page: askill, local managed runtimes, and the shared Node.js
@@ -9163,6 +9337,8 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "inspection_error": srt.get("inspection_error"),
         }
     )
+
+    deps.append(_model_hub_engine_dependency_status())
 
     memory_package, memory_runtime = _memory_dependencies_status(offline=offline)
     deps.extend((memory_package, memory_runtime))
@@ -9837,6 +10013,7 @@ def reconcile_startup_dependencies() -> dict:
         "node": {"ok": False, "status": "unknown"},
         "askill": {"ok": False, "status": "unknown"},
         "avault": {"ok": False, "status": "unknown"},
+        "model_hub_engine": {"ok": False, "status": "unknown"},
         "show_runtime": {"ok": False, "status": "unknown"},
         "tmux": {"ok": False, "status": "unknown"},
     }
@@ -9857,6 +10034,17 @@ def reconcile_startup_dependencies() -> dict:
             logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
             avault = {"ok": False, "message": str(exc)}
         result["avault"] = avault
+
+        try:
+            model_hub_engine = ensure_model_hub_engine_installed(force=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Startup dependency reconcile failed to ensure the Model Hub engine: %s",
+                exc,
+                exc_info=True,
+            )
+            model_hub_engine = {"ok": False, "message": str(exc)}
+        result["model_hub_engine"] = model_hub_engine
 
         try:
             from core.show_runtime import ShowRuntimeAvailability, get_show_runtime_manager
@@ -9920,6 +10108,7 @@ def reconcile_startup_dependencies() -> dict:
             bool(result["memory_package"].get("ok"))
             and bool(result["askill"].get("ok"))
             and bool(result["avault"].get("ok"))
+            and bool(result["model_hub_engine"].get("ok"))
             and bool(result["show_runtime"].get("ok"))
         )
         return result
@@ -9970,6 +10159,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_askill_installed(force=True)
             elif dep == "avault":
                 result = ensure_avault_installed(force=True)
+            elif dep == "model-hub-engine":
+                result = ensure_model_hub_engine_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
             elif dep == "memory-package":

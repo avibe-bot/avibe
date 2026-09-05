@@ -28,6 +28,7 @@ from config.v2_config import (
 from core.agent_auth_service import BackendLoginInProgressError
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
     EngineHealth,
     EngineStatus,
     ObservationDiscovery,
@@ -161,6 +162,8 @@ class FakeAdapter:
         self.start_calls = 0
         self.stop_runtime_calls = 0
         self.install_calls = 0
+        self.ensure_calls: list[bool] = []
+        self.ensure_offline_calls: list[bool] = []
         self.credential_count = 0
         self.observation: SourceObservation | None = None
         self.observed_protocol_orders: list[tuple[str, ...]] = []
@@ -168,8 +171,13 @@ class FakeAdapter:
         self.refreshable_credential_refs: set[str] = set()
         self.discovery_credential_refs: list[str] = []
 
-    async def ensure_installed(self):
-        return await self.status()
+    async def ensure_installed(self, *, force=False, offline=False):
+        self.ensure_calls.append(force)
+        self.ensure_offline_calls.append(offline)
+        return EngineEnsureResult(
+            status=await self.status(),
+            changed=force,
+        )
 
     async def install(self):
         self.install_calls += 1
@@ -945,6 +953,7 @@ def test_runtime_recovery_starts_only_for_persisted_user_intent(tmp_path):
     asyncio.run(service.recover_runtime_intent())
 
     assert adapter.start_calls == 0
+    assert adapter.ensure_calls == []
 
     store.config.enabled = True
     restarted = ModelHubService(
@@ -958,6 +967,7 @@ def test_runtime_recovery_starts_only_for_persisted_user_intent(tmp_path):
     asyncio.run(restarted.recover_runtime_intent())
 
     assert adapter.start_calls == 1
+    assert adapter.ensure_calls == [False]
 
 
 def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
@@ -1169,6 +1179,32 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
     assert calls == [("runtime_install", None)]
 
 
+def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {
+            "contract_version": 7,
+            "changed": True,
+            "status": {"health": "not_started", "verified": True},
+        }
+
+    monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
+
+    runtime = ModelHubRemoteService().ensure_runtime_dependency(
+        force=True,
+        offline=True,
+    )
+
+    assert runtime["changed"] is True
+    assert calls == [
+        ("runtime_ensure_dependency", {"force": True, "offline": True})
+    ]
+
+
 def test_reorder_client_preserves_explicit_null_order(monkeypatch):
     from vibe import model_hub_client
 
@@ -1247,6 +1283,64 @@ def test_runtime_install_is_allowlisted_by_controller_rpc(tmp_path):
 
     assert runtime["status"]["health"] == "installing"
     assert adapter.install_calls == 1
+
+
+def test_runtime_dependency_ensure_is_allowlisted_without_starting_engine(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    class PinnedAdapter(FakeAdapter):
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_STARTED,
+                installed_version="v7.2.149",
+                verified=True,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    adapter = PinnedAdapter()
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(
+        dispatch_model_hub_rpc(
+            service,
+            "runtime_ensure_dependency",
+            {"force": True, "offline": True},
+        )
+    )
+
+    assert runtime["changed"] is True
+    assert runtime["enabled"] is False
+    assert runtime["status"]["installed_version"] == "v7.2.149"
+    assert adapter.ensure_calls == [True]
+    assert adapter.ensure_offline_calls == [True]
+    assert adapter.start_calls == 0
+
+
+def test_runtime_dependency_ensure_preserves_closed_install_failure_reason(tmp_path):
+    class InstallFailure(RuntimeError):
+        reason = "model_hub_engine_archive_download_failed"
+
+    class FailingAdapter(FakeAdapter):
+        async def ensure_installed(self, *, force=False, offline=False):
+            raise InstallFailure
+
+    service, _store, _adapter = _service(tmp_path, adapter=FailingAdapter())
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.runtime_ensure_dependency())
+
+    assert exc_info.value.code == "engine_down"
+    assert exc_info.value.data == {
+        "reason": "model_hub_engine_archive_download_failed"
+    }
 
 
 def test_runtime_status_reports_observed_not_installed_state(tmp_path):
