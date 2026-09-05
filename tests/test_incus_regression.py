@@ -3582,7 +3582,7 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
 @pytest.mark.parametrize("recorded", [False, True], ids=["new-row", "existing-row"])
 @pytest.mark.parametrize(
     "fail_at",
-    ["require_runtime_seed_env", "ensure_project_and_instance", "sync_source"],
+    ["require_runtime_seed_env", "ensure_project_and_instance", "sync_source", "prepare_show_runtime"],
 )
 def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str, recorded: bool, holds_project: bool
@@ -3675,8 +3675,9 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
         "write_metadata",
         "prepare_show_runtime",
         "restart_and_verify",
+        "restart_service_after_failed_update",
     ):
-        monkeypatch.setattr(incus_regression, name, record(name))
+        monkeypatch.setattr(incus_regression, name, record(name), raising=False)
 
     args = argparse.Namespace(
         target="worktree",
@@ -3707,6 +3708,8 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
         incus_regression.cmd_up(args)
 
     assert fail_at in calls
+    recovery_calls = calls.count("restart_service_after_failed_update")
+    assert recovery_calls == (1 if fail_at in {"sync_source", "prepare_show_runtime"} else 0)
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
     assert ("demo-branch" in mapping) == holds_project
     if holds_project:
@@ -4514,7 +4517,13 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
     assert "pip install -e ." not in joined
 
 
-def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() -> None:
+@pytest.mark.parametrize(
+    ("timeout_env", "expected_timeout"),
+    [(None, incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS), ("900", 900)],
+)
+def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install(
+    monkeypatch: pytest.MonkeyPatch, timeout_env: str | None, expected_timeout: int
+) -> None:
     commands = []
     build_timeouts = []
 
@@ -4541,6 +4550,9 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() ->
         ui_host="127.0.0.1",
         ui_port=5123,
     )
+    monkeypatch.delenv("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS", raising=False)
+    if timeout_env is not None:
+        monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS", timeout_env)
 
     incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
 
@@ -4548,7 +4560,7 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() ->
     assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
     assert "npm run bundle:vibe-remote" in joined
     assert 'install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"' in joined
-    assert build_timeouts == [incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS]
+    assert build_timeouts == [expected_timeout]
     build_command = next(command for command in commands if "git clone --depth 1" in command)
     assert build_command.index("VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required") < build_command.index("git clone")
     assert joined.count("vibe runtime prepare --strict") == 2

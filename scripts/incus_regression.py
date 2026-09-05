@@ -1706,6 +1706,10 @@ def stop_service_for_update(runner: Runner, target: RegressionTarget, *, remote:
     runner.run(root_exec(target, f"systemctl stop {SERVICE_NAME} || true", remote=remote), check=False)
 
 
+def restart_service_after_failed_update(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    runner.run(root_exec(target, f"systemctl start {SERVICE_NAME} || true", remote=remote), check=False)
+
+
 def migrate_legacy_backend_runtimes(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
     """Move pre-#545 root-global backends into the service user's home.
 
@@ -2358,7 +2362,7 @@ fi
 """.strip(),
             remote=remote,
         ),
-        timeout=SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS,
+        timeout=env_int("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS") or SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS,
     )
     result = runner.run(
         tenant_exec(target, f"{runtime_env_prefix} {VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote),
@@ -2513,6 +2517,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     # otherwise reach that handler with no runner to ask through.
     runner = Runner(dry_run=args.dry_run)
     reservation: WorktreeReservation | None = None
+    stopped_service_target: RegressionTarget | None = None
     try:
         with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run):
             with metadata.locked(dry_run=args.dry_run):
@@ -2550,6 +2555,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             if not args.dry_run and not seed_requires_env and should_seed_state(runner, target, reset_mode=args.reset_mode, remote=args.remote):
                 require_runtime_seed_env()
             stop_service_for_update(runner, target, remote=args.remote)
+            stopped_service_target = target
             if seed_requires_env or loaded_env_file is not None or args.dry_run:
                 write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
             else:
@@ -2585,12 +2591,15 @@ def cmd_up(args: argparse.Namespace) -> int:
             # restarted process cannot keep serving code loaded before preparation.
             prepare_show_runtime(runner, target, remote=args.remote)
             restart_and_verify(runner, target, remote=args.remote)
+            stopped_service_target = None
             reservation.complete()
     except BaseException:
         # Not `Exception`: Ctrl-C is how an `up` is abandoned in practice, and a
         # KeyboardInterrupt would otherwise leave exactly the row this exists for.
         # `None` covers failing before the row was written -- resolving a target,
         # or waiting on the update lock -- where there is nothing to give back.
+        if stopped_service_target is not None:
+            restart_service_after_failed_update(runner, stopped_service_target, remote=args.remote)
         if reservation is not None:
             reservation.release(runner)
         raise
