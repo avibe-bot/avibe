@@ -1712,8 +1712,23 @@ def test_unreadable_source_state_is_discarded_rebuilt_and_reaches_ready(
     sources_path = store.root / "sources.json"
     sources_path.write_text(persisted, encoding="utf-8")
 
+    with pytest.raises(EngineStateError):
+        store.revoke_credential(credential_ref)
+    assert store.credential_metadata(credential_ref)["value"] == "upstream-secret"
+    assert sources_path.read_text(encoding="utf-8") == persisted
+    assert not sources_path.with_name("sources.json.invalid").exists()
+
+    async def sync_and_start() -> None:
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+        await adapter.sync_sources([_binding(credential_ref)])
+        try:
+            status = await adapter.start()
+            assert status.health is EngineHealth.OK
+        finally:
+            await adapter.stop()
+
     with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.state"):
-        store.sync_sources([_binding(credential_ref)])
+        asyncio.run(sync_and_start())
 
     warnings = [
         record
@@ -1727,13 +1742,6 @@ def test_unreadable_source_state_is_discarded_rebuilt_and_reaches_ready(
     assert sources_path.with_name("sources.json.invalid").read_text(encoding="utf-8") == persisted
     rebuilt = json.loads(sources_path.read_text(encoding="utf-8"))
     assert rebuilt["sources"][0]["model_reasoning_efforts"] == []
-
-    try:
-        supervisor.ensure_running()
-        assert supervisor.status()["status"]["health"] == "ok"
-    finally:
-        supervisor.stop()
-
 
 def test_valid_source_state_is_loaded_without_touching_the_file(
     tmp_path: Path,

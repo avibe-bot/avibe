@@ -1326,7 +1326,10 @@ class CLIProxyEngineAdapter:
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
         async with self._routing_lock:
-            previous = await asyncio.to_thread(self.state_store.list_sources)
+            try:
+                previous = await asyncio.to_thread(self.state_store.list_sources)
+            except EngineStateError:
+                previous = []
             was_running = await asyncio.to_thread(self.supervisor.client_if_running) is not None
             await asyncio.to_thread(self.state_store.sync_sources, bindings)
             try:

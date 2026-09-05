@@ -123,9 +123,8 @@ class EngineStateStore:
 
     def list_sources(self) -> list[SourceRecord]:
         with self._lock:
-            path = self.root / "sources.json"
             try:
-                payload = self._read_json(path) or {}
+                payload = self._read_json(self.root / "sources.json") or {}
                 raw_sources = payload.get("sources", [])
                 if not isinstance(raw_sources, list):
                     raise EngineStateError("invalid engine source state")
@@ -134,15 +133,8 @@ class EngineStateStore:
                     for item in raw_sources
                     if isinstance(item, dict)
                 ]
-            except EngineStateError as exc:
-                self._discard_invalid_state_file(path, exc)
-                return []
             except (KeyError, TypeError, ValueError) as exc:
-                self._discard_invalid_state_file(
-                    path,
-                    EngineStateError(f"invalid engine source state: {exc}"),
-                )
-                return []
+                raise EngineStateError(f"invalid engine source state: {exc}") from exc
 
     def get_source(self, source_id: str) -> SourceRecord | None:
         return next((source for source in self.list_sources() if source.source_id == source_id), None)
@@ -216,7 +208,12 @@ class EngineStateStore:
     def sync_sources(self, bindings: Sequence[Any]) -> list[SourceRecord]:
         """Atomically replace the engine projection using opaque credential refs."""
         with self._lock:
-            existing = {source.source_id: source for source in self.list_sources()}
+            path = self.root / "sources.json"
+            try:
+                existing = {source.source_id: source for source in self.list_sources()}
+            except EngineStateError as exc:
+                self._discard_invalid_state_file(path, exc)
+                existing = {}
             records: list[SourceRecord] = []
             seen: set[str] = set()
             for binding in bindings:
