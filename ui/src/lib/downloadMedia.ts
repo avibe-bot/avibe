@@ -52,6 +52,18 @@ function inferFilename(mime: string, fallback?: string): string {
   return `media.${ext || 'bin'}`;
 }
 
+function serverFilename(response: Response): string | undefined {
+  // The media proxy emits an RFC 5987 UTF-8 filename for both preview and download.
+  const encoded = response.headers.get('Content-Disposition')?.match(/(?:^|;)\s*filename\*=UTF-8''([^;]*)/i)?.[1];
+  if (!encoded) return undefined;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    // An invalid header must not prevent saving with the caller's fallback name.
+    return undefined;
+  }
+}
+
 // Reload the current page so the server re-runs its auth gate and 302s to the
 // cloud login (mirrors apiFetch's 401 recovery / RemoteLoginRedirect).
 function recoverFromExpiredSession(): void {
@@ -80,7 +92,7 @@ async function saveViaShareSheet(url: string, filename?: string): Promise<void> 
     }
     if (!res.ok) return;
     const blob = await res.blob();
-    const file = new File([blob], inferFilename(blob.type, filename), {
+    const file = new File([blob], serverFilename(res) || inferFilename(blob.type, filename), {
       type: blob.type || 'application/octet-stream',
     });
     // Probe the REAL file (type + size matter on iOS), not a dummy: canShare can
