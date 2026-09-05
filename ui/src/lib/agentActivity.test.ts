@@ -462,6 +462,33 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(state.startedAt).toBe(100);
   });
 
+  it.each(['legacy ids', 'clock ids'] as const)('preserves durable tie order across hydration windows with %s', (idShape) => {
+    // The endpoint orders equal emission clocks by id, not locale or source.
+    const ids = idShape === 'legacy ids'
+      ? ['evt_A', 'evt_a', 'msg_A', 'msg_a', 'opaque_A', 'opaque_a']
+      : Array.from({ length: 6 }, (_, i) => `${i < 3 ? 'evt' : 'msg'}_${(1_700_000_000_000_000).toString(16).padStart(15, '0')}${String(i).padStart(8, '0')}`);
+    const rows = ids.map((id, i): ActivityRow => ({
+      id, kind: id.startsWith('msg_') ? 'assistant' : 'tool_call', text: `step ${i}`,
+      created_at: '2023-11-14T22:13:20Z',
+    }));
+    // Cover every boundary, including a later disjoint snapshot and a stale
+    // earlier snapshot after reconnect. The union must always match durable order.
+    for (let split = 1; split < rows.length; split += 1) {
+      for (const overlap of [0, 1]) {
+        const windows = [rows.slice(0, split), rows.slice(split - overlap)];
+        for (const snapshots of [windows, [...windows].reverse()]) {
+          let state = initialLiveActivity();
+          for (const snapshot of snapshots) {
+            state = liveActivityReducer(state, {
+              type: 'rehydrate_for_gen', gen: state.gen, rows: snapshot, startedAt: 100,
+            });
+          }
+          expect(state.rows).toEqual(rows);
+        }
+      }
+    }
+  });
+
   it('does not rehydrate a settled generation or the next turn', () => {
     let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
     const late = { type: 'rehydrate_for_gen' as const, gen: state.gen, rows: [row('old')], startedAt: 1 };

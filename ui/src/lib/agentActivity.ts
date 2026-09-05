@@ -184,12 +184,15 @@ export const liveActivityReducer = (
       return event.gen === state.gen ? { ...state, rows: [], startedAt: null } : state;
     case 'rehydrate_for_gen':
       if (event.gen !== state.gen || state.settled) return state;
-      // Keep the union in emission order even when storage's bounded window moves
-      // past rows already loaded. Stable sorting preserves durable order on ties.
+      // Match storage's (emission time, id) order even when its bounded window
+      // advances. Stable timestamp-only sorting would move retained tied rows last.
       return {
         ...state,
         rows: [...new Map([...event.rows, ...state.rows].map((row) => [row.id, row])).values()]
-          .sort((a, b) => activityRowTimeMs(a) - activityRowTimeMs(b)),
+          .sort((a, b) => {
+            const timeOrder = activityRowTimeMs(a) - activityRowTimeMs(b);
+            return timeOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+          }),
         startedAt: Math.min(state.startedAt ?? event.startedAt, event.startedAt),
       };
     default:
