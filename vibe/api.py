@@ -9316,44 +9316,8 @@ def ensure_model_hub_engine_installed(
     }
 
 
-def dependencies_status(*, offline: bool = False) -> dict:
-    """Status of the required local runtime dependencies for the Dependencies
-    settings page: askill, local managed runtimes, and the shared Node.js
-    prerequisite. (Agent backend CLIs are managed on the Backends tab.)
-
-    Returns stable ids + machine-readable status only — display copy (label /
-    detail) is localized in the React page, not sent from here.
-    """
-    deps: list[dict] = []
-
-    a = askill_update_status(include_latest=False)
-    deps.append(
-        {
-            "id": "askill",
-            "kind": "tool",
-            "required": True,
-            "installed": a["installed"],
-            "version": a.get("version"),
-            "latest_version": a.get("latest_version"),
-            "has_update": a.get("has_update", False),
-            "status": a["status"],
-        }
-    )
-
-    av = avault_status()
-    deps.append(
-        {
-            "id": "avault",
-            "kind": "tool",
-            "required": True,
-            "installed": av["installed"],
-            "version": av.get("version"),
-            "latest_version": None,
-            "has_update": False,
-            "status": av["status"],
-        }
-    )
-
+def _show_runtime_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
+    """Show Runtime and Node share one inspection and its failure evidence."""
     from core.show_runtime import ShowRuntimeManager, get_show_runtime_manager
 
     srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
@@ -9370,46 +9334,20 @@ def dependencies_status(*, offline: bool = False) -> dict:
         if srt_status in {"ready", "missing"} or recovery_action == "repair"
         else "operator_only"
     )
-    deps.append(
-        {
-            "id": "show-runtime",
-            "kind": "runtime",
-            "required": True,
-            "installed": srt_installed,
-            "version": install.get("runtime_version"),
-            "latest_version": manifest.get("runtime_version"),
-            "has_update": bool(srt_installed is True and installed_matches_manifest is False),
-            "status": srt_status,
-            "action_class": action_class,
-            "reason": srt.get("reason"),
-            "download_error": srt.get("download_error"),
-            "inspection_error": srt.get("inspection_error"),
-        }
-    )
-
-    deps.append(_model_hub_engine_dependency_status())
-
-    memory_package, memory_runtime = _memory_dependencies_status(offline=offline)
-    deps.extend((memory_package, memory_runtime))
-
-    try:
-        from core.tmux_runtime import TmuxRuntimeManager, tmux_status
-
-        tmux = TmuxRuntimeManager(offline=True).status() if offline else tmux_status()
-    except Exception as exc:  # noqa: BLE001
-        tmux = {"installed": False, "version": None, "status": "missing", "reason": str(exc)}
-    deps.append(
-        {
-            "id": "tmux",
-            "kind": "tool",
-            "required": False,
-            "installed": bool(tmux.get("installed")),
-            "version": tmux.get("version"),
-            "status": "ready" if tmux.get("installed") else "missing",
-            "reason": tmux.get("reason"),
-            "download_error": tmux.get("download_error"),
-        }
-    )
+    runtime = {
+        "id": "show-runtime",
+        "kind": "runtime",
+        "required": True,
+        "installed": srt_installed,
+        "version": install.get("runtime_version"),
+        "latest_version": manifest.get("runtime_version"),
+        "has_update": bool(srt_installed is True and installed_matches_manifest is False),
+        "status": srt_status,
+        "action_class": action_class,
+        "reason": srt.get("reason"),
+        "download_error": srt.get("download_error"),
+        "inspection_error": srt.get("inspection_error"),
+    }
 
     # Node present but below the Show Runtime minimum (node_supported is False)
     # is not actually usable — don't show it green while runtime repair fails.
@@ -9422,18 +9360,91 @@ def dependencies_status(*, offline: bool = False) -> dict:
         if node_inspection_failed
         else bool(srt.get("node_available")) and srt.get("node_supported") is not False
     )
-    deps.append(
-        {
-            "id": "node",
-            "kind": "node",
-            "required": True,
-            "installed": node_ok,
-            "version": srt.get("node_version"),
-            "status": "error" if node_ok is None else "ready" if node_ok else "missing",
-        }
-    )
+    node = {
+        "id": "node",
+        "kind": "node",
+        "required": True,
+        "installed": node_ok,
+        "version": srt.get("node_version"),
+        "status": "error" if node_ok is None else "ready" if node_ok else "missing",
+    }
+    return runtime, node
 
-    return {"ok": True, "deps": deps}
+
+DEPENDENCY_IDS = (
+    "askill",
+    "avault",
+    "show-runtime",
+    "model-hub-engine",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+    "node",
+)
+
+
+def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | None = None) -> dict:
+    """Inspect only the requested dependencies, preserving the full status contract.
+
+    Omitting ids keeps the synchronous, complete inspection used by Doctor.
+    Web consumers can request independent checks without waiting for unrelated
+    CLI probes. Coupled rows share their existing inspection; no health result
+    is cached or inferred from a different dependency.
+    """
+    requested = set(DEPENDENCY_IDS if dependency_ids is None else dependency_ids)
+    unknown = requested.difference(DEPENDENCY_IDS)
+    if unknown:
+        raise ValueError(f"Unknown dependencies: {', '.join(sorted(unknown))}")
+    deps: dict[str, dict] = {}
+    if "askill" in requested:
+        a = askill_update_status(include_latest=False)
+        deps["askill"] = {
+            "id": "askill",
+            "kind": "tool",
+            "required": True,
+            "installed": a["installed"],
+            "version": a.get("version"),
+            "latest_version": a.get("latest_version"),
+            "has_update": a.get("has_update", False),
+            "status": a["status"],
+        }
+    if "avault" in requested:
+        av = avault_status()
+        deps["avault"] = {
+            "id": "avault",
+            "kind": "tool",
+            "required": True,
+            "installed": av["installed"],
+            "version": av.get("version"),
+            "latest_version": None,
+            "has_update": False,
+            "status": av["status"],
+        }
+    if requested.intersection({"show-runtime", "node"}):
+        deps["show-runtime"], deps["node"] = _show_runtime_dependencies_status(offline=offline)
+    if "model-hub-engine" in requested:
+        deps["model-hub-engine"] = _model_hub_engine_dependency_status()
+    if requested.intersection({"memory-package", "memory-runtime"}):
+        deps["memory-package"], deps["memory-runtime"] = _memory_dependencies_status(offline=offline)
+    if "tmux" in requested:
+        try:
+            from core.tmux_runtime import TmuxRuntimeManager, tmux_status
+
+            tmux = TmuxRuntimeManager(offline=True).status() if offline else tmux_status()
+        except Exception as exc:  # noqa: BLE001
+            tmux = {"installed": False, "version": None, "status": "missing", "reason": str(exc)}
+        deps["tmux"] = {
+            "id": "tmux",
+            "kind": "tool",
+            "required": False,
+            "installed": bool(tmux.get("installed")),
+            "version": tmux.get("version"),
+            "status": "ready" if tmux.get("installed") else "missing",
+            "reason": tmux.get("reason"),
+            "download_error": tmux.get("download_error"),
+        }
+
+    return {"ok": True, "deps": [deps[dep] for dep in DEPENDENCY_IDS if dep in requested]}
 
 
 def _memory_runtime_dependency_status(memory_runtime: dict) -> str:

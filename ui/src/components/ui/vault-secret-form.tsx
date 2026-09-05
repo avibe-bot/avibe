@@ -209,7 +209,7 @@ export const VaultSecretForm: React.FC<{
     let alive = true;
     setCheckingAvault(true);
     api
-      .listDependencies()
+      .listDependencies({ ids: ['avault'] })
       .then((res) => {
         if (!alive) return;
         setAvaultDep(res.deps.find((dep) => dep.id === 'avault') ?? null);

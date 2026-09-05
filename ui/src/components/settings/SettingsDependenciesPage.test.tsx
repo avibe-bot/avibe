@@ -1,11 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsDependenciesPage } from './SettingsDependenciesPage';
+import type { DependenciesResult, DependencyReadOptions, MemoryStatusResult } from '@/context/ApiContext';
 
 const api = vi.hoisted(() => ({
   getMemoryStatus: vi.fn(),
@@ -47,6 +48,16 @@ const dependency = (overrides = {}) => ({
   ...overrides,
 });
 
+const stubDependencies = (response: DependenciesResult) => {
+  api.listDependencies.mockImplementation(async ({ ids }: DependencyReadOptions = {}) => ({
+    ...response,
+    deps: (ids ?? response.deps.map((dep) => dep.id)).map((id) => (
+      response.deps.find((dep) => dep.id === id)
+      ?? { id, kind: 'runtime', required: null, installed: null, version: null, status: 'unknown', action_class: 'none' }
+    )),
+  }));
+};
+
 const renderPage = () => render(
   <MemoryRouter>
     <SettingsDependenciesPage />
@@ -54,7 +65,7 @@ const renderPage = () => render(
 );
 
 beforeEach(() => {
-  api.listDependencies.mockResolvedValue({ ok: true, deps: [dependency()] });
+  stubDependencies({ ok: true, deps: [dependency()] });
   api.getMemoryStatus.mockResolvedValue({
     status: 'ok',
     state: 'disabled',
@@ -72,7 +83,7 @@ afterEach(() => {
 
 describe('SettingsDependenciesPage Show Runtime status', () => {
   it('renders inspection failure without authorizing install or repair', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'show-runtime',
@@ -94,7 +105,7 @@ describe('SettingsDependenciesPage Show Runtime status', () => {
   });
 
   it('keeps a proven absence installable', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'show-runtime',
@@ -114,7 +125,7 @@ describe('SettingsDependenciesPage Show Runtime status', () => {
 
 describe('SettingsDependenciesPage Model Hub engine', () => {
   it('shows the installed and pinned CPA versions and offers the update action', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'model-hub-engine',
@@ -137,7 +148,90 @@ describe('SettingsDependenciesPage Model Hub engine', () => {
   });
 });
 
+describe('SettingsDependenciesPage independent checks', () => {
+  it('shows completed checks and permits their actions while another check waits', async () => {
+    stubDependencies({ ok: true, deps: [dependency({ id: 'avault' })] });
+    const read = api.listDependencies.getMockImplementation()!;
+    let finish!: (value: DependenciesResult) => void;
+    const slow = new Promise<DependenciesResult>((resolve) => { finish = resolve; });
+    api.listDependencies.mockImplementation((options: DependencyReadOptions) => (
+      options.ids?.includes('askill') ? slow : read(options)
+    ));
+    renderPage();
+
+    expect(await screen.findByText('settings.dependencies.statusReady · v1.0.0')).toBeTruthy();
+    expect(screen.getByText('settings.dependencies.checking')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'settings.dependencies.reinstall' }));
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('avault'));
+    expect(api.listDependencies).toHaveBeenLastCalledWith({ ids: ['avault'], signal: expect.any(AbortSignal) });
+    await act(async () => finish({ ok: true, deps: [dependency({ id: 'askill', status: 'unknown' })] }));
+    expect(screen.queryByText('settings.dependencies.checking')).toBeNull();
+  });
+
+  it('shows an unknown CLI version as a warning, never ready', async () => {
+    stubDependencies({ ok: true, deps: [dependency({ id: 'askill', status: 'unknown', version: null })] });
+    renderPage();
+    const badges = await screen.findAllByText('settings.dependencies.statusUnknown');
+    expect(badges.every((badge) => badge.className.includes('text-gold-ink'))).toBe(true);
+    expect(screen.queryByText(/settings.dependencies.statusReady/)).toBeNull();
+  });
+
+  it('keeps stored failure evidence, blocks actions and retries only the failed check', async () => {
+    const dep = dependency({ id: 'model-hub-engine', status: 'error', reason: 'engine_install_failed' });
+    stubDependencies({ ok: true, deps: [dep] });
+    const read = api.listDependencies.getMockImplementation()!;
+    renderPage();
+    expect(await screen.findByText('errors.engine_install_failed')).toBeTruthy();
+    api.listDependencies.mockImplementation((options: DependencyReadOptions) => (
+      options.ids?.includes(dep.id) ? Promise.reject(new Error('offline')) : read(options)
+    ));
+    await userEvent.click(screen.getByRole('button', { name: 'settings.dependencies.recheckAll' }));
+    const retry = await screen.findByRole('button', { name: 'settings.dependencies.recheck' });
+    expect(screen.getByText('errors.engine_install_failed')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'settings.dependencies.repair' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.installDependency).not.toHaveBeenCalled();
+    api.listDependencies.mockImplementation(read);
+    api.listDependencies.mockClear();
+    await userEvent.click(retry);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'settings.dependencies.recheck' })).toBeNull());
+    expect(api.listDependencies).toHaveBeenCalledTimes(1);
+    expect(api.listDependencies).toHaveBeenCalledWith({ ids: [dep.id], signal: expect.any(AbortSignal) });
+  });
+
+  it('does not present an old healthy inspection as current after a failed refresh', async () => {
+    stubDependencies({ ok: true, deps: [dependency({ id: 'avault' })] });
+    const read = api.listDependencies.getMockImplementation()!;
+    renderPage();
+    expect(await screen.findByText('settings.dependencies.statusReady · v1.0.0')).toBeTruthy();
+    api.listDependencies.mockImplementation((options: DependencyReadOptions) => (
+      options.ids?.includes('avault') ? Promise.reject(new Error('offline')) : read(options)
+    ));
+    await userEvent.click(screen.getByRole('button', { name: 'settings.dependencies.recheckAll' }));
+    await screen.findByRole('button', { name: 'settings.dependencies.recheck' });
+    expect(screen.queryByText(/settings.dependencies.statusReady/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'settings.dependencies.reinstall' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
 describe('SettingsDependenciesPage Memory runtime', () => {
+  it('does not let an older sidecar read override the current repair guard', async () => {
+    let finish!: (value: MemoryStatusResult) => void;
+    api.getMemoryStatus.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    renderPage();
+    const repair = await screen.findByRole('button', { name: 'settings.dependencies.repair' });
+    expect((repair as HTMLButtonElement).disabled).toBe(true);
+    const running = {
+      status: 'ok', state: 'running', reason: null,
+      source: { status: 'unavailable', observed_at: null, reason: null }, health: null,
+    } as MemoryStatusResult;
+    api.getMemoryStatus.mockResolvedValue(running);
+    await userEvent.click(screen.getByRole('button', { name: 'settings.dependencies.recheckAll' }));
+    await screen.findByText('settings.dependencies.memoryRuntimeDisableBeforeRepair');
+    await act(async () => finish({ ...running, state: 'disabled' }));
+    expect((repair as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('settings.dependencies.memoryRuntimeDisableBeforeRepair')).toBeTruthy();
+  });
+
   it.each([false, null, true])(
     'presents source management neutrally without claiming installation or readiness (%s)',
     async (installed) => {
@@ -151,7 +245,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
         version: null,
         reason: 'memory_package_source_build',
       }));
-      api.listDependencies.mockResolvedValue({ ok: true, deps: [row] });
+      stubDependencies({ ok: true, deps: [row] });
       api.getMemoryStatus.mockRejectedValue(new Error('Status is unavailable'));
       renderPage();
 
@@ -176,7 +270,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     'memory_package_artifact_unavailable',
     'memory_runtime_install_failed',
   ])('keeps the actual runtime failure visible next to a source-managed package: %s', async (reason) => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [
         dependency({
@@ -203,7 +297,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     'memory_package_metadata_ambiguous',
     'memory_package_install_failed',
   ])('does not reclassify a different package failure: %s', async (reason) => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'memory-package',
@@ -222,7 +316,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
   });
 
   it('routes repairable Python package bootstrap through its own dependency action', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'memory-package',
@@ -241,7 +335,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
   });
 
   it('hides package bootstrap while Memory is not required', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'memory-package',
@@ -259,7 +353,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
   });
 
   it('keeps explicit package repair available while disabled', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         id: 'memory-package',
@@ -312,7 +406,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
   });
 
   it('renders a persisted preparation reason on initial page load', async () => {
-    api.listDependencies.mockResolvedValue({
+    stubDependencies({
       ok: true,
       deps: [dependency({
         installed: false,

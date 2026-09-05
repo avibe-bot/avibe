@@ -91,7 +91,7 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const loadDependency = useCallback(async () => {
     try {
-      const res = await api.listDependencies();
+      const res = await api.listDependencies({ ids: ['memory-package', 'memory-runtime'] });
       const memoryPackage = res.deps?.find((item) => item.id === 'memory-package');
       const memoryRuntime = res.deps?.find((item) => item.id === 'memory-runtime');
       if (memoryPackage?.action_class === 'repairable' && memoryPackage.installed !== true) {

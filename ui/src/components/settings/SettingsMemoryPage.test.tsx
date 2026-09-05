@@ -159,6 +159,13 @@ afterEach(() => {
 });
 
 describe('SettingsMemoryPage', () => {
+  it('inspects only the Memory dependency owner', async () => {
+    renderPage();
+    await waitFor(() => expect(api.listDependencies).toHaveBeenCalledWith({
+      ids: ['memory-package', 'memory-runtime'],
+    }));
+  });
+
   it('directs disabled Memory to the explicit package bootstrap when missing', async () => {
     api.getMemorySettings.mockResolvedValue({ ...settings, enabled: false });
     api.listDependencies.mockResolvedValue({
