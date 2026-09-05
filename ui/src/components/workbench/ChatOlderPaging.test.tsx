@@ -1,219 +1,77 @@
 /** @vitest-environment jsdom */
 
-// The transcript's older-page loader must be LEVEL-triggered: for as long as the
-// reader is inside the trigger band at the top of the loaded window and older
-// history remains, pages keep arriving. The invariant is deliberately stated
-// without reference to scroll events, because the reader most likely to want
-// another page — already parked at the very top — cannot produce one: an upward
-// gesture at scrollTop 0 moves nothing, so no scroll event is emitted at all.
-//
-// The IntersectionObserver stub below models the one browser guarantee the fix
-// rests on: ``observe()`` reports the CURRENT intersection state, rather than
-// waiting for the next crossing. So each test declares where the reader is as a
-// standing fact and lets the component ask as often as it likes.
-
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { createRef } from 'react';
+import { createRef, type ComponentProps } from 'react';
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
-
-vi.mock('../../context/ApiContext', () => ({
-  useApi: () => ({}),
-}));
-
-vi.mock('../../context/ToastContext', () => ({
-  useToast: () => ({ showToast: vi.fn() }),
-}));
-
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('../../context/ApiContext', () => ({ useApi: () => ({}) }));
+vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({
-    capabilities: {
-      can_chat: true,
-      can_manage_instance: false,
-      can_use_show_pages: false,
-      can_use_vault_secrets: false,
-    },
+    capabilities: { can_chat: true, can_manage_instance: false, can_use_show_pages: false, can_use_vault_secrets: false },
   }),
 }));
-
 vi.mock('../../context/WindowManagerContext', () => ({
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
-
-vi.mock('../../lib/useIsDesktop', () => ({
-  isDesktopViewport: () => false,
-  useIsDesktop: () => false,
-}));
-
-// Importing ChatPage pulls in the composer's lexical stack, which touches
-// browser APIs jsdom lacks at module scope. The transcript never renders it.
-vi.mock('./Composer', () => ({
-  Composer: () => null,
-}));
+vi.mock('../../lib/useIsDesktop', () => ({ isDesktopViewport: () => false, useIsDesktop: () => false }));
+// The transcript does not render the composer's browser-only Lexical stack.
+vi.mock('./Composer', () => ({ Composer: () => null }));
 
 import { Transcript } from './ChatPage';
-import type { WorkbenchSession } from '../../context/ApiContext';
+import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 
-// One live IntersectionObserver stub shared by the render under test. ``atTop``
-// is the world: where the reader is sitting. Every observe() answers with it,
-// which is what a real observer does for a freshly observed target.
-class FakeIntersectionObserver {
-  static live: FakeIntersectionObserver[] = [];
-  static atTop = false;
+type Props = ComponentProps<typeof Transcript>;
+const messages = (first: number, count: number): WorkbenchMessage[] =>
+  Array.from({ length: count }, (_, index) => ({
+    id: `msg-${first + index}`,
+    session_id: 'session-1',
+    platform: 'avibe',
+    author: 'user',
+    type: 'user',
+    text: `Message ${first + index}`,
+    content: {},
+    metadata: {},
+    created_at: new Date(Date.UTC(2026, 8, 1, 0, 0, first + index)).toISOString(),
+  }) as WorkbenchMessage);
 
-  private callback: IntersectionObserverCallback;
-  private observed = new Set<Element>();
-  private pending = new Set<Element>();
-  private readonly root: Element | null;
+const pendingPage = () => {
+  let land!: (ok: boolean) => void;
+  const promise = new Promise<boolean>((resolve) => { land = resolve; });
+  return { promise, land };
+};
 
-  constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
-    this.callback = callback;
-    this.root = (options?.root as Element | null) ?? null;
-    FakeIntersectionObserver.live.push(this);
-  }
-
-  // The element the transcript scrolls. The observer is rooted at it, so a test
-  // reaches it through the observer rather than by matching a class name.
-  static scroller(): HTMLElement {
-    const root = FakeIntersectionObserver.live[0]?.root;
-    if (!(root instanceof HTMLElement)) {
-      throw new Error('the older-page observer was not rooted at the scroll container');
-    }
-    return root;
-  }
-
-  observe(target: Element) {
-    this.observed.add(target);
-    this.deliver(target);
-  }
-
-  unobserve(target: Element) {
-    this.observed.delete(target);
-  }
-
-  disconnect() {
-    this.observed.clear();
-    FakeIntersectionObserver.live = FakeIntersectionObserver.live.filter((io) => io !== this);
-  }
-
-  // Simulate the reader's position changing under a live observer.
-  static move(atTop: boolean) {
-    FakeIntersectionObserver.atTop = atTop;
-    for (const io of [...FakeIntersectionObserver.live]) {
-      for (const target of io.deliverable()) io.deliver(target);
-    }
-  }
-
-  private deliverable() {
-    return [...this.observed];
-  }
-
-  // A real observer never calls back from inside ``observe()``: the delivery is
-  // queued, and the intersection it reports is computed when the queue runs, not
-  // when it was queued. That gap is a whole frame in which the reader can move,
-  // so the fake keeps it — a component that only behaves correctly when its own
-  // re-observe answers instantly is not correct.
-  private deliver(target: Element) {
-    // One notification per target per frame, however many times the browser was
-    // asked. A real observer batches its entries into a single callback, so a
-    // component never sees two answers with no render in between.
-    if (this.pending.has(target)) return;
-    this.pending.add(target);
-    queueMicrotask(() => {
-      this.pending.delete(target);
-      if (!this.observed.has(target)) return;
-      const entry = { target, isIntersecting: FakeIntersectionObserver.atTop };
-      this.callback([entry as IntersectionObserverEntry], this as never);
-    });
-  }
-}
-
-const session = (): WorkbenchSession =>
-  ({
-    id: 'session-1',
-    title: 'Session',
-    agent_name: null,
-    archived_at: null,
-  }) as unknown as WorkbenchSession;
-
-// A transcript taller than its viewport, scrolled up to the top of the loaded
-// window: the reader is in history, which is what paging exists for.
-const READING_HISTORY = { scrollTop: 0, scrollHeight: 10_000, clientHeight: 800 };
-// A transcript SHORT enough to fit its viewport. There is nothing to scroll, so
-// the reader is still following the live tail even though the top of the loaded
-// window — and the sentinel with it — is permanently in view.
-const FITS_VIEWPORT = { scrollTop: 0, scrollHeight: 800, clientHeight: 800 };
-
-// Frame callbacks are queued rather than run inline, because the deep-link jump
-// spreads across two frames and its suppression window — open in the first,
-// released in the second — is a state the trigger has to be tested against.
 let nextFrameId = 1;
 const frames = new Map<number, FrameRequestCallback>();
 const flushFrames = () => {
   const queued = [...frames.values()];
   frames.clear();
-  for (const cb of queued) cb(0);
+  queued.forEach((callback) => callback(0));
 };
 
-// jsdom has no layout, so where the reader sits is stated as geometry and
-// announced with the scroll event a browser would emit. This is the production
-// path: the transcript derives "following the live tail" from exactly these
-// three numbers, and nothing else tells it where the reader is.
-const placeReader = (
-  el: HTMLElement,
-  geometry: { scrollTop: number; scrollHeight: number; clientHeight: number },
-) => {
-  for (const [prop, value] of Object.entries(geometry)) {
-    Object.defineProperty(el, prop, { value, writable: true, configurable: true });
-  }
-  fireEvent.scroll(el);
-};
+class TestResizeObserver {
+  static live = new Set<TestResizeObserver>();
+  constructor(private callback: ResizeObserverCallback) { TestResizeObserver.live.add(this); }
+  observe() {}
+  unobserve() {}
+  disconnect() { TestResizeObserver.live.delete(this); }
+  static resize() { for (const observer of TestResizeObserver.live) observer.callback([], observer as unknown as ResizeObserver); }
+}
 
-// A page the test lands by hand. Landing is not a detail these tests can leave
-// to a resolved mock: a page that lands re-asks the level question, so a world
-// that never moves would be asked for pages forever. Production moves it — the
-// prepended rows and the anchor restore push the sentinel back out of the band.
-const pendingPage = () => {
-  let land: (ok: boolean) => void = () => {};
-  const promise = new Promise<boolean>((resolve) => {
-    land = resolve;
-  });
-  return { promise, land: (ok: boolean) => land(ok) };
-};
-
-// A request that goes out and never comes back — for tests that assert what was
-// asked for rather than what happened next.
-const neverLands = () => new Promise<boolean>(() => {});
-
-const renderTranscript = (over: {
-  hasOlder?: boolean;
-  loadingOlder?: boolean;
-  onLoadOlder?: () => void | Promise<boolean>;
-  // A deep-link target. With no rows rendered the jump finds nothing to centre,
-  // which is fine: what matters here is the suppression window it opens.
-  jumpTarget?: string;
-  // Whether the reader is following the live tail. Defaults to "scrolled up in
-  // history", the state every paging assertion below is about.
-  following?: boolean;
-}) => {
-  const props = {
-    messages: [],
-    session: session(),
+const renderTranscript = (over: Partial<Props> = {}) => {
+  const props: Props = {
+    messages: messages(301, 50),
+    session: { id: 'session-1', title: 'Session', agent_name: null, archived_at: null } as WorkbenchSession,
     agentDisplayName: null,
-    // No rows, but ``working`` keeps the transcript out of its empty state, so the
-    // scroll container (and the sentinel inside it) mounts. The trigger does not
-    // depend on row content.
-    working: true,
-    hasOlder: over.hasOlder ?? true,
-    loadingOlder: over.loadingOlder ?? false,
-    onLoadOlder: over.onLoadOlder ?? vi.fn(),
+    working: false,
+    hasOlder: true,
+    loadingOlder: false,
+    onLoadOlder: vi.fn().mockResolvedValue(true),
     needsLatestReload: false,
     onReloadLatest: vi.fn().mockResolvedValue(true),
-    jumpTarget: over.jumpTarget ?? null,
+    jumpTarget: null,
     onJumpHandled: vi.fn(),
     highlightedId: null,
     messageFontSize: 14,
@@ -224,211 +82,343 @@ const renderTranscript = (over: {
     onAskInNewSession: vi.fn(),
     readOnly: false,
     followingTailRef: createRef<boolean>() as React.MutableRefObject<boolean>,
+    ...over,
   };
-  const view = render(
-    <MemoryRouter>
-      <Transcript {...props} />
-    </MemoryRouter>,
-  );
-  // The mount effect jumps to the bottom inside a frame callback and pins the
-  // transcript there. Let that land first, so this placement is what the
-  // component ends up believing rather than something it overwrites later.
-  act(() => flushFrames());
-  placeReader(FakeIntersectionObserver.scroller(), over.following ? FITS_VIEWPORT : READING_HISTORY);
-
-  const rerender = (next: Partial<typeof props>) =>
-    view.rerender(
-      <MemoryRouter>
-        <Transcript {...props} {...next} />
-      </MemoryRouter>,
-    );
-  return { ...view, rerender, props };
+  const view = render(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
+  const scroller = view.getByTestId('chat-transcript');
+  const geometry = { extraAbove: 0 };
+  let scrollTop = 0;
+  const loadingSlotHeight = () => scroller.querySelector('[role="status"], button')?.classList.contains('h-8') ? 44 : 0;
+  Object.defineProperties(scroller, {
+    clientHeight: { configurable: true, get: () => 800 },
+    scrollHeight: { configurable: true, get: () => scroller.querySelectorAll('[data-message-id]').length * 112 + 40 + loadingSlotHeight() + geometry.extraAbove },
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight)); },
+    },
+  });
+  scroller.getBoundingClientRect = () => ({ top: 10, bottom: 810, height: 800 }) as DOMRect;
+  // jsdom has no layout. Derive every row's position from the committed DOM,
+  // including prepended rows and the transient loading slot + column gap.
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.messageId === undefined) return { top: 0, bottom: 0, height: 0 } as DOMRect;
+    const rows = Array.from(scroller.querySelectorAll('[data-message-id]'));
+    const index = rows.indexOf(this);
+    const top = 30 + index * 112 + loadingSlotHeight() + (index > 0 ? geometry.extraAbove : 0) - scrollTop;
+    return { top, bottom: top + 100, height: 100 } as DOMRect;
+  });
+  act(flushFrames);
+  const rerender = (next: Partial<Props>) => {
+    Object.assign(props, next);
+    view.rerender(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
+  };
+  const scrollTo = (top: number) => {
+    fireEvent.pointerDown(scroller, { pointerType: 'mouse' });
+    scroller.scrollTop = top;
+    fireEvent.scroll(scroller);
+  };
+  return { ...view, scroller, geometry, props, rerender, scrollTo };
 };
 
 describe('transcript older-page loading', () => {
   beforeEach(() => {
-    // jsdom ships no CSS namespace object; the deep-link jump escapes its target
-    // id before looking the row up.
     vi.stubGlobal('CSS', { escape: (value: string) => value });
-    FakeIntersectionObserver.live = [];
-    FakeIntersectionObserver.atTop = false;
-    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
+    TestResizeObserver.live.clear();
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} unobserve() {} });
     nextFrameId = 1;
     frames.clear();
-    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       const id = nextFrameId++;
-      frames.set(id, cb);
+      frames.set(id, callback);
       return id;
     });
-    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
-      frames.delete(id);
-    });
-    vi.stubGlobal(
-      'ResizeObserver',
-      class {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      },
-    );
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
   });
-
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
-  it('keeps loading pages while the reader stays at the top, with no scroll event', async () => {
-    const first = pendingPage();
-    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockReturnValue(neverLands());
-    renderTranscript({ onLoadOlder });
-
-    // The reader scrolls up into the trigger band.
-    await act(async () => FakeIntersectionObserver.move(true));
+  it('requires fresh upward input for each page, even when a page adds no visible rows', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const page = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(page.promise).mockResolvedValue(true);
+    const { scroller, scrollTo, rerender } = renderTranscript({ onLoadOlder });
+    scrollTo(0);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    rerender({ loadingOlder: true });
+    fireEvent.wheel(scroller, { deltaY: -100 });
+    fireEvent.scroll(scroller);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
 
-    // The page is in flight and the reader is still in the band: asking again
-    // would put a second request on the wire for the page already coming.
-    await act(async () => FakeIntersectionObserver.move(true));
+    await act(async () => { rerender({ loadingOlder: false }); page.land(true); });
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    expect(scroller.scrollTop).toBe(0);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
-
-    // It lands, and the reader never moved — still at the top of the loaded
-    // window, still more history behind it. This is the case the old
-    // scroll-armed latch deadlocked on, and the whole point of the fix.
-    await act(async () => first.land(true));
+    now.mockReturnValue(300);
+    await act(async () => fireEvent.wheel(scroller, { deltaY: -100 }));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
   });
 
-  it('stops once the reader leaves the band or history runs out', async () => {
+  it.each([50, 300])('preserves the reader through a prepend with %i retained rows and no resize notification', async (count) => {
+    const page = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(page.promise).mockReturnValue(new Promise(() => {}));
+    const { scroller, scrollTo, rerender, geometry } = renderTranscript({ messages: messages(301, count), onLoadOlder });
+    scrollTo(0);
+    const anchor = scroller.querySelector('[data-message-id="msg-301"]')!;
+    const before = anchor.getBoundingClientRect().top;
+    const height = scroller.scrollHeight;
+    rerender({ loadingOlder: true });
+    expect(anchor.getBoundingClientRect().top).toBe(before);
+    expect(scroller.scrollTop).toBe(44);
+
+    await act(async () => {
+      rerender({ messages: messages(251, Math.min(count + 50, 300)), loadingOlder: false });
+      page.land(true);
+    });
+    expect(anchor.getBoundingClientRect().top).toBe(before);
+    expect(scroller.scrollTop).toBe(50 * 112);
+    if (count === 300) expect(scroller.scrollHeight).toBe(height);
+    // A queued scroll from mounting/removing the spinner sees the restored DOM.
+    fireEvent.scroll(scroller);
+    rerender({ agentDisplayName: 'Renamed agent' });
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+
+    geometry.extraAbove = 180;
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    expect(anchor.getBoundingClientRect().top).toBe(before);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    scrollTo(0);
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows another upward scroll inside the trigger band without a down-and-up detour', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scrollTo } = renderTranscript({ onLoadOlder });
+    await act(async () => scrollTo(110));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => scrollTo(100));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  const upwardInputs = {
+    wheel: (el: HTMLElement) => fireEvent.wheel(el, { deltaY: -100 }),
+    touch: (el: HTMLElement) => {
+      fireEvent.touchStart(el, { touches: [{ clientY: 100 }] });
+      fireEvent.touchMove(el, { touches: [{ clientY: 140 }] });
+      fireEvent.touchEnd(el);
+    },
+    keyboard: (el: HTMLElement) => fireEvent.keyDown(el, { key: 'PageUp' }),
+  };
+  it.each(Object.entries(upwardInputs))('accepts %s input at the hard top without a scroll event', async (_name, upward) => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller, rerender, props } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    act(TestResizeObserver.resize);
+    rerender({ agentDisplayName: 'Renamed agent' });
+    expect(scroller.scrollTop).toBe(0);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    await act(async () => upward(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    expect(props.followingTailRef.current).toBe(false);
+  });
+
+  it('consumes one touch drag across settled empty pages and momentum scrolls', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    for (const clientY of [140, 180, 220]) {
+      await act(async () => fireEvent.touchMove(scroller, { touches: [{ clientY }] }));
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    }
+    fireEvent.touchEnd(scroller);
+    fireEvent.scroll(scroller);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => upwardInputs.touch(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a wheel burst consumed through momentum and rearms after an idle gap', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    for (const timestamp of [0, 50, 150, 250]) {
+      now.mockReturnValue(timestamp);
+      await act(async () => upwardInputs.wheel(scroller));
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    }
+    now.mockReturnValue(550);
+    await act(async () => upwardInputs.wheel(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares gesture consumption with scroll events inside the trigger band', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    scrollTo(200);
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    for (const top of [110, 90]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        fireEvent.scroll(scroller);
+      });
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    }
+    fireEvent.touchEnd(scroller);
+    await act(async () => {
+      scroller.scrollTop = 70;
+      fireEvent.scroll(scroller);
+    });
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => upwardInputs.touch(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('consumes input begun while a page is pending until the next gesture', async () => {
+    const first = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(true);
+    const { scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    scrollTo(0);
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 140 }] });
+    await act(async () => first.land(true));
+    await act(async () => fireEvent.touchMove(scroller, { touches: [{ clientY: 180 }] }));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    fireEvent.touchEnd(scroller);
+    await act(async () => upwardInputs.touch(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('is keyboard focusable and requires a fresh key press after an empty page', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    expect(scroller.tabIndex).toBe(0);
+    scroller.focus();
+    expect(document.activeElement).toBe(scroller);
+    await act(async () => upwardInputs.keyboard(scroller));
+    await act(async () => fireEvent.keyDown(scroller, { key: 'PageUp', repeat: true }));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => upwardInputs.keyboard(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(Object.entries(upwardInputs))('lets a nested scroller own %s input until it can chain upward', async (_name, upward) => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    const panel = document.createElement('div');
+    panel.style.overflowY = 'auto';
+    Object.defineProperties(panel, { clientHeight: { value: 100 }, scrollHeight: { value: 500 } });
+    panel.scrollTop = 120;
+    const target = document.createElement('span');
+    panel.append(target);
+    scroller.append(panel);
+    await act(async () => upward(target));
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    panel.scrollTop = 0;
+    panel.style.overscrollBehaviorY = 'contain';
+    await act(async () => upward(target));
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    panel.style.overscrollBehaviorY = 'auto';
+    await act(async () => upward(target));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not interpret downward, pinch, or editing input as a request for history', () => {
+    const onLoadOlder = vi.fn();
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    fireEvent.wheel(scroller, { deltaY: 100 });
+    fireEvent.keyDown(scroller, { key: 'PageDown' });
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 80 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 140 }, { clientY: 160 }] });
+    const input = document.createElement('input');
+    scroller.append(input);
+    fireEvent.keyDown(input, { key: 'Home' });
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it('serializes multiple upward inputs until the active request settles', async () => {
     const first = pendingPage();
     const onLoadOlder = vi.fn().mockReturnValue(first.promise);
-    const { rerender } = renderTranscript({ onLoadOlder });
-
-    await act(async () => FakeIntersectionObserver.move(true));
+    const { scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    scrollTo(0);
+    for (const upward of Object.values(upwardInputs)) upward(scroller);
+    scrollTo(500);
+    scrollTo(0);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
-
-    // The prepended page pushes the sentinel out of the band (the anchor restore
-    // does this for real) — the reader is no longer asking for anything.
-    await act(async () => FakeIntersectionObserver.move(false));
     await act(async () => first.land(true));
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
-
-    // Back at the top, but the server says that was the last page.
-    await act(async () => rerender({ hasOlder: false }));
-    await act(async () => FakeIntersectionObserver.move(true));
-    expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
-  it('does not page while the reader is following the live tail', async () => {
+  it('stops when history is exhausted', async () => {
     const onLoadOlder = vi.fn().mockResolvedValue(true);
-    const { rerender } = renderTranscript({ onLoadOlder, following: true });
-
-    // A transcript short enough to fit its viewport leaves the sentinel in the
-    // band with the reader still parked on the latest message. Sentinel in view
-    // is only a REQUEST for older history if the reader went looking for it —
-    // otherwise opening or resizing such a chat would walk backwards through
-    // history nobody asked to see.
-    await act(async () => FakeIntersectionObserver.move(true));
-    await act(async () => rerender({ loadingOlder: true }));
-    await act(async () => rerender({ loadingOlder: false }));
-    expect(onLoadOlder).not.toHaveBeenCalled();
-  });
-
-  // The three tests below are one property seen from three sides: EVERY input to
-  // the trigger re-asks the level question when it changes, not just the one the
-  // browser watches. A guard that quietly goes false while nothing re-evaluates
-  // is the same deadlock as a latch that never re-arms — it just needs a
-  // different reader to walk into it.
-
-  it('pages once the reader stops following the tail, with no new intersection', async () => {
-    const onLoadOlder = vi.fn().mockReturnValue(neverLands());
-    renderTranscript({ onLoadOlder, following: true });
-
-    await act(async () => FakeIntersectionObserver.move(true));
-    expect(onLoadOlder).not.toHaveBeenCalled();
-
-    // A transcript only slightly taller than its viewport keeps the sentinel
-    // inside the band at every scroll position, so scrolling up emits no new
-    // intersection for the observer to report — the reader's own scroll is the
-    // only evidence that they left the live tail.
-    await act(async () => placeReader(FakeIntersectionObserver.scroller(), READING_HISTORY));
+    const { scroller, scrollTo, rerender } = renderTranscript({ onLoadOlder });
+    await act(async () => scrollTo(0));
+    rerender({ hasOlder: false });
+    for (const upward of Object.values(upwardInputs)) upward(scroller);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
-  it('pages once a deep-link jump releases its hold on the scroll position', async () => {
-    const onLoadOlder = vi.fn().mockReturnValue(neverLands());
-    const { rerender } = renderTranscript({ onLoadOlder, jumpTarget: 'msg-42' });
-
-    // A jump owns scrollTop until it settles, so the trigger stands down. A
-    // target near the head of the loaded window lands INSIDE the band, which
-    // makes this the reader's whole view of history rather than a moment in
-    // passing.
-    await act(async () => FakeIntersectionObserver.move(true));
+  it('keeps a deep-link jump stable until the reader asks for more history', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller, scrollTo, rerender } = renderTranscript({ onLoadOlder, jumpTarget: 'missing-target' });
+    scrollTo(0);
+    fireEvent.wheel(scroller, { deltaY: -100 });
     expect(onLoadOlder).not.toHaveBeenCalled();
-
-    // The jump acks itself once it has landed and the parent answers by clearing
-    // the target — which is the whole of releasing the hold, and changes no
-    // geometry. So unless the release itself re-asks, the reader is left parked
-    // in the band with paging dead and no gesture available to revive it.
-    await act(async () => flushFrames());
-    await act(async () => rerender({ jumpTarget: null }));
+    act(flushFrames);
+    rerender({ jumpTarget: null });
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    now.mockReturnValue(300);
+    await act(async () => fireEvent.wheel(scroller, { deltaY: -100 }));
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
-  it('records no failure against a reader who has already left the band', async () => {
-    const first = pendingPage();
-    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockReturnValue(neverLands());
-    renderTranscript({ onLoadOlder });
-
-    await act(async () => FakeIntersectionObserver.move(true));
-    expect(onLoadOlder).toHaveBeenCalledTimes(1);
-
-    // The reader gives up on a slow request and scrolls away; it fails only
-    // afterwards. Recording that failure holds the trigger off for someone who
-    // never saw it, and the exit that clears the record has already gone by.
-    await act(async () => FakeIntersectionObserver.move(false));
-
-    // They come back in the same frame the failure lands in. Recording it does
-    // re-observe, which would normally notice they are gone and drop the record
-    // — but that answer arrives at the end of the frame, by which time they are
-    // back at the top and it reports so. Nothing clears the latch after that.
-    await act(async () => {
-      first.land(false);
-      FakeIntersectionObserver.move(true);
-    });
-    expect(onLoadOlder).toHaveBeenCalledTimes(2);
-  });
-
-  it('offers an explicit retry instead of re-asking after a failed page', async () => {
+  it('surfaces failures and offers one explicit retry without an automatic retry loop', async () => {
     const onLoadOlder = vi.fn().mockResolvedValue(false);
-    const { getByText } = renderTranscript({ onLoadOlder });
-
-    // The failed page settles like a successful one, so it reaches the post-load
-    // re-evaluation. But a failure adds no content: the reader is still in the
-    // band, and re-asking would spin against a server that is still failing.
-    await act(async () => FakeIntersectionObserver.move(true));
-    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    const { getByText, scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    await act(async () => scrollTo(0));
     expect(getByText('chat.olderLoadFailed')).toBeTruthy();
+    act(TestResizeObserver.resize);
+    fireEvent.wheel(scroller, { deltaY: -100 });
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => fireEvent.click(getByText('chat.olderLoadFailed')));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+    scrollTo(500);
+    await act(async () => scrollTo(0));
+    expect(onLoadOlder).toHaveBeenCalledTimes(3);
+  });
 
-    // Clicking the retry line is the way forward for a reader who stays put. It
-    // clears the failure, which re-asks — and the re-ask must not put a second
-    // request on the wire beside the one the click just started.
-    await act(async () => getByText('chat.olderLoadFailed').click());
+  it('does not hold a failure against a reader who left before it arrived', async () => {
+    const first = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(true);
+    const { scrollTo, queryByText } = renderTranscript({ onLoadOlder });
+    scrollTo(0);
+    scrollTo(500);
+    await act(async () => first.land(false));
+    expect(queryByText('chat.olderLoadFailed')).toBeNull();
+    await act(async () => scrollTo(0));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
   });
 
-  it('retries once when the reader leaves the band and comes back', async () => {
-    const onLoadOlder = vi.fn().mockResolvedValue(false);
-    renderTranscript({ onLoadOlder });
-
-    await act(async () => FakeIntersectionObserver.move(true));
-    expect(onLoadOlder).toHaveBeenCalledTimes(1);
-
-    // Moving away and back is a fresh ask, not the same doomed one repeated —
-    // otherwise one failure would leave the retry line as the only way to page
-    // for the rest of the session.
-    await act(async () => FakeIntersectionObserver.move(false));
-    await act(async () => FakeIntersectionObserver.move(true));
+  it('keeps an old session request from settling a new session request', async () => {
+    const previous = pendingPage();
+    const current = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(previous.promise).mockReturnValue(current.promise);
+    const { scroller, scrollTo, rerender, props, queryByText } = renderTranscript({ onLoadOlder });
+    scrollTo(0);
+    rerender({ session: { ...props.session, id: 'session-2' }, messages: messages(401, 50) });
+    act(flushFrames);
+    scrollTo(0);
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
+    await act(async () => previous.land(false));
+    expect(queryByText('chat.olderLoadFailed')).toBeNull();
+    fireEvent.wheel(scroller, { deltaY: -100 });
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+    await act(async () => current.land(true));
   });
 });
