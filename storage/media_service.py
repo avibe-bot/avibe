@@ -186,7 +186,14 @@ def get_by_token(conn: Connection, token: str) -> Optional[dict[str, Any]]:
     if not token:
         return None
     row = conn.execute(select(media_objects).where(media_objects.c.token == token)).mappings().first()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    # Older agent replies stored the Markdown label as file_name. Resolve the
+    # actual name on read so existing links work without rewriting saved state.
+    if result["source"] == "agent_reply":
+        result["file_name"] = Path(result["local_path"]).name
+    return result
 
 
 def referenced_session_ids(conn: Connection, token: str) -> list[str]:

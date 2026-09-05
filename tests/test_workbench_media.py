@@ -11,8 +11,10 @@ from __future__ import annotations
 import struct
 import zlib
 from datetime import datetime, timezone
+from email.message import Message
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import select
 
 from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES, rewrite_agent_media
@@ -138,6 +140,82 @@ def test_rewrite_in_place_image_file_and_external(tmp_path):
         rows = conn.execute(select(media_objects)).mappings().all()
     assert sorted(r["kind"] for r in rows) == ["file", "image"]
     assert all(r["source"] == "agent_reply" for r in rows)
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["new", "existing"])
+@pytest.mark.parametrize("filename", ["report.pdf", "报告 (最终).docx", "data.v2.tar.gz", "README"])
+def test_agent_download_and_metadata_preserve_real_filename(tmp_path, monkeypatch, filename, legacy):
+    from tests.ui_server_test_helpers import _save_config
+    from vibe import ui_server
+
+    _save_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
+    document = tmp_path / filename
+    document.write_bytes(b"document contents")
+    label = "下载报告 v2.1.pdf"
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        rewritten = rewrite_agent_media(
+            conn, scope_id=scope_id, session_id="sess_x", text=f"[{label}](<{document.as_uri()}>)"
+        )
+        row = dict(conn.execute(select(media_objects)).mappings().one())
+        token = row["token"]
+        assert rewritten == f"[{label}](</api/media/{token}>)"
+        if legacy:
+            conn.execute(media_objects.update().where(media_objects.c.token == token).values(file_name=label))
+        else:
+            assert row["file_name"] == filename
+
+    client = ui_server.app.test_client()
+    meta = client.get(f"/api/media/{token}/meta")
+    assert meta.status_code == 200
+    assert meta.get_json()["name"] == filename
+    assert meta.get_json()["ext"] == row["file_ext"]
+    for query in ("", "?download=1"):
+        response = client.get(f"/api/media/{token}{query}")
+        assert response.status_code == 200
+        assert response.content == document.read_bytes()
+        disposition = Message()
+        disposition["Content-Disposition"] = response.headers["Content-Disposition"]
+        assert disposition.get_filename() == filename
+        assert response.headers["Content-Type"].split(";", 1)[0] == row["content_type"]
+        if query:
+            assert disposition.get_content_disposition() == "attachment"
+    with engine.connect() as conn:
+        stored_name = conn.execute(select(media_objects.c.file_name).where(media_objects.c.token == token)).scalar_one()
+    assert stored_name == (label if legacy else filename)
+    engine.dispose()
+
+
+def test_uploaded_download_keeps_original_name_instead_of_storage_basename(tmp_path, monkeypatch):
+    from tests.ui_server_test_helpers import _save_config
+    from vibe import ui_server
+
+    _save_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
+    document = tmp_path / "random-upload-id_report.docx"
+    document.write_bytes(b"uploaded document")
+    filename = "原始报告.docx"
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        token = media_service.register(
+            conn, scope_id=scope_id, session_id="sess_x", kind="file", source="user_upload",
+            local_path=str(document.resolve()), file_name=filename,
+        )
+    client = ui_server.app.test_client()
+    assert client.get(f"/api/media/{token}/meta").get_json()["name"] == filename
+    response = client.get(f"/api/media/{token}?download=1")
+    assert response.status_code == 200
+    disposition = Message()
+    disposition["Content-Disposition"] = response.headers["Content-Disposition"]
+    assert disposition.get_filename() == filename
+    engine.dispose()
 
 
 def test_rewrite_angle_wrapped_file_links(tmp_path):

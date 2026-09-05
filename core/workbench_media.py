@@ -375,7 +375,7 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
         return text
 
     def _replace(match) -> str:
-        bang, label, url = match.group(1), match.group(2), match.group(3)
+        bang, url = match.group(1), match.group(3)
         source_url = text[match.start(3) : match.end(3)]
         parsed = _parse_file_uri(url)
         if parsed.scheme.casefold() != "file":
@@ -396,7 +396,7 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
                 session_id=session_id,
                 kind="image" if bang == "!" else "file",
                 local_path=safe_path,
-                file_name=label or os.path.basename(safe_path),
+                file_name=os.path.basename(safe_path),
             )
         except Exception:
             logger.exception("workbench_media: failed to register media for %s", safe_path)
