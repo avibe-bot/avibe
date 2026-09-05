@@ -1490,6 +1490,7 @@ class SessionHandler(BaseHandler):
         from modules.agents.model_hub import (
             build_claude_hub_env,
             claude_setting_sources_for_launch,
+            claude_settings_for_launch,
             launch_for_context,
         )
 
@@ -1587,7 +1588,7 @@ class SessionHandler(BaseHandler):
             "resume": stored_claude_session_id if stored_claude_session_id else None,
             "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
-            "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
+            "settings": claude_settings_for_launch(CLAUDE_MEMORY_DISABLED_SETTINGS, model_hub_launch),
             "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
             "skills": [],
             "sandbox": CLAUDE_REMOTE_SANDBOX,
