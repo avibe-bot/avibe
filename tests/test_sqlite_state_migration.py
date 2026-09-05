@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from importlib import import_module
 import hashlib
 import json
@@ -9,6 +10,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from alembic import command
@@ -863,6 +865,29 @@ def _upgraded_db(db_path: Path, revision: str) -> Path:
     return db_path
 
 
+@pytest.fixture(scope="module")
+def reference_schema(tmp_path_factory):
+    references = {}
+    root = tmp_path_factory.mktemp("migration-reference-schemas")
+
+    def schema(revision: str):
+        if revision not in references:
+            path = _upgraded_db(root / f"reference-{len(references)}.sqlite", revision)
+            references[revision] = frozenset(_schema_of(path))
+        return references[revision]
+
+    return schema
+
+
+def test_schema_reference_is_immutable_and_built_once(reference_schema):
+    reference = reference_schema("head")
+    assert isinstance(reference, frozenset)
+    assert reference_schema("head") is reference
+    assert reference
+    with pytest.raises(AttributeError):
+        reference.clear()
+
+
 def _revisions_the_repair_must_cover() -> list[str]:
     """Every released revision a database can still be sitting on below the repair.
 
@@ -881,7 +906,7 @@ def _revisions_the_repair_must_cover() -> list[str]:
 
 
 def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
-    tmp_path: Path,
+    tmp_path: Path, reference_schema,
 ) -> None:
     # Every branch table being present does not mean the branch was applied. A repair
     # interrupted after 20260725_0038 recreated the table but before 20260815_0054
@@ -889,7 +914,7 @@ def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
     # stamped below the repair. Skipping the replay on a table-presence check would
     # stamp the repair over the short table, and a stamped revision never runs again:
     # the columns would then be missing for the life of the database.
-    expected = {obj for obj in _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head")) if obj[1] == _INTERRUPTED_TABLE}
+    expected = {obj for obj in reference_schema("head") if obj[1] == _INTERRUPTED_TABLE}
     assert expected, "the interrupted table must exist at head"
 
     # Take the interrupted shape from the revision that creates it instead of writing
@@ -924,7 +949,7 @@ def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
         ]
 
 
-def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path) -> None:
+def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path, reference_schema) -> None:
     # A table is not the unit of interruption; a schema object is. Each branch
     # revision creates its table and then its index as two statements, so a run
     # interrupted between them leaves the table present and the index missing --
@@ -934,9 +959,9 @@ def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path) ->
     # never runs again. Derive the objects from the two sides of the merge rather
     # than naming them, so an index added to the branch later is covered here
     # without editing the test.
-    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
-    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
-    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+    reference = reference_schema("head")
+    without_branch = reference_schema("20260804_0046")
+    with_branch = reference_schema(_SPLICED_MERGE_REVISION)
     branch_names = {name for _, name, _ in with_branch} - {name for _, name, _ in without_branch}
     branch_indexes = {name for kind, name, _ in with_branch if kind == "index"} & branch_names
     assert branch_indexes, "the spliced branch must own at least one index"
@@ -1023,15 +1048,15 @@ def test_repair_refuses_to_stamp_a_schema_it_could_not_restore(tmp_path: Path) -
         ]
 
 
-def test_spliced_branch_schema_is_restored_from_every_released_revision(tmp_path: Path) -> None:
+def test_spliced_branch_schema_is_restored_from_every_released_revision(tmp_path: Path, reference_schema) -> None:
     # The property: whatever released revision a database is on, upgrading to head
     # leaves every schema object the spliced branch owns in the shape a fresh install
     # has. Deriving that set from the two sides of the merge, instead of sharing a
     # hand-written list with the migration, means a table added to the branch later
     # cannot fall out of both at once.
-    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
-    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
-    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+    reference = reference_schema("head")
+    without_branch = reference_schema("20260804_0046")
+    with_branch = reference_schema(_SPLICED_MERGE_REVISION)
 
     # Compare by name: an object's recorded DDL text also varies with the rebuild
     # path a table took, which says nothing about who created it.
@@ -3862,16 +3887,17 @@ def _head_shaped_unversioned_db(tmp_path: Path, name: str = "vibe.sqlite") -> Pa
     return db_path
 
 
-def _reference_agent_runs_index_sql(tmp_path: Path) -> dict[str, str]:
+@pytest.fixture(scope="module")
+def reference_agent_runs_index_sql(tmp_path_factory):
     """The three indexes as a full 0001-to-head replay writes them, byte for byte."""
 
-    reference_db = tmp_path / "reference.sqlite"
+    reference_db = tmp_path_factory.mktemp("migration-index-reference") / "reference.sqlite"
     run_migrations(reference_db)
-    with sqlite3.connect(reference_db) as conn:
-        return {name: _index_sql(conn, name) for name in _agent_runs_index_names()}
+    with closing(sqlite3.connect(reference_db)) as conn:
+        return MappingProxyType({name: _index_sql(conn, name) for name in _agent_runs_index_names()})
 
 
-def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path) -> None:
+def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path, reference_agent_runs_index_sql) -> None:
     """The migration ENTRYPOINT leaves a head-shaped database with the 0039-0042 indexes.
 
     This test is GREEN FROM BIRTH — it is a refutation pin, not a fix; red-first does
@@ -3899,7 +3925,7 @@ def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path)
     replayed_indexes = _agent_runs_index_names()
 
     # Reference: an empty path replays 0001 -> head with no stamping shortcut at all.
-    reference_sql = _reference_agent_runs_index_sql(tmp_path)
+    reference_sql = reference_agent_runs_index_sql
 
     db_path = _head_shaped_unversioned_db(tmp_path)
     _seed_settled_history(db_path)
@@ -3922,7 +3948,7 @@ def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path)
     _assert_live_reads_seek_agent_runs_indexes(db_path, route="the migration entrypoint")
 
 
-def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Path) -> None:
+def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Path, reference_agent_runs_index_sql) -> None:
     """The head-schema REPAIR path installs the 0039-0042 indexes by itself.
 
     ``_ensure_head_indexes`` promises a head-shaped database every index head has, and
@@ -3946,7 +3972,7 @@ def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Pat
     """
     settled_index, owed_notice_index, streak_index = _agent_runs_index_names()
     superseded = import_module(SUPERSEDED_OWED_NOTICE_MIGRATION_MODULE)
-    reference_sql = _reference_agent_runs_index_sql(tmp_path)
+    reference_sql = reference_agent_runs_index_sql
 
     db_path = _head_shaped_unversioned_db(tmp_path)
     _seed_settled_history(db_path)
@@ -3987,10 +4013,10 @@ def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Pat
     _assert_live_reads_seek_agent_runs_indexes(db_path, route="the head-schema repair path")
 
 
-def test_background_store_repairs_indexes_on_an_already_ready_schema(tmp_path: Path) -> None:
+def test_background_store_repairs_indexes_on_an_already_ready_schema(tmp_path: Path, reference_agent_runs_index_sql) -> None:
     """Store construction reaches index repair even when no migration is needed."""
 
-    reference_sql = _reference_agent_runs_index_sql(tmp_path)
+    reference_sql = reference_agent_runs_index_sql
     db_path = _head_shaped_unversioned_db(tmp_path, "store-ready.sqlite")
     assert background_tables_ready(db_path)
 
