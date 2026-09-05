@@ -22,6 +22,7 @@ from modules.agents.model_hub import (
     bind_launch,
     bind_persisted_launch,
     claude_setting_sources_for_launch,
+    claude_settings_for_launch,
     launch_for_context,
     opencode_model_for_overlay,
     opencode_requested_model_for_overlay,
@@ -138,8 +139,52 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
     assert claude_setting_sources_for_launch(launch) == ["project", "local"]
+
+
+def test_claude_hub_settings_own_connection_after_native_and_sdk_env_merges():
+    launch = hub_launch()
+    inherited = {
+        "ANTHROPIC_API_KEY": "parent-key",
+        "ANTHROPIC_AUTH_TOKEN": "parent-token",
+        "ANTHROPIC_BASE_URL": "https://parent.example",
+        "ANTHROPIC_CUSTOM_HEADERS": "Authorization: Bearer other-key",
+        "CLAUDE_CODE_OAUTH_TOKEN": "parent-oauth",
+        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR": "3",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR": "4",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "CLAUDE_CODE_USE_FOUNDRY": "1",
+        "PATH": "/bin",
+    }
+    settings = json.loads(claude_settings_for_launch('{"autoMemoryEnabled":false}', launch))
+    subprocess_env = {**inherited, **build_claude_hub_env(inherited, launch)}
+    effective_env = {**subprocess_env, **inherited, **settings["env"]}
+
+    assert effective_env["ANTHROPIC_BASE_URL"] == launch.gateway_base_url
+    assert effective_env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
+    for key in inherited.keys() - {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "PATH"}:
+        assert effective_env[key] == ""
+    assert effective_env["PATH"] == "/bin"
+    assert settings["autoMemoryEnabled"] is False
+    assert settings["apiKeyHelper"] == ""
+
+
+@pytest.mark.parametrize("channel", [None, "direct", "native_cli"])
+def test_claude_native_settings_are_unchanged_without_a_hub_launch(channel):
+    settings = '{"autoMemoryEnabled":false}'
+    launch = hub_launch(channel=channel) if channel is not None else None
+    assert claude_settings_for_launch(settings, launch) == settings
+
+
+@pytest.mark.parametrize("missing", ["gateway_base_url", "gateway_token"])
+def test_claude_hub_launch_cannot_fall_back_to_native_auth(missing):
+    launch = hub_launch(**{missing: None})
+    with pytest.raises(ModelHubError, match="engine_down"):
+        build_claude_hub_env({"ANTHROPIC_AUTH_TOKEN": "native-token"}, launch)
+    with pytest.raises(ModelHubError, match="engine_down"):
+        claude_settings_for_launch("{}", launch)
 
 
 def test_native_cli_launch_keeps_auth_and_applies_catalog_limits():

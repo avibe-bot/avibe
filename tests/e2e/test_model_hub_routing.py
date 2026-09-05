@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -36,6 +39,97 @@ from tests.scenario_harness.model_hub import (
 
 
 pytestmark = pytest.mark.e2e_model_hub
+
+
+@pytest.mark.parametrize("settings_scope", ["home", "project", "local"])
+def test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route(
+    model_hub_app_factory, mock_llm_upstream, settings_scope,
+) -> None:
+    """MH-CLAUDE-LAUNCH-001: native settings cannot change a Hub turn's egress."""
+
+    import claude_agent_sdk
+
+    binary = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+    assert binary.is_file(), "The installed Claude SDK must supply its CLI"
+    menu_model = "claude-opus-5"
+    routed_model = "gpt-6-astra"
+    native_key = "sk-native-claude-settings-fixture"
+    with MockLLMUpstream() as native, _engine_app(model_hub_app_factory) as app:
+        _configure_protocol(native, "anthropic", models=[{"id": menu_model}])
+        cwd = app.home if settings_scope == "home" else app.home / "project"
+        filename = "settings.local.json" if settings_scope == "local" else "settings.json"
+        native_settings = cwd / ".claude" / filename
+        native_payload = json.dumps({"env": {
+            "ANTHROPIC_BASE_URL": native.url,
+            "ANTHROPIC_AUTH_TOKEN": native_key,
+            "ANTHROPIC_API_KEY": native_key,
+            "ANTHROPIC_CUSTOM_HEADERS": f"Authorization: Bearer {native_key}",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "CLAUDE_CODE_USE_FOUNDRY": "1",
+        }})
+        _write(native_settings, native_payload)
+        configured = app.client.post("/api/config", {
+            "agents": {"claude": {"enabled": True, "cli_path": str(binary)}},
+        })
+        assert configured.status == 200, configured.json()
+        _install_engine(app)
+        _configure_protocol(mock_llm_upstream, "openai_responses", models=[{"id": routed_model}])
+        supplied, _ = _create_source(
+            app, mock_llm_upstream, protocol="openai_responses",
+            extra={"base_url": mock_llm_upstream.url + "/v1"},
+        )
+        mode = app.client.patch("/api/models/agents/claude/mode", {"mode": "hub"})
+        assert mode.status == 200, mode.json()
+        chain = app.client.put(f"/api/models/agents/claude/chain?model={menu_model}", {
+            "hops": [{"source_id": supplied["id"], "model_id": routed_model}],
+        })
+        assert chain.status == 200, chain.json()
+        agent = app.client.post("/api/agents", {
+            "name": "claude-hub-settings-e2e", "backend": "claude",
+            "model": menu_model, "system_prompt": "Reply with the supplied response.",
+        })
+        assert agent.status == 200, agent.json()
+        project = app.client.post("/api/projects", {
+            "folder_path": str(cwd), "display_name": "Claude Hub settings E2E",
+        })
+        assert project.status == 201, project.json()
+        session = app.client.post("/api/sessions", {
+            "project_id": project.json()["id"], "agent_name": "claude-hub-settings-e2e",
+            "model": menu_model,
+        })
+        assert session.status == 201, session.json()
+        session_id = session.json()["id"]
+        mock_llm_upstream.reset_requests()
+        native.reset_requests()
+        sent = app.client.post(f"/api/sessions/{session_id}/messages", {"text": "hello"})
+        assert sent.status == 202, sent.json()
+        result = None
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            transcript = app.client.get(f"/api/sessions/{session_id}/messages?tail=1")
+            assert transcript.status == 200, transcript.json()
+            result = next((row for row in transcript.json()["messages"] if row["type"] == "result"), None)
+            if result is not None or any(item["path"].startswith("/v1/messages") for item in native.requests()):
+                break
+            time.sleep(0.1)
+        native_calls = [item for item in native.requests() if item["path"].startswith("/v1/messages")]
+        assert native_calls == [], "Claude bypassed Model Hub using native settings"
+        captured = [item for item in mock_llm_upstream.requests() if item["path"] == "/v1/responses"]
+        assert captured, app.diagnostics()
+        assert all(item["body"]["model"] == routed_model for item in captured)
+        assert all(_request_credential(item) == SYNTHETIC_API_KEY for item in captured)
+        assert result is not None, app.diagnostics()
+        assert result["text"] == "mock response"
+        provenance = app.client.get(f"/api/models/turns/{result['metadata']['turn_id']}/provenance")
+        assert provenance.status == 200, provenance.json()
+        attribution = provenance.json()["provenance"]
+        assert attribution["requested_model_id"] == menu_model
+        assert attribution["outcome"] == "served"
+        assert attribution["served"]["source_id"] == supplied["id"]
+        assert attribution["served"]["configured_model_id"] == routed_model
+        assert attribution["served"]["channel"] == "hub"
+        assert native_settings.read_text() == native_payload
 
 
 def _seed_codex_native_login(home) -> None:

@@ -208,11 +208,21 @@ def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | Non
 
 def claude_setting_sources_for_launch(launch: ModelHubLaunch | None) -> list[str]:
     if launch is not None and launch.channel == "hub":
-        # ~/.claude/settings.json env values override subprocess env. Keep
-        # project/local CLAUDE.md loading, but mask the user settings source so
-        # persisted native auth cannot bypass the ephemeral gateway injection.
+        # Project/local settings remain available. Connection settings are
+        # pinned separately because HOME can also be the project directory.
         return ["project", "local"]
     return ["user", "project", "local"]
+
+
+def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None) -> str:
+    """Pin Hub connection settings above every native settings source."""
+
+    if launch is None or launch.channel != "hub":
+        return base_settings
+    settings = json.loads(base_settings)
+    settings["env"] = {**settings.get("env", {}), **build_claude_hub_env({}, launch)}
+    settings["apiKeyHelper"] = ""
+    return json.dumps(settings)
 
 
 async def resolve_model_hub_launch(
@@ -307,18 +317,26 @@ def build_claude_hub_env(
         return dict(base_env)
     if launch.channel == "hub":
         if not launch.gateway_base_url or not launch.gateway_token:
-            return dict(base_env)
-        result = {
-            key: value
-            for key, value in base_env.items()
-            if not key.startswith("ANTHROPIC_")
-            and key
-            not in {
-                "CLAUDE_CODE_OAUTH_TOKEN",
-                "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-            }
+            raise ModelHubError("engine_down", status=503, turn_outcome=ENGINE_DOWN_TURN_OUTCOME)
+        # The SDK merges overrides over os.environ, so deletion would revive
+        # inherited auth. The same tombstones also mask project/local settings.
+        masked_keys = {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
         }
+        result = {
+            key: "" if key.startswith("ANTHROPIC_") or key in masked_keys else value
+            for key, value in base_env.items()
+        }
+        result.update(dict.fromkeys(masked_keys, ""))
         result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
         result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
         result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"

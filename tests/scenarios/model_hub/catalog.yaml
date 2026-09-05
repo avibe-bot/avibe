@@ -173,6 +173,12 @@ scenarios:
     layer: contract
     missing_layer: scenario
     test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
+  - id: MH-CLAUDE-LAUNCH-001
+    name: Claude Hub turns preserve the configured Source and model despite native connection settings
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered

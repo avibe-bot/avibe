@@ -236,6 +236,45 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
     assert captured["options"].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
 
 
+def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp_path: Path) -> None:
+    import json
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured = {}
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    class Runtime:
+        async def resolve(self, backend, requested_model, **kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel="hub", requested_model=requested_model,
+                target_model="gpt-6-astra", runtime_model=requested_model,
+                source_id="src_hubsettings", gateway_base_url="http://127.0.0.1:18443/claude",
+                gateway_token="hub-settings-fixture-token",
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    controller.settings_manager.get_channel_routing = lambda _: RoutingSettings(model="claude-opus-5")
+    _run_session(SessionHandler(controller), MessageContext(user_id="U123", channel_id="C123"))
+
+    options = captured["options"]
+    settings = json.loads(options.settings)
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == options.env["ANTHROPIC_BASE_URL"]
+    assert settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "hub-settings-fixture-token"
+    assert settings["env"]["ANTHROPIC_API_KEY"] == ""
+    assert settings["autoMemoryEnabled"] is False
+    assert options.setting_sources == ["project", "local"]
+    assert options.extra_args["model"] == "claude-opus-5"
+
+
 def test_session_handler_recreates_cached_claude_client_when_catalog_limits_change(
     monkeypatch,
     tmp_path: Path,

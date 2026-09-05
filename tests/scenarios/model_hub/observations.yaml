@@ -1,6 +1,11 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-006
+    source: claude-sdk-0.2.93-local-http-regression-2026-09-06
+    summary: Native project and local settings override subprocess environment; when cwd is HOME the user settings file is also a project source. Hub connection settings require a higher-priority launch override, and SDK sandbox merging must not expand credentials into argv.
+    affects:
+      - MH-CLAUDE-LAUNCH-001
   - id: MH-OBS-001
     source: engine-survey-s1
     summary: The adapter owns one Source call while the configured route executor owns cross-Source fallback.
