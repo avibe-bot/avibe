@@ -57,15 +57,13 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
 //
 // Ask Hub first because reading OpenCode's live catalog may start OpenCode.
 //
-// claude / codex expose flat model arrays. OpenCode's public options catalog is
-// per-provider and returns RAW model ids (never provider-prefixed), so
-// we flatten it into ``providerId/modelId`` keys — ALWAYS provider-prefixed,
-// even when the raw id itself contains "/" (e.g. OpenRouter's
-// ``anthropic/claude-*`` must become ``openrouter/anthropic/claude-*``). The
-// OpenCode adapter resolves the override by splitting on the FIRST "/" into
-// {providerID, modelID}, so the prefix is required for the selection to bind to
-// the right provider. Callers keep ``allowCustomValue`` so a model the catalog
-// doesn't know yet can still be typed.
+// claude / codex expose flat model arrays. OpenCode's Direct options catalog is
+// per-provider and returns RAW model ids (never provider-prefixed), so we
+// flatten it into ``providerId/modelId`` keys. A projected Hub entry carries
+// ``vibe_remote.model_hub_projected`` and keeps its bare canonical id instead;
+// the controller derives transport addressing from that row's native protocol.
+// Callers keep ``allowCustomValue`` so a model the catalog doesn't know yet can
+// still be typed.
 export async function fetchBackendModels(
   api: ApiContextType,
   backend: string,
@@ -107,19 +105,31 @@ export async function fetchBackendModels(
       const providerId = typeof providerRecord.id === 'string' ? providerRecord.id : '';
       if (!providerId) return [];
       const rawModels = providerRecord.models;
-      const modelIds = Array.isArray(rawModels)
-        ? rawModels.map((model: unknown) => {
-          if (typeof model === 'string') return model;
-          if (!model || typeof model !== 'object') return undefined;
+      const modelEntries: [string, unknown][] = Array.isArray(rawModels)
+        ? rawModels.flatMap((model: unknown): [string, unknown][] => {
+          if (typeof model === 'string') return [[model, model]];
+          if (!model || typeof model !== 'object') return [];
           const modelId = (model as Record<string, unknown>).id;
-          return typeof modelId === 'string' ? modelId : undefined;
+          return typeof modelId === 'string' ? [[modelId, model]] : [];
         })
         : rawModels && typeof rawModels === 'object'
-          ? Object.keys(rawModels)
+          ? Object.entries(rawModels)
           : [];
-      return modelIds
-        .filter((modelId: unknown): modelId is string => typeof modelId === 'string' && Boolean(modelId))
-        .map((modelId: string) => `${providerId}/${modelId}`);
+      return modelEntries
+        .filter(([modelId]) => Boolean(modelId))
+        .map(([modelId, modelInfo]) => {
+          if (modelInfo && typeof modelInfo === 'object') {
+            const metadata = (modelInfo as Record<string, unknown>).vibe_remote;
+            if (
+              metadata
+              && typeof metadata === 'object'
+              && (metadata as Record<string, unknown>).model_hub_projected === true
+            ) {
+              return modelId;
+            }
+          }
+          return `${providerId}/${modelId}`;
+        });
     });
     return {
       models,
