@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import message_deliveries as delivery_store
+from vibe.opencode_config import OPENCODE_REASONING_VARIANTS
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
@@ -1136,6 +1137,26 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                     "reasoningEffort": "high",
                 },
             )
+
+    async def test_agent_reasoning_effort_reads_back_every_savable_variant(self):
+        # A tier the save path can write must never be dropped here as unknown
+        # (#1840: catalog-declared `ultra` was rejected by both halves).
+        for effort in OPENCODE_REASONING_VARIANTS:
+            with self.subTest(effort=effort):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_home = Path(tmp_dir)
+                    config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    config_path.write_text(
+                        json.dumps({"reasoningEffort": effort}),
+                        encoding="utf-8",
+                    )
+
+                    manager = OpenCodeServerManager(binary="opencode", port=4096)
+                    with patch("vibe.opencode_config.Path.home", return_value=tmp_home):
+                        resolved = manager.get_agent_reasoning_effort_from_config(None)
+
+                    self.assertEqual(resolved, effort)
 
     async def test_refresh_global_config_patches_live_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
