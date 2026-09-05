@@ -5009,12 +5009,22 @@ def show_archive_builder(tmp_path, monkeypatch):
 def test_show_archive_reuses_verified_artifact_without_rewriting(show_archive_builder):
     run, _commit, archive, log, _script = show_archive_builder
     run()
-    before = archive.stat()
-    receipt_before = Path(str(archive) + ".build-key").stat()
+    receipt = Path(str(archive) + ".build-key")
+
+    def write_identity(path):
+        value = path.stat()
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    # Reading to verify a cache hit may advance atime on Linux relatime mounts.
+    # Make that eligible even when the two builds run in the same clock tick.
+    for path in (archive, receipt):
+        value = path.stat()
+        os.utime(path, ns=(value.st_mtime_ns - 172_800_000_000_000, value.st_mtime_ns))
+    before = {path: write_identity(path) for path in (archive, receipt)}
     result = run()
     assert "reusing verified build" in result.stdout
-    assert archive.stat() == before
-    assert Path(str(archive) + ".build-key").stat() == receipt_before
+    assert all(write_identity(path) == identity for path, identity in before.items())
     assert log.read_text().splitlines() == ["ci", "run build", "run bundle:vibe-remote"]
 
 
