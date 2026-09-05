@@ -3581,11 +3581,36 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
 @pytest.mark.parametrize("holds_project", [False, True], ids=["daemon-empty", "daemon-holds-project"])
 @pytest.mark.parametrize("recorded", [False, True], ids=["new-row", "existing-row"])
 @pytest.mark.parametrize(
+    ("failure_type", "recovery_error"),
+    [
+        (RuntimeError, None),
+        (KeyboardInterrupt, None),
+        (RuntimeError, OSError),
+        (RuntimeError, KeyboardInterrupt),
+        (RuntimeError, subprocess.CalledProcessError),
+    ],
+)
+@pytest.mark.parametrize(
     "fail_at",
-    ["require_runtime_seed_env", "ensure_project_and_instance", "sync_source"],
+    [
+        "require_runtime_seed_env",
+        "ensure_project_and_instance",
+        "stop_service_for_update",
+        "sync_source",
+        "prepare_show_runtime",
+        "restart_and_verify",
+        "health_check",
+    ],
 )
 def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str, recorded: bool, holds_project: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fail_at: str,
+    recorded: bool,
+    holds_project: bool,
+    failure_type: type[BaseException],
+    recovery_error: type[BaseException] | None,
 ) -> None:
     """A failed `up` drops its row exactly when the daemon holds no project for it.
 
@@ -3609,22 +3634,44 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     someone deleted the slug by hand.
     """
     calls = []
+    recovery_locks = []
+    service_commands = []
+    restart_and_verify = incus_regression.restart_and_verify
+    original_error = failure_type(f"{fail_at} failed")
     inventory = ("avr-wt-demo-branch",) if holds_project else ()
 
-    class NewRunner:
-        def __init__(self, *, dry_run=False):
-            self.dry_run = dry_run
-
+    class NewRunner(incus_regression.Runner):
         names = daemon_listing(*inventory)
 
-        def run(self, command, **kwargs):
-            return subprocess.CompletedProcess(command, 0, stdout="{}")
+    def run_command(command, **kwargs):
+        script = command[-1]
+        service_commands.append(script)
+        if "/health" in script:
+            raise original_error
+        if script in {
+            "systemctl daemon-reload",
+            f"systemctl enable --now {incus_regression.SERVICE_NAME}",
+            f"systemctl restart {incus_regression.SERVICE_NAME}",
+        }:
+            return subprocess.CompletedProcess(command, 0)
+        calls.append("restart_service_after_failed_update")
+        recovery_locks.append(incus_regression.target_run_in_flight(tmp_path, None, "avr-wt-demo-branch"))
+        assert command[-1] == f"systemctl start {incus_regression.SERVICE_NAME}"
+        assert kwargs["check"] is True
+        if recovery_error is subprocess.CalledProcessError:
+            raise subprocess.CalledProcessError(1, command)
+        if recovery_error is not None:
+            raise recovery_error("recovery failed")
+        return subprocess.CompletedProcess(command, 0, stdout="{}")
 
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "restart_and_verify" and fail_at == "health_check":
+                calls.append("health_check")
+                return restart_and_verify(*args, **kwargs)
             if name == fail_at:
-                raise RuntimeError(f"{name} failed")
+                raise original_error
             if name == "update_dependencies_and_build":
                 return set()
 
@@ -3657,6 +3704,7 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
     monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
     monkeypatch.setattr(incus_regression, "Runner", NewRunner)
+    monkeypatch.setattr(incus_regression.subprocess, "run", run_command)
     monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
     monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
     monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
@@ -3703,10 +3751,25 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
         reset_mode="none",
     )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(failure_type) as raised:
         incus_regression.cmd_up(args)
 
+    assert raised.value is original_error
     assert fail_at in calls
+    recovery_calls = calls.count("restart_service_after_failed_update")
+    assert recovery_calls == int("stop_service_for_update" in calls)
+    if fail_at == "health_check":
+        assert service_commands.count(f"systemctl restart {incus_regression.SERVICE_NAME}") == 1
+        assert sum("/health" in script for script in service_commands) == 1
+    if incus_regression.fcntl is not None:
+        assert recovery_locks == [True] * recovery_calls
+    assert not incus_regression.target_run_in_flight(tmp_path, None, "avr-wt-demo-branch")
+    stderr = capsys.readouterr().err
+    if recovery_calls and recovery_error is not None:
+        assert "Could not restart avibe-regression.service after failed update" in stderr
+        assert recovery_error.__name__ in stderr
+    else:
+        assert not stderr
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
     assert ("demo-branch" in mapping) == holds_project
     if holds_project:
@@ -4514,7 +4577,39 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
     assert "pip install -e ." not in joined
 
 
-def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() -> None:
+@pytest.mark.parametrize("invalid_timeout", ["-1", "0", "not-an-integer", "0.5"])
+@pytest.mark.parametrize("from_env_file", [False, True])
+def test_up_rejects_invalid_build_timeout_before_incus_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_timeout: str, from_env_file: bool
+) -> None:
+    name = "REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS"
+    monkeypatch.setenv(name, invalid_timeout)
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    if from_env_file:
+        monkeypatch.delenv(name)
+        (tmp_path / incus_regression.ENV_FILE_NAME).write_text(f"{name}={invalid_timeout}\n", encoding="utf-8")
+
+    def unexpected_incus_access(*args, **kwargs):
+        pytest.fail("Invalid configuration must fail before Incus access")
+
+    monkeypatch.setattr(incus_regression, "require_incus", unexpected_incus_access)
+    monkeypatch.setattr(incus_regression.subprocess, "run", unexpected_incus_access)
+    args = incus_regression.build_parser().parse_args(["up", "--target", "master"])
+
+    with pytest.raises(incus_regression.RegressionError, match=f"{name} must be .*integer"):
+        incus_regression.cmd_up(args)
+
+    assert not (tmp_path / ".runtime").exists()
+
+
+@pytest.mark.parametrize(
+    ("timeout_env", "expected_timeout"),
+    [(None, incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS), ("", 300), ("1", 1), (" 900 ", 900)],
+)
+def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install(
+    monkeypatch: pytest.MonkeyPatch, timeout_env: str | None, expected_timeout: int
+) -> None:
     commands = []
     build_timeouts = []
 
@@ -4541,6 +4636,9 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() ->
         ui_host="127.0.0.1",
         ui_port=5123,
     )
+    monkeypatch.delenv("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS", raising=False)
+    if timeout_env is not None:
+        monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS", timeout_env)
 
     incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
 
@@ -4548,7 +4646,7 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() ->
     assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
     assert "npm run bundle:vibe-remote" in joined
     assert 'install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"' in joined
-    assert build_timeouts == [incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS]
+    assert build_timeouts == [expected_timeout]
     build_command = next(command for command in commands if "git clone --depth 1" in command)
     assert build_command.index("VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required") < build_command.index("git clone")
     assert joined.count("vibe runtime prepare --strict") == 2
