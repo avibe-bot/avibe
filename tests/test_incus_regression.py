@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import tarfile
@@ -357,6 +358,69 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "/opt/avibe/source" in data
     assert "/home/avibe/.vibe_remote" in data
     assert "libreoffice-nogui" not in data
+    assert json.dumps(incus_regression.legacy_image_ownership_command()) in data
+
+
+def test_service_directory_preparation_preserves_existing_descendants(tmp_path: Path) -> None:
+    roots = (tmp_path / "home", tmp_path / "install", tmp_path / "metadata")
+    script = incus_regression.prepare_service_directories_command()
+    for original, replacement in zip(
+        (incus_regression.SERVICE_HOME, "/opt/avibe", incus_regression.METADATA_DIR), roots,
+    ):
+        script = script.replace(original, shlex.quote(str(replacement)))
+    script = script.replace("avibe:avibe", f"{os.getuid()}:{os.getgid()}")
+    subprocess.run(["bash", "-c", script], check=True)
+    owned_roots = {path for root in roots for path in (root, *root.rglob("*"))}
+    for root in owned_roots:
+        nested = root / "existing" / "future-runtime"
+        nested.mkdir(parents=True)
+        private = nested / "private"
+        private.write_text("preserved", encoding="utf-8")
+        private.chmod(0o600)
+        (nested / "link").symlink_to(private)
+    roots[0].chmod(0o700)
+    descendants = {path for root in roots for path in root.rglob("*")} - owned_roots
+
+    def metadata(path: Path) -> tuple[int, int, int, int]:
+        value = path.lstat()
+        return value.st_uid, value.st_gid, value.st_mode, value.st_ctime_ns
+
+    before = {path: metadata(path) for path in descendants}
+    subprocess.run(["bash", "-c", script], check=True)
+
+    assert {path: metadata(path) for path in descendants} == before
+    assert stat.S_IMODE(roots[0].stat().st_mode) == 0o700
+    assert all(path.stat().st_uid == os.getuid() for path in owned_roots)
+
+
+def test_legacy_image_repair_only_visits_root_owned_backend_installs(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    files = {}
+    for name in (".local/bin", ".npm-global", ".npm", ".avibe/runtime", ".local/share/future-runtime"):
+        directory = home / name
+        directory.mkdir(parents=True)
+        files[name] = directory / "existing"
+        files[name].write_text("preserved", encoding="utf-8")
+    (home / ".npmrc").write_text("prefix=preserved", encoding="utf-8")
+    (home / ".opencode").symlink_to(home / ".avibe/runtime", target_is_directory=True)
+    (home / ".npm-global/link").symlink_to(files[".avibe/runtime"])
+    script = incus_regression.legacy_image_ownership_command().replace(
+        incus_regression.SERVICE_HOME, str(home),
+    ).replace("avibe:avibe", f"{os.getuid()}:{os.getgid()}")
+    # Emulate legacy image ownership without requiring root on the test host.
+    stat = 'stat() { case "$3" in */.npm-global|*/.npmrc|*/.opencode) echo 0;; *) echo 1;; esac; };\n'
+    before = {name: path.stat().st_ctime_ns for name, path in files.items()}
+    subprocess.run(["bash", "-c", stat + script], check=True)
+
+    assert files[".npm-global"].stat().st_ctime_ns != before[".npm-global"]
+    assert {name: path.stat().st_ctime_ns for name, path in files.items() if name != ".npm-global"} == {
+        name: value for name, value in before.items() if name != ".npm-global"
+    }
+    assert all(path.read_text(encoding="utf-8") == "preserved" for path in files.values())
+    assert (home / ".opencode").is_symlink()
+    migrated = files[".npm-global"].stat().st_ctime_ns
+    subprocess.run(["bash", "-c", "stat() { echo 1; };\n" + script], check=True)
+    assert files[".npm-global"].stat().st_ctime_ns == migrated
 
 
 def test_project_config_marks_regression_target() -> None:
@@ -748,6 +812,7 @@ def test_existing_instance_is_not_reinitialised() -> None:
     rendered = [" ".join(command) for command, _ in commands]
     assert not any(" init " in f" {command} " for command in rendered)
     assert not any("soffice" in command or "libreoffice" in command for command in rendered)
+    assert not any("chown -hR" in command or "chown -R" in command for command in rendered)
 
 
 def test_build_base_uses_publishable_temp_instance() -> None:
@@ -782,17 +847,21 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     assert "--ephemeral" not in joined
     assert "incus launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
     assert "https://deb.nodesource.com/setup_20.x" in joined
-    assert 'HOME="$avibe_home" npm install -g @anthropic-ai/claude-code @openai/codex' in joined
+    assert "useradd --create-home --shell /bin/bash --groups sudo avibe" in joined
+    backend_install = joined.split("sudo -H -u avibe -- bash -s <<'AVIBE_BACKENDS'\n", 1)[1].split("\nAVIBE_BACKENDS", 1)[0]
+    assert 'avibe_home="$HOME"' in backend_install
+    assert 'npm install -g @anthropic-ai/claude-code @openai/codex' in backend_install
     assert "https://askill.sh | sh -s -- -b /usr/local/bin" in joined
     assert ".npm-global" in joined
     assert 'ln -sf "$avibe_home/.npm-global/bin/claude" "$avibe_home/.local/bin/claude"' in joined
     assert 'ln -sf "$avibe_home/.npm-global/bin/codex" "$avibe_home/.local/bin/codex"' in joined
-    assert 'curl -fsSL https://opencode.ai/install | HOME="$avibe_home" bash -s -- --no-modify-path' in joined
+    assert 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path' in backend_install
     assert 'ln -sf "$avibe_home/.opencode/bin/opencode" "$avibe_home/.local/bin/opencode"' in joined
     # Backends must not be root-global: the non-root avibe user owns them and self-updates.
     assert "/usr/local/bin/opencode" not in joined
     assert "cloud-init clean --logs || true" in joined
     assert "incus publish avibe-regression-base-build --alias avibe-regression-base-current" in joined
+    subprocess.run(["bash", "-n"], input=next(command[-1] for command in commands if "apt-get update" in command[-1]), text=True, check=True)
 
 
 def test_source_exclude_drops_runtime_and_dependency_dirs() -> None:
@@ -1030,6 +1099,49 @@ def test_sync_source_clears_stale_files_even_without_clean(tmp_path: Path) -> No
     assert f"find {incus_regression.SOURCE_DIR}/ui -mindepth 1 -maxdepth 1 " in joined
     for kept in incus_regression.UI_NON_SOURCE_DIRS:
         assert f"! -name {kept}" in joined
+
+
+def test_source_sync_writes_as_service_user_and_preserves_unshipped_trees(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    deployed = tmp_path / "deployed"
+    source.mkdir()
+    deployed.mkdir()
+    (source / "ui").mkdir()
+    (source / "ui" / "entry.js").write_text("new source", encoding="utf-8")
+    (source / "tool").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (source / "tool").chmod(0o755)
+    (source / "tool-link").symlink_to("tool")
+    seed_source_tree(deployed)
+    preserved = {
+        path: path.lstat()
+        for name in incus_regression.UI_NON_SOURCE_DIRS
+        for path in (deployed / "ui" / name).rglob("*")
+    }
+    archive_commands = []
+
+    class LocalRunner:
+        dry_run = False
+
+        def run(self, command, **kwargs):
+            shell_index = command.index("-lc") + 1
+            script = command[shell_index].replace(incus_regression.SOURCE_DIR, str(deployed))
+            if "input_bytes" in kwargs:
+                archive_commands.append(command)
+                # Only the generated extraction runs locally, inside the fixture root.
+                script = script[script.index("tar --no-same-owner"):]
+            return subprocess.run(["bash", "-c", script], input=kwargs.get("input_bytes"), check=True)
+
+    target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
+    incus_regression.sync_source(LocalRunner(), target, source, remote=None, clean=False)
+
+    assert len(archive_commands) == 1
+    assert ["sudo", "-H", "-u", "avibe"] == archive_commands[0][archive_commands[0].index("sudo"):][:4]
+    assert (deployed / "ui" / "entry.js").read_text() == "new source"
+    assert stat.S_IMODE((deployed / "tool").stat().st_mode) == 0o755
+    assert (deployed / "tool-link").readlink() == Path("tool")
+    assert (deployed / "tool").stat().st_uid == os.getuid()
+    assert not (deployed / "stale.py").exists()
+    assert all(path.lstat().st_ctime_ns == before.st_ctime_ns for path, before in preserved.items())
 
 
 def test_sync_source_without_clean_keeps_every_ui_non_source_dir(tmp_path: Path) -> None:
@@ -1346,6 +1458,10 @@ def test_prepare_state_reseeds_when_reset_requested(monkeypatch: pytest.MonkeyPa
     assert "rm -rf /home/avibe/.avibe/config /home/avibe/.avibe/state /home/avibe/.avibe/runtime" in joined
     assert "rm -rf /home/avibe/.regression-seed" in joined
     assert "prepare_regression.py" in joined
+    copy_command = next(command for command in commands if "cp -a" in " ".join(command))
+    assert "sudo -H -u avibe" in " ".join(copy_command)
+    assert "--no-preserve=ownership" in " ".join(copy_command)
+    assert "chown" not in " ".join(copy_command)
 
 
 def test_prepare_state_reset_all_deletes_target_home_before_copy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4160,6 +4276,52 @@ def test_update_builds_ui_before_editable_install() -> None:
     install_index = next(i for i, command in enumerate(commands) if "pip install -e ." in command)
     build_index = next(i for i, command in enumerate(commands) if "npm run build" in command)
     assert build_index < install_index
+
+
+@pytest.mark.parametrize("venv_exists", [False, True])
+def test_python_environment_is_created_by_its_owner_and_reinstalled_only_when_needed(venv_exists: bool) -> None:
+    commands = []
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            commands.append(" ".join(command))
+            result = 0 if venv_exists else 1
+            return subprocess.CompletedProcess(command, result if "pyvenv.cfg" in commands[-1] else 0)
+
+    target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
+    fingerprints = {"python": "p", "ui_deps": "d", "ui_source": "s"}
+    incus_regression.update_dependencies_and_build(
+        RecordingRunner(), target, previous_fingerprints=fingerprints, next_fingerprints=fingerprints,
+        force_deps=False, build_ui=True, force_ui=False, remote=None,
+    )
+
+    creation = [command for command in commands if "python3 -m venv" in command]
+    assert len(creation) == (0 if venv_exists else 1)
+    assert all("sudo -H -u avibe" in command for command in creation)
+    assert any("pip install -e ." in command for command in commands) is not venv_exists
+    assert all("chown" not in command for command in commands)
+
+
+def test_python_environment_creation_failure_stops_deployment() -> None:
+    commands = []
+
+    class FailingRunner:
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            commands.append(joined)
+            if "pyvenv.cfg" in joined:
+                return subprocess.CompletedProcess(command, 1)
+            assert "python3 -m venv" in joined
+            assert "|| true" not in joined
+            raise subprocess.CalledProcessError(1, command)
+
+    target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
+    with pytest.raises(subprocess.CalledProcessError):
+        incus_regression.update_dependencies_and_build(
+            FailingRunner(), target, previous_fingerprints={}, next_fingerprints={},
+            force_deps=False, build_ui=True, force_ui=False, remote=None,
+        )
+    assert len(commands) == 2
 
 
 def test_force_ui_rebuilds_with_realtime_enabled_by_default() -> None:

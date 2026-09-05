@@ -443,6 +443,90 @@ def test_engine_health_projects_only_required_facts_from_large_responses(
     assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
 
 
+@pytest.mark.parametrize("endpoint", ["/v1/models", "/v0/management/config"])
+@pytest.mark.parametrize(
+    ("status", "error_type", "reason"),
+    [(None, "TimeoutError", "timeout"), (401, "private-error", "http_error"),
+     (None, "invalid_json", "invalid_response"), (None, "private-error", "unavailable")],
+)
+def test_health_failure_retains_only_local_diagnostic_facts(
+    monkeypatch: pytest.MonkeyPatch, endpoint: str, status: int | None, error_type: str, reason: str,
+) -> None:
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "private-management", "private-gateway"))
+    calls = []
+
+    def request(_method, path, _projector, **kwargs):
+        calls.append(path)
+        assert kwargs["timeout"] == 1.0
+        if path == endpoint:
+            raise EngineClientError("private-response", status_code=status, error_type=error_type)
+        return True
+
+    monkeypatch.setattr(client, "_request_json_projection", request)
+    assert client.health() is False
+    failure = client.health_failure
+    assert failure is not None
+    assert (failure.path, failure.reason, failure.http_status) == (endpoint, reason, status)
+    assert failure.elapsed_seconds >= 0
+    assert calls[-1] == endpoint
+    assert "private" not in repr(failure)
+
+    monkeypatch.setattr(client, "_request_json_projection", lambda *_args, **_kwargs: True)
+    assert client.health() is True
+    assert client.health_failure is None
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/models", "/v0/management/config"])
+def test_health_rejects_an_unexpected_success_response(monkeypatch: pytest.MonkeyPatch, endpoint: str) -> None:
+    client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+    monkeypatch.setattr(client, "_request_json_projection", lambda _method, path, *_args, **_kwargs: path != endpoint)
+
+    assert client.health() is False
+    assert client.health_failure is not None
+    assert client.health_failure.path == endpoint
+    assert client.health_failure.reason == "invalid_response"
+
+
+def test_supervisor_records_health_transitions_without_repeating_or_leaking_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    installer = SimpleNamespace(
+        status=lambda: {"installed": True, "version": "fixture"},
+        contract_manifest=lambda: {"name": "cliproxyapi", "version": "fixture", "assets": []},
+    )
+    supervisor = EngineSupervisor(installer=installer, state_store=EngineStateStore(tmp_path / "state"))
+    supervisor._process = SimpleNamespace(poll=lambda: None)
+    supervisor._connection = EngineConnection("http://127.0.0.1:15220", "private-management", "private-gateway")
+    failure = [EngineClientError("private-body", error_type="TimeoutError")]
+
+    def request(_client, _method, path, *_args, **_kwargs):
+        if path == "/v0/management/config" and failure[0] is not None:
+            raise failure[0]
+        return True
+
+    monkeypatch.setattr(EngineClient, "_request_json_projection", request)
+    with caplog.at_level(logging.INFO, logger="vibe.model_hub_runtime.supervisor"):
+        for _ in range(3):
+            assert supervisor.status()["status"]["health"] == "degraded"
+        failure[0] = EngineClientError("private-body", status_code=403, error_type="private-error")
+        assert supervisor.status()["status"]["health"] == "degraded"
+        failure[0] = None
+        for _ in range(2):
+            assert supervisor.status()["status"]["health"] == "ok"
+        failure[0] = EngineClientError("private-body", error_type="TimeoutError")
+        assert supervisor.status()["status"]["health"] == "degraded"
+
+    messages = [record.getMessage() for record in caplog.records]
+    failures = [message for message in messages if "health outcome=failed" in message]
+    assert len(failures) == 3
+    assert all("endpoint=/v0/management/config" in message for message in failures)
+    assert "reason=timeout" in failures[0]
+    assert "reason=http_error http_status=403" in failures[1]
+    assert sum("health outcome=recovered" in message for message in messages) == 1
+    assert all("private" not in message for message in messages)
+    supervisor._process = None
+
+
 def test_engine_error_projection_does_not_materialize_unrelated_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

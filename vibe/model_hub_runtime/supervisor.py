@@ -59,6 +59,7 @@ class EngineSupervisor:
         self._connection: EngineConnection | None = None
         self._last_check: str | None = None
         self._start_attempted = False
+        self._health_failure_signature: tuple[str, str, int | None] | None = None
 
     def ensure_running(self) -> EngineConnection:
         with self._lock:
@@ -220,7 +221,7 @@ class EngineSupervisor:
             if remaining <= 0:
                 break
             client = EngineClient(connection, timeout=min(1.0, remaining / 2))
-            if client.health():
+            if self._check_health_locked(client):
                 try:
                     self.state_store.audit_auth_permissions()
                 except Exception as exc:
@@ -251,8 +252,25 @@ class EngineSupervisor:
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:
             return False
-        healthy = EngineClient(self._connection, timeout=1.0).health()
+        return self._check_health_locked(EngineClient(self._connection, timeout=1.0))
+
+    def _check_health_locked(self, client: EngineClient) -> bool:
+        healthy = client.health()
         self._last_check = _utc_now()
+        failure = client.health_failure
+        if failure is not None:
+            signature = (failure.path, failure.reason, failure.http_status)
+            if signature != self._health_failure_signature:
+                logger.warning(
+                    "Model Hub engine health outcome=failed endpoint=%s reason=%s "
+                    "http_status=%s elapsed_seconds=%.3f",
+                    failure.path, failure.reason, failure.http_status, failure.elapsed_seconds,
+                )
+            self._health_failure_signature = signature
+        elif healthy:
+            if self._health_failure_signature is not None:
+                logger.info("Model Hub engine health outcome=recovered")
+            self._health_failure_signature = None
         return healthy
 
     def _is_running_locked(self) -> bool:
@@ -262,6 +280,7 @@ class EngineSupervisor:
         process = self._process
         self._process = None
         self._connection = None
+        self._health_failure_signature = None
         if process is None or process.poll() is not None:
             return
         signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
