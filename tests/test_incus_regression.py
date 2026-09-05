@@ -3581,11 +3581,35 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
 @pytest.mark.parametrize("holds_project", [False, True], ids=["daemon-empty", "daemon-holds-project"])
 @pytest.mark.parametrize("recorded", [False, True], ids=["new-row", "existing-row"])
 @pytest.mark.parametrize(
+    ("failure_type", "recovery_error"),
+    [
+        (RuntimeError, None),
+        (KeyboardInterrupt, None),
+        (RuntimeError, OSError),
+        (RuntimeError, KeyboardInterrupt),
+        (RuntimeError, subprocess.CalledProcessError),
+    ],
+)
+@pytest.mark.parametrize(
     "fail_at",
-    ["require_runtime_seed_env", "ensure_project_and_instance", "sync_source", "prepare_show_runtime"],
+    [
+        "require_runtime_seed_env",
+        "ensure_project_and_instance",
+        "stop_service_for_update",
+        "sync_source",
+        "prepare_show_runtime",
+        "restart_and_verify",
+    ],
 )
 def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str, recorded: bool, holds_project: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fail_at: str,
+    recorded: bool,
+    holds_project: bool,
+    failure_type: type[BaseException],
+    recovery_error: type[BaseException] | None,
 ) -> None:
     """A failed `up` drops its row exactly when the daemon holds no project for it.
 
@@ -3609,22 +3633,29 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     someone deleted the slug by hand.
     """
     calls = []
+    recovery_locks = []
+    original_error = failure_type(f"{fail_at} failed")
     inventory = ("avr-wt-demo-branch",) if holds_project else ()
 
-    class NewRunner:
-        def __init__(self, *, dry_run=False):
-            self.dry_run = dry_run
-
+    class NewRunner(incus_regression.Runner):
         names = daemon_listing(*inventory)
 
-        def run(self, command, **kwargs):
-            return subprocess.CompletedProcess(command, 0, stdout="{}")
+    def run_command(command, **kwargs):
+        calls.append("restart_service_after_failed_update")
+        recovery_locks.append(incus_regression.target_run_in_flight(tmp_path, None, "avr-wt-demo-branch"))
+        assert command[-1] == f"systemctl start {incus_regression.SERVICE_NAME}"
+        assert kwargs["check"] is True
+        if recovery_error is subprocess.CalledProcessError:
+            raise subprocess.CalledProcessError(1, command)
+        if recovery_error is not None:
+            raise recovery_error("recovery failed")
+        return subprocess.CompletedProcess(command, 0, stdout="{}")
 
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
             if name == fail_at:
-                raise RuntimeError(f"{name} failed")
+                raise original_error
             if name == "update_dependencies_and_build":
                 return set()
 
@@ -3657,6 +3688,7 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
     monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
     monkeypatch.setattr(incus_regression, "Runner", NewRunner)
+    monkeypatch.setattr(incus_regression.subprocess, "run", run_command)
     monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
     monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
     monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
@@ -3675,9 +3707,8 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
         "write_metadata",
         "prepare_show_runtime",
         "restart_and_verify",
-        "restart_service_after_failed_update",
     ):
-        monkeypatch.setattr(incus_regression, name, record(name), raising=False)
+        monkeypatch.setattr(incus_regression, name, record(name))
 
     args = argparse.Namespace(
         target="worktree",
@@ -3704,12 +3735,22 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
         reset_mode="none",
     )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(failure_type) as raised:
         incus_regression.cmd_up(args)
 
+    assert raised.value is original_error
     assert fail_at in calls
     recovery_calls = calls.count("restart_service_after_failed_update")
-    assert recovery_calls == (1 if fail_at in {"sync_source", "prepare_show_runtime"} else 0)
+    assert recovery_calls == int("stop_service_for_update" in calls)
+    if incus_regression.fcntl is not None:
+        assert recovery_locks == [True] * recovery_calls
+    assert not incus_regression.target_run_in_flight(tmp_path, None, "avr-wt-demo-branch")
+    stderr = capsys.readouterr().err
+    if recovery_calls and recovery_error is not None:
+        assert "Could not restart avibe-regression.service after failed update" in stderr
+        assert recovery_error.__name__ in stderr
+    else:
+        assert not stderr
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
     assert ("demo-branch" in mapping) == holds_project
     if holds_project:

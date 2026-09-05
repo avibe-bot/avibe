@@ -1707,7 +1707,7 @@ def stop_service_for_update(runner: Runner, target: RegressionTarget, *, remote:
 
 
 def restart_service_after_failed_update(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
-    runner.run(root_exec(target, f"systemctl start {SERVICE_NAME} || true", remote=remote), check=False)
+    runner.run(root_exec(target, f"systemctl start {SERVICE_NAME}", remote=remote))
 
 
 def migrate_legacy_backend_runtimes(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
@@ -2512,14 +2512,11 @@ def cmd_up(args: argparse.Namespace) -> int:
     # which is why the identity is observed here and not derived from a target.
     slug = target_slug(args, repo_root)
     lock_project = project_name_for(args.target, slug)
-    # Built before the attempt, not inside it: releasing the reservation asks the
-    # daemon what it holds, and a failure while acquiring the update lock would
-    # otherwise reach that handler with no runner to ask through.
     runner = Runner(dry_run=args.dry_run)
     reservation: WorktreeReservation | None = None
     stopped_service_target: RegressionTarget | None = None
-    try:
-        with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run):
+    with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run):
+        try:
             with metadata.locked(dry_run=args.dry_run):
                 target = resolve_target(args, repo_root, dry_run=args.dry_run, slug=slug)
                 reservation = metadata.reserve(target, dry_run=args.dry_run)
@@ -2554,8 +2551,9 @@ def cmd_up(args: argparse.Namespace) -> int:
             )
             if not args.dry_run and not seed_requires_env and should_seed_state(runner, target, reset_mode=args.reset_mode, remote=args.remote):
                 require_runtime_seed_env()
-            stop_service_for_update(runner, target, remote=args.remote)
+            # The stop may take effect before an interrupted client returns.
             stopped_service_target = target
+            stop_service_for_update(runner, target, remote=args.remote)
             if seed_requires_env or loaded_env_file is not None or args.dry_run:
                 write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
             else:
@@ -2593,16 +2591,23 @@ def cmd_up(args: argparse.Namespace) -> int:
             restart_and_verify(runner, target, remote=args.remote)
             stopped_service_target = None
             reservation.complete()
-    except BaseException:
-        # Not `Exception`: Ctrl-C is how an `up` is abandoned in practice, and a
-        # KeyboardInterrupt would otherwise leave exactly the row this exists for.
-        # `None` covers failing before the row was written -- resolving a target,
-        # or waiting on the update lock -- where there is nothing to give back.
-        if stopped_service_target is not None:
-            restart_service_after_failed_update(runner, stopped_service_target, remote=args.remote)
-        if reservation is not None:
-            reservation.release(runner)
-        raise
+        except BaseException:
+            # Recovery still owns the update lock: another up must not stop and
+            # sync this environment while this failed run is starting it again.
+            try:
+                if stopped_service_target is not None:
+                    restart_service_after_failed_update(runner, stopped_service_target, remote=args.remote)
+            except BaseException as exc:
+                # A launch failure or a second Ctrl-C must not replace the
+                # original update error or prevent reservation cleanup.
+                print(
+                    f"Could not restart {SERVICE_NAME} after failed update: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+            finally:
+                if reservation is not None:
+                    reservation.release(runner)
+            raise
     print_summary(target)
     return 0
 
