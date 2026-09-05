@@ -236,6 +236,37 @@ Contract and consuming tests must cover old records without optional metadata,
 model/backend isolation, latest-success clearing, bounded/absent history, unsafe
 upstream text exclusion, read-only retrieval, and real model-not-found display.
 
+### Atomic Invocation Admission
+
+Transport draining alone does not protect a request that resolved an old target
+but has not entered the adapter when a configuration Save removes that target.
+Close this boundary for ordinary resolution, fallback, the bounded credential
+refresh retry, and selected-model probing through the same service admission path.
+
+Extend the internal `EngineAdapter.invoke` contract with optional keyword
+`on_admitted: Callable[[], None] | None = None`. The service revalidates the current
+effective candidate, exact source configuration, and synchronized engine projection
+under its existing mutation lock. The adapter takes its existing routing lock,
+validates source/origin, acquires the active transport lease, then calls
+`on_admitted` exactly once before any network wait. This handoff releases service
+mutation exclusion and records the actual attempt. Network, buffered response,
+first-token wait, and stream consumption remain outside the service mutation lock.
+
+Lock order is always service mutation then adapter routing, matching source sync.
+Every pre-admission failure or cancellation releases service exclusion; every
+post-admission completion or cancellation releases the transport lease. A callback
+failure before network must release the lease too. Do not manufacture an attempt
+for a stale plan that never entered transport. Recompute unattempted candidates
+from current config while preserving already failed-source exclusions; a credential
+refresh may retry only its still-valid exact source/model. Probe uses the same
+admission primitive instead of a second direct adapter path.
+
+No per-request engine registration, retained invented model inventory, synthetic
+upstream model-not-found, persistent generation store, or network-duration global
+lock is allowed. Deterministic tests must cross a concurrent target removal/change,
+source change, refresh retry, probing, pre-admission cancellation and callback
+failure; concurrent independent HTTP requests must still make progress.
+
 ## Engine Proof and Acceptance
 
 Remove inventory cardinality/membership admission gates from the service engine
