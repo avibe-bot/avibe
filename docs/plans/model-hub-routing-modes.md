@@ -199,7 +199,8 @@ introduce a second history store or turn request failures into Source health eve
 
 Add GET `/api/models/agents/<backend>/provenance?model=<id>` through the existing
 service, RPC, client, and UI-server path. Validate the backend and its canonical
-catalog model identifier. Return `{success:true,provenance:TurnProvenance|null}`
+catalog model identifier. Reuse the existing envelope:
+`{ok:true,contract_version:9,provenance:TurnProvenance|null}`
 for the most recently persisted retained record matching both backend and requested
 model, regardless of outcome; no record means null, not a fabricated success.
 This is a read-only, on-demand dialog read and never starts or syncs the engine.
@@ -208,8 +209,12 @@ Do not add history to the pure effective-route owner or every chain-list respons
 
 For newly observed terminal errors, retain optional `http_status` (valid HTTP
 status integer or null) and `upstream_error_code` (known machine code or null)
-inside the existing `terminal_error` object. Derive the latter only from codes
-recognized by the existing classification authority, using its specificity order;
+inside the existing `terminal_error` object. Derive the latter only from observed
+codes recognized by the existing `UPSTREAM_MACHINE_ERROR_CODES` authority. For an
+observed `model_not_found` whose classified result is `upstream_request_invalid`,
+retain that specific code instead of a co-occurring generic `invalid_request_error`
+type. Otherwise use the existing machine-code specificity order. This is diagnostic
+selection only and must not rerank or change the classifier's decisions;
 never persist arbitrary upstream strings, raw bodies, messages, headers, or
 credentials for this panel. Preserve exact observed `model_not_found` when present,
 without reconstructing it from the broader `invalid_parameter` classification.
