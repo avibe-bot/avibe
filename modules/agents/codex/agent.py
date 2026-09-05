@@ -27,6 +27,7 @@ from core.managed_skills import (
 )
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.prompt_registry import prompt_text, render_prompt
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -2510,7 +2511,7 @@ class CodexAgent(BaseAgent):
 
         instruction_parts: list[str] = []
         if agent_instructions:
-            instruction_parts.append(agent_instructions)
+            instruction_parts.append(render_prompt("agent-instructions", agent_instructions=agent_instructions))
 
         # Resolve admission once: it associates or clears this turn's Memory CLI
         # session scope as a side effect, so a second call per turn would repeat
@@ -2538,7 +2539,7 @@ class CodexAgent(BaseAgent):
             )
         )
 
-        return "\n\n".join(part for part in instruction_parts if part) or None
+        return "".join(part for part in instruction_parts if part) or None
 
     async def _inject_forked_session_correction(
         self,
@@ -2794,16 +2795,9 @@ class CodexAgent(BaseAgent):
     @staticmethod
     def _render_developer_prompt_snapshot(developer_instructions: str) -> str:
         return (
-            "<avibe_runtime_instructions>\n"
-            "This is the complete current Avibe runtime instruction snapshot. "
-            "Only the most recent snapshot is active. It replaces all earlier "
-            "Avibe-generated runtime prompt snapshots, including untagged versions. "
-            "Rules and capability, Agent, or Skill catalog entries omitted from this "
-            "snapshot no longer apply: do not carry them forward from earlier snapshots. "
-            "This replacement does not revoke user or project instructions or erase "
-            "conversation history.\n\n"
-            f"{developer_instructions}\n"
-            "</avibe_runtime_instructions>"
+            prompt_text("runtime-snapshot-open")
+            + developer_instructions
+            + prompt_text("runtime-snapshot-close")
         )
 
     async def _inject_thread_developer_instructions(

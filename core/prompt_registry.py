@@ -85,6 +85,16 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("preferences-context-prompt", "Preferences and Project Context Prompt", "preferences-context.md", leading_newlines=1, trailing_newlines=1, placeholders=("preferences_path", "platform")),
     PromptModule("memory-context-prompt", "Memory and Project Context Prompt", "memory-context.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("session-title-prompt", "Session Title Prompt", "session-title.md", leading_newlines=1, trailing_newlines=1),
+    PromptModule("skills-prompt", "Skills Usage", "skills.md", leading_newlines=2, trailing_newlines=2),
+    PromptModule("skills-manual-prompt", "Explicit Skill Requests", "skills-manual.md", leading_newlines=2),
+    PromptModule("skills-pagination-prompt", "Skills Discovery Pagination", "skills-pagination.md", trailing_newlines=1),
+    PromptModule("skills-more-notice", "Skills Next Page", "skills-more.md", placeholders=("next_page",)),
+    PromptModule("skills-catalog", "Available Skills", "skills-catalog.md", placeholders=("skill_rows",)),
+    PromptModule("show-history-managed", "Show History: Managed Workspace", "show-history-managed.md"),
+    PromptModule("show-history-self-managed", "Show History: User Repository", "show-history-self-managed.md"),
+    PromptModule("runtime-snapshot-open", "Codex Runtime Snapshot Start", "runtime-snapshot-open.md", trailing_newlines=2),
+    PromptModule("runtime-snapshot-close", "Codex Runtime Snapshot End", "runtime-snapshot-close.md", leading_newlines=1),
+    PromptModule("agent-instructions", "Agent Custom Instructions", "agent-instructions.md", trailing_newlines=2, placeholders=("agent_instructions",)),
 )
 
 _MODULES_BY_ID = {module.id: module for module in PROMPT_MODULES}
@@ -118,6 +128,30 @@ def prompt_text(module_id: str) -> str:
 
 def render_prompt(module_id: str, **values: object) -> str:
     return prompt_module(module_id).render(values)
+
+
+@dataclass(frozen=True)
+class RenderedPromptBlock:
+    """One production-rendered block, addressable by the source catalog."""
+
+    module_id: str
+    text: str
+
+    def export(self) -> dict[str, str]:
+        module = prompt_module(self.module_id)
+        return {"id": self.module_id, "source_path": module.source_path, "text": self.text}
+
+
+def render_prompt_block(module_id: str, **values: object) -> RenderedPromptBlock:
+    return RenderedPromptBlock(module_id, render_prompt(module_id, **values))
+
+
+def join_prompt_blocks(blocks: list[RenderedPromptBlock]) -> str:
+    return "".join(block.text for block in blocks)
+
+
+def runtime_snapshot_blocks(blocks: list[RenderedPromptBlock]) -> list[RenderedPromptBlock]:
+    return [render_prompt_block("runtime-snapshot-open"), *blocks, render_prompt_block("runtime-snapshot-close")]
 
 
 def export_prompt_catalog() -> dict[str, Any]:

@@ -782,8 +782,12 @@
       "help": {
         "command": "Inspect internal Avibe state",
         "prompt": "Inspect authored prompt sources",
-        "promptExport": "Export the Prompt Studio source catalog",
+        "promptExport": "Export all prompt sources, optionally with the production rendering",
+        "promptContext": "JSON file with backend, optional agent_instructions and production builder options",
         "promptFormat": "Export format"
+      },
+      "error": {
+        "promptExport": "Prompt export failed: {error}"
       }
     }
   },

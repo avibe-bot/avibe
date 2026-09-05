@@ -886,13 +886,23 @@ def cmd_skill(args) -> int:
 
 
 def cmd_debug_prompt(args) -> int:
-    """Export the deterministic Prompt Studio source catalog."""
+    """Export all authored sources, optionally with the production rendering."""
 
     if args.debug_command != "prompt" or args.prompt_debug_command != "export":
         return 1
     from core.prompt_studio_catalog import export_prompt_studio_catalog
 
-    print(json.dumps(export_prompt_studio_catalog(), ensure_ascii=False, indent=2))
+    context_file = getattr(args, "context_file", None)
+    try:
+        context = json.loads(Path(context_file).read_text(encoding="utf-8")) if context_file else None
+        if context_file and not isinstance(context, dict):
+            raise ValueError("Render context must be a JSON object")
+        payload = export_prompt_studio_catalog(render_context=context)
+    except (OSError, ValueError, TypeError) as exc:
+        language = _configured_cli_language()
+        print(i18n_t("debug.cli.error.promptExport", language, error=str(exc)), file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -15934,6 +15944,10 @@ def build_parser():
     debug_prompt_export_parser = debug_prompt_subparsers.add_parser(
         "export",
         help=i18n_t("debug.cli.help.promptExport", debug_help_language),
+    )
+    debug_prompt_export_parser.add_argument(
+        "--context-file",
+        help=i18n_t("debug.cli.help.promptContext", debug_help_language),
     )
     debug_prompt_export_parser.add_argument(
         "--format",

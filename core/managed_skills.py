@@ -23,6 +23,7 @@ from typing import Any, Sequence
 import yaml
 
 from config import paths
+from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, render_prompt, render_prompt_block
 
 try:
     import tomllib
@@ -1156,43 +1157,27 @@ def render_skill_list(
     lines = [f"- {skill.name}: {skill.description}" for skill in entries]
     if next_page is not None:
         lines.append(
-            more_notice or f"More skills are available. Run `vibe skill list --page {next_page}` to view more."
+            more_notice or render_prompt("skills-more-notice", next_page=next_page)
         )
     return "\n".join(lines)
 
 
 def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
+    return join_prompt_blocks(render_skill_catalog_blocks(skills))
+
+
+def render_skill_catalog_blocks(skills: Sequence[ManagedSkill]) -> list[RenderedPromptBlock]:
     rows = render_skill_list(skills, page=1)
     if not rows:
         if any(skill.disable_model_invocation for skill in skills):
-            return (
-                "\n\n## Skills\n\n"
-                "If the user requests a Skill by exact name, ensure its content is in context: "
-                "reuse an earlier successful load that remains in context; otherwise run "
-                "`vibe skill load -- <name>` before proceeding.\n"
-                "Otherwise, do not guess skill names."
-            )
-        return ""
+            return [render_prompt_block("skills-manual-prompt")]
+        return []
     _, next_page = _page(skills, 1)
-    later_page_guidance = (
-        "Use `vibe skill list --page 2` only when more discovery is useful; "
-        "ordinary tasks do not require scanning every page.\n"
-        if next_page is not None
-        else ""
-    )
-    return (
-        "\n\n## Skills\n\n"
-        "Skills provide specialized instructions and workflows for specific tasks.\n"
-        "Before acting on a task covered by a listed Skill, ensure its content is in context: "
-        "reuse an earlier successful load that remains in context; otherwise run "
-        "`vibe skill load -- <name>`.\n"
-        "If the user requests a Skill by exact name, apply this rule to that name.\n"
-        "For non-explicit requests, only load Skill names listed here or returned by "
-        "`vibe skill list`; do not guess names.\n\n"
-        f"{later_page_guidance}"
-        "### Available skills\n"
-        f"{rows}"
-    )
+    blocks = [render_prompt_block("skills-prompt")]
+    if next_page is not None:
+        blocks.append(render_prompt_block("skills-pagination-prompt"))
+    blocks.append(render_prompt_block("skills-catalog", skill_rows=rows))
+    return blocks
 
 
 def render_skill_content(skill: ManagedSkill) -> str:
