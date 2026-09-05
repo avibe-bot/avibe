@@ -2359,7 +2359,7 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
 
 def show_runtime_archive_script() -> str:
     """Build one exact upstream revision, or reuse its verified local artifact."""
-    return textwrap.dedent(r'''
+    script = textwrap.dedent(r'''
         set -euo pipefail
         if [ "${VIBE_SHOW_RUNTIME_SOURCE:-}" != "archive" ]; then exit 0; fi
         : "${VIBE_SHOW_RUNTIME_ARCHIVE_PATH:?VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required for archive runtime source}"
@@ -2413,6 +2413,8 @@ def show_runtime_archive_script() -> str:
         mv -f -- "$receipt_temp" "$receipt"
         printf 'Show Runtime archive built from %s.\n' "$revision"
     ''').strip()
+    # Early exits must not run the service user's login-shell logout hooks.
+    return "(\n" + script + "\n)"
 
 
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:

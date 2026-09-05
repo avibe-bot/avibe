@@ -5000,8 +5000,9 @@ def show_archive_builder(tmp_path, monkeypatch):
         "upstream=https://github.com/avibe-bot/vibe-show-runtime.git", "upstream=" + shlex.quote(str(upstream)),
     )
 
-    def run(recipe=None, *, check=True):
-        return subprocess.run(["bash", "-c", recipe or script], check=check, capture_output=True, text=True)
+    def run(recipe=None, *, check=True, login=False):
+        options = ["--noprofile", "--norc", "--login"] if login else []
+        return subprocess.run(["bash", *options, "-c", recipe or script], check=check, capture_output=True, text=True)
 
     return run, commit, archive, build_log, script
 
@@ -5026,6 +5027,34 @@ def test_show_archive_reuses_verified_artifact_without_rewriting(show_archive_bu
     assert "reusing verified build" in result.stdout
     assert all(write_identity(path) == identity for path, identity in before.items())
     assert log.read_text().splitlines() == ["ci", "run build", "run bundle:vibe-remote"]
+
+
+@pytest.mark.parametrize("outcome", ["cache-hit", "non-archive", "build-failure"])
+def test_show_archive_recipe_does_not_exit_the_login_shell(show_archive_builder, tmp_path, monkeypatch, outcome):
+    run, commit, _archive, _log, _script = show_archive_builder
+    run()
+    home = tmp_path / "login-home"
+    home.mkdir()
+    logout_log = tmp_path / "logout.log"
+    (home / ".bash_logout").write_text('printf "logout\\n" >> "$LOGOUT_LOG"\nfalse\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOGOUT_LOG", str(logout_log))
+    # Reproduce Ubuntu's failing noninteractive clear_console logout hook.
+    assert run("set -euo pipefail; exit 0", check=False, login=True).returncode != 0
+    assert logout_log.read_text() == "logout\n"
+    logout_log.unlink()
+    if outcome == "non-archive":
+        monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", "manifest-cache")
+    elif outcome == "build-failure":
+        commit("revision whose build fails")
+        monkeypatch.setenv("FAIL_BUILD", "1")
+
+    result = run(check=False, login=True)
+
+    assert result.returncode == (19 if outcome == "build-failure" else 0)
+    assert not logout_log.exists()
+    if outcome == "cache-hit":
+        assert "reusing verified build" in result.stdout
 
 
 @pytest.mark.parametrize("change", ["revision", "node", "npm", "recipe", "missing", "corrupt", "receipt"])
