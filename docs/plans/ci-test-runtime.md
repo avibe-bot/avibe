@@ -110,3 +110,28 @@ not an observed CI duration. The algorithm and discovery rules remain unchanged.
 Review inventory: head `cfe16d930f` passed via bot comment 5551035775, complete
 review/thread collections empty. Zero findings-bearing review heads. The next
 push needs its own exact-head review and fully successful CI.
+
+### Clean-run tail diagnosis
+
+Head `305f19859c` passed review (comment 5551088001), all 17 checks, and
+all whole-PR thread checks: zero findings-bearing heads and zero threads.
+Run 33959745089 took 8m58s, not an improvement over the earlier 8m26s PR
+sample. The build completed in 3m22s; the two installation suites took 2m20s
+and 2m03s in parallel. Five unit jobs finished in 4m45s-6m23s, but shard zero
+took 8m50s. All 398 files ran exactly once without failing file exit codes.
+
+The archive module on the longest shard grew from 27s to 86s between the two
+CI samples. A local profile independently found 14.915s in migrations out of
+16.738s overall, with 47 migration calls for 41 behavioral cases. The unprofiled
+baseline was 11.05s. This does not establish the runner-specific cause of the
+CI variance, but it demonstrates removable migration work in another consumer.
+
+The orchestrator extends scope only to `tests/test_vibe_agent_archive.py`,
+opting it into the same private database factory. Keep every existing transaction,
+write-lock race, immutable-snapshot and rollback assertion intact. Migration tests
+remain unseeded. Do not rebalance again from this single runner-skewed sample,
+increase runner count, or change production migration behavior.
+
+After the archive fixture change, all 41 cases passed in 2.35s (11.05s baseline).
+Fixture/workflow/shard contracts passed again; the existing timing snapshot is
+unchanged and the next exact-head CI run will measure the actual overall effect.
