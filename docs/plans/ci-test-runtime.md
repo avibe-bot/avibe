@@ -135,3 +135,31 @@ increase runner count, or change production migration behavior.
 After the archive fixture change, all 41 cases passed in 2.35s (11.05s baseline).
 Fixture/workflow/shard contracts passed again; the existing timing snapshot is
 unchanged and the next exact-head CI run will measure the actual overall effect.
+
+### Asynchronous UI test boundary
+
+Head `fae385e6ea` passed bot review (comment 5551151290), with no review threads
+or findings-bearing heads. Run 33960329173 completed in 6m18s; all six Python
+shards passed in 5m42s-6m08s, as did both installation suites. The workflow still
+failed because the modified-Escape Composer test expected an abort callback
+before the plain-Escape listener handled the event; the aggregate correctly failed.
+Do not report this failed workflow as a delivered six-minute CI result.
+
+The focused nine-test file and the entire local UI suite (283 files, 3766 tests)
+pass without changes, so the CI failure has not been reproduced deterministically.
+Inspection shows recording starts across resolved promises, while plain Escape
+uses a passive effect listener. The test used synchronous `fireEvent`, then DOM
+queries, neither of which explicitly flushes the whole asynchronous interaction.
+This is consistent with a listener-registration race, not proof of a product bug.
+
+The orchestrator extends scope to `Composer.shortcut.test.tsx` only: wrap the
+recording-start interaction in awaited asynchronous `act`, as specified by
+React's [test interaction contract](https://react.dev/reference/react/act).
+Preserve every finish/abort assertion and real event listener. Do not add sleeps,
+retries, relaxed expectations, or production changes. Verify focused and full UI
+tests again and obtain new exact-head CI/review evidence before merge.
+
+After the interaction-boundary change: 17 focused shortcut/listener tests and
+all 283 UI files / 3766 tests passed. Theme validation, lint baseline, test type
+checking and production build passed. In the prior failed run, archive measured
+9s (86s before the private fixture); all 398 Python files still ran exactly once.

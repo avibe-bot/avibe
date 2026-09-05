@@ -307,7 +307,11 @@ describe('Composer voice shortcut', () => {
     const textbox = screen.getByRole('textbox');
     await act(async () => undefined);
 
-    fireEvent.keyDown(textbox, { code: 'Escape', key: 'Escape', altKey: true });
+    // Recording startup crosses promises; flush its effects, including the
+    // plain-Escape listener, before dispatching the next keyboard interaction.
+    await act(async () => {
+      fireEvent.keyDown(textbox, { code: 'Escape', key: 'Escape', altKey: true });
+    });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
     await screen.findByRole('button', { name: en.chat.compose.stopRecording });
     fireEvent.keyDown(textbox, { code: 'Escape', key: 'Escape', altKey: true });
