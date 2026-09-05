@@ -17,7 +17,9 @@ payload contract) and §5.
 from __future__ import annotations
 
 import re
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -59,13 +61,43 @@ FUTURE = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
 PAST = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 
 
+@pytest.fixture(scope="module")
+def _background_store_template(tmp_path_factory):
+    path = tmp_path_factory.mktemp("background-store") / "empty.sqlite"
+    sqlite = SQLiteBackgroundTaskStore(path)
+    sqlite.close()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return path
+
+
 @pytest.fixture()
-def store(tmp_path: Path):
-    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+def store(tmp_path: Path, sqlite_db_factory, _background_store_template):
+    path = sqlite_db_factory(tmp_path / "state" / "vibe.sqlite", template=_background_store_template)
+    sqlite = SQLiteBackgroundTaskStore(path)
     try:
         yield sqlite
     finally:
         sqlite.close()
+
+
+def test_background_template_matches_real_store_initialization(
+    tmp_path, _background_store_template, sqlite_db_factory,
+):
+    from tests.test_sqlite_state_migration import _schema_fingerprint
+
+    reference = tmp_path / "reference.sqlite"
+    sqlite = SQLiteBackgroundTaskStore(reference)
+    sqlite.close()
+    copied = sqlite_db_factory(tmp_path / "copied.sqlite", template=_background_store_template)
+    with closing(sqlite3.connect(reference)) as fresh, closing(sqlite3.connect(copied)) as clone:
+        assert _schema_fingerprint(fresh) == _schema_fingerprint(clone)
+        assert sorted(row for row in fresh.iterdump() if row.startswith("INSERT INTO")) == sorted(
+            row for row in clone.iterdump() if row.startswith("INSERT INTO")
+        )
+        for pragma in ("journal_mode", "user_version", "application_id"):
+            assert fresh.execute(f"PRAGMA {pragma}").fetchall() == clone.execute(f"PRAGMA {pragma}").fetchall()
+        assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
 def _task(store: SQLiteBackgroundTaskStore, task_id: str, **overrides) -> None:

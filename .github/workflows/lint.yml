@@ -89,13 +89,10 @@ jobs:
           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS: 3.0.99rc1
           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY: 3.0.99rc1
         run: |
-          pip install -e . build hatchling hatch-vcs pytest
+          pip install -e . build hatchling hatch-vcs
           python scripts/prepare_local_show_runtime_manifest.py
           python -m build --outdir memory-dist packaging/avibe-memory
           python -m build
-          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
-          AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)" \
-            pytest tests/test_memory_distribution.py -v
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
@@ -108,6 +105,19 @@ jobs:
         with:
           name: vibe-wheel-linux
           path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
+      # Keep the existing core-only wheel artifact stable for all consumers.
+      # Multiple source directories preserve dist/ and memory-dist/ in this
+      # companion artifact, consumed only by the distribution contracts.
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: vibe-package-contracts-linux
+          path: |
+            dist/*.tar.gz
+            memory-dist/*.whl
+            memory-dist/*.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -288,6 +298,12 @@ jobs:
           name: vibe-wheel-linux
           path: dist
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        if: matrix.suite == 'installer'
+        with:
+          name: vibe-package-contracts-linux
+          path: .
+
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
@@ -307,6 +323,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/prepare_local_show_runtime_manifest.py
+
+      - name: Verify built distribution contracts
+        if: matrix.suite == 'installer'
+        env:
+          AVIBE_PACKAGE_CONTRACT_VERSION: 3.0.99rc1
+        run: |
+          set -o pipefail
+          output="$RUNNER_TEMP/distribution-contracts.log"
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v -ra | tee "$output"
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "Distribution contracts must not skip."
+            exit 1
+          fi
 
       - name: Run packaged Memory package-shape smoke
         if: matrix.suite == 'packaged-memory'
