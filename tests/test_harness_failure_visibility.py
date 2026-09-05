@@ -40,6 +40,14 @@ from storage.background import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _prepare_behavior_state(tmp_path, sqlite_db_factory, request):
+    # These cases exercise Harness behavior against the real current schema,
+    # not the migration path that produces it.
+    if not request.node.get_closest_marker("no_sqlite_template"):
+        sqlite_db_factory(tmp_path / "state" / "vibe.sqlite")
+
+
 def _store(tmp_path: Path) -> tuple[SQLiteBackgroundTaskStore, TaskExecutionStore]:
     sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
     requests = TaskExecutionStore(tmp_path / "task_requests")
