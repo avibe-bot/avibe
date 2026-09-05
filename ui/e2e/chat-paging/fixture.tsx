@@ -52,7 +52,7 @@ export function Fixture() {
       return false;
     }
     const start = Math.max(0, before - 50);
-    if (!params.has('empty') || loads !== 0) {
+    if (loads >= Number(params.get('empty') ?? 0)) {
       setMessages((current) => [...history.slice(start, before), ...current].slice(0, 300));
       if (messages.length + before - start > 300) setNeedsLatestReload(true);
     }
@@ -89,6 +89,11 @@ export function Fixture() {
         onAskInNewSession={noop}
         readOnly
         followingTailRef={followingTailRef}
+        footer={params.has('nested') ? (
+          <div data-testid="nested-scroller" tabIndex={0} className="h-40 overflow-y-auto">
+            {Array.from({ length: 30 }, (_, index) => <p key={index}>Activity line {index + 1}</p>)}
+          </div>
+        ) : undefined}
       />
     </div>
   );

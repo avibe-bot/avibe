@@ -114,6 +114,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
     view.rerender(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
   };
   const scrollTo = (top: number) => {
+    fireEvent.pointerDown(scroller, { pointerType: 'mouse' });
     scroller.scrollTop = top;
     fireEvent.scroll(scroller);
   };
@@ -142,6 +143,7 @@ describe('transcript older-page loading', () => {
   });
 
   it('requires fresh upward input for each page, even when a page adds no visible rows', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
     const page = pendingPage();
     const onLoadOlder = vi.fn().mockReturnValueOnce(page.promise).mockResolvedValue(true);
     const { scroller, scrollTo, rerender } = renderTranscript({ onLoadOlder });
@@ -157,6 +159,7 @@ describe('transcript older-page loading', () => {
     fireEvent.scroll(scroller);
     expect(scroller.scrollTop).toBe(0);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(300);
     await act(async () => fireEvent.wheel(scroller, { deltaY: -100 }));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
   });
@@ -224,6 +227,106 @@ describe('transcript older-page loading', () => {
     expect(props.followingTailRef.current).toBe(false);
   });
 
+  it('consumes one touch drag across settled empty pages and momentum scrolls', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    for (const clientY of [140, 180, 220]) {
+      await act(async () => fireEvent.touchMove(scroller, { touches: [{ clientY }] }));
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    }
+    fireEvent.touchEnd(scroller);
+    fireEvent.scroll(scroller);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => upwardInputs.touch(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a wheel burst consumed through momentum and rearms after an idle gap', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    for (const timestamp of [0, 50, 150, 250]) {
+      now.mockReturnValue(timestamp);
+      await act(async () => upwardInputs.wheel(scroller));
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    }
+    now.mockReturnValue(550);
+    await act(async () => upwardInputs.wheel(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares gesture consumption with scroll events inside the trigger band', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    scrollTo(200);
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    for (const top of [110, 90]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        fireEvent.scroll(scroller);
+      });
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    }
+    fireEvent.touchEnd(scroller);
+    await act(async () => {
+      scroller.scrollTop = 70;
+      fireEvent.scroll(scroller);
+    });
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => upwardInputs.touch(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('consumes input begun while a page is pending until the next gesture', async () => {
+    const first = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(true);
+    const { scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    scrollTo(0);
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 140 }] });
+    await act(async () => first.land(true));
+    await act(async () => fireEvent.touchMove(scroller, { touches: [{ clientY: 180 }] }));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    fireEvent.touchEnd(scroller);
+    await act(async () => upwardInputs.touch(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it('is keyboard focusable and requires a fresh key press after an empty page', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    expect(scroller.tabIndex).toBe(0);
+    scroller.focus();
+    expect(document.activeElement).toBe(scroller);
+    await act(async () => upwardInputs.keyboard(scroller));
+    await act(async () => fireEvent.keyDown(scroller, { key: 'PageUp', repeat: true }));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => upwardInputs.keyboard(scroller));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(Object.entries(upwardInputs))('lets a nested scroller own %s input until it can chain upward', async (_name, upward) => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
+    const panel = document.createElement('div');
+    panel.style.overflowY = 'auto';
+    Object.defineProperties(panel, { clientHeight: { value: 100 }, scrollHeight: { value: 500 } });
+    panel.scrollTop = 120;
+    const target = document.createElement('span');
+    panel.append(target);
+    scroller.append(panel);
+    await act(async () => upward(target));
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    panel.scrollTop = 0;
+    panel.style.overscrollBehaviorY = 'contain';
+    await act(async () => upward(target));
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    panel.style.overscrollBehaviorY = 'auto';
+    await act(async () => upward(target));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
   it('does not interpret downward, pinch, or editing input as a request for history', () => {
     const onLoadOlder = vi.fn();
     const { scroller } = renderTranscript({ messages: messages(1, 1), onLoadOlder });
@@ -261,6 +364,7 @@ describe('transcript older-page loading', () => {
   });
 
   it('keeps a deep-link jump stable until the reader asks for more history', async () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
     const onLoadOlder = vi.fn().mockResolvedValue(true);
     const { scroller, scrollTo, rerender } = renderTranscript({ onLoadOlder, jumpTarget: 'missing-target' });
     scrollTo(0);
@@ -269,6 +373,7 @@ describe('transcript older-page loading', () => {
     act(flushFrames);
     rerender({ jumpTarget: null });
     expect(onLoadOlder).not.toHaveBeenCalled();
+    now.mockReturnValue(300);
     await act(async () => fireEvent.wheel(scroller, { deltaY: -100 }));
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });

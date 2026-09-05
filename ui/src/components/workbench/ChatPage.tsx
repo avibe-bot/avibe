@@ -191,11 +191,10 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
 // below the viewport.
 const MAX_RETAINED_MESSAGES = 300;
 
-// How close to the top of the loaded window counts as "the reader is asking for
-// older history". Handed to the older-page IntersectionObserver as a root margin,
-// so the browser evaluates it continuously as a BAND the reader can sit inside —
-// not as a threshold some event has to be caught crossing.
+// Upward input can request history inside this band.
 const OLDER_TRIGGER_BAND_PX = 120;
+// Wheel events have no gesture-end event; an idle gap ends a momentum burst.
+const PAGING_WHEEL_IDLE_MS = 200;
 
 // Display label for the archive chord (⇧⌘D / Ctrl+Shift+D). Resolved once at
 // module load — the platform can't change mid-session — and shown as the archive
@@ -3616,6 +3615,18 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
 });
 TitleField.displayName = 'TitleField';
 
+function transcriptOwnsUpwardInput(target: EventTarget, root: HTMLElement): boolean {
+  if (!(target instanceof Element) || !root.contains(target)) return false;
+  for (let node: Element | null = target; node && node !== root; node = node.parentElement) {
+    if (node.matches('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]')) return false;
+    const style = getComputedStyle(node);
+    if (/^(auto|scroll)$/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
+      if (node.scrollTop > 0 || /^(contain|none)$/.test(style.overscrollBehaviorY)) return false;
+    }
+  }
+  return true;
+}
+
 interface TranscriptProps {
   messages: WorkbenchMessage[];
   session: WorkbenchSession;
@@ -3789,6 +3800,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const loadInFlightRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const touchYRef = useRef<number | null>(null);
+  const pagingGestureRef = useRef<{
+    kind: 'pointer' | 'wheel' | 'touch' | 'keyboard';
+    consumed: boolean;
+    at: number;
+  } | null>(null);
   const setFollowingTail = useCallback(
     (next: boolean) => {
       pinnedRef.current = next;
@@ -3908,6 +3924,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     if (!hasOlder || loadingOlder || loadInFlightRef.current || jumpTarget) return;
     const requestingSession = session.id;
     loadInFlightRef.current = true;
+    if (pagingGestureRef.current) pagingGestureRef.current.consumed = true;
     setFollowingTail(false);
     captureAnchor();
     setOlderLoadFailed(false);
@@ -3924,6 +3941,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const maybeLoadOlder = useCallback(() => {
     const el = scrollRef.current;
     if (!el || el.scrollTop > OLDER_TRIGGER_BAND_PX || olderLoadFailed || suppressAnchorRef.current) return;
+    const gesture = pagingGestureRef.current;
+    if (gesture?.consumed) return;
+    // A gesture made during an outstanding request is consumed too, rather
+    // than becoming a queued request when the page settles mid-gesture.
+    if (gesture) gesture.consumed = true;
     runLoadOlder();
   }, [olderLoadFailed, runLoadOlder]);
 
@@ -3963,6 +3985,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     setOlderLoadFailed(false);
     loadInFlightRef.current = false;
     touchYRef.current = null;
+    pagingGestureRef.current = null;
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
   }, [session.id, scrollToBottom, setFollowingTail]);
@@ -4112,27 +4135,44 @@ export const Transcript: React.FC<TranscriptProps> = ({
       <div
         ref={scrollRef}
         data-testid="chat-transcript"
+        tabIndex={0}
         onScroll={handleScroll}
+        onPointerDown={() => {
+          pagingGestureRef.current = { kind: 'pointer', consumed: false, at: 0 };
+        }}
         onWheel={(event) => {
-          // At the hard top an upward gesture emits no scroll event.
-          if (event.deltaY < 0 && event.currentTarget.scrollTop <= 0) maybeLoadOlder();
+          if (event.defaultPrevented || event.ctrlKey) return;
+          const at = performance.now();
+          const gesture = pagingGestureRef.current;
+          if (gesture?.kind !== 'wheel' || at - gesture.at > PAGING_WHEEL_IDLE_MS) {
+            pagingGestureRef.current = { kind: 'wheel', consumed: false, at };
+          } else {
+            gesture.at = at;
+          }
+          if (event.deltaY < 0 && Math.abs(event.deltaY) > Math.abs(event.deltaX)
+            && transcriptOwnsUpwardInput(event.target, event.currentTarget)) maybeLoadOlder();
         }}
         onTouchStart={(event) => {
           touchYRef.current = event.touches.length === 1 ? event.touches[0].clientY : null;
+          pagingGestureRef.current = { kind: 'touch', consumed: event.touches.length !== 1, at: 0 };
         }}
         onTouchMove={(event) => {
           const y = event.touches.length === 1 ? event.touches[0].clientY : null;
           const previousY = touchYRef.current;
           touchYRef.current = y;
-          if (y !== null && previousY !== null && y > previousY && event.currentTarget.scrollTop <= 0) {
+          if (y === null && pagingGestureRef.current) pagingGestureRef.current.consumed = true;
+          if (!event.defaultPrevented && y !== null && previousY !== null && y > previousY
+            && transcriptOwnsUpwardInput(event.target, event.currentTarget)) {
             maybeLoadOlder();
           }
         }}
+        // Keep the consumed gesture through momentum scrolls after release.
+        // Only the next pointer, touch, wheel burst or key press re-arms it.
         onTouchEnd={() => { touchYRef.current = null; }}
         onTouchCancel={() => { touchYRef.current = null; }}
         onKeyDown={(event) => {
-          if (event.defaultPrevented || event.currentTarget.scrollTop > 0) return;
-          if ((event.target as HTMLElement).closest('input, textarea, [contenteditable="true"], [role="textbox"]')) return;
+          if (!event.repeat) pagingGestureRef.current = { kind: 'keyboard', consumed: false, at: 0 };
+          if (event.defaultPrevented || !transcriptOwnsUpwardInput(event.target, event.currentTarget)) return;
           if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home' || (event.key === ' ' && event.shiftKey)) {
             maybeLoadOlder();
           }

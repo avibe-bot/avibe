@@ -8,7 +8,10 @@ const open = async (page: Page, query = '') => {
   // No API request from this fixture may reach a running Avibe service.
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
   await page.goto(`/e2e/chat-paging/fixture.html${query}`);
-  await expect.poll(() => scroller(page).evaluate((el) => el.scrollTop)).toBeGreaterThan(120);
+  await expect(scroller(page)).toBeVisible();
+  if (new URLSearchParams(query).get('count') !== '1') {
+    await expect.poll(() => scroller(page).evaluate((el) => el.scrollTop)).toBeGreaterThan(120);
+  }
 };
 
 test('each upward visit loads one page and preserves the reader through the retained-window cap', async ({ page }, testInfo) => {
@@ -77,4 +80,77 @@ test('offers an explicit retry for a failed page and then restores the reader', 
   await expect(page.locator('[data-message-id]')).toHaveCount(100);
   expect(await loads(page)).toBe(2);
   await expect.poll(() => scroller(page).evaluate((el) => el.scrollTop)).toBeGreaterThan(120);
+});
+
+test('consumes one continuous gesture even when every response is empty and immediate', async ({ page, isMobile }) => {
+  await open(page, '?count=1&empty=10&delay=0');
+  if (isMobile) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 180, y: 200 }] });
+    for (const y of [250, 300, 350]) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 180, y }] });
+      await page.waitForTimeout(70);
+      expect(await loads(page)).toBe(1);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForTimeout(250);
+    expect(await loads(page)).toBe(1);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 180, y: 200 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 180, y: 250 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await cdp.detach();
+  } else {
+    await scroller(page).hover();
+    for (const delta of [-150, -100, -50]) {
+      await page.mouse.wheel(0, delta);
+      await page.waitForTimeout(70);
+      expect(await loads(page)).toBe(1);
+    }
+    await page.waitForTimeout(250);
+    await page.mouse.wheel(0, -100);
+  }
+  await expect(fixture(page)).toHaveAttribute('data-loads', '2');
+});
+
+test('reaches the transcript with Tab and pages once per key press', async ({ page }) => {
+  await open(page, '?count=1&empty=10&delay=0');
+  await page.keyboard.press('Tab');
+  await expect(scroller(page)).toBeFocused();
+  await page.keyboard.down('PageUp');
+  await expect(fixture(page)).toHaveAttribute('data-loads', '1');
+  await page.keyboard.down('PageUp');
+  await page.waitForTimeout(100);
+  expect(await loads(page)).toBe(1);
+  await page.keyboard.up('PageUp');
+  await page.keyboard.press('PageUp');
+  await expect(fixture(page)).toHaveAttribute('data-loads', '2');
+});
+
+test('scrolls nested content without paging the surrounding transcript', async ({ page, isMobile }) => {
+  await open(page, '?count=1&nested=1&empty=10&delay=0');
+  const nested = page.getByTestId('nested-scroller');
+  await nested.evaluate((el) => { el.scrollTop = 150; });
+  expect(await scroller(page).evaluate((el) => el.scrollTop)).toBe(0);
+  if (isMobile) {
+    const bounds = (await nested.boundingBox())!;
+    const x = bounds.x + bounds.width / 2;
+    const y = bounds.y + 30;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y + 45 }] });
+    await expect.poll(() => nested.evaluate((el) => el.scrollTop)).toBeLessThan(150);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await cdp.detach();
+  } else {
+    await nested.hover();
+    await page.mouse.wheel(0, -50);
+    await expect.poll(() => nested.evaluate((el) => el.scrollTop)).toBeLessThan(150);
+  }
+  await page.waitForTimeout(200);
+  expect(await loads(page)).toBe(0);
+  await nested.focus();
+  await nested.evaluate((el) => { el.scrollTop = 300; });
+  await page.keyboard.press('PageUp');
+  await expect.poll(() => nested.evaluate((el) => el.scrollTop)).toBeLessThan(300);
+  expect(await loads(page)).toBe(0);
 });

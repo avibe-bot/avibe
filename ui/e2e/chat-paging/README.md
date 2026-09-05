@@ -11,10 +11,13 @@ used. This suite is separate from the live Model Hub suite.
 
 The tests verify one page per upward request, stable reader position across
 the 300-message retention cap, fast responses with unchanged content height,
-empty pages followed by wheel or touch input, and explicit failure recovery.
+empty pages followed by wheel or touch input, keyboard focus and repeat handling,
+continuous gestures, nested scrolling, and explicit failure recovery.
 Screenshots and failed traces are written under `e2e/.artifacts/chat-paging/`.
 
 For interactive inspection on a regular Vite dev server, open
 `/e2e/chat-paging/fixture.html`. Query parameters select the initial retained
 count (`count=300`), response delay (`delay=0`), or an empty/failed first page
-(`empty=1` / `fail=1`). These fixtures are not included in production builds.
+(`empty=1` / `fail=1`). `empty=10` returns ten empty pages; `nested=1&count=1`
+includes a scrollable activity fixture. These fixtures are not included in
+production builds.
