@@ -21,11 +21,12 @@ import urllib.parse
 import urllib.request
 import threading
 from asyncio.subprocess import Process
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
 from config import paths
+from config.v2_config import V2Config, is_model_hub_enabled
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
 from core.resource_governance import is_controller_resource_governor
@@ -70,7 +71,7 @@ def _percent_encode_path(path: str) -> str:
     return _url_quote(path, safe="/")
 
 
-def _project_model_hub_models(
+def project_opencode_model_hub_models(
     providers: list[Any],
     runtime_models: dict[str, Any],
 ) -> list[Any]:
@@ -181,7 +182,7 @@ def _public_opencode_catalog(
 
     providers = projected.get("providers")
     if model_hub_models and isinstance(providers, list):
-        projected["providers"] = _project_model_hub_models(
+        projected["providers"] = project_opencode_model_hub_models(
             providers,
             model_hub_models,
         )
@@ -220,6 +221,10 @@ class OpenCodePromptRejectedError(RuntimeError):
 
 class OpenCodeManagedPolicyRefreshPendingError(RuntimeError):
     """The adopted OpenCode process cannot apply Avibe's current policy yet."""
+
+
+class OpenCodeModelHubOverlayRequiredError(RuntimeError):
+    """Hub mode cannot launch OpenCode until its owner configures an overlay."""
 
 
 class OpenCodeServerManager:
@@ -269,6 +274,10 @@ class OpenCodeServerManager:
         self._model_hub_overlay_hash: Optional[str] = None
         self._model_hub_overlay_content: Optional[str] = None
         self._model_hub_overlay_provider_ids: tuple[str, ...] = ()
+        self._model_hub_overlay_preparer: (
+            Callable[[], Awaitable[Any | None]] | None
+        ) = None
+        self._model_hub_overlay_refusal_logged = False
         self._model_hub_overlay_transition: tuple[
             Optional[str], Optional[str], object
         ] | None = None
@@ -355,6 +364,14 @@ class OpenCodeServerManager:
             self.resource_governor
         ):
             self.resource_governor = resource_governor
+
+    def set_model_hub_overlay_preparer(
+        self,
+        preparer: Callable[[], Awaitable[Any | None]],
+    ) -> None:
+        """Attach the controller-owned overlay builder to this process."""
+
+        self._model_hub_overlay_preparer = preparer
 
     @classmethod
     async def get_instance(
@@ -686,6 +703,69 @@ class OpenCodeServerManager:
             return ()
         return tuple(dict.fromkeys(provider_ids))
 
+    def _configured_model_hub_overlay(self) -> bool:
+        return bool(
+            self._model_hub_overlay_path
+            and self._model_hub_overlay_hash
+            and self._model_hub_overlay_content
+            and self._model_hub_overlay_provider_ids
+        )
+
+    @staticmethod
+    def _model_hub_mode_enabled() -> bool:
+        if not is_model_hub_enabled():
+            return False
+        return V2Config.load().model_hub.agents["opencode"].mode == "hub"
+
+    def _refuse_unconfigured_model_hub_launch(self) -> None:
+        message = (
+            "OpenCode cannot be launched in Gateway mode without the Model Hub "
+            "overlay; the controller owns overlay configuration"
+        )
+        if not self._model_hub_overlay_refusal_logged:
+            logger.error(message)
+            self._model_hub_overlay_refusal_logged = True
+        raise OpenCodeModelHubOverlayRequiredError(message)
+
+    async def _start_server_for_current_model_hub_mode_locked(self) -> None:
+        # Known by design: a settings PATCH may commit while the OS spawn is in
+        # progress. Reading here bounds that cross-process race to the spawn;
+        # the next controller Hub use configures the overlay and restarts any
+        # unoverlaid server through the normal overlay-change path.
+        if self._model_hub_mode_enabled() and (
+            not is_controller_resource_governor(self.resource_governor)
+            or not self._configured_model_hub_overlay()
+        ):
+            self._refuse_unconfigured_model_hub_launch()
+        await self._start_server()
+
+    async def _prepare_model_hub_launch_boundary(self) -> object | None:
+        hub_mode = self._model_hub_mode_enabled()
+        if not hub_mode:
+            self._model_hub_overlay_refusal_logged = False
+            if (
+                is_controller_resource_governor(self.resource_governor)
+                and self._configured_model_hub_overlay()
+                and not self._model_hub_overlay_reservations
+            ):
+                return await self.configure_model_hub_overlay(None)
+            return None
+
+        if not is_controller_resource_governor(self.resource_governor):
+            self._refuse_unconfigured_model_hub_launch()
+        if self._model_hub_overlay_reservations:
+            if not self._configured_model_hub_overlay():
+                self._refuse_unconfigured_model_hub_launch()
+            return None
+
+        preparer = self._model_hub_overlay_preparer
+        if not callable(preparer):
+            self._refuse_unconfigured_model_hub_launch()
+        overlay = await preparer()
+        if overlay is None:
+            self._refuse_unconfigured_model_hub_launch()
+        return await self.configure_model_hub_overlay(overlay)
+
     async def configure_model_hub_overlay(self, overlay: Any | None) -> object:
         """Select an overlay and reserve it until the caller registers its run."""
 
@@ -714,6 +794,7 @@ class OpenCodeServerManager:
             composed_hash = hashlib.sha256(desired_content.encode()).hexdigest()
             if composed_hash != desired_hash:
                 raise RuntimeError("Model Hub OpenCode overlay content hash changed")
+            self._model_hub_overlay_refusal_logged = False
         drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
         transition_owner = object()
         owns_transition = False
@@ -1598,6 +1679,16 @@ class OpenCodeServerManager:
         self._clear_pid_file()
 
     async def ensure_running(self) -> str:
+        overlay_reservation = await self._prepare_model_hub_launch_boundary()
+        try:
+            return await self._ensure_running_with_current_overlay()
+        finally:
+            if overlay_reservation is not None:
+                await self.release_model_hub_overlay_reservation(
+                    overlay_reservation
+                )
+
+    async def _ensure_running_with_current_overlay(self) -> str:
         async with self._get_lock():
             plugin_install = ensure_plugin_installed()
             if plugin_install.changed:
@@ -1638,7 +1729,7 @@ class OpenCodeServerManager:
                         plugin_install.path,
                     )
                     await self._restart_for_auth_refresh_locked()
-                    await self._start_server()
+                    await self._start_server_for_current_model_hub_mode_locked()
                     self._caller_context_plugin_refresh_pending = False
                     return self.base_url
                 if runtime_policy_stale:
@@ -1684,7 +1775,7 @@ class OpenCodeServerManager:
 
             if self._runtime_generation_token is not None:
                 self._retire_runtime_generation_for_replacement()
-            await self._start_server()
+            await self._start_server_for_current_model_hub_mode_locked()
             self._caller_context_plugin_refresh_pending = False
             return self.base_url
 

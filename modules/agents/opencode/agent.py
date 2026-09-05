@@ -89,6 +89,7 @@ from .poll_loop import (
 )
 from .server import (
     OpenCodeManagedPolicyRefreshPendingError,
+    OpenCodeModelHubOverlayRequiredError,
     OpenCodePromptRejectedError,
     OpenCodeRuntimeConfigInvalidError,
     OpenCodeServerManager,
@@ -711,6 +712,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         self._client_manager = OpenCodeClientManager(opencode_config)
         self._client_manager.set_resource_governor(governor_from_controller(controller))
+        model_hub_runtime = getattr(controller, "model_hub_runtime", None)
+        prepare_overlay = getattr(
+            model_hub_runtime,
+            "prepare_opencode_overlay",
+            None,
+        )
+        if callable(prepare_overlay):
+            self._client_manager.set_model_hub_overlay_preparer(prepare_overlay)
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
@@ -939,7 +948,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
     def _server_start_error_display_text(self, error: BaseException) -> str:
         localized_key = None
-        if isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
+        if isinstance(error, OpenCodeModelHubOverlayRequiredError):
+            localized_key = "error.opencodeModelHubOverlayRequired"
+        elif isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
             localized_key = "error.opencodePolicyRefreshPending"
         elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
             localized_key = "error.opencodeRuntimeConfigInvalid"

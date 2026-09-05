@@ -67,6 +67,50 @@ describe('fetchBackendModels for OpenCode', () => {
     });
   });
 
+  it('preserves bare Hub ids when the primary catalog falls back to projected options', async () => {
+    const readOpencodeOptionsForModelPicker = vi.fn().mockResolvedValue({
+      ok: true,
+      data: {
+        models: {
+          providers: [
+            {
+              id: 'avibe-openai',
+              models: {
+                'moonshotai/kimi-k2': {
+                  vibe_remote: { model_hub_projected: true },
+                },
+              },
+            },
+            {
+              id: 'avibe-anthropic',
+              models: {
+                'claude-opus-5': {
+                  vibe_remote: { model_hub_projected: true },
+                },
+              },
+            },
+          ],
+        },
+        reasoning_options: {
+          'moonshotai/kimi-k2': [{ value: 'high', label: 'High' }],
+        },
+        source: 'model hub projection (persisted)',
+        live: false,
+      },
+    });
+    const api = {
+      readModelHubAgentCatalogForModelPicker: noHubCatalog(),
+      readOpencodeOptionsForModelPicker,
+    } as unknown as ApiContextType;
+
+    await expect(fetchBackendModels(api, 'opencode')).resolves.toEqual({
+      models: ['moonshotai/kimi-k2', 'claude-opus-5'],
+      reasoningOptions: {
+        'moonshotai/kimi-k2': [{ value: 'high', label: 'High' }],
+      },
+    });
+  });
+
   it('degrades to an empty catalog when the rank may not read the live options endpoint', async () => {
     const api = {
       readModelHubAgentCatalogForModelPicker: noHubCatalog(),

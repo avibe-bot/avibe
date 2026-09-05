@@ -5745,16 +5745,10 @@ def discord_list_channels_live(bot_token: str, guild_id: str) -> dict:
 
 
 def opencode_options(cwd: str) -> dict:
-    from core.handlers.model_hub import load_opencode_public_models
     from vibe.async_bridge import run_coroutine_blocking
 
     try:
-        return run_coroutine_blocking(
-            opencode_options_async(
-                cwd,
-                model_hub_models=load_opencode_public_models(),
-            )
-        )
+        return run_coroutine_blocking(opencode_options_async(cwd))
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -5952,38 +5946,58 @@ async def opencode_options_async(
     cache_data = cache_entry.get("data")
     updated_at = cache_entry.get("updated_at", 0.0)
     cache_age = time.monotonic() - updated_at
-    projection_key = json.dumps(
-        model_hub_models or {},
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    cache_projection_matches = (
-        cache_entry.get("model_hub_projection") == projection_key
-    )
+    model_hub_models_were_supplied = model_hub_models is not None
+    projection_key = ""
+    cache_projection_matches = False
+    cache_mode_matches = cache_entry.get("mode") == "direct"
+    model_hub_mode = None
     server = None
     try:
         from config.v2_compat import to_app_config
+        from config.v2_config import is_model_hub_enabled
+        from core.handlers.model_hub import load_opencode_public_models
         from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
             OpenCodeServerManager,
             build_reasoning_effort_options,
+            project_opencode_model_hub_models,
         )
         from modules.agents.opencode.utils import opencode_model_picker_value
 
         v2_config = V2Config.load()
+        if model_hub_models is None:
+            model_hub_config = getattr(v2_config, "model_hub", None)
+            model_hub_models = (
+                load_opencode_public_models(model_hub_config)
+                if model_hub_config is not None
+                else {}
+            )
+        projection_key = json.dumps(
+            model_hub_models,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cache_projection_matches = (
+            cache_entry.get("model_hub_projection") == projection_key
+        )
         model_hub_agents = getattr(getattr(v2_config, "model_hub", None), "agents", {})
         model_hub_agent = (
             model_hub_agents.get("opencode")
             if isinstance(model_hub_agents, dict)
             else None
         )
-        model_hub_mode = getattr(model_hub_agent, "mode", "direct")
+        model_hub_mode = (
+            getattr(model_hub_agent, "mode", "direct")
+            if is_model_hub_enabled()
+            else "direct"
+        )
         if (
             model_hub_mode != "hub"
             and cache_data
             and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
             and cache_projection_matches
+            and cache_mode_matches
         ):
             return {"ok": True, "data": cache_data, "cached": True}
         config = to_app_config(v2_config)
@@ -6020,6 +6034,27 @@ async def opencode_options_async(
                     options[model_key] = builder(models, model_key)
             return options
 
+        if model_hub_mode == "hub":
+            models = {
+                "providers": project_opencode_model_hub_models(
+                    [],
+                    model_hub_models or {},
+                ),
+                "default": {},
+            }
+            data = {
+                "agents": [],
+                "models": models,
+                "defaults": {},
+                "reasoning_options": _build_reasoning_options(
+                    models,
+                    build_reasoning_effort_options,
+                ),
+                "source": "model hub projection (persisted)",
+                "live": False,
+            }
+            return {"ok": True, "data": data}
+
         server = await OpenCodeServerManager.get_instance(
             binary=opencode_config.binary,
             port=opencode_config.port,
@@ -6030,7 +6065,7 @@ async def opencode_options_async(
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
         model_request = (
             server.get_available_models(expanded_cwd)
-            if model_hub_models is None
+            if not model_hub_models_were_supplied
             else server.get_available_models(
                 expanded_cwd,
                 model_hub_models=model_hub_models,
@@ -6084,16 +6119,24 @@ async def opencode_options_async(
             "models": models,
             "defaults": defaults,
             "reasoning_options": reasoning_options,
+            "source": "opencode server (live) + user config overlay",
+            "live": True,
         }
         _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
             "data": data,
             "updated_at": time.monotonic(),
             "model_hub_projection": projection_key,
+            "mode": "direct",
         }
         return {"ok": True, "data": data}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
-        if cache_data and cache_projection_matches:
+        if (
+            model_hub_mode != "hub"
+            and cache_data
+            and cache_projection_matches
+            and cache_mode_matches
+        ):
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:
@@ -6929,14 +6972,20 @@ def _opencode_model_options(
     notes: list[str] = []
     if provider_filter and not matched_provider_filter:
         notes.append(f"no configured OpenCode provider matches '{provider}'")
+    catalog_source = data.get("source")
+    if not isinstance(catalog_source, str) or not catalog_source:
+        catalog_source = "opencode server (live) + user config overlay"
+    catalog_live = data.get("live")
+    if not isinstance(catalog_live, bool):
+        catalog_live = True
     return {
         "ok": True,
         "backend": "opencode",
         "default_provider": default_provider or None,
         "providers": providers_out,
         "models": models_out,
-        "source": "opencode server (live) + user config overlay",
-        "live": True,
+        "source": catalog_source,
+        "live": catalog_live,
         "notes": notes or None,
     }
 
@@ -12046,17 +12095,20 @@ def save_claude_auth(payload: dict) -> dict:
 
 
 async def _opencode_get_server():
-    """Spin up a transient OpenCodeServerManager instance for HTTP calls.
+    """Get the OpenCode server manager for UI-process HTTP calls.
 
     Mirrors the pattern used by ``opencode_options_async``: pull the
-    OpenCode config from V2Config, request a manager instance, ensure
-    the daemon is reachable, and let the caller drive its HTTP methods.
-    Returns ``None`` if OpenCode is disabled — callers translate that
-    into a UI-friendly error.
+    OpenCode config from V2Config and ensure the daemon is reachable.
+    In Hub mode only the controller may launch the daemon; this caller
+    can adopt an already-running overlaid server. Returns ``None`` if
+    OpenCode is disabled or the controller-owned Hub overlay is not ready.
     """
     from config.v2_compat import to_app_config
     from core.resource_governance import AgentResourceGovernor, config_from_runtime
-    from modules.agents.opencode import OpenCodeServerManager
+    from modules.agents.opencode import (
+        OpenCodeModelHubOverlayRequiredError,
+        OpenCodeServerManager,
+    )
 
     v2_config = V2Config.load()
     config = to_app_config(v2_config)
@@ -12069,7 +12121,10 @@ async def _opencode_get_server():
         request_timeout_seconds=opencode_config.request_timeout_seconds,
         resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
     )
-    await server.ensure_running()
+    try:
+        await server.ensure_running()
+    except OpenCodeModelHubOverlayRequiredError:
+        return None
     return server
 
 

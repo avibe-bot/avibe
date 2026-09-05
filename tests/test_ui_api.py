@@ -3,13 +3,14 @@ import json
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from config.v2_config import (
     AgentsConfig,
     CodexConfig,
+    ModelHubBackendModelConfig,
     PlatformsConfig,
     RuntimeConfig,
     SlackConfig,
@@ -108,7 +109,7 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
     assert fake_manager.closed_loop is not None
 
 
-def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
+def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
 
@@ -152,6 +153,8 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
             },
         ),
     )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
     monkeypatch.setattr(
@@ -175,9 +178,216 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
     result = asyncio.run(api.opencode_options_async("~/workspace"))
 
     assert result["ok"] is True
+    assert "model_hub_overlay_required" not in captured_kwargs
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "ui-agents"
+
+
+def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _ForbiddenServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            raise AssertionError("Hub options must not acquire the OpenCode server")
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    v2_config.model_hub.agents["opencode"].models = [
+        ModelHubBackendModelConfig(
+            id="deepseek-v3.2",
+            display_name="DeepSeek V3.2",
+            supports_reasoning=True,
+            reasoning_efforts=["high"],
+            native_protocol="openai_responses",
+        ),
+        ModelHubBackendModelConfig(
+            id="claude-opus-5",
+            display_name="Claude Opus 5",
+            supports_reasoning=True,
+            reasoning_efforts=["max"],
+            native_protocol="anthropic",
+        ),
+    ]
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    load_config = Mock(return_value=v2_config)
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(load_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        opencode_module,
+        "OpenCodeServerManager",
+        _ForbiddenServerManager,
+    )
+
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
+
+    assert result["ok"] is True
+    load_config.assert_called_once_with()
+    assert result["data"]["agents"] == []
+    assert result["data"]["defaults"] == {}
+    assert result["data"]["source"] == "model hub projection (persisted)"
+    assert result["data"]["live"] is False
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+    providers = {
+        provider["id"]: provider
+        for provider in result["data"]["models"]["providers"]
+    }
+    assert set(providers) == {"avibe-openai", "avibe-anthropic"}
+    assert set(providers["avibe-openai"]["models"]) == {"deepseek-v3.2"}
+    assert set(providers["avibe-anthropic"]["models"]) == {"claude-opus-5"}
+    assert "native_protocol" not in providers["avibe-openai"]["models"]["deepseek-v3.2"]
+    assert result["data"]["reasoning_options"] == {
+        "deepseek-v3.2": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "high", "label": "High"},
+        ],
+        "claude-opus-5": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "max", "label": "Max"},
+        ],
+    }
+
+
+def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _FakeManager:
+        ensure_calls = 0
+
+        async def ensure_running(self):
+            self.ensure_calls += 1
+
+        async def get_available_agents(self, directory):
+            return [{"name": "build"}]
+
+        async def get_available_models(self, directory, *, model_hub_models=None):
+            return {"providers": []}
+
+        async def get_providers(self):
+            return {"all": [], "connected": []}
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            return None
+
+    manager = _FakeManager()
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(api, "_read_opencode_custom_provider_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(api, "_read_opencode_user_model_index", AsyncMock(return_value={}))
+
+    hub_result = asyncio.run(
+        api.opencode_options_async("/tmp/workspace", model_hub_models={})
+    )
+    v2_config.model_hub.agents["opencode"].mode = "direct"
+    direct_result = asyncio.run(
+        api.opencode_options_async("/tmp/workspace", model_hub_models={})
+    )
+
+    assert hub_result["data"]["agents"] == []
+    assert direct_result["data"]["agents"] == [{"name": "build"}]
+    assert manager.ensure_calls == 1
+    assert api._OPENCODE_OPTIONS_CACHE["/tmp/workspace"]["mode"] == "direct"
+
+
+def test_opencode_options_rereads_hub_mode_at_launch_boundary(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+    from modules.agents.opencode import server as opencode_server_module
+
+    direct_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    hub_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    hub_config.model_hub.agents["opencode"].mode = "hub"
+    configs = iter((direct_config, hub_config))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: next(configs)))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module.OpenCodeServerManager, "_instance", None)
+    monkeypatch.setattr(
+        opencode_server_module,
+        "ensure_plugin_installed",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Hub refusal must happen before server setup")
+        ),
+    )
+
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
+
+    assert result["ok"] is False
+    assert "Gateway mode" in result["error"]
 
 
 def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
@@ -318,23 +528,19 @@ def test_opencode_options_does_not_fall_back_across_model_hub_projections(
     assert result == {"ok": False, "error": "daemon unavailable"}
 
 
-def test_sync_opencode_options_loads_persisted_model_hub_projection(monkeypatch):
-    from core.handlers import model_hub
-
-    projection = {"custom/current": {"id": "custom/current"}}
+def test_sync_opencode_options_delegates_snapshot_loading(monkeypatch):
     calls = []
 
-    async def options(cwd, *, model_hub_models=None):
-        calls.append((cwd, model_hub_models))
+    async def options(cwd):
+        calls.append(cwd)
         return {"ok": True, "data": {"models": {"providers": []}}}
 
-    monkeypatch.setattr(model_hub, "load_opencode_public_models", lambda: projection)
     monkeypatch.setattr(api, "opencode_options_async", options)
 
     result = api.opencode_options("/tmp/workspace")
 
     assert result["ok"] is True
-    assert calls == [("/tmp/workspace", projection)]
+    assert calls == ["/tmp/workspace"]
 
 
 def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):
@@ -381,9 +587,52 @@ def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatc
 
     assert server is fake_manager
     fake_manager.ensure_running.assert_awaited_once()
+    assert "model_hub_overlay_required" not in captured_kwargs
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "provider-ui-agents"
+
+
+def test_opencode_provider_settings_return_structured_hub_refusal(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    refusal = opencode_module.OpenCodeModelHubOverlayRequiredError(
+        "controller overlay is not ready"
+    )
+    fake_manager = SimpleNamespace(ensure_running=AsyncMock(side_effect=refusal))
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return fake_manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    result = asyncio.run(api.get_opencode_providers_async())
+
+    assert result["ok"] is False
+    assert fake_manager.ensure_running.await_count == 1
 
 
 def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_path):
@@ -2611,6 +2860,47 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
     filtered = api.agent_model_options("opencode", provider="deepseek")
     assert [p["id"] for p in filtered["providers"]] == ["deepseek"]
     assert all(m["provider"] == "deepseek" for m in filtered["models"])
+
+
+def test_agent_model_options_preserves_hub_projection_provenance(monkeypatch):
+    import vibe.opencode_config as opencode_config
+
+    monkeypatch.setattr(
+        api,
+        "opencode_options",
+        lambda cwd: {
+            "ok": True,
+            "data": {
+                "models": {
+                    "providers": [
+                        {
+                            "id": "avibe-openai",
+                            "models": {
+                                "deepseek-v3.2": {
+                                    "vibe_remote": {"model_hub_projected": True}
+                                }
+                            },
+                        }
+                    ],
+                    "default": {},
+                },
+                "reasoning_options": {},
+                "source": "model hub projection (persisted)",
+                "live": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        opencode_config,
+        "read_opencode_custom_providers",
+        lambda **kwargs: {},
+    )
+
+    result = api.agent_model_options("opencode")
+
+    assert result["source"] == "model hub projection (persisted)"
+    assert result["live"] is False
+    assert [model["value"] for model in result["models"]] == ["deepseek-v3.2"]
 
 
 def test_codex_agents_merges_global_and_project(monkeypatch, tmp_path):

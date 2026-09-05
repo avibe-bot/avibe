@@ -3175,7 +3175,10 @@ class AgentAuthService:
             from config.v2_compat import to_app_config
             from config.v2_config import V2Config
             from core.resource_governance import AgentResourceGovernor, config_from_runtime
-            from modules.agents.opencode import OpenCodeServerManager
+            from modules.agents.opencode import (
+                OpenCodeModelHubOverlayRequiredError,
+                OpenCodeServerManager,
+            )
         except ImportError:
             return None
         try:
@@ -3196,6 +3199,8 @@ class AgentAuthService:
             )
             await server.ensure_running()
             return server
+        except OpenCodeModelHubOverlayRequiredError:
+            return None
         except Exception as err:  # noqa: BLE001
             logger.warning("OpenCodeServerManager.get_instance failed for web OAuth: %s", err)
             return None

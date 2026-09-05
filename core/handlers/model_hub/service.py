@@ -499,11 +499,13 @@ def _project_opencode_public_models(
     return projected
 
 
-def load_opencode_public_models() -> dict[str, dict[str, Any]]:
-    """Load the persisted, credential-free OpenCode projection for local callers."""
+def load_opencode_public_models(
+    config: ModelHubConfig | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return the credential-free OpenCode projection for local callers."""
 
     return _project_opencode_public_models(
-        V2ModelHubConfigStore().load(),
+        config if config is not None else V2ModelHubConfigStore().load(),
         now=_utc_now(),
     )
 
