@@ -3737,7 +3737,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listDependencies: ({ ids, signal } = {}) => {
       const params = new URLSearchParams();
       for (const id of ids ?? []) params.append('id', id);
-      const path = `/api/dependencies${params.size ? `?${params}` : ''}`;
+      const query = params.toString();
+      const path = `/api/dependencies${query ? `?${query}` : ''}`;
       return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
     },
     installDependency: (dep) => startAndPollDependencyInstall(dep),

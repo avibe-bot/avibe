@@ -12,20 +12,34 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 
 import { ApiProvider, useApi } from './ApiContext';
 import { isApiFetchDeadlineAbort } from '../lib/apiFetch';
+import { DEPENDENCY_CHECK_GROUPS } from '../components/settings/useDependencyChecks';
 
 beforeEach(() => { apiFetch.mockReset(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('dependency inspection transport', () => {
-  it('encodes selected IDs and preserves full inspection for callers without options', async () => {
-    apiFetch.mockImplementation(async () => new Response(JSON.stringify({ ok: true, deps: [] })));
-    const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    await result.current.listDependencies({ ids: ['memory-package', 'memory-runtime'] });
-    await result.current.listDependencies();
-    expect(apiFetch.mock.calls.map(([path]) => path)).toEqual([
-      '/api/dependencies?id=memory-package&id=memory-runtime', '/api/dependencies',
-    ]);
-  });
+  it.each([true, false])(
+    'preserves each requested group and the default full check (URLSearchParams.size available: %s)',
+    async (sizeAvailable) => {
+      const prototype = URLSearchParams.prototype;
+      const size = Object.getOwnPropertyDescriptor(prototype, 'size');
+      try {
+        if (!sizeAvailable) {
+          Reflect.deleteProperty(prototype, 'size');
+          expect('size' in new URLSearchParams()).toBe(false);
+        }
+        apiFetch.mockImplementation(async () => new Response(JSON.stringify({ ok: true, deps: [] })));
+        const { result } = renderHook(useApi, { wrapper: ApiProvider });
+        for (const ids of DEPENDENCY_CHECK_GROUPS) await result.current.listDependencies({ ids });
+        await result.current.listDependencies();
+        expect(apiFetch.mock.calls.map(([path]) => new URL(path, 'http://localhost').searchParams.getAll('id')))
+          .toEqual([...DEPENDENCY_CHECK_GROUPS, []]);
+        expect(apiFetch).toHaveBeenLastCalledWith('/api/dependencies', { signal: expect.any(AbortSignal) });
+      } finally {
+        if (size) Object.defineProperty(prototype, 'size', size);
+      }
+    },
+  );
 
   it.each(['fetch', 'body'] as const)('bounds the complete %s phase with one deadline', async (phase) => {
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
