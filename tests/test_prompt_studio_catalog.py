@@ -21,8 +21,9 @@ def test_every_prompt_markdown_file_has_one_stably_ordered_registry_entry() -> N
 
     assert len(registered) == len(set(registered))
     assert sorted(registered) == present
-    assert [module.id for module in PROMPT_MODULES[:3]] == [
+    assert [module.id for module in PROMPT_MODULES[:4]] == [
         "base-capabilities-intro",
+        "agent-working-principles",
         "base-capabilities-body",
         "codex-generated-images",
     ]

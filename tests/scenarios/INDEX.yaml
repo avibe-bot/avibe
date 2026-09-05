@@ -132,6 +132,7 @@ capabilities:
       - tests/e2e/test_model_hub_migration.py
       - tests/e2e/test_model_hub_mock_upstream.py
       - tests/e2e/test_model_hub_routing.py
+      - tests/e2e/test_model_hub_backend_settings.py
       - tests/e2e/test_model_hub_runtime.py
       - tests/e2e/test_model_hub_sources.py
       - tests/e2e/test_model_hub_usage_events.py

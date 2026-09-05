@@ -93,7 +93,7 @@ def test_preserved_custom_archive_path_cannot_split_build_and_supervisor(
 
     incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
 
-    build_command = next(command for command in commands if "git clone --depth 1" in command)
+    build_command = next(command for command in commands if "git fetch --depth 1" in command)
     assert custom_path not in build_command
     assert f"export VIBE_SHOW_RUNTIME_ARCHIVE_PATH={supervisor_path}" in build_command
 

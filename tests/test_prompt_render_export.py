@@ -70,6 +70,10 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
 
     assert result["text"] == production
     assert "".join(block["text"] for block in result["blocks"]) == production
+    principles = prompt_text("agent-working-principles")
+    assert production.count(principles) == 1
+    assert production.index(principles) < production.index(prompt_text("base-capabilities-body"))
+    assert [block["text"] for block in result["blocks"] if block["id"] == "agent-working-principles"] == [principles]
     catalog = {module.id: module for module in PROMPT_MODULES}
     for block in result["blocks"]:
         assert block["source_path"] == catalog[block["id"]].source_path
@@ -81,6 +85,28 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
         assert "- skill-00: Description skill-00" in production
     assert ("## Personal Memory" in production) == memory
     assert ("preferences.md" in production) != memory
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_working_principles_remain_without_session_skills_or_optional_capabilities(backend):
+    request = {
+        "backend": backend,
+        "options": {
+            "include_quick_replies": False,
+            "include_show_pages": False,
+            "include_codex_generated_images": False,
+            "include_context_guidance": False,
+        },
+    }
+    rendered = render_prompt_context(request)
+    blocks = rendered["blocks"]
+    if backend == "codex":
+        blocks = blocks[1:-1]
+    assert [block["id"] for block in blocks] == [
+        "base-capabilities-intro", "agent-working-principles", "base-capabilities-body",
+    ]
+    assert blocks[1]["text"] == prompt_text("agent-working-principles")
+    assert rendered == render_prompt_context(request)
 
 
 def test_exported_sources_cover_all_rendered_branches(monkeypatch):
@@ -284,13 +310,17 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
     assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
 
 
-def test_source_migration_preserves_injection_bytes(monkeypatch):
+def test_working_principles_addition_preserves_all_other_injection_bytes(monkeypatch):
     outputs = []
     for backend, memory, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
-        outputs.append(render_prompt_context(_inputs(backend, memory, history, skill_mode))["text"])
+        rendered = render_prompt_context(_inputs(backend, memory, history, skill_mode))["text"]
+        principles = prompt_text("agent-working-principles")
+        assert rendered.count(principles) == 1
+        outputs.append(rendered.replace(principles, "", 1))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured from the pre-migration renderer at 928924dd82bb48c7eea67ff06ddd844d442cb2a1.
+    # Only the approved working-principles block may differ from that baseline.
     assert digest == "adbf608248e0b0a03d6646f57d31816cdb520c86113225e281b2aa007b100bc5"

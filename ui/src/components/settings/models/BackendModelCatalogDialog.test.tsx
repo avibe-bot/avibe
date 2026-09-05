@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +54,12 @@ const staleCandidates = (changed: Record<string, RouteHop[]>) => new ApiCallErro
  *  three on screen. */
 const confirmation = () => within(screen.getByRole('alert').parentElement as HTMLElement);
 
+const enabledAddModels = () => waitFor(() => {
+  const button = screen.getByRole('button', { name: 'Add models' }) as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  return button;
+});
+
 const agent = (catalog: BackendModel[] | undefined, overrides: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
   cli_present: true,
@@ -99,12 +105,30 @@ afterEach(async () => {
 });
 
 describe('BackendModelCatalogDialog', () => {
+  it('enables catalog controls only after the baseline read completes', async () => {
+    let finishRead!: (value: AgentSupply) => void;
+    const pendingRead = new Promise<AgentSupply>((resolve) => { finishRead = resolve; });
+    vi.spyOn(modelsApi, 'getAgentSources').mockReturnValue(pendingRead);
+    renderDialog();
+
+    expect(screen.getByRole('heading', { name: 'Claude Code models' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add models' }).hasAttribute('disabled')).toBe(true);
+    expect((screen.getByLabelText('Search name or model ID') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByText('alpha')).toBeNull();
+
+    await act(async () => { finishRead(agent([model('alpha')])); });
+
+    expect(screen.getByRole('button', { name: 'Reorder alpha' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add models' }).hasAttribute('disabled')).toBe(false);
+    expect((screen.getByLabelText('Search name or model ID') as HTMLInputElement).disabled).toBe(false);
+  });
+
   it('shows a locked row without any way to edit, remove, or reorder it', async () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
     renderDialog();
 
     expect(await screen.findByRole('heading', { name: 'Claude Code models' })).toBeTruthy();
-    expect(screen.getByText('claude-default')).toBeTruthy();
+    expect(await screen.findByText('claude-default')).toBeTruthy();
     expect(screen.getByText('Default')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Reorder alpha' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reorder claude-default' })).toBeNull();
@@ -184,7 +208,7 @@ describe('BackendModelCatalogDialog', () => {
     const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(echoed);
     const { onSaved, onClose } = renderDialog();
 
-    await user.click(await screen.findByRole('button', { name: 'Add models' }));
+    await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('checkbox', { name: /GLM 5\.2/ }));
     await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
 
@@ -217,7 +241,7 @@ describe('BackendModelCatalogDialog', () => {
     const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([...catalog, model('added')]));
     renderDialog();
 
-    await user.click(await screen.findByRole('button', { name: 'Add models' }));
+    await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
     await user.type(screen.getByLabelText('Model'), 'added');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
@@ -254,6 +278,7 @@ describe('BackendModelCatalogDialog', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Remove Foo Air' }));
     await user.click(screen.getByRole('button', { name: 'Add models' }));
+    await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
     await user.type(await screen.findByLabelText('Search models or providers'), 'foo');
     await user.click(await screen.findByRole('button', { name: 'Add "foo" as a custom model…' }));
 
@@ -413,7 +438,7 @@ describe('BackendModelCatalogDialog', () => {
       .mockResolvedValue(agent([...catalog, model('glm-5.2')]));
     const { onSaved, onObserved } = renderDialog();
 
-    await user.click(await screen.findByRole('button', { name: 'Add models' }));
+    await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
     await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
     await user.click(await screen.findByRole('button', { name: 'Save' }));
@@ -507,7 +532,8 @@ describe('BackendModelCatalogDialog', () => {
     ]));
     renderDialog();
 
-    await user.type(await screen.findByLabelText('Search name or model ID'), 'bright');
+    await waitFor(() => expect((screen.getByLabelText('Search name or model ID') as HTMLInputElement).disabled).toBe(false));
+    await user.type(screen.getByLabelText('Search name or model ID'), 'bright');
     expect(screen.queryByRole('button', { name: 'Reorder beta' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Reorder Bright Alpha' }).hasAttribute('disabled')).toBe(true);
 
@@ -665,7 +691,7 @@ describe('BackendModelCatalogDialog', () => {
           vi.spyOn(modelsApi, 'getAgentModelCandidates')
             .mockResolvedValueOnce(offered({ providers: [shown] }))
             .mockResolvedValue(offered({ providers: [current] }));
-          await user.click(await screen.findByRole('button', { name: 'Add models' }));
+          await user.click(await enabledAddModels());
           await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
           await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
           // On the added row itself: the refusal is about its suppliers, and
@@ -795,7 +821,7 @@ describe('BackendModelCatalogDialog', () => {
         .mockResolvedValue(agent([EDITED, model('beta')]));
       const { onSaved, onClose } = renderDialog();
 
-      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await enabledAddModels());
       await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
       await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
       await widen(user, 'alpha');
@@ -845,7 +871,7 @@ describe('BackendModelCatalogDialog', () => {
         .mockResolvedValue(agent([...CATALOG, model('glm-5.2')]));
       const { onSaved } = renderDialog();
 
-      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await enabledAddModels());
       await user.click(await screen.findByRole('checkbox', { name: /GLM 5\.2/ }));
       await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
       await user.click(await screen.findByRole('button', { name: 'Save' }));
@@ -943,7 +969,7 @@ describe('BackendModelCatalogDialog', () => {
         .mockResolvedValue(agent([...CATALOG, model('kimi-3')]));
       renderDialog();
 
-      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await enabledAddModels());
       await user.click(await screen.findByRole('checkbox', { name: /GLM 5\.2/ }));
       await user.click(screen.getByRole('checkbox', { name: /Kimi 3/ }));
       await user.click(screen.getByRole('button', { name: 'Add 2 models' }));
@@ -979,7 +1005,7 @@ describe('BackendModelCatalogDialog', () => {
         .mockResolvedValue(agent(CATALOG));
       renderDialog();
 
-      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await enabledAddModels());
       await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
       await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
       await user.click(await screen.findByRole('button', { name: 'Save' }));
@@ -1017,7 +1043,7 @@ describe('BackendModelCatalogDialog', () => {
         .mockResolvedValue(agent(CATALOG));
       renderDialog();
 
-      await user.click(await screen.findByRole('button', { name: 'Add models' }));
+      await user.click(await enabledAddModels());
       await user.click(await screen.findByRole('checkbox', { name: /Primary relay/ }));
       await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
       await user.click(await screen.findByRole('button', { name: 'Save' }));

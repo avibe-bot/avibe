@@ -73,6 +73,7 @@ class PromptModule:
 # prompt structure changes, never because filesystem enumeration changed.
 PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("base-capabilities-intro", "Base Capabilities Intro", "base-capabilities-intro.md", trailing_newlines=2),
+    PromptModule("agent-working-principles", "Agent Working Principles", "agent-working-principles.md", trailing_newlines=2),
     PromptModule("base-capabilities-body", "Base Capabilities Body", "base-capabilities.md", trailing_newlines=1),
     PromptModule("codex-generated-images", "Codex-generated images", "codex-generated-images.md", leading_newlines=1, trailing_newlines=1, placeholders=("example_uri",)),
     PromptModule("show-pages-prompt", "Show Pages Prompt", "show-pages.md", leading_newlines=1, trailing_newlines=1),

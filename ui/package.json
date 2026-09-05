@@ -19,6 +19,7 @@
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
+    "test:chat-paging": "tsc -p e2e/chat-paging/tsconfig.json --noEmit && playwright test --config playwright.chat-paging.config.ts",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
   },

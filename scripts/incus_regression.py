@@ -19,14 +19,13 @@ import shutil
 import socket
 import subprocess
 import sys
-import tarfile
 import tempfile
 import textwrap
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Container, Iterable, Iterator, Sequence
+from typing import Callable, Container, Iterable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -412,6 +411,15 @@ def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry
             yield
         finally:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def regression_io_lock(repo_root: Path, remote: str | None, *, dry_run: bool):
+    """One heavy update per daemon across this checkout's regression environments."""
+    # This reserved lock name cannot collide with an avr-* environment project.
+    # Acquire before stopping a service, including while another environment builds.
+    with target_update_lock(repo_root, remote, "shared-io", dry_run=dry_run):
+        yield
 
 
 def target_run_in_flight(repo_root: Path, remote: str | None, project: str) -> bool:
@@ -1656,35 +1664,9 @@ def is_virtualenv_dir(path: Path) -> bool:
     return (path / "pyvenv.cfg").is_file()
 
 
-def iter_source_entries(repo_root: Path, *, include_ui_dist: bool = False) -> Iterator[tuple[Path, str]]:
-    """Yield ``(path, arcname)`` for everything that belongs in the source tar.
-
-    Excluded directories are pruned during the walk rather than filtered after
-    it: ``node_modules`` and a virtualenv together hold well over a hundred
-    thousand paths that would otherwise be stat'ed just to be discarded.
-    """
-    def walk(current: Path) -> Iterator[tuple[Path, str]]:
-        for entry in sorted(current.iterdir()):
-            relative = entry.relative_to(repo_root).as_posix()
-            if should_exclude(relative, include_ui_dist=include_ui_dist):
-                continue
-            is_dir = entry.is_dir() and not entry.is_symlink()
-            if is_dir and is_virtualenv_dir(entry):
-                continue
-            yield entry, relative
-            if is_dir:
-                yield from walk(entry)
-
-    yield from walk(repo_root)
-
-
-def build_source_tar(repo_root: Path, *, include_ui_dist: bool = False) -> bytes:
-    with tempfile.TemporaryFile() as fh:
-        with tarfile.open(fileobj=fh, mode="w") as tar:
-            for path, relative in iter_source_entries(repo_root, include_ui_dist=include_ui_dist):
-                tar.add(path, arcname=relative, recursive=False)
-        fh.seek(0)
-        return fh.read()
+def require_source_sync() -> None:
+    if shutil.which("rsync") is None:
+        raise RegressionError("Source sync requires rsync on the host (already included in the regression base image).")
 
 
 def sync_source(
@@ -1696,40 +1678,44 @@ def sync_source(
     clean: bool,
     include_ui_dist: bool = False,
 ) -> None:
+    if not runner.dry_run:
+        require_source_sync()
     quoted_source = shlex.quote(SOURCE_DIR)
     if clean:
         wipe = f"find {quoted_source} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +"
-    else:
-        # Everything stale still goes, but the UI dependency tree and its build
-        # output stay: they are the ~470 MB that a full wipe forces ``npm ci``
-        # and ``npm run build`` to recreate on every update whether or not the
-        # front end changed. Whether they are still valid is a fingerprint
-        # question, answered in update_dependencies_and_build.
-        #
-        # Preservation covers only what the archive does not carry. ``tar``
-        # extracts over what is already there and never deletes, so keeping a
-        # directory the host also ships would leave the files the host deleted
-        # -- a stable-name public asset, a manifest -- served alongside the new
-        # bundle. Whatever the archive supplies has to end up equal to the
-        # host's copy, which means the old one goes first. Which of these the
-        # archive supplies is read off the exclusion table rather than restated
-        # here, so the two cannot drift.
-        quoted_ui = shlex.quote(f"{SOURCE_DIR}/ui")
-        keep = " ".join(
-            f"! -name {shlex.quote(name)}"
-            for name in UI_NON_SOURCE_DIRS
-            if should_exclude(f"ui/{name}", include_ui_dist=include_ui_dist)
-        )
-        wipe = (
-            f"find {quoted_source} -mindepth 1 -maxdepth 1 ! -name ui -exec rm -rf {{}} + && "
-            f"if [ -d {quoted_ui} ]; then find {quoted_ui} -mindepth 1 -maxdepth 1 {keep} -exec rm -rf {{}} +; fi"
-        )
-    runner.run(root_exec(target, f"mkdir -p {quoted_source} && {wipe}", remote=remote))
-    tar_bytes = b"" if runner.dry_run else build_source_tar(repo_root, include_ui_dist=include_ui_dist)
-    runner.run(
-        tenant_exec(target, f"tar --no-same-owner -C {quoted_source} -xf -", remote=remote),
-        input_bytes=tar_bytes,
+        runner.run(root_exec(target, f"mkdir -p {quoted_source} && {wipe}", remote=remote))
+    # rsync owns reconciliation, including deletions and type changes. Excluded
+    # trees are protected on the receiver and pruned on both sides, not scanned
+    # for checksums. Ownership is established by the receiving service user.
+    excludes = list(source_excludes(include_ui_dist=include_ui_dist))
+    for current, dirs, _files in os.walk(repo_root, followlinks=False):
+        for name in dirs[:]:
+            path = Path(current) / name
+            relative = path.relative_to(repo_root).as_posix()
+            if should_exclude(relative, include_ui_dist=include_ui_dist) or path.is_symlink():
+                dirs.remove(name)
+            elif is_virtualenv_dir(path):
+                # Arbitrarily named host virtualenvs must not be shipped.
+                excludes.append("/" + re.sub(r"([\\*?\[\]])", r"\\\1", relative))
+                dirs.remove(name)
+    transport = incus(
+        "exec", remote_ref(remote, target.instance), "--mode", "non-interactive",
+        "--", "sudo", "-H", "-u", SERVICE_USER, "--",
+        project=target.project,
     )
+    with tempfile.TemporaryDirectory(prefix="avibe-rsync-") as temporary:
+        shell = Path(temporary) / "transport"
+        # rsync supplies a host placeholder before the remote server argv.
+        shell.write_text('#!/bin/sh\nshift\nexec ' + shlex.join(transport) + ' "$@"\n', encoding="utf-8")
+        shell.chmod(0o700)
+        runner.run([
+            "rsync", "-rltp", "--delete", "--stats",
+            # Hide secrets only on the sender. A receiver-side exclude would
+            # retain stale .env files that can change Vite's build environment.
+            "--filter=H .env", "--filter=H .env.*",
+            *(f"--exclude={pattern}" for pattern in excludes),
+            "--rsh", str(shell), "--", str(repo_root) + "/", f"incus:{SOURCE_DIR}/",
+        ])
 
 
 def stop_service_for_update(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
@@ -2371,6 +2357,66 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
     )
 
 
+def show_runtime_archive_script() -> str:
+    """Build one exact upstream revision, or reuse its verified local artifact."""
+    script = textwrap.dedent(r'''
+        set -euo pipefail
+        if [ "${VIBE_SHOW_RUNTIME_SOURCE:-}" != "archive" ]; then exit 0; fi
+        : "${VIBE_SHOW_RUNTIME_ARCHIVE_PATH:?VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required for archive runtime source}"
+        archive="$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"
+        receipt="$archive.build-key"
+        upstream=https://github.com/avibe-bot/vibe-show-runtime.git
+        revision=$(git ls-remote --exit-code "$upstream" HEAD | cut -f1)
+        [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+        node_identity=$(node -p 'JSON.stringify({platform:process.platform,arch:process.arch,versions:process.versions})')
+        npm_version=$(npm --version)
+        build_key=$(
+          printf '%s\n' 'avibe-regression-show-build-v1' "$upstream" "$revision" "$node_identity" "$npm_version" |
+            sha256sum | cut -d' ' -f1
+        )
+        if [ -f "$archive" ] && [ -f "$receipt" ]; then
+          digest=$(sha256sum "$archive" | cut -d' ' -f1)
+          if [ "$(cat "$receipt")" = "$build_key $digest" ]; then
+            printf 'Show Runtime archive unchanged (%s); reusing verified build.\n' "$revision"
+            exit 0
+          fi
+        fi
+        build_dir=$(mktemp -d)
+        archive_temp=
+        receipt_temp=
+        cleanup() {
+          rm -rf -- "$build_dir"
+          if [ -n "$archive_temp" ]; then rm -f -- "$archive_temp"; fi
+          if [ -n "$receipt_temp" ]; then rm -f -- "$receipt_temp"; fi
+        }
+        trap cleanup EXIT
+        git init --quiet "$build_dir/runtime"
+        (
+          cd "$build_dir/runtime"
+          git remote add origin "$upstream"
+          git fetch --depth 1 origin "$revision"
+          git checkout --quiet --detach FETCH_HEAD
+          [ "$(git rev-parse HEAD)" = "$revision" ]
+          npm ci
+          npm run build
+          npm run bundle:vibe-remote
+        )
+        set -- "$build_dir"/runtime/dist/vibe-show-runtime-node-*.tgz
+        [ "$#" -eq 1 ] && [ -f "$1" ]
+        mkdir -p -- "$(dirname "$archive")"
+        archive_temp=$(mktemp "$archive.XXXXXX")
+        receipt_temp=$(mktemp "$receipt.XXXXXX")
+        install -m 0644 "$1" "$archive_temp"
+        digest=$(sha256sum "$archive_temp" | cut -d' ' -f1)
+        printf '%s %s\n' "$build_key" "$digest" > "$receipt_temp"
+        mv -f -- "$archive_temp" "$archive"
+        mv -f -- "$receipt_temp" "$receipt"
+        printf 'Show Runtime archive built from %s.\n' "$revision"
+    ''').strip()
+    # Early exits must not run the service user's login-shell logout hooks.
+    return "(\n" + script + "\n)"
+
+
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
     build_timeout = show_runtime_build_timeout()
     source_result = runner.run(
@@ -2383,25 +2429,7 @@ def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: st
     runner.run(
         tenant_exec(
             target,
-            f"""
-set -euo pipefail
-{runtime_env_exports}
-if [ "${{VIBE_SHOW_RUNTIME_SOURCE:-}}" = "archive" ]; then
-  : "${{VIBE_SHOW_RUNTIME_ARCHIVE_PATH:?VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required for archive runtime source}}"
-  build_dir=$(mktemp -d)
-  trap 'rm -rf "$build_dir"' EXIT
-  git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git "$build_dir/runtime"
-  (
-    cd "$build_dir/runtime"
-    npm ci
-    npm run build
-    npm run bundle:vibe-remote
-  )
-  set -- "$build_dir"/runtime/dist/vibe-show-runtime-node-*.tgz
-  [ "$#" -eq 1 ] && [ -f "$1" ]
-  install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"
-fi
-""".strip(),
+            runtime_env_exports + "\n" + show_runtime_archive_script(),
             remote=remote,
         ),
         timeout=build_timeout,
@@ -2452,6 +2480,11 @@ def cmd_init_host(args: argparse.Namespace) -> int:
 def cmd_build_base(args: argparse.Namespace) -> int:
     if not args.dry_run:
         require_incus()
+    with regression_io_lock(current_repo_root(), args.remote, dry_run=args.dry_run):
+        return build_base_image(args)
+
+
+def build_base_image(args: argparse.Namespace) -> int:
     runner = Runner(dry_run=args.dry_run)
     runner.run(incus("delete", remote_ref(args.remote, args.temp_instance), "--force"), check=False)
     runner.run(
@@ -2540,6 +2573,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     show_runtime_build_timeout()
     if not args.dry_run:
         require_incus()
+        require_source_sync()
     metadata = WorktreeMetadata(repo_root, args.remote)
     # The lock comes before the row, because the lock is what says a run holds
     # this slug: `reconcile` prunes a reservation whose lock nobody holds, so a
@@ -2554,7 +2588,10 @@ def cmd_up(args: argparse.Namespace) -> int:
     runner = Runner(dry_run=args.dry_run)
     reservation: WorktreeReservation | None = None
     stopped_service_target: RegressionTarget | None = None
-    with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run):
+    with (
+        target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run),
+        regression_io_lock(repo_root, args.remote, dry_run=args.dry_run),
+    ):
         try:
             with metadata.locked(dry_run=args.dry_run):
                 target = resolve_target(args, repo_root, dry_run=args.dry_run, slug=slug)

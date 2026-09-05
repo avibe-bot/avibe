@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 #   health. Runtime policy belongs in the enforcing layer, not in its description.
 # - Keep every generated collection deterministic, including Agent and Skill order.
 # - Required built-in Skill routing is unconditional; installation guarantees it.
+# - Working principles are a static, unconditional prefix before Session and
+#   capability details; never gate them on a backend, Skill, or Turn.
 # - Author all injected prose in the registry. Production text and debug JSON
 #   must consume the same ordered rendered blocks; Studio never assembles prose.
 
@@ -217,7 +219,10 @@ def build_system_prompt_blocks(
         skill.name == "use-avibe-vault" for skill in advertisable_skills
     )
 
-    blocks = [render_prompt_block("base-capabilities-intro")]
+    blocks = [
+        render_prompt_block("base-capabilities-intro"),
+        render_prompt_block("agent-working-principles"),
+    ]
     if context is not None:
         blocks.append(render_prompt_block("session-start-prompt", default_session_id=_extract_default_session_id(context)))
         correction = build_forked_session_correction_prompt(context)

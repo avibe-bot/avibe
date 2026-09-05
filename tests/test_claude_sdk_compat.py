@@ -1,6 +1,8 @@
 import asyncio
 import builtins
 import importlib.util
+import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,84 @@ requires_claude_sdk = pytest.mark.skipif(
     not compat.CLAUDE_SDK_AVAILABLE,
     reason="claude_agent_sdk is not installed",
 )
+
+
+@requires_claude_sdk
+@pytest.mark.asyncio
+async def test_launch_env_stays_out_of_argv_and_is_cleaned_after_disconnect(monkeypatch):
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    token = "private-launch-settings-token"
+    payload = {"autoMemoryEnabled": False, "env": {"ANTHROPIC_AUTH_TOKEN": token}}
+    options = compat.ClaudeAgentOptions(
+        settings=json.dumps(payload), sandbox={"enabled": False}, cli_path="/fixture/claude",
+    )
+    files = []
+
+    async def connect(client, prompt=None):
+        path = Path(client.options.settings)
+        files.append(path)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert json.loads(path.read_text()) == {**payload, "sandbox": {"enabled": False}}
+        transport = SubprocessCLITransport(prompt="", options=client.options)
+        argv = transport._build_command()
+        assert argv[argv.index("--settings") + 1] == str(path)
+        assert token not in " ".join(argv)
+        assert options.settings == json.dumps(payload)
+        assert options.sandbox == {"enabled": False}
+
+    async def disconnect(client):
+        assert Path(client.options.settings).exists()
+
+    monkeypatch.setattr(compat._ClaudeSDKClient, "connect", connect)
+    monkeypatch.setattr(compat._ClaudeSDKClient, "disconnect", disconnect)
+    client = compat.ClaudeSDKClient(options=options)
+    for _ in range(2):
+        await client.connect()
+        assert files[-1].exists()
+        await client.disconnect()
+        assert not files[-1].parent.exists()
+        assert client.options is options
+    assert files[0] != files[1]
+
+
+@requires_claude_sdk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("stage", ["connect", "disconnect"])
+async def test_launch_settings_cleanup_covers_failure_and_cancellation(monkeypatch, error, stage):
+    options = compat.ClaudeAgentOptions(settings='{"env":{"ANTHROPIC_AUTH_TOKEN":"fixture"}}')
+    files = []
+
+    async def connect(client, prompt=None):
+        files.append(Path(client.options.settings))
+        if stage == "connect":
+            raise error("connect interrupted")
+
+    async def disconnect(client):
+        raise error("disconnect interrupted")
+
+    monkeypatch.setattr(compat._ClaudeSDKClient, "connect", connect)
+    monkeypatch.setattr(compat._ClaudeSDKClient, "disconnect", disconnect)
+    client = compat.ClaudeSDKClient(options=options)
+    with pytest.raises(error):
+        await client.connect()
+        await client.disconnect()
+    assert not files[0].parent.exists()
+    assert client.options is options
+
+
+@requires_claude_sdk
+@pytest.mark.asyncio
+async def test_launch_settings_preserve_native_options_without_env(monkeypatch):
+    options = compat.ClaudeAgentOptions(settings='{"autoMemoryEnabled":false}', sandbox={"enabled": False})
+
+    async def connect(client, prompt=None):
+        assert client.options is options
+
+    monkeypatch.setattr(compat._ClaudeSDKClient, "connect", connect)
+    await compat.ClaudeSDKClient(options=options).connect()
 
 
 class _FakeQuery:
