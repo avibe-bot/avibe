@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.codex.transport import (
     AVIBE_APP_SERVER_CONFIG_OVERRIDES,
+    CodexRPCError,
     CodexTransport,
     STREAM_BUFFER_LIMIT,
 )
@@ -23,6 +24,19 @@ def _forced_config_args() -> tuple[str, ...]:
 
 
 class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rpc_errors_preserve_protocol_rejection_identity(self):
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        for code in (-32600, -32601, -32602, -32603, -32000):
+            with self.subTest(code=code):
+                future = asyncio.get_running_loop().create_future()
+                transport._pending[1] = future
+                await transport._dispatch({"id": 1, "error": {"code": code, "message": "failure"}})
+                with self.assertRaises(CodexRPCError) as caught:
+                    await future
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(caught.exception.request_rejected, code in {-32600, -32601, -32602})
+                self.assertNotIn(1, transport._pending)
+
     async def test_cancelled_initialize_stops_unpublished_transport(self):
         initialize_started = asyncio.Event()
 
@@ -203,6 +217,12 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("features.image_generation=false", disabled)
         self.assertNotIn("features.shell_tool=false", disabled)
         self.assertNotIn("web_search=disabled", disabled)
+
+    def test_app_server_policy_preserves_client_developer_messages(self):
+        self.assertIn(
+            "features.retain_client_developer_messages=true",
+            AVIBE_APP_SERVER_CONFIG_OVERRIDES,
+        )
 
     async def test_reader_task_failure_marks_transport_not_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")

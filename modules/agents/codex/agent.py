@@ -52,7 +52,7 @@ from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.session import CodexSessionManager
-from modules.agents.codex.transport import CodexTransport
+from modules.agents.codex.transport import CodexRPCError, CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
 from vibe.i18n import t as i18n_t
@@ -2791,6 +2791,21 @@ class CodexAgent(BaseAgent):
         )
         return names_field and unsupported
 
+    @staticmethod
+    def _render_developer_prompt_snapshot(developer_instructions: str) -> str:
+        return (
+            "<avibe_runtime_instructions>\n"
+            "This is the complete current Avibe runtime instruction snapshot. "
+            "Only the most recent snapshot is active. It replaces all earlier "
+            "Avibe-generated runtime prompt snapshots, including untagged versions. "
+            "Rules and capability, Agent, or Skill catalog entries omitted from this "
+            "snapshot no longer apply: do not carry them forward from earlier snapshots. "
+            "This replacement does not revoke user or project instructions or erase "
+            "conversation history.\n\n"
+            f"{developer_instructions}\n"
+            "</avibe_runtime_instructions>"
+        )
+
     async def _inject_thread_developer_instructions(
         self,
         transport: CodexTransport,
@@ -2801,8 +2816,12 @@ class CodexAgent(BaseAgent):
         agent_session_id: Optional[str] = None,
         strategy: str = "fallback",
     ) -> None:
-        """Fallback for Codex builds without Turn collaboration settings."""
+        """Append model-visible instructions, with durable at-most-once recovery."""
 
+        previous_marker = self._read_persisted_prompt_strategy_marker(
+            thread_id,
+            agent_session_id=agent_session_id,
+        )
         pending_strategy = (
             "fallback_pending_clear_injection"
             if strategy == "fallback_pending_clear"
@@ -2832,24 +2851,46 @@ class CodexAgent(BaseAgent):
             thread_id,
             pending_strategy,
         )
-        await transport.send_request(
-            "thread/inject_items",
-            {
-                "threadId": thread_id,
-                "items": [
-                    {
-                        "type": "message",
-                        "role": "developer",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": developer_instructions,
-                            }
-                        ],
-                    }
-                ],
-            },
-        )
+        try:
+            await transport.send_request(
+                "thread/inject_items",
+                {
+                    "threadId": thread_id,
+                    "items": [
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": self._render_developer_prompt_snapshot(developer_instructions),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        except CodexRPCError as exc:
+            if not exc.request_rejected:
+                raise
+            # The server rejected the request before dispatch, so restore the
+            # pre-injection state instead of recording an unknowable mutation.
+            previous_marker = previous_marker or {}
+            if not self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=previous_marker.get("strategy"),
+                prompt_sha256=previous_marker.get("sha256"),
+                agent_session_id=agent_session_id,
+            ):
+                raise CodexPromptRefreshUnavailableError(
+                    "Could not restore the prompt strategy after rejected injection"
+                ) from exc
+            self._thread_prompt_strategies.pop(request.base_session_id, None)
+            raise CodexPromptRefreshUnavailableError(
+                "Codex rejected developer prompt injection; check app-server API compatibility"
+            ) from exc
         if not self._persist_prompt_strategy(
             request,
             thread_id,
@@ -2892,9 +2933,10 @@ class CodexAgent(BaseAgent):
             strategy,
         )
 
-    @staticmethod
-    def _prompt_fingerprint(developer_instructions: str) -> str:
-        return hashlib.sha256(developer_instructions.encode("utf-8")).hexdigest()
+    @classmethod
+    def _prompt_fingerprint(cls, developer_instructions: str) -> str:
+        snapshot = cls._render_developer_prompt_snapshot(developer_instructions)
+        return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
 
     def _read_persisted_prompt_strategy_marker(
         self,
@@ -3026,11 +3068,12 @@ class CodexAgent(BaseAgent):
         thread_id: str,
         developer_instructions: Optional[str],
         *,
-        strategy: str,
+        strategy: Optional[str],
         agent_session_id: Optional[str],
         prompt_sha256: Optional[str] = None,
     ) -> bool:
         if strategy not in {
+            None,
             "collaboration",
             "fallback",
             "fallback_pending_clear",
@@ -3044,10 +3087,10 @@ class CodexAgent(BaseAgent):
             or any(character not in "0123456789abcdef" for character in prompt_sha256)
         ):
             raise ValueError("Codex prompt fingerprint must be lowercase SHA-256")
-        if strategy == "unavailable" and (
+        if strategy in {None, "unavailable"} and (
             developer_instructions or prompt_sha256 is not None
         ):
-            raise ValueError("Unavailable prompt strategy cannot carry prompt identity")
+            raise ValueError("Absent or unavailable prompt strategy cannot carry prompt identity")
         if strategy == "fallback" and not developer_instructions and not prompt_sha256:
             raise ValueError("Fallback prompt strategy requires developer instructions")
         if not agent_session_id:
@@ -3078,7 +3121,7 @@ class CodexAgent(BaseAgent):
                     backend=self.name,
                     native_session_id=thread_id,
                     key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
-                    value=marker,
+                    value=marker if strategy is not None else None,
                 )
             )
 
@@ -3218,19 +3261,10 @@ class CodexAgent(BaseAgent):
             )
             if persisted_prompt_marker is not None:
                 prompt_strategy = persisted_prompt_marker["strategy"]
-            elif effective_model and getattr(transport, "supports_turn_collaboration_mode", True):
-                prompt_strategy = (
-                    "collaboration"
-                    if self._persist_prompt_strategy(
-                        request,
-                        thread_id,
-                        developer_instructions,
-                        strategy="collaboration",
-                        agent_session_id=agent_session_id,
-                    )
-                    else "fallback"
-                )
             else:
+                # Keep the durable name for existing threads. Collaboration
+                # settings are not a prompt channel: model catalog messages
+                # can override their developer_instructions entirely.
                 prompt_strategy = "fallback"
             self._remember_thread_prompt_strategy(
                 request.base_session_id,
@@ -3264,16 +3298,10 @@ class CodexAgent(BaseAgent):
         collaboration_mode_is_known = bool(
             getattr(transport, "supports_turn_collaboration_mode", True)
         )
-        collaboration_strategy_has_no_model = bool(
-            developer_instructions
-            and prompt_strategy == "collaboration"
-            and not effective_model
-        )
         clear_collaboration_mode = collaboration_mode_is_known and bool(
             prompt_strategy
-            in {"fallback_pending_clear", "fallback_pending_clear_injection"}
+            in {"collaboration", "fallback_pending_clear", "fallback_pending_clear_injection"}
             or (model_explicit and effective_model is None)
-            or collaboration_strategy_has_no_model
         )
         if clear_collaboration_mode:
             was_collaboration = prompt_strategy == "collaboration"
@@ -3292,26 +3320,7 @@ class CodexAgent(BaseAgent):
                 )
                 if was_collaboration and not fallback_prompt_is_current:
                     prompt_changed = True
-        use_collaboration_mode = bool(
-            developer_instructions
-            and effective_model
-            and prompt_strategy == "collaboration"
-            and collaboration_mode_is_known
-        )
-        if use_collaboration_mode:
-            # Codex keeps the collaboration world state across Turns and emits
-            # a new developer fragment only when these exact bytes change. The
-            # explicit model and effort preserve the route because the mode
-            # takes precedence over the sibling turn fields.
-            turn_params["collaborationMode"] = {
-                "mode": "default",
-                "settings": {
-                    "model": effective_model,
-                    "reasoning_effort": effective_effort,
-                    "developer_instructions": developer_instructions,
-                },
-            }
-        elif (
+        if (
             developer_instructions
             and prompt_changed
             and prompt_strategy
@@ -3357,23 +3366,10 @@ class CodexAgent(BaseAgent):
             ):
                 raise
             logger.warning(
-                "Codex turn collaboration mode is unavailable; falling back to developer item injection: %s",
+                "Codex turn collaboration mode is unavailable; retrying without the model reset field: %s",
                 exc,
             )
             transport.supports_turn_collaboration_mode = False
-            self._remember_thread_prompt_strategy(
-                request.base_session_id,
-                thread_id,
-                "fallback",
-            )
-            if developer_instructions and not fallback_prompt_is_current:
-                await self._inject_thread_developer_instructions(
-                    transport,
-                    request,
-                    thread_id,
-                    developer_instructions,
-                    agent_session_id=agent_session_id,
-                )
             fallback_turn_params = dict(turn_params)
             fallback_turn_params.pop("collaborationMode", None)
             resp = await transport.send_request("turn/start", fallback_turn_params)
@@ -3420,12 +3416,6 @@ class CodexAgent(BaseAgent):
                     "Codex collaboration clear succeeded but the unknown injection marker remains pending"
                 )
 
-        if use_collaboration_mode and developer_instructions:
-            self._remember_thread_developer_instructions(
-                request.base_session_id,
-                thread_id,
-                developer_instructions,
-            )
         if effective_model:
             self._thread_model_settings = getattr(self, "_thread_model_settings", {})
             self._thread_model_settings[request.base_session_id] = (

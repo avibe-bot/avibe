@@ -46,6 +46,8 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.plugins=false",
     "features.recommended_plugins=false",
     "features.remote_plugin=false",
+    # Preserve Avibe's injected developer items in Codex remote compaction v2.
+    "features.retain_client_developer_messages=true",
     "features.skill_mcp_dependency_install=false",
     "features.terminal_visualization_instructions=false",
     "features.tool_call_mcp_elicitation=false",
@@ -61,6 +63,20 @@ def _avibe_app_server_config_args() -> list[str]:
         for override in AVIBE_APP_SERVER_CONFIG_OVERRIDES
         for arg in ("-c", override)
     ]
+
+
+class CodexRPCError(RuntimeError):
+    """A structured server error, distinct from an ambiguous transport failure."""
+
+    def __init__(self, error: Any) -> None:
+        super().__init__(f"Codex RPC error: {error}")
+        self.code = error.get("code") if isinstance(error, dict) else None
+
+    @property
+    def request_rejected(self) -> bool:
+        # Protocol validation failures precede dispatch. Internal/server errors
+        # do not prove that a mutation was rejected before it took effect.
+        return self.code in {-32600, -32601, -32602}
 
 
 class CodexTransport:
@@ -163,9 +179,9 @@ class CodexTransport:
                         "title": "Avibe",
                         "version": "1.0.0",
                     },
-                    # Dynamic developer instructions for an existing native
-                    # thread use turn/start.collaborationMode. Omitted
-                    # server-request capabilities remain disabled.
+                    # Developer item injection and legacy collaboration-mode
+                    # cleanup use experimental APIs. Omitted server-request
+                    # capabilities remain disabled.
                     "capabilities": {"experimentalApi": True},
                 },
             )
@@ -174,10 +190,8 @@ class CodexTransport:
             try:
                 await self.send_request("collaborationMode/list", {})
             except Exception as exc:
-                # Older app-servers accept unknown turn fields, so the catalog
-                # method is the capability probe. Fall back to item injection
-                # on any inconclusive result rather than risk dropping the
-                # developer instructions silently.
+                # Only legacy-thread cleanup depends on collaboration support.
+                # A catalog response does not prove custom prompt delivery.
                 logger.info(
                     "Codex turn collaboration mode is unavailable; using developer item injection: %s",
                     exc,
@@ -401,7 +415,7 @@ class CodexTransport:
             fut = self._pending.pop(req_id, None)
             if fut and not fut.done():
                 if "error" in msg:
-                    fut.set_exception(RuntimeError(f"Codex RPC error: {msg['error']}"))
+                    fut.set_exception(CodexRPCError(msg["error"]))
                 else:
                     fut.set_result(msg.get("result", {}))
             return
