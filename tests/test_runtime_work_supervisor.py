@@ -326,6 +326,7 @@ async def test_hfr_288_expired_backoff_preserves_forward_scan_before_retry() -> 
 async def test_hfr_162_backoff_budget_preserves_exact_partition_deadline() -> None:
     now = 0.0
     release_retry = asyncio.Event()
+    retry_entered = asyncio.Event()
     retry_delays: list[float] = []
     exact_retried = asyncio.Event()
     later_started = asyncio.Event()
@@ -333,6 +334,7 @@ async def test_hfr_162_backoff_budget_preserves_exact_partition_deadline() -> No
 
     async def controlled_retry(delay: float) -> None:
         retry_delays.append(delay)
+        retry_entered.set()
         await release_retry.wait()
 
     class _TwoPartitions(RuntimeWorkHandler):
@@ -367,10 +369,7 @@ async def test_hfr_162_backoff_budget_preserves_exact_partition_deadline() -> No
     supervisor.register(RuntimeWorkLane.REQUESTS, _TwoPartitions())
     await supervisor.activate()
     try:
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if retry_delays:
-                break
+        await asyncio.wait_for(retry_entered.wait(), 1)
         assert retry_delays == [10.0]
         assert attempts == {"exact": 1}
 
@@ -1058,6 +1057,7 @@ async def test_hfr_159_blocked_store_scan_does_not_block_another_lane() -> None:
 async def test_hfr_163_lane_capacity_bounds_distinct_partition_workers() -> None:
     release = asyncio.Event()
     two_started = asyncio.Event()
+    all_completed = asyncio.Event()
     active = 0
     peak = 0
     completed = 0
@@ -1084,6 +1084,8 @@ async def test_hfr_163_lane_capacity_bounds_distinct_partition_workers() -> None
             active -= 1
             done.add(item.partition_key)
             completed += 1
+            if completed == 5:
+                all_completed.set()
 
     supervisor = RuntimeWorkSupervisor(
         reconcile_interval=3600,
@@ -1092,14 +1094,14 @@ async def test_hfr_163_lane_capacity_bounds_distinct_partition_workers() -> None
     )
     supervisor.register(RuntimeWorkLane.RUN_CALLBACKS, _Backlog())
     await supervisor.activate()
-    await asyncio.wait_for(two_started.wait(), 1)
-    assert peak == 2
-    release.set()
-    for _ in range(100):
-        if completed == 5:
-            break
-        await asyncio.sleep(0)
-    await supervisor.stop()
+    try:
+        await asyncio.wait_for(two_started.wait(), 1)
+        assert peak == 2
+        release.set()
+        await asyncio.wait_for(all_completed.wait(), 1)
+    finally:
+        release.set()
+        await supervisor.stop()
     assert completed == 5
     assert peak == 2
 
@@ -1718,6 +1720,7 @@ async def test_hfr_175_global_lease_loss_joins_every_registration(
 ) -> None:
     owns_lease = True
     scanned = threading.Event()
+    stop_started = asyncio.Event()
     processed: list[str] = []
 
     class _LeaseHandler(RuntimeWorkHandler):
@@ -1739,6 +1742,14 @@ async def test_hfr_175_global_lease_loss_joins_every_registration(
     )
     supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
     supervisor._requires_service_lease = True
+    begin_stop = supervisor._begin_stop
+
+    def observe_stop() -> asyncio.Task[None]:
+        task = begin_stop()
+        stop_started.set()
+        return task
+
+    monkeypatch.setattr(supervisor, "_begin_stop", observe_stop)
     handlers = {
         RuntimeWorkLane.SESSION_DELIVERIES: _LeaseHandler(),
         RuntimeWorkLane.REQUESTS: _LeaseHandler(),
@@ -1746,17 +1757,17 @@ async def test_hfr_175_global_lease_loss_joins_every_registration(
     for lane, handler in handlers.items():
         supervisor.register(lane, handler)
     await supervisor.activate()
-    assert await asyncio.to_thread(scanned.wait, 1)
+    try:
+        assert await asyncio.to_thread(scanned.wait, 1)
 
-    owns_lease = False
-    for handler in handlers.values():
-        handler.ready = True
-    supervisor.notify(*handlers)
-    for _ in range(100):
-        if supervisor._stop_task is not None:
-            break
-        await asyncio.sleep(0)
-    assert supervisor._stop_task is not None
-    await supervisor._stop_task
+        owns_lease = False
+        for handler in handlers.values():
+            handler.ready = True
+        supervisor.notify(*handlers)
+        await asyncio.wait_for(stop_started.wait(), 1)
+        assert supervisor._stop_task is not None
+        await asyncio.wait_for(asyncio.shield(supervisor._stop_task), 1)
+    finally:
+        await supervisor.stop()
     assert supervisor._registrations == {}
     assert processed == []

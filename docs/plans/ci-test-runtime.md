@@ -231,3 +231,36 @@ integration passed 130 tests, and four focused UI files passed 62 tests. The
 1,092 original top-level functions/classes across the four behavioral test
 modules are unchanged. No test assertions were removed. Dependency compatibility
 and Ruff checks passed; main-checkout dirty-file checksums remain unchanged.
+
+### Post-merge supervisor test synchronization
+
+PR #1882 head `feb73e6c33` passed exact-head bot review, all 17 checks and
+the complete whole-PR thread gate. Its green run 33967285557 took 6m24s;
+all 399 Python files ran exactly once. The merge source `1ec7842f1` has the
+same tree, but master run 33967925507 failed one existing supervisor test:
+HFR-163 stopped the supervisor after 100 `sleep(0)` iterations with four of
+five partitions completed. All other independent jobs passed. The master's
+6m41s failed run is not a green performance measurement.
+
+The supervisor scans through a thread executor. Yielding the event loop a fixed
+number of times does not guarantee that the executor result has been delivered.
+Stopping the supervisor then correctly closes admission before the last partition
+can run. A controlled local probe delayed each real scan result by 200 event-loop
+turns, without changing that result or the production implementation. It reproduced
+premature assertions in HFR-163 and the same positive-wait pattern in HFR-162
+(backoff entry) and HFR-175 (global lease-loss shutdown).
+
+The orchestrator chooses a separate, test-only follow-up PR for these three
+waits. Await bounded events for actual backoff entry, all five completions, and
+the real stop-task creation. The stop observer delegates to the original method;
+it does not replace lease-loss handling or trigger shutdown itself. Retain every
+deadline, capacity, completion, lease-loss and ownership assertion, and always join
+the supervisor on assertion failure. The remaining fixed yields inspect absence
+of extra work or same-loop callbacks, not completion of an off-loop scan, and are
+outside this diagnosed class. No production, timeout, discovery, dependency or
+shard change is needed. No blind rerun of the failed master run is requested.
+
+Validation: all 38 supervisor tests passed normally (0.95s) and with the
+controlled 200-turn scan-result delay (0.52s). The same delay made all three
+original positive waits fail. Ruff 0.4.9 and dependency compatibility passed.
+These are local correctness checks, not estimates of CI performance.
