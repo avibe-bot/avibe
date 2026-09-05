@@ -181,3 +181,10 @@ tests: no overlap with this PR's nine-file scope, no allocated artifact-name
 collision. Integrate that source and run its new dependency-consumer tests with
 the changed fixture/workflow contracts; the new file uses the existing shard
 planner fallback, with no invented timing entry.
+
+After merging that exact master, all 561 dependency-consumer/FSM/lifecycle/
+workflow/shard/fixture cases passed. The new inventory is 400 files; the previous
+399-file hosted comparisons remain pinned to their original heads. The final
+scope remains nine files relative to the integrated master. The prior automatic
+review was terminal before the next push (live bot +1, no reviews or threads);
+the next head requires its own complete review and CI evidence before merge.
