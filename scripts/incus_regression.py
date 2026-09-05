@@ -2707,14 +2707,29 @@ def cmd_delete(args: argparse.Namespace) -> int:
     with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run, blocking=False):
         target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, slug=slug)
         runner = Runner(dry_run=args.dry_run)
-        runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False)
-        runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False)
+        results = (
+            runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False),
+            runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False),
+        )
+        failed = [result for result in results if result.returncode != 0]
+        if failed:
+            statuses = ", ".join(str(result.returncode) for result in failed)
+            commands = "; ".join(shlex.join(result.args) for result in failed)
+            print(f"Could not delete {target.slug} ({commands} exited {statuses}); kept its metadata.", file=sys.stderr)
+            return 1
         if target.target == WORKTREE_TARGET and not args.dry_run:
             metadata = WorktreeMetadata(repo_root, args.remote)
-            metadata.forget([target.slug])
-            if not metadata.owned:
+            if metadata.owned:
+                with metadata.locked(dry_run=False):
+                    if target.slug in metadata.rows():
+                        environment = next(env for env in worktree_environments(runner, metadata) if env.slug == target.slug)
+                        if environment.exists:
+                            print(f"Could not confirm deletion of {target.slug}; kept its metadata.", file=sys.stderr)
+                            return 1
+                        metadata.forget([target.slug])
+            else:
                 # The row describes a slug and host port on this machine, and this
-                # deletion happened somewhere else, so `forget` above did nothing.
+                # deletion happened somewhere else, so this accessor cannot forget it.
                 # Saying so is all that is left to the caller: a slug used on both
                 # daemons would otherwise lose its local port reservation the moment
                 # the remote copy was removed, and lose it silently.

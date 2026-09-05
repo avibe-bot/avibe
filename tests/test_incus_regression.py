@@ -2381,6 +2381,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         encoding="utf-8",
     )
     commands = []
+    listings = []
 
     class RecordingRunner:
         def __init__(self, *, dry_run=False):
@@ -2389,6 +2390,13 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         def run(self, command, *, check=True, **kwargs):
             commands.append(command)
             return subprocess.CompletedProcess(command, 0)
+
+        def records(self, command, *, what):
+            listings.append((command, what))
+            return []
+
+        def names(self, command, *, what):
+            return [item["name"] for item in self.records(command, what=what)]
 
     monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
     monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
@@ -2417,8 +2425,54 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         ["incus", "--project", project, "delete", instance, "--force"],
         ["incus", "project", "delete", project],
     ]
+    assert listings == [
+        (["incus", "project", "list", "--format", "json"], "Incus projects"),
+        (["incus", "list", "--all-projects", "--format", "json"], "Incus instances"),
+    ]
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == {}
+
+
+@pytest.mark.parametrize(
+    ("returncode", "project_present"),
+    [(1, False), (0, True)],
+    ids=["delete-fails", "listing-still-present"],
+)
+def test_delete_keeps_worktree_metadata_until_absence_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, project_present: bool
+) -> None:
+    repo = tmp_path / "repo"
+    runtime = repo / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    slug = "delete-failed"
+    row = {"path": str(repo), "project": f"avr-wt-{slug}", "instance": f"avibe-wt-{slug}", "host_port": 15206}
+    mapping_path = runtime / "worktrees.json"
+    mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": {slug: row}}), encoding="utf-8")
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        def run(self, command, *, check=True, **kwargs):
+            return subprocess.CompletedProcess(command, returncode, stderr="daemon unavailable")
+
+        def records(self, command, *, what):
+            if what == "Incus projects" and project_present:
+                return [{"name": row["project"]}]
+            return []
+
+        def names(self, command, *, what):
+            return [item["name"] for item in self.records(command, what=what)]
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda _repo_root, _env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+
+    assert incus_regression.cmd_delete(_delete_args(slug)) == 1
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {slug: row}
 
 
 def test_delete_against_a_remote_keeps_the_local_metadata(
@@ -2568,6 +2622,12 @@ def test_delete_holds_the_slug_lock_across_the_objects_and_the_row(
         def run(self, command, *, check=True, **kwargs):
             observed.append(("objects", held()))
             return subprocess.CompletedProcess(command, 0)
+
+        def records(self, command, *, what):
+            return []
+
+        def names(self, command, *, what):
+            return []
 
     forget = incus_regression.WorktreeMetadata.forget
 
