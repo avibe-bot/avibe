@@ -69,11 +69,11 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   `thinking.budgetTokens` shape is not used: the engine folds it into a bucketed effort, and
   `thinking: {type, effort}` silently becomes a 1024-token budget. A row with
   `supports_reasoning: false` has no variants.
-- The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
-  normalizes a provider, matches inventory, or substitutes a model. The same-protocol
+- The invocation selects the exact effective `(source_id, model_id)` hop. Invocation never
+  normalizes a provider or chooses a different plan tier. The same-protocol
   guarantee is protocol-specific: **Anthropic** — when the hop's Source protocol is
   `anthropic`, the request body reaches the upstream unchanged apart from the `model` field,
-  which the Gateway rewrites to the stored hop's model id (a user-configured substitution,
+  which the Gateway rewrites to the effective hop's model id (a user-configured substitution,
   `model-hub.md` §4.5, is invoked as written); **Responses** — when the hop's Source protocol
   is `openai_responses`, `input`, `reasoning`, and `prompt_cache_key` reach the upstream intact
   while the engine's Codex executor edits the envelope (below). The Anthropic guarantee is
@@ -92,28 +92,31 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   Anthropic-frontend `output_config.effort` is dropped on the way to an `openai_chat` upstream
   (a second reason models are grouped by native protocol, not by supplier).
 
-## Add-time matching (`matching-v1`)
+## Effective route planning
 
-OpenCode matching occurs once while adding a Source or a menu model, using the inventory
-owned by that write. An exact model id wins; there is no prefix to strip or repair. The stored
-Route carries the concrete upstream model id and this normalization is never repeated by
-runtime or refresh.
+The shared resolver owns OpenCode matching over complete non-retired inventory.
+A manual key returns exact saved hops. Otherwise literal canonical model equality
+selects the matching tier in default order; if none matches, eligible non-retired
+Hub API-key defaults receive the original id unchanged. Subscriptions retain existing
+known-model admission and are never speculative unknown-model candidates. No vendor-prefix repair or fuzzy matching
+exists. Live health and protocol transport inspection annotate that chosen plan without
+creating another tier. The overlay never duplicates this planning algorithm.
 
 ## Stability invariant (test requirement, L7)
 
 For a fixed set of checked rows with fixed `native_protocol` values, the generated overlay is
 byte-identical across: Source-order edits, Source cooldown/failover, route-chain edits,
 engine restarts, and gateway token rotation apart from
-`options.apiKey`. Adding/removing a Source without changing the stored Route chains also
+`options.apiKey`. Adding/removing a Source without changing the effective Route targets also
 leaves it byte-identical. A scenario test asserts this by diffing generated overlays under
 each perturbation.
 
-## Upgrade — none
+## Persisted compatibility
 
-Model Hub is pre-release (owner, 2026-09-05; `README.md`: no bump carries a migration,
-compatibility reader, conversion, or version discriminator). A stored OpenCode section in the
-pre-v4 shape is invalid input under the v4 schema and is handled by the existing invalid-config
-path; nothing converts it.
+Supported saved shapes use the existing safe loader. Preserve sparse manual intent,
+including empty, stale and dormant OpenCode entries; do not infer old authorship or
+automatic intent from array equality/default order. Legacy shapes outside supported
+conversion use documented safe degradation, never a blanket pre-release waiver.
 
 ## Spike record (S1–S6; evidence captured 2026-09-04 on OpenCode 1.18.18 and CLIProxyAPI 7.2.105 `4a2eb54d`, the binary Avibe's manifest pins, with the repo mock upstream recording path/headers/body)
 

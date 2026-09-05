@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
-import { modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi } from './modelsApi';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import type { AgentSupply, Source } from './types';
 
@@ -65,18 +65,46 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
-  vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(agent);
+  vi.spyOn(modelsApi, 'putAgentSources').mockResolvedValue(agent);
 });
 
 describe('SourceOrderDrawer keyboard ordering', () => {
+  it('echoes the exact effective-removal guard before saving default membership', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'model-a', position: 1, source_id: 'src_a', model_id: 'model-a' }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    const put = vi.spyOn(modelsApi, 'putAgentSources')
+      .mockRejectedValueOnce(new ApiCallError('source_in_route_chain', undefined, true, [], [], hops))
+      .mockResolvedValueOnce({ ...agent, sources: { ...agent.sources!, order: ['src_b'] } });
+    renderDrawer();
+    await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
+    await screen.findByText('Review affected routes');
+    expect(put).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
+    await waitFor(() => expect(put).toHaveBeenLastCalledWith('claude', { order: ['src_b'], force: true, would_remove_hops: hops, would_interrupt: [] }));
+  });
+  it('reconciles an unknown order write without resubmitting the mutation', async () => {
+    const user = userEvent.setup();
+    const committed = { ...agent, sources: { ...agent.sources!, order: ['src_b'] } };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValueOnce(agent).mockResolvedValueOnce(committed);
+    const put = vi.spyOn(modelsApi, 'putAgentSources').mockRejectedValueOnce(new TypeError('response lost'));
+    const onSaved = vi.fn();
+    renderDrawer({ onSaved });
+    await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
+    await user.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(committed));
+    expect(put).toHaveBeenCalledTimes(1);
+  });
   it('grabs, moves, announces, and restores the pre-grab order on Escape', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     renderDrawer();
     const handles = await screen.findAllByRole('button', { name: 'Reorder source' });
-    expect(screen.getByRole('heading', { name: 'Claude Code · Global route priority' })).toBeTruthy();
-    expect(screen.getByText("Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.")).toBeTruthy();
-    expect(screen.getByText("These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route.")).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Claude Code · Default routing' })).toBeTruthy();
+    expect(screen.getByText('Applies to automatic and passthrough routes. Saved manual routes stay unchanged.')).toBeTruthy();
+    expect(screen.getByText('Available for manual routes.')).toBeTruthy();
     expect(handles[0].className).toContain('cursor-grab');
 
     handles[0].focus();
@@ -109,33 +137,35 @@ describe('SourceOrderDrawer keyboard ordering', () => {
   it('reads the current order on open and keeps the moved draft after a failed save', async () => {
     const user = userEvent.setup();
     const getAgentSources = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
-    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockRejectedValue(new Error('offline'));
+    const putAgentSources = vi.spyOn(modelsApi, 'putAgentSources').mockRejectedValue(new Error('offline'));
     renderDrawer();
 
     await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
     await user.click(screen.getByRole('button', { name: 'Remove from order' }));
-    await user.click(screen.getByRole('button', { name: 'Save order' }));
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
 
-    await screen.findByText('The order was not saved');
+    await screen.findByText('Could not confirm the saved default routing. Retry to check.');
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     expect(screen.getByText('This order is empty. Add a source from below.')).toBeTruthy();
     expect(getAgentSources).toHaveBeenCalledWith('claude');
-    expect(reorderAgentChains).toHaveBeenCalledWith('claude', []);
+    expect(putAgentSources).toHaveBeenCalledWith('claude', { order: [] });
   });
 
-  it('applies the saved priority to existing route chains', async () => {
+  it('saves only default source membership through the source endpoint', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
-    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(agent);
+    const putAgentSources = vi.spyOn(modelsApi, 'putAgentSources').mockResolvedValue(agent);
+    const reorder = vi.spyOn(modelsApi, 'reorderAgentChains');
     renderDrawer();
 
     await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
-    await user.click(screen.getByRole('button', { name: 'Save order' }));
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
 
-    await waitFor(() => expect(reorderAgentChains).toHaveBeenCalledWith('claude', ['src_b']));
+    await waitFor(() => expect(putAgentSources).toHaveBeenCalledWith('claude', { order: ['src_b'] }));
+    expect(reorder).not.toHaveBeenCalled();
   });
 
-  it('allows reapplying an unchanged saved priority to existing route chains', async () => {
+  it('does not rewrite routes when default membership and order are unchanged', async () => {
     const user = userEvent.setup();
     const savedAgent: AgentSupply = {
       ...agent,
@@ -145,14 +175,14 @@ describe('SourceOrderDrawer keyboard ordering', () => {
       },
     };
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(savedAgent);
-    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(savedAgent);
+    const putAgentSources = vi.spyOn(modelsApi, 'putAgentSources').mockResolvedValue(savedAgent);
     renderDrawer({ agent: savedAgent });
 
-    const save = await screen.findByRole('button', { name: 'Save order' });
-    expect(save.hasAttribute('disabled')).toBe(false);
+    const save = await screen.findByRole('button', { name: 'Save default routing' });
+    expect(save.hasAttribute('disabled')).toBe(true);
     await user.click(save);
 
-    await waitFor(() => expect(reorderAgentChains).toHaveBeenCalledWith('claude', ['src_b', 'src_a']));
+    expect(putAgentSources).not.toHaveBeenCalled();
   });
 
   it('keeps a read failure inside the drawer and retries the collection read', async () => {
@@ -181,7 +211,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     renderDrawer({ agent: noEligible });
 
     await screen.findByText('No source is available to this backend yet.');
-    expect(screen.getByRole('button', { name: 'Save order' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Save default routing' }).hasAttribute('disabled')).toBe(true);
   });
 
   it('uses the source inventory read in the same generation as the Agent order', async () => {

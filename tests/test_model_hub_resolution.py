@@ -264,7 +264,9 @@ class FakeAdapter:
             models=tuple(DiscoveredModel(id=model_id) for model_id in self.discovered),
         )
 
-    async def invoke(self, source_id, model_id, request, stream, origin):
+    async def invoke(self, source_id, model_id, request, stream, origin, *, on_admitted=None):
+        if on_admitted is not None:
+            on_admitted()
         self.invocations.append((source_id, model_id))
         self.invocation_requests.append(request)
         outcome = self.outcomes.popleft()
@@ -301,6 +303,8 @@ def _config(sources: list[ModelHubSourceConfig], *, model: str = "claude-opus-4-
         for backend in ("claude", "codex", "opencode")
     }
     for backend, agent in agents.items():
+        # Existing persisted routes remain explicit, including old empty seeds.
+        agent.routes = {entry.id: ModelHubRouteConfig() for entry in agent.models}
         eligible = [source.id for source in sources if ModelHubConfig.source_eligible_for_backend(source, backend)]
         agent.sources.order = eligible
     agents["claude"].routes[model] = ModelHubRouteConfig(
@@ -1143,18 +1147,19 @@ def test_runtime_does_not_alias_unpersisted_claude_request():
     assert resolution.supply_status == "interrupted"
 
 
-def test_resolution_marks_stale_exact_hop_unsupported():
+def test_resolution_preserves_unlisted_manual_target():
     source = _source("src_stale001", ("other-model",))
     config = _config([source], model="stale-model")
     resolution = resolve_model_hub_turn(config, "claude", "stale-model")
     assert resolution.matching_sources == (source,)
-    assert resolution.candidates == ()
-    assert resolution.unsupported_source_ids == (source.id,)
+    assert resolution.candidates == (source,)
+    assert resolution.unsupported_source_ids == ()
     assert resolution.projectable_hops == resolution.inspected_hops
 
 
-def test_launch_failure_reports_unsupported_exact_hop():
-    source = _source("src_launch001", ("other-model",))
+def test_launch_failure_reports_retired_exact_hop():
+    source = _source("src_launch001", ("stale-model",))
+    source.models[0].retired = True
     config = _config([source], model="stale-model")
     resolution = resolve_model_hub_turn(config, "claude", "stale-model")
 
@@ -1194,7 +1199,7 @@ def test_exact_hop_inspection_is_the_single_identity_and_supply_authority():
     assert inspected.reason is None
 
 
-def test_exact_hop_inspection_rejects_wrong_identity_and_empty_route():
+def test_exact_hop_inspection_distinguishes_missing_inventory_from_empty_route():
     source = _source("src_exact002", ("actual-model",), vendor="openai")
     config = _config([source], model="menu-model")
 
@@ -1207,9 +1212,9 @@ def test_exact_hop_inspection_rejects_wrong_identity_and_empty_route():
     empty = inspect_exact_hop(config, "opencode", "menu-model", None)
 
     assert wrong.inventory_member is False
-    assert wrong.supply_eligible is False
-    assert wrong.runnable is False
-    assert wrong.reason == "model_unsupported"
+    assert wrong.supply_eligible is True
+    assert wrong.runnable is True
+    assert wrong.reason is None
     assert empty.identity == ("opencode", "menu-model", None, None)
     assert empty.reason == "route_unconfigured"
 
@@ -1334,12 +1339,13 @@ def test_refresh_ignores_preexisting_unrelated_interruption(tmp_path):
     assert result["interrupted"] == []
 
 
-def test_engine_binding_excludes_empty_inventory(tmp_path):
+def test_engine_binding_preserves_empty_inventory(tmp_path):
     source = _source("src_empty01", (), vendor="openai")
     config = _config([source], model="requested")
     service, _store, _ = _service(tmp_path, config)
 
-    assert service._bindings(config) == []
+    assert len(service._bindings(config)) == 1
+    assert service._bindings(config)[0].model_ids == ()
 
 
 def test_agent_chain_projects_exact_hops_and_blockers(tmp_path):
@@ -1353,13 +1359,13 @@ def test_agent_chain_projects_exact_hops_and_blockers(tmp_path):
             "model_id": "stale-model",
             "channel": "hub",
             "health": "healthy",
-            "runnable": False,
-            "reason": "model_unsupported",
+            "runnable": True,
+            "reason": None,
             "retry_at": None,
         }
     ]
-    assert payload["current"] is None
-    assert payload["supply_state"] == "interrupted"
+    assert payload["current"] == {"source_id": source.id, "model_id": "stale-model"}
+    assert payload["supply_state"] == "ok"
 
 
 def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
@@ -1388,7 +1394,7 @@ def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
     assert [hop.source_id for hop in store.load().agents["claude"].routes[menu_model].hops] == [second.id, first.id]
 
 
-def test_set_agent_chain_reports_complete_removed_hops_without_syncing(tmp_path):
+def test_set_agent_chain_reports_removed_hops_and_syncs_transport_targets(tmp_path):
     menu_model = "claude-opus-4-6"
     first = _source("src_chain006", (menu_model,))
     second = _source("src_chain007", (menu_model,))
@@ -1415,7 +1421,8 @@ def test_set_agent_chain_reports_complete_removed_hops_without_syncing(tmp_path)
             "position": 2,
         }
     ]
-    assert adapter.synced == []
+    assert len(adapter.synced) == 1
+    assert adapter.synced[0][1].route_model_ids == ()
 
 
 def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
@@ -1452,7 +1459,8 @@ def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
     )
 
     assert result["interrupted"] == []
-    assert adapter.synced == []
+    assert len(adapter.synced) == 1
+    assert adapter.synced[0][-1].route_model_ids == ("other",)
     assert [hop.source_id for hop in store.load().agents["claude"].routes[menu_model].hops] == [second.id, first.id]
 
 
@@ -1590,7 +1598,6 @@ def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
             native_protocol="openai_responses",
         )
     ]
-    opencode.routes["gpt-5.6"] = ModelHubRouteConfig()
     adapter = FakeAdapter(discovered=("gpt-5.6",))
     service, store, _ = _service(tmp_path, config, adapter)
 
@@ -1762,7 +1769,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 8,
+        "contract_version": 9,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1793,7 +1800,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 8,
+        "contract_version": 9,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",
@@ -2068,7 +2075,7 @@ def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):
     ]
 
 
-def test_manual_model_delete_requires_the_exact_guard_plan(tmp_path):
+def test_manual_model_delete_preserves_explicit_route(tmp_path):
     menu_model = "claude-opus-4-6"
     source = _source("src_manual003")
     source.models.append(ModelHubModelConfig(id="manual-model", provenance="manual"))
@@ -2078,31 +2085,10 @@ def test_manual_model_delete_requires_the_exact_guard_plan(tmp_path):
     )
     service, store, _ = _service(tmp_path, config)
 
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(service.delete_custom_model(source.id, "manual-model"))
-
-    assert exc.value.code == "source_model_in_route_chain"
-    assert store.load().to_payload() == config.to_payload()
-    with pytest.raises(ModelHubError) as unconfirmed:
-        asyncio.run(
-            service.delete_custom_model(
-                source.id,
-                "manual-model",
-                force=True,
-            )
-        )
-    assert unconfirmed.value.data == exc.value.data
-    result = asyncio.run(
-        service.delete_custom_model(
-            source.id,
-            "manual-model",
-            force=True,
-            confirmed_remove_hops=exc.value.data["would_remove_hops"],
-            confirmed_interruptions=exc.value.data["would_interrupt"],
-        )
-    )
-    assert result["removed_hops"] == exc.value.data["would_remove_hops"]
-    assert store.load().agents["claude"].routes[menu_model].hops == ()
+    result = asyncio.run(service.delete_custom_model(source.id, "manual-model"))
+    assert result["removed_hops"] == []
+    assert store.load().agents["claude"].routes[menu_model].hops == config.agents["claude"].routes[menu_model].hops
+    assert service.agent_chain("claude", menu_model)["current"]["model_id"] == "manual-model"
 
 
 def test_delete_unused_source_ignores_preexisting_unrelated_gap(tmp_path):
@@ -2189,20 +2175,10 @@ def test_refresh_source_uses_guarded_success_shape(tmp_path):
     config = _config([source], model=menu_model)
     adapter = FakeAdapter(discovered=("new-model",))
     service, store, _ = _service(tmp_path, config, adapter)
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(service.refresh_source(source.id))
-    assert exc.value.code == "source_model_in_route_chain"
-    result = asyncio.run(
-        service.refresh_source(
-            source.id,
-            force=True,
-            confirmed_remove_hops=exc.value.data["would_remove_hops"],
-            confirmed_interruptions=exc.value.data["would_interrupt"],
-        )
-    )
+    result = asyncio.run(service.refresh_source(source.id))
     assert set(result) == {"source", "removed_hops", "interrupted"}
-    assert result["removed_hops"][0]["model_id"] == menu_model
-    assert store.load().agents["claude"].routes[menu_model].hops == ()
+    assert result["removed_hops"] == []
+    assert store.load().agents["claude"].routes[menu_model].hops == config.agents["claude"].routes[menu_model].hops
 
 
 @pytest.mark.parametrize(
@@ -2261,37 +2237,13 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
         assert store.load().to_payload() == before
         return
 
-    if inventory_case == "empty":
-        with pytest.raises(ModelHubError) as refusal:
-            asyncio.run(mutation())
-        confirmed = {
-            "force": True,
-            "would_remove_hops": refusal.value.data["would_remove_hops"],
-            "would_interrupt": refusal.value.data["would_interrupt"],
-        }
-        if operation == "refresh":
-            confirmed = {
-                "force": True,
-                "confirmed_remove_hops": refusal.value.data[
-                    "would_remove_hops"
-                ],
-                "confirmed_interruptions": refusal.value.data[
-                    "would_interrupt"
-                ],
-            }
-        result = asyncio.run(mutation(confirmed))
-    else:
-        result = asyncio.run(mutation())
+    result = asyncio.run(mutation())
     persisted = store.load().sources[0]
     response_source = result["source"]
     assert [model["retired"] for model in response_source["models"]] == [
         False
     ] * len(discovered)
-    assert response_source["adopted_by"] == (
-        [{"backend": "claude", "menu_model": "claude-opus-4-6"}]
-        if inventory_case == "normal"
-        else []
-    )
+    assert response_source["adopted_by"] == [{"backend": "claude", "menu_model": "claude-opus-4-6"}]
     persisted_projection = {
         key: value
         for key, value in response_source.items()
@@ -2316,7 +2268,8 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
     )
     direct_baseline_guards = {
         "delete_source",
-        "set_agent_chain",
+        "_write_agent_chain",
+        "set_agent_sources",
         "delete_custom_model",
     }
     inventory_guards = {
@@ -2397,7 +2350,9 @@ def test_credential_target_and_refresh_capability_have_single_service_consumers(
     assert "credential_supports_refresh" in calls(
         methods["_classify_credential_outcome"]
     )
-    assert "_classify_source_outcome" in calls(methods["probe_agent"])
+    assert "_probe_agent_once" in calls(methods["probe_agent"])
+    assert "_classify_source_outcome" in calls(methods["_probe_agent_once"])
+    assert "_invoke_admitted" in calls(methods["_probe_agent_once"])
     assert "_classify_source_outcome" in calls(methods["resolve"])
     capability_callers = {
         name

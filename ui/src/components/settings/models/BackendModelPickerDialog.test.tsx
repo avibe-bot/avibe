@@ -77,6 +77,7 @@ describe('BackendModelPickerDialog', () => {
     renderPicker();
 
     expect(await screen.findByRole('heading', { name: 'Add Claude Code models' })).toBeTruthy();
+    await screen.findByRole('group', { name: BUILT_IN });
     // A built-in row has nothing but an id, so the id is its label rather than a
     // sub-line under an empty one.
     expect(group(BUILT_IN).getAllByRole('checkbox').map((row) => row.textContent))

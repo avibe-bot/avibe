@@ -10,7 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 8 as const;
+export const CONTRACT_VERSION = 9 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -362,6 +363,8 @@ export type RouteHopRef = RouteHop & {
 export type AgentRoute = {
   hops: RouteHop[];
 };
+export type ManualRouteOverride = AgentRoute;
+export type RouteOrigin = 'automatic' | 'manual' | 'passthrough' | null;
 
 /** Agent-level supply rollup (§4.5). `waiting` = every enabled source is
  *  cooling and one will come back; `interrupted` = nothing can serve the
@@ -386,6 +389,7 @@ export type NamedAgentSupply = {
  *  is the honest 「ticked but nothing supplies it」 state. */
 export type ModelSupply = {
   model_id: string;
+  route_origin: RouteOrigin;
   chain_length: number;
   has_runnable_hop: boolean;
 };
@@ -407,7 +411,7 @@ export type AgentSupply = {
   selected_model_explicit?: boolean;
   /** Per-backend enabled subset + order. null when mode=direct. */
   sources?: AgentSources | null;
-  /** Exact configured Route for each menu model. Runtime reads this verbatim. */
+  /** Sparse persisted manual overrides. Missing keys follow default routing. */
   routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
    *  and whenever `selected_model_id` is null. This is not a backend-wide
@@ -548,11 +552,45 @@ export type AgentChain = {
   contract_version: typeof AGENT_CHAIN_CONTRACT_VERSION;
   backend: AgentBackend;
   model_id: string;
+  manual_override: ManualRouteOverride | null;
+  route_origin: RouteOrigin;
   current: RouteHop | null;
   chain: AgentChainLink[];
   /** v4 pins this to the array it summarises: `ok` iff some member is runnable,
    *  the two blocked values iff none is. */
   supply_state: 'ok' | 'waiting' | 'interrupted';
+};
+
+export type RecordedAttempt = {
+  source_id: string;
+  configured_model_id: string;
+  channel: SupplyChannel;
+  stripped_reasoning_efforts?: string[];
+  declared_reasoning_efforts?: string[];
+};
+export type TurnProvenance = {
+  contract_version: (typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number];
+  turn_id: string;
+  ts: string;
+  agent: AgentBackend;
+  requested_model_id: string;
+  outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
+  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason }>;
+  served: RecordedAttempt | null;
+  canceled_attempt: RecordedAttempt | null;
+  terminal_error: {
+    source_id: string | null;
+    configured_model_id: string | null;
+    channel: SupplyChannel | null;
+    reason: 'invalid_parameter' | 'protocol_error' | 'tool_incompatible' | 'stream_interrupted' | 'engine_down';
+    stream_started: boolean;
+    http_status?: number | null;
+    upstream_error_code?: string | null;
+    stripped_reasoning_efforts?: string[];
+    declared_reasoning_efforts?: string[];
+  } | null;
+  model_supply_state: 'waiting' | 'interrupted' | null;
+  blockers: Array<RouteHop & { reason: ChainUnavailableReason; retry_at?: string | null }>;
 };
 
 // ── probe-result.schema.json ────────────────────────────────────────────
@@ -857,7 +895,12 @@ export type SourcePatch = {
 };
 
 /** PUT /api/models/agents/<backend>/sources — replaces the complete order. */
-export type AgentSourcesPut = { order: string[] };
+export type AgentSourcesPut = {
+  order: string[];
+  force?: boolean;
+  would_remove_hops?: RouteHopRef[];
+  would_interrupt?: SupplyGap[];
+};
 
 /** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
 export type AgentChainPut = {

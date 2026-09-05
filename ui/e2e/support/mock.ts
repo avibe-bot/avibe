@@ -17,10 +17,11 @@ export type MockModelsEndpoint = 'ok' | 'http_404' | 'http_500' | 'timeout' | 'm
 
 export type MockConfig = {
   auth?: MockAuthMode;
-  stream?: 'healthy' | 'interrupt_after_first_output';
+  stream?: 'healthy' | 'interrupt_after_first_output' | 'pause_after_first_output';
   models?: unknown[];
   protocol?: MockProtocol;
   models_endpoint?: MockModelsEndpoint;
+  model_errors?: Record<string, 'model_not_found'>;
 };
 
 export type CapturedRequest = {

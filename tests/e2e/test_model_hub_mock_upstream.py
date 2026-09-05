@@ -252,6 +252,9 @@ def _send_through_opencode_gateway_engine(
     variant: dict[str, Any],
     prompt_start_delay_seconds: float = 0,
     require_terminal_result: bool = False,
+    inventory_models: list[dict[str, Any]] | None = None,
+    automatic_route: bool = False,
+    isolated_upstream: MockLLMUpstream | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     binary = shutil.which("opencode")
     if binary is None:
@@ -266,6 +269,9 @@ def _send_through_opencode_gateway_engine(
         "openai_responses": "/v1/responses",
         "openai_chat": "/v1/chat/completions",
     }[upstream_protocol]
+    inventory = inventory_models if inventory_models is not None else [
+        {"id": stored_model, "supported_parameters": ["reasoning"]},
+    ]
     with _engine_app(model_hub_app_factory) as app:
         configured = app.client.post(
             "/api/config",
@@ -276,12 +282,7 @@ def _send_through_opencode_gateway_engine(
         _configure_protocol(
             mock_llm_upstream,
             upstream_protocol,
-            models=[
-                {
-                    "id": stored_model,
-                    "supported_parameters": ["reasoning"],
-                }
-            ],
+            models=inventory,
         )
         source, _ = _create_source(
             app,
@@ -294,10 +295,17 @@ def _send_through_opencode_gateway_engine(
                 else None
             ),
         )
-        source_model = next(
-            model for model in source["models"] if model["id"] == stored_model
-        )
-        assert "high" in source_model["reasoning_efforts"], source_model
+        if inventory_models is None:
+            source_model = next(model for model in source["models"] if model["id"] == stored_model)
+            assert "high" in source_model["reasoning_efforts"], source_model
+        else:
+            assert {model["id"] for model in source["models"]} == {model["id"] for model in inventory}
+        if isolated_upstream is not None:
+            _configure_protocol(isolated_upstream, upstream_protocol, models=[{"id": stored_model}])
+            _create_source(
+                app, isolated_upstream, protocol=upstream_protocol, nonce="scn_routingoutside001",
+                extra=({"base_url": f"{isolated_upstream.url}/v1"} if upstream_protocol == "openai_responses" else None),
+            )
         sources = app.client.put(
             "/api/models/agents/opencode/sources",
             {"order": [source["id"]]},
@@ -333,15 +341,16 @@ def _send_through_opencode_gateway_engine(
             {"mode": "hub"},
         )
         assert mode.status == 200, mode.json()
-        chain = app.client.put(
-            f"/api/models/agents/opencode/chain?model={menu_model}",
-            {
-                "hops": [
-                    {"source_id": source["id"], "model_id": stored_model}
-                ]
-            },
+        route_path = f"/api/models/agents/opencode/chain?model={menu_model}"
+        chain = app.client.get(route_path) if automatic_route else app.client.put(
+            route_path, {"hops": [{"source_id": source["id"], "model_id": stored_model}]},
         )
         assert chain.status == 200, chain.json()
+        if inventory_models is not None:
+            assert chain.json()["chain"]["route_origin"] == ("passthrough" if automatic_route else "manual")
+            assert chain.json()["chain"]["manual_override"] == (
+                None if automatic_route else {"hops": [{"source_id": source["id"], "model_id": stored_model}]}
+            )
 
         options = app.client.post(
             "/api/opencode/options",
@@ -368,6 +377,8 @@ def _send_through_opencode_gateway_engine(
 
         started = app.client.post("/api/models/runtime/start", {})
         assert started.status == 200, started.json()
+        engine_state = app.avibe_home / "runtime" / "model-hub" / "state"
+        engine_configs = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in engine_state.glob("instances/*/config.yaml")}
 
         agent = app.client.post(
             "/api/agents",
@@ -413,13 +424,10 @@ def _send_through_opencode_gateway_engine(
         _configure_protocol(
             mock_llm_upstream,
             upstream_protocol,
-            models=[
-                {
-                    "id": stored_model,
-                    "supported_parameters": ["reasoning"],
-                }
-            ],
+            models=inventory,
         )
+        if isolated_upstream is not None:
+            isolated_upstream.reset_requests()
         sent = app.client.post(
             f"/api/sessions/{session.json()['id']}/messages",
             {"text": "hello"},
@@ -453,6 +461,17 @@ def _send_through_opencode_gateway_engine(
                 break
             time.sleep(0.1)
         assert len(captured) == 1, app.diagnostics()
+        if inventory_models is not None:
+            assert captured[0]["body"]["model"] == stored_model
+            current = app.client.get("/api/models/sources")
+            assert current.status == 200, current.json()
+            current_source = next(row for row in current.json()["sources"] if row["id"] == source["id"])
+            assert {row["id"] for row in current_source["models"]} == {row["id"] for row in inventory}
+            assert app.client.get(route_path).json()["chain"]["manual_override"] == chain.json()["chain"]["manual_override"]
+            assert engine_configs
+            assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in engine_state.glob("instances/*/config.yaml")} == engine_configs
+        if isolated_upstream is not None:
+            assert not [row for row in isolated_upstream.requests() if row["path"] == upstream_path]
         if require_terminal_result:
             assert result is not None, app.diagnostics()
             assert result["text"] == "mock response", {
@@ -518,6 +537,27 @@ def _send_through_opencode_gateway_engine(
             "claude-opus-5"
         }
         return captured[0]["body"], result
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
+@pytest.mark.parametrize("inventory", [[], [{"id": "unrelated-listed-model"}]], ids=["empty", "incomplete"])
+@pytest.mark.parametrize("automatic", [True, False], ids=["passthrough", "manual"])
+def test_mh_routing_005_real_opencode_gateway_cpa_preserves_unknown_model_and_source_isolation(
+    model_hub_app_factory, mock_llm_upstream, protocol, inventory, automatic,
+):
+    """MH-ROUTING-005: real backend -> gateway -> pinned CPA forwards an unlisted exact model only to its source."""
+    native = "anthropic" if protocol == "anthropic" else "openai_responses"
+    menu = "claude-opus-5" if native == "anthropic" else "deepseek-v3.2"
+    target = menu if automatic else "vendor/unlisted-route-target"
+    variant = {"effort": "high"} if native == "anthropic" else {"reasoningEffort": "high"}
+    with MockLLMUpstream() as other:
+        captured, result = _send_through_opencode_gateway_engine(
+            model_hub_app_factory, mock_llm_upstream, upstream_protocol=protocol, native_protocol=native,
+            stored_model=target, variant=variant, inventory_models=inventory, automatic_route=automatic,
+            isolated_upstream=other, require_terminal_result=True,
+        )
+    assert captured["model"] == target
+    assert result is not None
 
 
 @pytest.mark.parametrize(
@@ -894,6 +934,9 @@ def test_mock_upstream_control_validation_capture_envelope_and_reset(
         {"protocol": "invalid"},
         {"models_endpoint": "invalid"},
         {"models": [""]},
+        {"model_errors": []},
+        {"model_errors": {"": "model_not_found"}},
+        {"model_errors": {"unknown-model": "server_error"}},
     ):
         status, _, payload = _json_request(
             mock_llm_upstream.url,
@@ -946,6 +989,49 @@ def test_mock_upstream_control_validation_capture_envelope_and_reset(
         mock_llm_upstream.url, "/__control/requests"
     )
     assert captured == {"requests": []}
+
+
+@pytest.mark.parametrize("protocol", PROTOCOL_CASES)
+@pytest.mark.parametrize("inventory", [[], [{"id": "catalog-only-model"}]])
+def test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent(
+    mock_llm_upstream, protocol, inventory,
+) -> None:
+    """MH-ROUTING-001: truthful inventory never gates capture or request-only errors."""
+
+    missing = "vendor/unknown-model-20260906"
+    healthy = "vendor/other-unlisted-model"
+    case = PROTOCOL_CASES[protocol]
+    original = _configure(
+        mock_llm_upstream.url,
+        protocol=protocol,
+        models=inventory,
+        model_errors={missing: "model_not_found"},
+    )
+    for model, expected_status in [(missing, 404), (healthy, 200)]:
+        body = {**case["body"], "model": model}
+        if protocol == "openai_responses":
+            body["input"] = "Original identifier and request: 中文"
+        else:
+            body["messages"] = [{"role": "user", "content": "Original identifier and request: 中文"}]
+        status, _, payload = _json_request(
+            mock_llm_upstream.url, case["path"], method="POST", body=body,
+        )
+        assert status == expected_status, payload
+        if model == missing:
+            assert model in payload["error"]["message"]
+            if protocol != "anthropic":
+                assert payload["error"]["code"] == "model_not_found"
+        assert mock_llm_upstream.requests()[-1]["body"] == body
+
+    assert mock_llm_upstream.state.config() == original
+    assert _configure(mock_llm_upstream.url, model_errors={})["models"] == inventory
+    status, _, _ = _json_request(
+        mock_llm_upstream.url,
+        case["path"],
+        method="POST",
+        body={**case["body"], "model": missing},
+    )
+    assert status == 200
 
 
 def test_mock_upstream_contract_client_ignores_inherited_proxy(

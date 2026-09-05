@@ -908,8 +908,8 @@
       "gateway": {
         "heading": "Gateway routes",
         "infoLabel": "What gateway routes are",
-        "info": "Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
-        "sourceOrder": "Adjust priority",
+        "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
+        "sourceOrder": "Default routing",
         "manageModels": "Manage models",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
@@ -1170,16 +1170,54 @@
         "reorder": "Reorder",
         "oauthSignedOut": "CLI subscription is signed out"
       },
+      "routing": {
+        "historyFailed": "Recorded turn could not be read.",
+        "latestRecorded": "Latest recorded turn",
+        "modelNotFound": "Upstream returned model not found",
+        "errorDetails": "View error details",
+        "errorReason": { "invalid_parameter": "Request parameters rejected", "protocol_error": "Protocol error", "tool_incompatible": "Tool incompatible", "stream_interrupted": "Stream interrupted", "engine_down": "Gateway unavailable" },
+        "origin": { "automatic": "Automatic", "manual": "Manual", "passthrough": "Passthrough", "unconfigured": "Unconfigured" },
+        "help": {
+          "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
+          "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
+          "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the upstream to handle.",
+          "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
+        },
+        "frozen": "This model uses a saved, fixed route",
+        "follows": "Follows {{backend}} default routing",
+        "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
+        "editHint": "Editing and saving gives this model a manual route.",
+        "restoreAutomatic": "Restore automatic",
+        "undoRestore": "Undo restore",
+        "undoDone": "Previous manual draft restored.",
+        "restorePending": "Not saved yet. The saved route is still in use.",
+        "afterSave": "Route after saving",
+        "preview": { "automatic": "After restore: automatic matching", "passthrough": "After restore: original-name passthrough", "unconfigured": "After restore: unconfigured" },
+        "previewFailed": "Could not preview automatic routing. Your draft is unchanged. Try again.",
+        "manualEmpty": "This saved route is empty. Restore automatic to follow defaults.",
+        "noDefaults": "No default provider can route this model. Add a matching provider or an eligible API-key provider.",
+        "inventoryNotProvided": "Model list not provided",
+        "configureDefaults": "Configure default routing",
+        "defaultRouting": "Default routing",
+        "close": "Close",
+        "editRoute": "Edit route",
+        "exactModel": "Exact model ID",
+        "moveUp": "Move source up",
+        "moveDown": "Move source down",
+        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
+        "guardTitle": "Review affected routes",
+        "confirmDefaults": "Save default routing"
+      },
       "order": {
-        "title": "{{backend}} · Global route priority",
-        "subtitle": "Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
-        "infoLabel": "What global route priority is",
+        "title": "{{backend}} · Default routing",
+        "subtitle": "Applies to automatic and passthrough routes. Saved manual routes stay unchanged.",
+        "infoLabel": "About default routing",
         "reorder": "Reorder source",
         "section": {
-          "ordered": "In this order",
-          "ordered.note": "Drag to reorder",
-          "heldOut": "Not in this order",
-          "heldOut.note": "These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route."
+          "ordered": "Provider priority",
+          "ordered.note": "Match model names first; otherwise pass through to eligible API-key providers in this order.",
+          "heldOut": "Not in default routing",
+          "heldOut.note": "Available for manual routes."
         },
         "action": {
           "include": "Add to order",
@@ -1190,10 +1228,10 @@
           "ordered": "This order is empty. Add a source from below."
         },
         "cancel": "Cancel",
-        "save": "Save order",
+        "save": "Save default routing",
         "fail": {
           "read": "The source list could not be read",
-          "save": "The order was not saved"
+          "save": "Could not confirm the saved default routing. Retry to check."
         },
         "retry": "Retry",
         "grabbed_one": "Grabbed {{source}}, position {{position}} of {{count}}.",
@@ -1292,7 +1330,7 @@
         "modelCount_other": "{{count}} models",
         "hubNoSupply": "On the gateway · no source enabled, the next turn will fail",
         "directNote": "Uses the CLI's native configuration",
-        "sourceOrder": "Source order",
+        "sourceOrder": "Default routing",
         "modelListCount_one": "{{count}} model",
         "modelListCount_other": "{{count}} models",
         "enableManaged": "Manage centrally",
@@ -1368,7 +1406,7 @@
         "retry": "Retry",
         "empty": "This route chain is empty. Add a hop, or leave it unconfigured.",
         "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
-        "hint": "This chain is stored configuration. Later Source order changes reorder its hops to match."
+        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it."
       },
       "recent": {
         "title": "Recent switches",

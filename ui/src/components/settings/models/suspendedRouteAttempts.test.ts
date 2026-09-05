@@ -12,12 +12,14 @@ describe("suspended route attempts", () => {
       backend: "claude" as const,
       modelId: "claude-model",
       stage: "initial" as const,
+      manual_override: { hops: [] },
       submitted: [],
     };
     const codex = {
       backend: "codex" as const,
       modelId: "codex-model",
       stage: "confirmed" as const,
+      manual_override: { hops: [] },
       submitted: [],
     };
     const held = holdSuspendedRouteAttempt(

@@ -6,7 +6,7 @@
 // here skips without one. The mock is reached ONLY over HTTP at
 // `VIBE_E2E_MOCK_UPSTREAM_URL`, and its URL enters the product the same way a
 // user's would: typed into the dialog's Base URL field.
-import type { HubApi, RouteHop } from './support/api';
+import type { HubApi } from './support/api';
 import { hub as copy } from './support/copy';
 import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import {
@@ -327,7 +327,7 @@ test.describe('B · add an API-key source', () => {
     // The operator's chain only. The retry below deletes and recreates the
     // precondition source, so a baseline carrying its hop would name a source id
     // that no longer exists — and that refusal is not partial.
-    const original: RouteHop[] = await captureAgentChain(api, gateway);
+    const original = await captureAgentChain(api, gateway);
     try {
       // The restoration boundary is entered BEFORE the arranged PUT (inside
       // `arrange` below), not after it returns: a PUT whose response is lost

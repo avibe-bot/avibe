@@ -209,7 +209,11 @@ class ModelHubScenarioAdapter:
         request,
         stream: bool,
         origin: str,
+        *,
+        on_admitted=None,
     ) -> ScenarioInvokeHandle:
+        if on_admitted is not None:
+            on_admitted()
         self.invocations.append((source_id, model_id, origin))
         self.requests.append(request)
         result = self.invoke_results.popleft()

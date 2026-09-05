@@ -908,8 +908,8 @@
       "gateway": {
         "heading": "路由",
         "infoLabel": "什么是路由",
-        "info": "路由决定每个 Agent 的模型优先使用哪个供应商；当前供应商不可用时，模型网关按优先级自动切换。",
-        "sourceOrder": "调整优先级",
+        "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
+        "sourceOrder": "默认路由",
         "manageModels": "管理模型",
         "switchToGateway": "切换到模型网关",
         "switchToDirect": "切到直连",
@@ -1170,16 +1170,54 @@
         "reorder": "拖动排序",
         "oauthSignedOut": "CLI 订阅未登录"
       },
+      "routing": {
+        "historyFailed": "暂时无法读取已记录回合。",
+        "latestRecorded": "最近已记录回合",
+        "modelNotFound": "上游返回模型不存在",
+        "errorDetails": "查看错误详情",
+        "errorReason": { "invalid_parameter": "请求参数被拒绝", "protocol_error": "协议错误", "tool_incompatible": "工具不兼容", "stream_interrupted": "响应中断", "engine_down": "模型网关不可用" },
+        "origin": { "automatic": "自动", "manual": "手动", "passthrough": "透传", "unconfigured": "未配置" },
+        "help": {
+          "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
+          "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
+          "passthrough": "未在供应商列表中匹配到此模型。\n按默认顺序向符合条件的 API Key 供应商透传原模型名，由上游处理。",
+          "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
+        },
+        "frozen": "此模型使用已保存的固定路由",
+        "follows": "跟随 {{backend}} 的默认路由",
+        "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
+        "editHint": "编辑并保存后，此模型将使用手动路由。",
+        "restoreAutomatic": "恢复自动",
+        "undoRestore": "撤销恢复",
+        "undoDone": "已恢复之前的手动草稿。",
+        "restorePending": "尚未保存，当前仍使用已保存的路由。",
+        "afterSave": "保存后的路由",
+        "preview": { "automatic": "恢复后：自动匹配", "passthrough": "恢复后：原名透传", "unconfigured": "恢复后：未配置" },
+        "previewFailed": "自动路由预览暂时不可用，草稿保持不变。请重试。",
+        "manualEmpty": "此模型已保存空路由。恢复自动后可跟随默认路由。",
+        "noDefaults": "暂无可路由此模型的默认供应商。请加入匹配的供应商或符合条件的 API Key 供应商。",
+        "inventoryNotProvided": "模型列表未提供",
+        "configureDefaults": "设置默认路由",
+        "defaultRouting": "默认路由",
+        "close": "关闭",
+        "editRoute": "编辑路由",
+        "exactModel": "准确模型 ID",
+        "moveUp": "上移供应商",
+        "moveDown": "下移供应商",
+        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由",
+        "guardTitle": "确认受影响的路由",
+        "confirmDefaults": "保存默认路由"
+      },
       "order": {
-        "title": "{{backend}} · 供应商优先级",
-        "subtitle": "在每个模型已有路由中，排在前面的供应商优先使用；当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，模型网关会自动切换到下一优先级。",
-        "infoLabel": "什么是供应商优先级",
+        "title": "{{backend}} · 默认路由",
+        "subtitle": "作用于自动和透传路由，已保存的手动路由保持不变。",
+        "infoLabel": "关于默认路由",
         "reorder": "调整供应商顺序",
         "section": {
-          "ordered": "当前顺序",
-          "ordered.note": "拖动排序",
-          "heldOut": "未加入当前顺序",
-          "heldOut.note": "这些供应商仍保留在已有路由末尾。要从路由中移除，请编辑对应模型的路由。"
+          "ordered": "供应商优先级",
+          "ordered.note": "先匹配同名模型；无匹配时按此顺序向符合条件的 API Key 供应商透传。",
+          "heldOut": "未加入默认路由",
+          "heldOut.note": "可用于手动路由。"
         },
         "action": {
           "include": "排进来",
@@ -1190,10 +1228,10 @@
           "ordered": "当前顺序为空。把下面的供应商加入顺序。"
         },
         "cancel": "取消",
-        "save": "保存顺序",
+        "save": "保存默认路由",
         "fail": {
           "read": "供应商列表暂时不可用",
-          "save": "顺序没保存上"
+          "save": "暂时无法确认默认路由是否保存。请重试检查。"
         },
         "retry": "重试",
         "grabbed_one": "已抓取 {{source}}，当前位置 {{position}} / {{count}}。",
@@ -1292,7 +1330,7 @@
         "modelCount_other": "{{count}} 个模型",
         "hubNoSupply": "已使用模型网关 · 没有启用任何供应商，下一个回合会失败",
         "directNote": "使用 Agent 自己的配置",
-        "sourceOrder": "供应商优先级",
+        "sourceOrder": "默认路由",
         "modelListCount_one": "{{count}} 个模型",
         "modelListCount_other": "{{count}} 个模型",
         "enableManaged": "模型网关",
@@ -1368,7 +1406,7 @@
         "retry": "重试",
         "empty": "这条路由是空的。添加一个路由项，或保持为空。",
         "impact": { "title": "路由已保存", "detail": "以下是这次保存实际移除或中断的项目。", "refreshFail": "路由已保存，但模型页面暂时无法刷新。", "done": "完成" },
-        "hint": "这是当前保存的路由。以后调整供应商优先级时，其中的供应商会按新顺序重排。"
+        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。"
       },
       "recent": {
         "title": "最近切换",

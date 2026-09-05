@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-supply.schema.json",
   "title": "AgentSupply",
-  "description": "Per-backend Gateway configuration and live supply projection. It exposes explicit Source order, menu metadata, model-supply state, and enabled named-Agent attribution without deriving Route membership.",
+  "description": "Per-backend Gateway configuration and live supply projection. It exposes explicit Source order, menu metadata, model-supply state, and enabled named-Agent attribution from the shared effective route planner.",
   "type": "object",
   "required": ["backend", "mode", "menu_kind"],
   "additionalProperties": false,
@@ -35,19 +35,19 @@
     "selected_model_explicit": { "type": "boolean", "description": "TRUE iff `selected_model_id` originates from the user's explicit configuration request; FALSE means no explicit model selection, including a resolver-picked value or no selected model." },
     "sources": {
       "type": ["object", "null"],
-      "description": "This backend's explicit Gateway Source order. It is stored configuration and an Add-time placement input; runtime model execution reads the exact per-model Route chain instead of deriving one from this order. There is no follow/custom or other policy discriminator. It is non-null in Gateway mode and null in Direct mode.",
+      "description": "This backend's default Gateway Source membership and priority. The shared planner uses this order only when a model has no manual override. No second persisted policy discriminator exists. It is non-null in Gateway mode and null in Direct mode.",
       "required": ["order"],
       "additionalProperties": false,
       "properties": {
         "order": {
           "type": "array",
-          "description": "Configured Source ids, position 0 first. A subset, not a permutation: configuration-ineligible Sources or Sources the user removed are absent. The server re-echoes the full canonical order after mutation; clients never compute a partial reorder. Add-time placement is owned only by model-hub.md §4.2 and never reruns during a request.",
+          "description": "Configured Source ids, position 0 first. A subset, not a permutation: configuration-ineligible Sources or Sources the user removed are absent. The server re-echoes the full canonical order after mutation; clients never compute a partial reorder. Source creation appends eligible defaults once; effective routing consumes the latest saved order. Manual overrides may reference eligible Sources outside this subset.",
           "items": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
           "uniqueItems": true
         },
         "eligibility": {
           "type": ["array", "null"],
-          "description": "Server-authoritative configuration eligibility, one row per existing Source. It makes UI eligibility a projection rather than a second compatibility matrix. `in_current_model_chain` reports whether the selected model's stored Route references the Source; `process_availability_reason` reports native CLI readiness independently of Source health. Required and non-null whenever sources is an object.",
+          "description": "Server-authoritative configuration eligibility, one row per existing Source. It makes UI eligibility a projection rather than a second compatibility matrix. `in_current_model_chain` reports whether the selected model's effective Route references the Source; `process_availability_reason` reports native CLI readiness independently of Source health. Required and non-null whenever sources is an object.",
           "items": {
             "type": "object",
             "required": ["source_id", "eligible"],
@@ -94,7 +94,7 @@
               },
               "in_current_model_chain": {
                 "type": ["boolean", "null"],
-                "description": "Whether the selected model's stored Route references this Source. true includes blocked hops because availability does not rewrite configuration; false keeps non-members visible; null exactly when selected_model_id is null."
+                "description": "Whether the selected model's effective Route references this Source. true includes blocked hops because availability does not rewrite configuration; false keeps non-members visible; null exactly when selected_model_id is null."
               },
               "process_availability_reason": {
                 "enum": ["native_cli_unavailable", null],
@@ -108,7 +108,7 @@
     },
     "routes": {
       "type": ["object", "null"],
-      "description": "The persisted exact Route for every menu model. Keys are caller-facing menu ids; each value is an ordered hops array and may be empty. Runtime reads this projection verbatim.",
+      "description": "Sparse persisted manual overrides keyed by caller-facing canonical menu ids. Key absence means automatic. Key presence preserves exact hops, including empty, stale and dormant arrays. Saving equal-to-automatic hops remains manual; Restore deletes the key. New catalog rows receive no key.",
       "additionalProperties": {
         "type": "object",
         "required": ["hops"],
@@ -152,25 +152,29 @@
     },
     "model_supply": {
       "type": ["array", "null"],
-      "description": "Per-menu-item configured Route summary so the model menu can flag an empty chain without one chain query per row. Read-only projection; the authoritative chain is GET /api/models/agents/<backend>/chain.",
+      "description": "Per-menu-item effective Route summary so the model menu can flag an empty chain without one chain query per row. Read-only projection; the authoritative chain is GET /api/models/agents/<backend>/chain.",
       "items": {
         "type": "object",
-        "required": ["model_id", "chain_length"],
+        "required": ["model_id", "chain_length", "route_origin"],
         "additionalProperties": false,
         "properties": {
           "model_id": {
             "type": "string",
             "description": "The exact canonical identifier this backend's menu uses."
           },
+          "route_origin": {
+            "enum": ["automatic", "manual", "passthrough", null],
+            "description": "Shared planner origin, independent of transient health. Passthrough uses Hub API-key defaults only; subscriptions remain subject to known-model admission. Null exactly when chain_length is zero."
+          },
           "chain_length": {
             "type": "integer",
             "minimum": 0,
-            "$comment": "Configuration visibility is not candidate availability. Every stored hop remains counted regardless of live runnability.",
-            "description": "Length of the exact configured Route chain, including cooling, live-connection-backoff, and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
+            "$comment": "Configuration visibility is not candidate availability. Every effective hop remains counted regardless of live runnability.",
+            "description": "Length of the effective Route chain, including cooling, live-connection-backoff, and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
           },
           "has_runnable_hop": {
             "type": "boolean",
-            "description": "True exactly when at least one exact stored hop is runnable under the same source-health AND process-availability axiom as AgentChain. False distinguishes an all-stale or empty Route from a Route with live supply without changing chain_length. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
+            "description": "True exactly when at least one exact effective hop is runnable under the same source-health AND process-availability axiom as AgentChain. False distinguishes an all-stale or empty Route from a Route with live supply without changing chain_length. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
           }
         },
         "allOf": [
@@ -180,7 +184,10 @@
               "required": ["chain_length"]
             },
             "then": {
-              "properties": { "has_runnable_hop": { "const": false } }
+              "properties": { "has_runnable_hop": { "const": false }, "route_origin": { "type": "null" } }
+            },
+            "else": {
+              "properties": { "route_origin": { "enum": ["automatic", "manual", "passthrough"] } }
             }
           }
         ]

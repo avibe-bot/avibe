@@ -1147,7 +1147,9 @@ class ProbeAdapter:
         self.capability_queries.append(credential_ref)
         return credential_ref in self.refreshable_credential_refs
 
-    async def invoke(self, source_id, model_id, request, _stream, origin):
+    async def invoke(self, source_id, model_id, request, _stream, origin, *, on_admitted=None):
+        if on_admitted is not None:
+            on_admitted()
         self.invocations.append((source_id, model_id, origin))
         self.requests.append(request)
         if self.live_handles:
@@ -2781,7 +2783,7 @@ def test_gateway_no_candidate_projects_live_exact_hop_blockers(
             {
                 "source_id": source.id,
                 "model_id": "removed-model",
-                "reason": "model_unsupported",
+                "reason": "credential_revoked",
             }
         ]
         _assert_valid("turn-provenance.schema.json", record)
@@ -2907,10 +2909,12 @@ def test_gateway_exhaustion_uses_no_time_copy_when_an_earlier_hop_recovers(
             request,
             stream,
             origin,
+            *,
+            on_admitted=None,
         ):
             if source_id == second.id:
                 clock["now"] = NOW + timedelta(minutes=10)
-            return await invoke(source_id, model_id, request, stream, origin)
+            return await invoke(source_id, model_id, request, stream, origin, on_admitted=on_admitted)
 
         service.adapter.invoke = advance_during_later_attempt
         gateway = ModelHubTurnGateway(service)
@@ -3020,6 +3024,8 @@ def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
             "channel": "hub",
             "reason": "stream_interrupted",
             "stream_started": True,
+            "http_status": 200,
+            "upstream_error_code": None,
         }
         _assert_valid("turn-provenance.schema.json", record)
 
@@ -4070,6 +4076,7 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
+            kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
             return await invoke(*args, **kwargs)
@@ -4121,6 +4128,7 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
+            kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
             return await invoke(*args, **kwargs)
@@ -4673,6 +4681,8 @@ def test_gateway_localizes_terminal_permission_denial_without_switching(
             "channel": "hub",
             "reason": "invalid_parameter",
             "stream_started": False,
+            "http_status": 403,
+            "upstream_error_code": "permission_error",
         }
         _assert_valid("turn-provenance.schema.json", record)
 
@@ -5698,7 +5708,7 @@ def test_opencode_overlay_identity_is_stable_under_runtime_perturbations(
     assert projected_content() == baseline
 
 
-def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path) -> None:
+def test_opencode_overlay_uses_exact_manual_target_missing_from_inventory(tmp_path: Path) -> None:
     source = _source(
         "src_overlay03",
         "Overlay",
@@ -5733,7 +5743,7 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    assert [launch.target_model for launch in overlay.launches] == ["supported-model"]
+    assert [launch.target_model for launch in overlay.launches] == ["stale-model"]
 
 
 def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
@@ -5776,8 +5786,8 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
         }
     }
     assert overlay.checked_identifiers == ("menu-model",)
-    assert overlay.available_identifiers == ()
-    assert overlay.launches == ()
+    assert overlay.available_identifiers == ("menu-model",)
+    assert [launch.target_model for launch in overlay.launches] == ["stale-model"]
 
 
 def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them(
@@ -6434,7 +6444,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 8,
+            "contract_version": 9,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -8053,6 +8063,7 @@ def test_model_discovery_adds_standard_v1_path_to_a_bare_origin() -> None:
 
 def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None:
     source = _source("src_blocked01", "Blocked")
+    source.models.append(ModelHubModelConfig(id="removed-model", provenance="discovered", retired=True))
     service = _service(tmp_path, sources=[source])
     service.store.config.agents["claude"].routes["shared-model"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
@@ -8559,7 +8570,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 8,
+        "contract_version": 9,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,

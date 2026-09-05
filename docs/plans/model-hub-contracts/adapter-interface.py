@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v8 (2026-09-05).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v9 (2026-09-06).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Final, Literal, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
 
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
@@ -73,12 +73,14 @@ class SourceBinding:
     # source. Empty tuple = unrestricted (api_key default). Subscription
     # sources MUST be non-empty (README invariant 3); L2 populates, L1
     # enforces as backstop.
-    model_ids: tuple[str, ...]  # declared supply list (discovered + manual
-    # custom entries); required by the engine's generic/API-key config. Bare
-    # model ids, no provider prefix.
+    model_ids: tuple[str, ...]  # truthful inventory evidence (discovered + manual).
+    # May be empty; API-key invocation need not be listed. Bare ids, no prefix.
     model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
     # Per-model levels declared by the Source. CLIProxyAPI needs these on its
     # model registration or it removes an otherwise valid reasoning effort.
+    route_model_ids: tuple[str, ...] = ()
+    # Sorted API-key transport targets derived from effective routes, never
+    # inventory or capability evidence. Independent of live health and mode.
 
 
 class OriginNotAllowedError(Exception):
@@ -535,8 +537,18 @@ class EngineAdapter(Protocol):
         request: Mapping[str, Any],
         stream: bool,
         origin: str,
+        *,
+        on_admitted: Callable[[], None] | None = None,
     ) -> InvokeHandle:
         """``origin`` = requesting agent name ("claude"|"codex"|"opencode"|...).
         Raises ``OriginNotAllowedError`` when the binding's ``allowed_origins``
-        excludes it (backstop; L2 must have filtered already)."""
+        excludes it (backstop; L2 must have filtered already). ``model_id`` is
+        the chosen canonical route target. API-key targets need not be listed;
+        subscriptions retain their existing exact inventory admission.
+        The adapter must keep exact source isolation without inventing inventory.
+        After validating source/origin, acquire the transport lease and call
+        ``on_admitted`` exactly once before any network wait. Callback failure
+        releases the lease without invoking upstream. Transport completion,
+        close, or cancellation releases the lease independently of settlement.
+        """
         ...

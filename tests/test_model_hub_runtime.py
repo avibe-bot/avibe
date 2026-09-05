@@ -1293,7 +1293,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 8, **supervisor.status()}
+    projected = {"contract_version": 9, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1731,8 +1731,8 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
             ]
         )
 
-    with pytest.raises(EngineStateError, match="at least one model"):
-        store.sync_sources([_binding(credential_ref, model_ids=())])
+    empty_inventory = store.sync_sources([_binding(credential_ref, model_ids=())])
+    assert empty_inventory[0].model_ids == ()
 
     official_anthropic_ref = store.store_api_key(
         "secret",
@@ -3126,9 +3126,11 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             stream,
             request_protocol=None,
             request_headers=None,
+            on_transport_done=None,
         ):
             self.request_protocol = request_protocol
             self.request_headers = request_headers
+            on_transport_done()
             return object()
 
     class Supervisor:
@@ -3236,8 +3238,10 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
             stream,
             request_protocol=None,
             request_headers=None,
+            on_transport_done=None,
         ):
             invoked_refs.append(source.credential_ref)
+            on_transport_done()
             return object()
 
     class Supervisor:

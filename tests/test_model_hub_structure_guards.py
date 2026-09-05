@@ -457,7 +457,7 @@ def test_g3_settlement_returns_are_consumed() -> None:
 
 def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
     allowed_owners = {
-        SERVICE: {"probe_agent", "resolve"},
+        SERVICE: {"admitted"},
         ROUTER: {"resolve"},
     }
     for path, expected in allowed_owners.items():
@@ -474,6 +474,17 @@ def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
             and _call_name(node) == "_reserve_settlement_generation"
         }
         assert owners == expected
+        if path == SERVICE:
+            admission_owners = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or _call_name(node) != "_reserve_settlement_generation":
+                    continue
+                parent = parents[node]
+                while not isinstance(parent, ast.FunctionDef):
+                    parent = parents[parent]
+                assert parent.name == "admitted"
+                admission_owners.add(_owner_name(parent, parents))
+            assert admission_owners == {"_probe_agent_once", "resolve"}
 
     settlement_owner = _functions(_tree(SERVICE))["_settle_fallback_source"]
     assert not any(

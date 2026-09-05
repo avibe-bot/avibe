@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 AUTH_BEHAVIORS = frozenset(
     {"ok", "401", "403_banned", "402", "429", "quota_message", "5xx"}
 )
-STREAM_BEHAVIORS = frozenset({"healthy", "interrupt_after_first_output"})
+STREAM_BEHAVIORS = frozenset({"healthy", "interrupt_after_first_output", "pause_after_first_output"})
 PROTOCOLS = frozenset({"anthropic", "openai_responses", "openai_chat"})
 MODELS_ENDPOINT_BEHAVIORS = frozenset(
     {"ok", "http_404", "http_500", "timeout", "malformed_json"}
@@ -200,6 +200,7 @@ class MockUpstreamState:
             "models": [copy.deepcopy(model) for model in DEFAULT_MODELS],
             "protocol": "openai_chat",
             "models_endpoint": "ok",
+            "model_errors": {},
         }
         self._requests: deque[dict[str, Any]] = deque(
             maxlen=MAX_CAPTURED_REQUESTS
@@ -216,6 +217,7 @@ class MockUpstreamState:
             "models",
             "protocol",
             "models_endpoint",
+            "model_errors",
         }
         if unknown:
             raise ConfigurationError(
@@ -232,6 +234,12 @@ class MockUpstreamState:
         if candidate["models_endpoint"] not in MODELS_ENDPOINT_BEHAVIORS:
             raise ConfigurationError("unsupported models endpoint behavior")
         candidate["models"] = _validated_models(candidate["models"])
+        model_errors = candidate["model_errors"]
+        if not isinstance(model_errors, dict) or any(
+            not isinstance(model, str) or not model.strip() or error != "model_not_found"
+            for model, error in model_errors.items()
+        ):
+            raise ConfigurationError("model_errors must map non-empty model ids to model_not_found")
         with self._lock:
             self._config = candidate
             return copy.deepcopy(self._config)
@@ -354,6 +362,13 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
                 _invalid_probe_payload(protocol),
             )
             return
+        model = _requested_model(body)
+        if model in config["model_errors"]:
+            error = {"type": "not_found_error", "code": "model_not_found", "message": f"model {model} not found"}
+            if protocol != "anthropic":
+                error.update(type="invalid_request_error", code="model_not_found", param="model")
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": error})
+            return
         if isinstance(body, dict) and body.get("stream") is True:
             self._write_stream(protocol, body, config["stream"])
             return
@@ -475,12 +490,18 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         frames = _stream_frames(protocol, body)
         limit = len(frames)
+        first_output = {"anthropic": 3, "openai_responses": 4, "openai_chat": 2}[protocol]
         if stream_behavior == "interrupt_after_first_output":
-            limit = 3 if protocol == "anthropic" else 2
+            limit = first_output
         try:
-            for frame in frames[:limit]:
+            for index, frame in enumerate(frames[:limit], start=1):
                 self.wfile.write(frame)
                 self.wfile.flush()
+                if stream_behavior == "pause_after_first_output" and index == first_output:
+                    deadline = time.monotonic() + 30
+                    while self.state.config()["stream"] == "pause_after_first_output":
+                        if time.monotonic() >= deadline or self.server.shutdown_event.wait(0.01):
+                            return
         except (BrokenPipeError, ConnectionResetError):
             return
 
@@ -914,6 +935,11 @@ def _anthropic_stream_frames(model: str) -> list[bytes]:
 
 
 def _responses_stream_frames(model: str) -> list[bytes]:
+    text = {"type": "output_text", "text": "mock response", "annotations": []}
+    message = {
+        "id": "msg_mock_001", "type": "message", "role": "assistant",
+        "status": "completed", "content": [text],
+    }
     return [
         _sse(
             "response.created",
@@ -929,10 +955,25 @@ def _responses_stream_frames(model: str) -> list[bytes]:
             },
         ),
         _sse(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added", "sequence_number": 1, "output_index": 0,
+                "item": {**message, "status": "in_progress", "content": []},
+            },
+        ),
+        _sse(
+            "response.content_part.added",
+            {
+                "type": "response.content_part.added", "sequence_number": 2,
+                "item_id": "msg_mock_001", "output_index": 0, "content_index": 0,
+                "part": {**text, "text": ""},
+            },
+        ),
+        _sse(
             "response.output_text.delta",
             {
                 "type": "response.output_text.delta",
-                "sequence_number": 1,
+                "sequence_number": 3,
                 "item_id": "msg_mock_001",
                 "output_index": 0,
                 "content_index": 0,
@@ -940,15 +981,35 @@ def _responses_stream_frames(model: str) -> list[bytes]:
             },
         ),
         _sse(
+            "response.output_text.done",
+            {
+                "type": "response.output_text.done", "sequence_number": 4,
+                "item_id": "msg_mock_001", "output_index": 0, "content_index": 0,
+                "text": "mock response",
+            },
+        ),
+        _sse(
+            "response.content_part.done",
+            {
+                "type": "response.content_part.done", "sequence_number": 5,
+                "item_id": "msg_mock_001", "output_index": 0, "content_index": 0, "part": text,
+            },
+        ),
+        _sse(
+            "response.output_item.done",
+            {"type": "response.output_item.done", "sequence_number": 6, "output_index": 0, "item": message},
+        ),
+        _sse(
             "response.completed",
             {
                 "type": "response.completed",
-                "sequence_number": 2,
+                "sequence_number": 7,
                 "response": {
                     "id": "resp_mock_001",
                     "object": "response",
                     "status": "completed",
                     "model": model,
+                    "output": [message],
                     "usage": {
                         "input_tokens": 12,
                         "input_tokens_details": {

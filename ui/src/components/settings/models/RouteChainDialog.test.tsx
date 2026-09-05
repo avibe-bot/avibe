@@ -51,8 +51,8 @@ const sources: Source[] = [
     models: [],
   },
 ];
-const chain: AgentChain = {
-  contract_version: 8,
+const chain: AgentChain = { manual_override: {hops:[{source_id:"src_a",model_id:"claude-opus-5"},{source_id:"src_b",model_id:"opus-5"}]}, route_origin: "manual" as const,
+  contract_version: 9,
   backend: "claude",
   model_id: "opus-5",
   current: { source_id: "src_b", model_id: "opus-5" },
@@ -166,6 +166,7 @@ const renderDialog = (onCommitted = vi.fn(), onClose = vi.fn()) => {
 };
 
 beforeEach(() => {
+  vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
   // cmdk observes its list box and scrolls the active row into view; jsdom
   // implements neither.
   vi.stubGlobal(
@@ -186,11 +187,110 @@ afterEach(() => {
 });
 
 describe("RouteChainDialog", () => {
-  it("matches a suspended Direct attempt only by its exact ordered pairs", () => {
+  it('refreshes inherited routing after returning from Default routing', async () => {
+    const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
+    const next: AgentChain = { ...inherited, chain: [chain.chain[1]] };
+    const read = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValueOnce(inherited).mockResolvedValue(next);
+    const props = { selection: { agent, modelId: 'opus-5', read: readyRegion(inherited) }, sources, onClose: vi.fn(), readAgents: vi.fn(), readSources: vi.fn() };
+    const view = (covered: boolean) => <I18nextProvider i18n={i18n}><RouteChainDialog {...props} covered={covered} /></I18nextProvider>;
+    const { rerender } = render(view(false));
+    await screen.findByRole('button', { name: 'Edit route' });
+    rerender(view(true));
+    rerender(view(false));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.querySelectorAll('.model-hub-route-hop-model')).toHaveLength(1));
+    expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('opus-5');
+  });
+
+  it('refreshes restore preview without losing the earlier manual draft', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
+    const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
+    const preview = vi.spyOn(modelsApi, 'previewAgentChain').mockResolvedValueOnce(inherited).mockResolvedValue({ ...inherited, chain: [chain.chain[0]] });
+    const props = { selection: { agent, modelId: 'opus-5', read: readyRegion(chain) }, sources, onClose: vi.fn(), readAgents: vi.fn(), readSources: vi.fn() };
+    const view = (covered: boolean) => <I18nextProvider i18n={i18n}><RouteChainDialog {...props} covered={covered} /></I18nextProvider>;
+    const { rerender } = render(view(false));
+    await screen.findAllByRole('button', { name: 'Remove hop' });
+    await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
+    await user.click(screen.getByRole('button', { name: 'Restore automatic' }));
+    await screen.findByRole('button', { name: 'Undo restore' });
+    rerender(view(true));
+    rerender(view(false));
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.querySelectorAll('.model-hub-route-hop-model')).toHaveLength(1));
+    expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('claude-opus-5');
+    await user.click(screen.getByRole('button', { name: 'Undo restore' }));
+    expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('opus-5');
+  });
+
+  it('previews restore, undoes to the unsaved manual draft, and cancels without writing', async () => {
+    const user = userEvent.setup();
+    const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'passthrough' };
+    const preview = vi.spyOn(modelsApi, 'previewAgentChain').mockResolvedValue(inherited);
+    const put = vi.spyOn(modelsApi, 'putAgentChain');
+    const restore = vi.spyOn(modelsApi, 'restoreAgentChain');
+    const close = vi.fn();
+    renderDialog(vi.fn(), close);
+    await screen.findAllByRole('button', { name: 'Remove hop' });
+    await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
+    await user.click(screen.getByRole('button', { name: 'Restore automatic' }));
+    await screen.findByText('After restore: original-name passthrough');
+    expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
+    expect(screen.queryByRole('button', { name: 'Remove hop' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Undo restore' }));
+    expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(1);
+    expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('opus-5');
+    await user.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+    expect(close).toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('saves restored intent with DELETE even when automatic hops equal the manual hops', async () => {
+    const user = userEvent.setup();
+    const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
+    vi.spyOn(modelsApi, 'previewAgentChain').mockResolvedValue(inherited);
+    const restore = vi.spyOn(modelsApi, 'restoreAgentChain').mockResolvedValue(mutation(inherited));
+    const put = vi.spyOn(modelsApi, 'putAgentChain');
+    renderDialog();
+    await user.click(await screen.findByRole('button', { name: 'Restore automatic' }));
+    await screen.findByRole('button', { name: 'Undo restore' });
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(restore).toHaveBeenCalledWith('claude', 'opus-5', undefined));
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('saving an explicit edit of identical inherited hops creates manual intent', async () => {
+    const user = userEvent.setup();
+    const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
+    renderDialog();
+    vi.mocked(modelsApi.getAgentChain).mockResolvedValue(inherited);
+    // Reopen on a fresh mount so the initial read observes inherited intent.
+    cleanup();
+    const fixture = stocked();
+    const put = vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue(mutation(chain));
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent: fixture.agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={fixture.sources} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
+    await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith('claude', 'opus-5', { hops: chain.manual_override!.hops }));
+  });
+
+  it('accepts an exact unlisted API-key target without creating inventory', async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await user.click(await screen.findByRole('button', { name: 'Add a hop' }));
+    expect(screen.getByLabelText('Source').querySelectorAll('option')).toHaveLength(1);
+    await user.type(screen.getByLabelText('Exact model ID'), 'unlisted-model');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    expect([...document.querySelectorAll('.model-hub-route-hop-model')].at(-1)?.textContent).toBe('unlisted-model');
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("matches a suspended Direct attempt by persisted intent and ordered pairs", () => {
     const attempt = {
       backend: "claude" as const,
       modelId: "opus-5",
       stage: "initial" as const,
+      manual_override: { hops: [{ source_id: "src_b", model_id: "opus-5" }, { source_id: "src_a", model_id: "claude-opus-5" }] },
       submitted: [
         { source_id: "src_b", model_id: "opus-5" },
         { source_id: "src_a", model_id: "claude-opus-5" },
@@ -200,6 +300,7 @@ describe("RouteChainDialog", () => {
       routeChainMatchesAttempt(
         {
           ...chain,
+          manual_override: attempt.manual_override,
           chain: [chain.chain[1], chain.chain[0]],
         },
         attempt,
@@ -456,6 +557,7 @@ describe("RouteChainDialog", () => {
     const user = userEvent.setup();
     const committedChain: AgentChain = {
       ...chain,
+      manual_override: { hops: [{ source_id: "src_b", model_id: "opus-5" }] },
       current: { source_id: "src_b", model_id: "opus-5" },
       chain: [chain.chain[1]],
     };
@@ -482,6 +584,7 @@ describe("RouteChainDialog", () => {
     const user = userEvent.setup();
     const observed: AgentChain = {
       ...chain,
+      manual_override: { hops: [{ source_id: "src_a", model_id: "claude-opus-5" }] },
       chain: [chain.chain[0]],
       current: null,
       supply_state: "interrupted",
@@ -521,6 +624,7 @@ describe("RouteChainDialog", () => {
     const user = userEvent.setup();
     const nonmatching: AgentChain = {
       ...chain,
+      manual_override: { hops: [{ source_id: "src_a", model_id: "claude-opus-5" }] },
       chain: [chain.chain[0]],
       current: null,
       supply_state: "interrupted",
@@ -602,7 +706,7 @@ describe("RouteChainDialog", () => {
 
     const refreshedSources = editableSources.map((source) =>
       source.id === "src_a"
-        ? { ...source, models: source.models.slice(0, 1) }
+        ? { ...source, models: source.models.map((model, index) => index === 0 ? model : { ...model, retired: true }) }
         : source,
     );
     page.rerender(
@@ -634,7 +738,7 @@ describe("RouteChainDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Add a hop" }));
 
-    expect(screen.getByText("Source")).toBeTruthy();
+    expect(screen.getAllByText("Source").length).toBeGreaterThan(0);
     expect(screen.getByText("Model")).toBeTruthy();
     // Both halves of a candidate are legible: the model id AND which source
     // supplies it. The source column is what a sizing rework once dropped, so

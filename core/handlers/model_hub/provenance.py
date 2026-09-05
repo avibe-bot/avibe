@@ -23,7 +23,12 @@ from core.run_settlement import (
 from vibe.i18n import t as i18n_t
 
 from .adapter import RawCallOutcome
-from .classification import ResolutionDecision, ResolutionReason
+from .classification import (
+    UPSTREAM_MACHINE_ERROR_CODES,
+    ResolutionDecision,
+    ResolutionReason,
+    machine_error_codes,
+)
 from .events import (
     EVENT_REASON_AUTHORITY,
     RETIRED_PERSISTED_REASON_DEGRADATIONS,
@@ -816,6 +821,18 @@ class BoundedProvenanceStore:
                 None,
             )
 
+    def latest_for_model(self, backend: str, model_id: str) -> Optional[dict]:
+        with self._lock:
+            return next(
+                (
+                    dict(record)
+                    for record in reversed(self._read())
+                    if record.get("agent") == backend
+                    and record.get("requested_model_id") == model_id
+                ),
+                None,
+            )
+
 
 class TurnCorrelationRegistry:
     """Correlate process credentials to the existing Workbench turn token."""
@@ -1549,10 +1566,22 @@ class TurnCorrelationRegistry:
                 )
                 return
             if decision.action == "surface":
+                observed_codes = machine_error_codes(outcome)
+                diagnostic_code = (
+                    "model_not_found"
+                    if decision.error_code == "upstream_request_invalid" and "model_not_found" in observed_codes
+                    else next((code for code in observed_codes if code in UPSTREAM_MACHINE_ERROR_CODES), None)
+                )
                 trace.terminal_error = {
                     **identity.payload(),
                     "reason": _terminal_reason(decision),
                     "stream_started": outcome.stream_started,
+                    "http_status": (
+                        outcome.http_status
+                        if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599
+                        else None
+                    ),
+                    "upstream_error_code": diagnostic_code,
                 }
 
     def settle(self, turn_id: str, *, settled_by: Optional[str], ts: Optional[str] = None) -> None:
@@ -1661,7 +1690,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 8,
+                    "contract_version": 9,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

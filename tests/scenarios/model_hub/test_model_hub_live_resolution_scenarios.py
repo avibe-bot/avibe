@@ -146,7 +146,9 @@ class AdapterBoundaryFake:
     async def credential_supports_refresh(self, credential_ref: str) -> bool:
         return credential_ref in self.refreshable_credential_refs
 
-    async def invoke(self, source_id, model_id, request, stream, origin) -> InvokeHandle:
+    async def invoke(self, source_id, model_id, request, stream, origin, *, on_admitted=None) -> InvokeHandle:
+        if on_admitted is not None:
+            on_admitted()
         self.invocations.append((source_id, model_id, origin))
         self.requests.append(request)
         result = self.results.popleft()

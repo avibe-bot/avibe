@@ -3,6 +3,8 @@ import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, P
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
+import { RouteOriginBadge } from './RouteOriginBadge';
+import { modelRouteOrigin } from './modelRows';
 import { Button } from '@/components/ui/button';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
@@ -67,11 +69,7 @@ const ModelRow: React.FC<{
   const takeover = isTakeoverRead(read);
   const supplyState = modelSupplyState(agent, modelId);
   const resolved = read?.kind === 'ready' && current !== null;
-  const mode = resolved
-    ? current.channel === 'native_cli'
-      ? t('settings.models.legend.native') as string
-      : t('settings.models.gateway.group.mode.gateway') as string
-    : '—';
+  const routeOrigin = modelRouteOrigin(agent, modelId);
   const currentSource = resolved ? sourceName(sources, current.source_id) : '';
   const currentCopy = supplyState === 'paused'
     ? t('settings.models.legend.unavailable') as string
@@ -88,18 +86,16 @@ const ModelRow: React.FC<{
     ? t('settings.models.routeDialog.openWithMapping', { model: modelId, mapping: currentCopy }) as string
     : t('settings.models.routeDialog.open', { model: modelId }) as string;
   return (
-    <button
-      type="button"
+    <div
       data-route-backend={agent.backend}
       data-route-model={modelId}
-      onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
-      aria-label={openRouteLabel}
-      className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-md border border-border px-3 text-left"
+      className="model-hub-model-row relative flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md border border-border px-3 text-left"
     >
-      <span className="flex min-w-0 flex-1 items-center justify-between gap-2.5">
+      <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
+      <span className="pointer-events-none flex min-w-0 flex-1 items-center justify-between gap-2.5">
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
         <span className="flex min-w-0 flex-1 items-center justify-end gap-[7px]">
-          <span className="model-hub-pill model-hub-model-mode-chip shrink-0 border border-border text-muted">{mode}</span>
+          <span className="pointer-events-auto relative shrink-0"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} /></span>
           {hasCurrentMapping ? (
             <span
               className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
@@ -113,8 +109,8 @@ const ModelRow: React.FC<{
           )}
         </span>
       </span>
-      <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" aria-hidden="true" />
-    </button>
+      <ChevronRight className="model-hub-overview-chevron pointer-events-none size-[15px] shrink-0" aria-hidden="true" />
+    </div>
   );
 };
 

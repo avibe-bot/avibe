@@ -45,6 +45,15 @@ const sources = [
 ];
 
 describe("routeChainDraft", () => {
+  it('allows unknown API-key models while keeping subscription admission and retirement', () => {
+    const unknown = { source_id: 'src_a', model_id: 'unlisted' };
+    expect(validateRouteDraft(agent, sources, [], [unknown]).valid).toBe(true);
+    const subscription: Source = { ...sources[0], kind: 'subscription' };
+    expect(validateRouteDraft(agent, [subscription], [], [unknown]).valid).toBe(false);
+    expect(validateRouteDraft(agent, [subscription], [unknown], [unknown]).valid).toBe(true);
+    const retired: Source = { ...sources[0], models: [{ id: 'unlisted', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null, retired: true }] };
+    expect(validateRouteDraft(agent, [retired], [], [unknown]).valid).toBe(false);
+  });
   it("builds eligible candidates without duplicate exact hops", () => {
     const candidates = routeCandidates(agent, sources, [
       { source_id: "src_a", model_id: "model-a" },

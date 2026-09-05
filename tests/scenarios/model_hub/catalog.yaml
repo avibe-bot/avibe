@@ -103,11 +103,11 @@ scenarios:
     layer: unit
     test: ui/src/components/settings/models/RouteChainDialog.test.tsx::MH-ROUTE-EDIT-001
   - id: MH-MATCH-001
-    name: Add-time matching persists each exact hop and returns its visible position
+    name: Source addition projects automatic positions without writing manual overrides
     status: covered
     kind: selection
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_001_add_source_persists_and_reports_each_exact_position
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_001_add_source_projects_automatic_positions_without_persisting_hops
   - id: MH-MATCH-002
     name: Matching tie-break is deterministic across inventory processing order
     status: covered
@@ -115,12 +115,12 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_002_matching_tie_break_is_independent_of_inventory_order
   - id: MH-MENU-ADD-001
-    name: Adding a provider menu model seeds every overlapping supplier in Source order
+    name: Adding a provider menu model projects overlapping suppliers in default order without persisting automatic hops
     status: covered
     kind: mutation
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_menu_add_001_seeds_overlapping_suppliers_in_source_order
-  # The client half of MH-MENU-ADD-001: the server seeds a route from whatever
+  # The client half of MH-MENU-ADD-001: the server projects a route from whatever
   # supply exists at commit time, and this is what makes that supply the one the
   # user was shown. The picker's other two doors — an id the list already holds,
   # and one no provider offers, reached through the models.dev lookup — are each
@@ -143,11 +143,65 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order
   - id: MH-SUPPLY-GAP-001
-    name: Inventory loss leaves the affected menu model visibly unconfigured
+    name: Inventory loss preserves an explicit API-key route target
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_supply_gap_001_empty_chain_remains_visible_after_inventory_loss
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_supply_gap_001_manual_target_survives_inventory_loss
+  - id: MH-ROUTING-001
+    name: Model-specific mock errors preserve truthful inventory and unrelated model requests
+    status: covered
+    kind: contract
+    layer: e2e
+    test: tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent
+  - id: MH-ROUTING-002
+    name: Matching precedes API-key passthrough and health cannot change route membership
+    status: covered
+    kind: determinism
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes_membership
+  - id: MH-ROUTING-003
+    name: Manual unknown and empty targets survive refresh, default reorder, and reload
+    status: covered
+    kind: persistence
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reload
+  - id: MH-ROUTING-004
+    name: Restore and undo previews are inert and committed restore deletes the override idempotently
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_override
+  - id: MH-ROUTING-005
+    name: Real OpenCode launch, gateway, and pinned CPA preserve unlisted API-key targets and source isolation
+    status: assert
+    kind: transport
+    layer: e2e
+    test: tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_005_real_opencode_gateway_cpa_preserves_unknown_model_and_source_isolation
+  - id: MH-ROUTING-006
+    name: Subscription sources retain inventory admission and never advertise unknown-model passthrough
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_006_subscription_inventory_admission_is_not_expanded
+  - id: MH-ROUTING-008
+    name: Buffered and streaming real gateway calls preserve exact unlisted model, source, inventory, and engine configuration
+    status: assert
+    kind: transport
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_008_real_gateway_cpa_exact_model_and_source
+  - id: MH-ROUTING-009
+    name: Registration-changing Save waits for active output completion or client close without deadlock or truncation
+    status: assert
+    kind: concurrency
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock
+  - id: MH-ROUTING-010
+    name: Real gateway model-not-found preserves source health and records exact attributed errors superseded by success
+    status: assert
+    kind: recovery
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gateway_cpa
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered

@@ -280,7 +280,9 @@ class FakeAdapter:
             models=tuple(models),
         )
 
-    async def invoke(self, source_id, model_id, request, stream, origin):
+    async def invoke(self, source_id, model_id, request, stream, origin, *, on_admitted=None):
+        if on_admitted is not None:
+            on_admitted()
         return FakeInvokeHandle(
             RawCallOutcome(
                 kind=RawOutcomeKind.SUCCESS,
@@ -387,7 +389,7 @@ def _refresh_fixture_routes(config: ModelHubConfig) -> None:
     by_id = {source.id: source for source in config.sources}
     for backend, agent in config.agents.items():
         agent.sources.order = config.recommended_source_order(backend)
-        agent.routes = {model_id: ModelHubRouteConfig() for model_id in agent.routes}
+        agent.routes = {model.id: ModelHubRouteConfig() for model in agent.models}
         for source_id in agent.sources.order:
             source = by_id[source_id]
             for model in source.models:
@@ -915,7 +917,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 8
+    assert runtime["contract_version"] == 9
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1135,7 +1137,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 8, "status": {"health": "ok"}}
+        return {"contract_version": 9, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1152,7 +1154,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 8, "status": {"health": "not_started"}}
+        return {"contract_version": 9, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1169,7 +1171,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 8, "status": {"health": "installing"}}
+        return {"contract_version": 9, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1187,7 +1189,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 8,
+            "contract_version": 9,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -1219,6 +1221,84 @@ def test_reorder_client_preserves_explicit_null_order(monkeypatch):
     asyncio.run(ModelHubRemoteService().reorder_agent_chains("claude", None))
 
     assert calls == [("reorder_agent_chains", {"backend": "claude", "order": None})]
+
+
+def test_preview_and_restore_cross_client_and_controller_without_preview_sync(monkeypatch, tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+    from vibe import model_hub_client
+
+    service, store, adapter = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_rpc00001",), model_id)
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig()
+    before = store.config.to_payload()
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return await dispatch_model_hub_rpc(service, operation, payload or {})
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+    monkeypatch.setattr(model_hub_client, "_rpc_sync", lambda operation, payload=None: asyncio.run(rpc(operation, payload)))
+    remote = ModelHubRemoteService()
+    draft = remote.preview_agent_chain("claude", model_id, {"manual_override": None})
+    assert draft["route_origin"] == "automatic"
+    assert draft["manual_override"] is None
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
+
+    restored = asyncio.run(remote.delete_agent_chain("claude", model_id))
+    assert restored["chain"] == draft
+    assert model_id not in store.config.agents["claude"].routes
+    assert calls == [
+        ("preview_agent_chain", {"backend": "claude", "model_id": model_id, "chain": {"manual_override": None}}),
+        ("delete_agent_chain", {"backend": "claude", "model_id": model_id, "chain": None}),
+    ]
+
+
+def test_chain_preview_is_read_only_and_restore_accepts_no_http_body(monkeypatch, tmp_path):
+    service, store, adapter = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_http0001",), model_id)
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig()
+    before = store.config.to_payload()
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    origin = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, origin)
+    response = client.post(
+        f"/api/models/agents/claude/chain/preview?model={model_id}",
+        json={"manual_override": None}, headers=headers, base_url=origin,
+    )
+    assert response.status_code == 200
+    draft = response.get_json()["chain"]
+    assert draft["manual_override"] is None
+    assert draft["route_origin"] == "automatic"
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
+    restored = client.delete(
+        f"/api/models/agents/claude/chain?model={model_id}", headers=headers, base_url=origin,
+    )
+    assert restored.status_code == 200
+    assert restored.get_json()["chain"] == draft
+    assert model_id not in store.config.agents["claude"].routes
+
+
+@pytest.mark.parametrize("body", [[], {}, {"manual_override": []}, {"manual_override": {"hops": [], "mode": "manual"}}])
+def test_preview_rejects_invalid_shape_without_state_change(monkeypatch, tmp_path, body):
+    service, store, adapter = _service(tmp_path)
+    before = store.config.to_payload()
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    origin = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/agents/claude/chain/preview?model=claude-opus-4-6",
+        json=body, headers=csrf_headers(client, origin), base_url=origin,
+    )
+    assert response.status_code in (400, 409)
+    assert response.get_json()["ok"] is False
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
 
 
 def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
@@ -2138,7 +2218,7 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
     response = asyncio.run(service.set_agent_models(backend, baseline, [*baseline, added]))
 
     assert response["agent"]["catalog_models"][-1] == added
-    assert store.config.agents[backend].routes[model_id].hops == ()
+    assert model_id not in store.config.agents[backend].routes
     assert refreshed == [backend]
     if backend == "opencode":
         assert store.config.agents[backend].menu.checked == [model_id]
@@ -2520,7 +2600,8 @@ def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
     )
 
     assert result["agent"]["catalog_models"][-1] == added
-    assert [(hop.source_id, hop.model_id) for hop in store.config.agents["codex"].routes[model_id].hops] == [
+    assert model_id not in store.config.agents["codex"].routes
+    assert [(hop["source_id"], hop["model_id"]) for hop in service.agent_chain("codex", model_id)["chain"]] == [
         (source.id, model_id) for source in reversed(sources)
     ]
     after = store.config.to_payload()
@@ -2681,7 +2762,8 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     created = next(model for model in agent.models if model.id == "gpt-new")
     assert created.display_name == "GPT New"
     assert created.reasoning_efforts == ["low", "high"]
-    assert [(hop.source_id, hop.model_id) for hop in agent.routes["gpt-new"].hops] == [(source.id, "gpt-new")]
+    assert "gpt-new" not in agent.routes
+    assert service.agent_chain("codex", "gpt-new")["current"] == {"source_id": source.id, "model_id": "gpt-new"}
     assert "gpt-hidden" not in {model.id for model in agent.models}
     assert "x" * (MODEL_ID_MAX_LENGTH + 1) not in {model.id for model in agent.models}
     assert {model.id: model.to_payload() for model in agent.models if model.id in unchanged} == unchanged
@@ -3625,6 +3707,7 @@ def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
         "model_id": model_id,
         "chain_length": 1,
         "has_runnable_hop": True,
+        "route_origin": "manual",
     }
     empty_model = next(model for model, row in supplied.items() if row["chain_length"] == 0)
     assert supplied[empty_model]["has_runnable_hop"] is False
@@ -3899,7 +3982,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 8,
+        "contract_version": 9,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -4009,9 +4092,8 @@ def test_direct_to_hub_atomically_adopts_recognized_native_login(tmp_path):
     assert native.supply_channel == "native_cli"
     assert native.vendor == "anthropic"
     assert store.config.agents["claude"].sources.order[0] == native.id
-    assert any(
-        hop.source_id == native.id for route in store.config.agents["claude"].routes.values() for hop in route.hops
-    )
+    assert store.config.agents["claude"].routes == {}
+    assert service.agent_chain("claude", "claude-opus-4-6")["chain"][0]["source_id"] == native.id
 
     repeated = asyncio.run(service.set_agent_mode("claude", "hub"))
 
@@ -4220,7 +4302,7 @@ def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_
     assert store.config.sources == []
 
 
-def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_path):
+def test_reorder_agent_chains_without_order_is_read_only(tmp_path):
     service, store, adapter = _service(tmp_path)
     model_id = "claude-opus-4-6"
     original = _set_claude_route_fixture(
@@ -4238,8 +4320,8 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
     reordered = store.config.agents["claude"].routes[model_id].hops
 
     assert [(hop.source_id, hop.model_id) for hop in reordered] == [
-        ("src_second001", model_id),
         ("src_first0001", model_id),
+        ("src_second001", model_id),
     ]
     assert sorted((hop.source_id, hop.model_id) for hop in reordered) == sorted(
         (hop.source_id, hop.model_id) for hop in original
@@ -4247,12 +4329,12 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
     assert adapter.synced == []
     assert service._engine_synced is True
     assert agent["routes"][model_id]["hops"] == [
-        {"source_id": "src_second001", "model_id": model_id},
         {"source_id": "src_first0001", "model_id": model_id},
+        {"source_id": "src_second001", "model_id": model_id},
     ]
 
 
-def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
+def test_reorder_agent_chains_commits_defaults_without_reordering_manual_route(tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "claude-opus-4-6"
     _set_claude_route_fixture(
@@ -4274,12 +4356,12 @@ def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
     ]
     assert agent["sources"]["order"] == ["src_second001", "src_first0001"]
     assert [hop["source_id"] for hop in agent["routes"][model_id]["hops"]] == [
-        "src_second001",
         "src_first0001",
+        "src_second001",
     ]
 
 
-def test_new_source_is_appended_to_route_hops(tmp_path):
+def test_new_source_is_appended_to_defaults_only(tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "claude-opus-4-6"
     _set_claude_route_fixture(store, ("src_listed01", "src_heldout1"), model_id)
@@ -4305,7 +4387,6 @@ def test_new_source_is_appended_to_route_hops(tmp_path):
     assert [hop.source_id for hop in agent.routes[model_id].hops] == [
         "src_listed01",
         "src_heldout1",
-        "src_new0001",
     ]
 
 
@@ -4341,7 +4422,6 @@ def test_new_source_preserves_explicit_route_order(tmp_path):
     assert [hop.source_id for hop in agent.routes[model_id].hops] == [
         "src_explicit01",
         "src_listed01",
-        "src_new0001",
     ]
 
 
@@ -4372,8 +4452,8 @@ def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
         "src_first0001",
     ]
     assert [hop["source_id"] for hop in payload["agent"]["routes"][model_id]["hops"]] == [
-        "src_second001",
         "src_first0001",
+        "src_second001",
     ]
 
 
@@ -5453,7 +5533,7 @@ def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):
     claude = store.config.agents["claude"]
     claude.sources.order = [source.id]
     claude.routes = {
-        **{model_id: ModelHubRouteConfig() for model_id in claude.routes},
+        **{model.id: ModelHubRouteConfig() for model in claude.models},
         "claude-opus-4-6": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)),
         "claude-sonnet-4-6": ModelHubRouteConfig(),
     }
@@ -7075,7 +7155,7 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
     assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
-def test_failed_zero_model_hub_source_is_omitted_from_restart_sync(tmp_path):
+def test_failed_zero_model_subscription_retains_omission_from_restart_projection(tmp_path):
     class StrictProjectionAdapter(FakeAdapter):
         async def sync_sources(self, bindings):
             assert all(binding.model_ids for binding in bindings)
@@ -7340,7 +7420,7 @@ def test_failed_hub_reauth_rolls_back_when_old_journal_cleanup_fails(tmp_path):
     assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
-def test_credential_route_carries_body_force_override_and_structured_guard(
+def test_credential_inventory_narrowing_preserves_exact_routes(
     monkeypatch,
     tmp_path,
 ):
@@ -7377,90 +7457,24 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
     headers = csrf_headers(client, base_url)
     request_body = {"key": "sk-narrower-route-key"}
 
-    refused = client.put(
+    before_routes = store.config.agents["claude"].to_payload()["routes"]
+    response = client.put(
         f"/api/models/sources/{created['id']}/credential",
         json=request_body,
         headers=headers,
         base_url=base_url,
     )
 
-    assert refused.status_code == 409
-    refusal = refused.get_json()
-    route_hop_schema = _schema("guard-refusal.schema.json")["definitions"]["RouteHopRef"]
-    for hop in refusal["would_remove_hops"]:
-        Draft7Validator(route_hop_schema).validate(hop)
-    assert refusal["error"] == "source_model_in_route_chain"
-    assert refusal["would_remove_hops"]
-    assert all(hop["source_id"] == created["id"] for hop in refusal["would_remove_hops"])
-    assert refusal["would_interrupt"] == [
-        {
-            "backend": "claude",
-            "model_id": "claude-opus-4-6",
-            "agents": ["claude"],
-        },
-        {
-            "backend": "claude",
-            "model_id": "claude-sonnet-4-6",
-            "agents": [],
-        },
-    ]
-    unconfirmed = client.put(
-        f"/api/models/sources/{created['id']}/credential",
-        json={**request_body, "force": True},
-        headers=headers,
-        base_url=base_url,
-    )
-    assert unconfirmed.status_code == 409
-    assert unconfirmed.get_json()["would_remove_hops"] == refusal["would_remove_hops"]
-    assert unconfirmed.get_json()["would_interrupt"] == refusal["would_interrupt"]
-
-    stale_confirmation = client.put(
-        f"/api/models/sources/{created['id']}/credential",
-        json={
-            **request_body,
-            "force": True,
-            "would_remove_hops": refusal["would_remove_hops"],
-            "would_interrupt": refusal["would_interrupt"][:-1],
-        },
-        headers=headers,
-        base_url=base_url,
-    )
-    assert stale_confirmation.status_code == 409
-    assert stale_confirmation.get_json()["error"] == refusal["error"]
-    assert stale_confirmation.get_json()["would_remove_hops"] == refusal["would_remove_hops"]
-    assert stale_confirmation.get_json()["would_interrupt"] == refusal["would_interrupt"]
-
-    committed = client.put(
-        f"/api/models/sources/{created['id']}/credential",
-        json={
-            **request_body,
-            "force": True,
-            "would_remove_hops": refusal["would_remove_hops"],
-            "would_interrupt": refusal["would_interrupt"],
-        },
-        headers=headers,
-        base_url=base_url,
-    ).get_json()
-
-    assert committed["removed_hops"] == refusal["would_remove_hops"]
-    assert committed["interrupted"] == refusal["would_interrupt"]
-    assert committed["source"]["credential_ref"] == "cred_route_5"
-    removed_identities = {
-        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"]) for hop in committed["removed_hops"]
-    }
-    assert all(
-        (backend, menu_model, hop.source_id, hop.model_id) not in removed_identities
-        for backend, agent in store.config.agents.items()
-        for menu_model, route in agent.routes.items()
-        for hop in route.hops
-    )
-    assert adapter.revoked == [
-        "cred_test001",
-        "cred_route_2",
-        "cred_route_3",
-        "cred_route_4",
-        "cred_route_1",
-    ]
+    assert response.status_code == 200
+    committed = response.get_json()
+    assert committed["removed_hops"] == []
+    assert committed["interrupted"] == []
+    assert committed["source"]["credential_ref"] == "cred_route_2"
+    assert store.config.agents["claude"].to_payload()["routes"] == before_routes
+    chain = service.agent_chain("claude", "claude-opus-4-6")
+    assert chain["current"] == {"source_id": created["id"], "model_id": "claude-opus-4-6"}
+    assert chain["route_origin"] == "passthrough"
+    assert adapter.revoked == ["cred_test001", "cred_route_1"]
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
@@ -8141,7 +8155,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 8
+    assert runtime["contract_version"] == 9
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
@@ -8777,7 +8791,7 @@ def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path)
     assert store.config.sources[0].base_url == "https://relay.example/v1"
 
 
-def test_base_url_change_guards_and_prunes_invalid_exact_hops(
+def test_base_url_change_preserves_missing_inventory_exact_hops(
     monkeypatch,
     tmp_path,
 ):
@@ -8807,58 +8821,35 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
     headers = csrf_headers(client, origin)
     replacement_url = "https://other-relay.example/v1"
 
-    refused = client.patch(
+    before_routes = store.config.agents["claude"].to_payload()["routes"]
+    response = client.patch(
         f"/api/models/sources/{source['id']}",
         json={"base_url": replacement_url},
         headers=headers,
         base_url=origin,
     )
 
-    assert refused.status_code == 409
-    refusal = refused.get_json()
-    assert refusal["error"] == "source_model_in_route_chain"
-    assert refusal["would_remove_hops"]
-    assert store.config.sources[0].base_url is None
-    refused_retarget = adapter.retargeted_credentials[0]
-    assert refused_retarget[:4] == (
+    assert response.status_code == 200
+    committed = response.get_json()
+    committed_retarget = adapter.retargeted_credentials[0]
+    assert committed_retarget[:4] == (
         old_credential_ref,
         "anthropic",
         "anthropic",
         replacement_url,
     )
-    assert discovery_refs == [refused_retarget[4]]
-    assert refused_retarget[4] in adapter.revoked
-
-    committed = client.patch(
-        f"/api/models/sources/{source['id']}",
-        json={
-            "base_url": replacement_url,
-            "force": True,
-            "would_remove_hops": refusal["would_remove_hops"],
-            "would_interrupt": refusal["would_interrupt"],
-        },
-        headers=headers,
-        base_url=origin,
-    ).get_json()
-
     assert committed["source"]["base_url"] == replacement_url
-    committed_retarget = adapter.retargeted_credentials[1]
-    assert committed_retarget[:4] == refused_retarget[:4]
     assert committed["source"]["credential_ref"] == committed_retarget[4]
-    assert discovery_refs == [refused_retarget[4], committed_retarget[4]]
+    assert discovery_refs == [committed_retarget[4]]
     assert old_credential_ref in adapter.revoked
-    assert committed["removed_hops"] == refusal["would_remove_hops"]
-    assert committed["interrupted"] == refusal["would_interrupt"]
+    assert committed_retarget[4] not in adapter.revoked
+    assert committed["removed_hops"] == []
+    assert committed["interrupted"] == []
     assert store.config.sources[0].base_url == replacement_url
-    removed_identities = {
-        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"]) for hop in committed["removed_hops"]
+    assert store.config.agents["claude"].to_payload()["routes"] == before_routes
+    assert service.agent_chain("claude", "claude-opus-4-6")["current"] == {
+        "source_id": source["id"], "model_id": "claude-opus-4-6"
     }
-    assert all(
-        (backend, menu_model, hop.source_id, hop.model_id) not in removed_identities
-        for backend, agent in store.config.agents.items()
-        for menu_model, route in agent.routes.items()
-        for hop in route.hops
-    )
 
 
 def test_base_url_retarget_cancellation_revokes_only_the_uncommitted_ref(

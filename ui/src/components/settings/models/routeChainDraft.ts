@@ -4,6 +4,7 @@ import type {
   AgentChain,
   AgentSupply,
   RouteHop,
+  ManualRouteOverride,
   Source,
 } from "./types";
 
@@ -64,20 +65,19 @@ export function validateRouteDraft(
   draft: RouteHop[],
 ): DraftValidation {
   const unchanged = new Set(origin.map(identity));
-  const available = new Set(
-    eligibleSources(sources, agent).flatMap((source) =>
-      source.models
-        .filter((model) => model.retired !== true)
-        .map((model) => `${source.id}\u0000${model.id}`),
-    ),
-  );
+  const available = new Map(eligibleSources(sources, agent).map((source) => [source.id, source]));
   const counts = new Map<string, number>();
   draft.forEach((hop) =>
     counts.set(identity(hop), (counts.get(identity(hop)) ?? 0) + 1),
   );
   const allInvalidIndexes = draft.flatMap((hop, index) => {
     const key = identity(hop);
-    return counts.get(key)! > 1 || (!unchanged.has(key) && !available.has(key))
+    const source = available.get(hop.source_id);
+    const admitted = source && hop.model_id.trim().length > 0
+      && hop.model_id === hop.model_id.trim()
+      && (source.kind === 'api_key' || source.models.some((model) => model.id === hop.model_id))
+      && !source.models.some((model) => model.id === hop.model_id && model.retired === true);
+    return counts.get(key)! > 1 || (!unchanged.has(key) && !admitted)
       ? [index]
       : [];
   });
@@ -112,21 +112,22 @@ export const sameRouteDraft = (left: RouteHop[], right: RouteHop[]): boolean =>
   left.length === right.length &&
   left.every((hop, index) => identity(hop) === identity(right[index]));
 
+export const sameManualOverride = (left: ManualRouteOverride | null, right: ManualRouteOverride | null): boolean =>
+  left === null || right === null ? left === right : sameRouteDraft(left.hops, right.hops);
+
 export const routeChainMatchesAttempt = (
   chain: AgentChain,
   attempt: {
     backend: AgentBackend;
     modelId: string;
     submitted: RouteHop[];
+    manual_override: ManualRouteOverride | null;
   },
 ): boolean => {
   const { backend, model_id: menuModel } = chain;
   return (
     backend === attempt.backend &&
     menuModel === attempt.modelId &&
-    sameRouteDraft(
-      chain.chain.map(({ source_id, model_id }) => ({ source_id, model_id })),
-      attempt.submitted,
-    )
+    sameManualOverride(chain.manual_override, attempt.manual_override)
   );
 };

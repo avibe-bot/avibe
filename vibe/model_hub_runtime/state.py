@@ -44,6 +44,7 @@ class SourceRecord:
     model_ids: tuple[str, ...]
     prefix: str
     model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    route_model_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SourceRecord:
@@ -57,6 +58,12 @@ class SourceRecord:
         if not isinstance(raw_model_ids, list):
             raise EngineStateError("invalid engine source state")
         model_ids = tuple(str(model) for model in raw_model_ids)
+        route_model_ids = payload.get("route_model_ids", [])
+        if not isinstance(route_model_ids, list) or any(
+            not isinstance(model, str) or not model or model != model.strip()
+            for model in route_model_ids
+        ) or len(set(route_model_ids)) != len(route_model_ids):
+            raise EngineStateError("invalid engine route model state")
         parsed_reasoning_efforts: list[tuple[str, tuple[str, ...]]] = []
         seen_reasoning_models: set[str] = set()
         for item in raw_reasoning_efforts:
@@ -84,6 +91,7 @@ class SourceRecord:
             model_ids=model_ids,
             prefix=str(payload["prefix"]),
             model_reasoning_efforts=tuple(parsed_reasoning_efforts),
+            route_model_ids=tuple(route_model_ids),
         )
 
 
@@ -249,10 +257,11 @@ class EngineStateStore:
                     raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
                 model_ids = tuple(dict.fromkeys(str(model).strip() for model in binding.model_ids))
-                if not model_ids:
-                    raise EngineStateError("source requires at least one model id")
                 if any(not model for model in model_ids):
                     raise EngineStateError("model id cannot be empty")
+                route_model_ids = tuple(binding.route_model_ids)
+                if any(not isinstance(model, str) or not model or model != model.strip() for model in route_model_ids):
+                    raise EngineStateError("invalid route model id")
                 reasoning_by_model: dict[str, tuple[str, ...]] = {}
                 for model_id, efforts in binding.model_reasoning_efforts:
                     normalized_model_id = str(model_id).strip()
@@ -275,6 +284,7 @@ class EngineStateStore:
                         credential_ref=credential_ref,
                         allowed_origins=allowed_origins,
                         model_ids=model_ids,
+                        route_model_ids=tuple(sorted(set(route_model_ids))),
                         prefix=(
                             str(credential["prefix"])
                             if credential.get("prefix")
@@ -495,6 +505,7 @@ class EngineStateStore:
                         **asdict(source),
                         "allowed_origins": list(source.allowed_origins),
                         "model_ids": list(source.model_ids),
+                        "route_model_ids": list(source.route_model_ids),
                         "model_reasoning_efforts": [
                             [model_id, list(efforts)]
                             for model_id, efforts in source.model_reasoning_efforts

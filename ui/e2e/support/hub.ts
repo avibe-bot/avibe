@@ -132,6 +132,16 @@ export class ModelHubPage {
     return this.page.locator(attr('data-route-backend', backend) + attr('data-route-model', model));
   }
 
+  async openRoute(backend: string, model: string): Promise<void> {
+    await this.agentCard(backend).waitFor({ state: 'visible' });
+    const row = this.routeRow(backend, model);
+    if (!(await row.count())) {
+      const expand = this.agentCard(backend).locator('.model-hub-model-collapse').first();
+      if (await expand.count()) await expand.click();
+    }
+    await row.click();
+  }
+
   /** The card collapses its model list, so a spec that just needs *a* route
    *  takes the first row the card actually shows rather than naming a model
    *  that may be hidden behind "N more models". */

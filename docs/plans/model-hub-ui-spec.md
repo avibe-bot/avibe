@@ -10,6 +10,77 @@ at 40 sources instead of 4* — so every implementation lane invents its own ans
 and the answers disagree. Everything below was decided while the frames were being
 drawn; this file is where those decisions land instead of evaporating.
 
+## Routing modes revision - 2026-09-06
+
+Owner scope decision `c1d398d5f` restricts unknown-model passthrough and inventory-
+independent manual invocation to Hub API-key Sources. Subscriptions keep existing
+known-model matching/admission and stale-hop retention. Unmatched subscription-only
+defaults render Unconfigured. The route wire fields and approved helper interactions
+remain unchanged; copy must not imply expanded subscription support.
+
+The approved `model-hub-routing-modes.md` contract (`2db273891`) and frames `bmi25`
+(dark), `ziils` (light), `NuxyR` (hover/focus/touch help), `jCs2A` (manual/restore),
+`ztAos` (defaults), `P6Zi8k` (automatic/error/empty), and reusable row `tFl3R` govern
+routing surfaces. Existing Source, OAuth, credentials and reconciliation workflows below
+remain applicable. This revision replaces all-chain priority with backend defaults.
+
+The UI consumes `AgentChain.manual_override`, `AgentChain.route_origin` and effective
+`chain`, plus `AgentSupply.model_supply[].route_origin`. It never matches inventories,
+derives origin from array equality, or treats historical manual arrays as known human
+authorship. Nonempty plans display Automatic (mint), Manual (manual blue) or
+Passthrough (amber); null origin displays Unconfigured (neutral), independently of health.
+Use `--route-manual` and matching soft tokens: dark `#8BB4FF`, light `#245BCD`.
+Approved route rows are 36px, chips 23px and radius 8px; exact pixels remain in Pencil.
+
+Origin help works on hover and keyboard focus; touch tap opens the same help without
+opening the row editor. Escape/outside dismiss it; avoid nested buttons. Retain approved
+helper text and complete EN/ZH pairs in design/locales. Recorded model-not-found keeps
+Passthrough and uses the retained-turn detail surface below without marking the Source failed.
+
+Inherited dialogs open with Edit route. Manual editing retains add/edit/remove/reorder
+and accepts exact API-key upstream ids absent from inventory; subscription targets retain
+known-model admission. Restore automatic in the footer
+changes the draft to null and calls preview; its result may be Passthrough or Unconfigured.
+Undo restore reinstates the prior manual draft. Cancel/close never writes. Save sends
+DELETE for restored automatic or PUT for manual hops, consuming the complete canonical
+mutation result and exact-plan guards. Failed saves retain draft intent; stale preview
+responses cannot replace newer edits; duplicate submissions are disabled.
+
+Lost-response reconciliation compares actual `manual_override` as well as effective
+pairs: equal arrays can represent different saved intent. Preview is read-only with runtime
+stopped and never starts the engine. An explicit empty override stays empty and offers
+Restore automatic; inherited emptiness offers Configure default routing. Backend changes
+cannot leak drafts. Origin, runtime health, request errors and draft state remain separate.
+
+### Latest recorded turn detail
+
+The Recorded Error Detail Closure (`0de3d2f47`, corrected by `9cb9ebb53`) supplies the approved error panel's
+data through on-demand GET `/api/models/agents/<backend>/provenance?model=<id>`.
+This read is independent of route draft/preview and returns the latest retained exactly
+attributed settled turn for both identifiers, regardless of outcome, or null in the
+existing `{ok: true, contract_version: 9, provenance}` envelope. It reads
+the existing 500-record store only; neither AgentChain nor the pure planner owns history.
+
+Show an error panel only when that latest record has `terminal_error`. A newer served,
+canceled or other non-terminal-error result clears the old error; null is absent retained
+history, not a fabricated successful request. Use the exact label "Latest recorded turn"
+/ "最近已记录回合", the record's timestamp, and historical `source_id` and
+`configured_model_id`. Never infer a Source from today's chain; a deleted Source remains
+identifiable by its recorded id. The details action opens the same structured record,
+not a synthesized string or an independent request history.
+
+Display optional observed `http_status` and `upstream_error_code` only as recorded.
+Missing metadata in old records uses generic reason-based copy. Show model-not-found
+copy only for observed `upstream_error_code: model_not_found`, not for the broader
+`invalid_parameter` reason. Never display or persist arbitrary upstream text through
+this panel. Route origin, Source health and fallback semantics remain unchanged.
+
+The read has explicit loading, absent, terminal-error, non-error and retry states.
+Closing the dialog or changing backend/model invalidates in-flight responses; failure
+keeps a retry affordance without claiming no history. Cancel/Restore/Undo/Save neither
+write nor rewrite the retained record. No polling or every-request completeness claim
+is introduced.
+
 ## 0. Scope, authority, provenance
 
 ### 0.1 Frames covered
@@ -90,50 +161,13 @@ that a page with this title and these two tabs exists at this address.
 This file **references anchors and never restates spec content**. If you want to
 know what a chain is, read §4.3 there; this file only says where it is drawn.
 
-**Verification basis.** Every anchor and every `[spec]` / `[contract]` claim below
-was checked against **`ceace07f`** — the squash of the spec lane's PR #1215, and an
-ancestor of `master` — **not** against the pre-#1215 `master` whose §3, §4.1, §4.2,
-§4.6 and §5 it supersedes. Every anchor this file cites is reachable from `master`
-today, and the standing caveat that this file must not merge before #1215 lands is
-retired by #1215 having landed.
-
-The basis moved three times while this file was being written: `7984aabf` → `176b41b7`
-→ `ca45aeb6` → `ceace07f`. The first move added AC-29/30/31, and **AC-30** (takeover is
-derived, and a chain with no runnable hop renders none of takeover's visual semantics)
-and **AC-31** (Direct is a mode and the first state of an existing install; Native names
-a hop and never a mode) land directly on frames 08, 09 and 10. The second move is
-**S-1**, and it is larger: a configured chain is now stored configuration executed as
-written, with no runtime Source/model matching and no `follow | custom` state. The
-backend order remains a separate projection; the explicit `chains/reorder` operation
-may apply its stable ordering to existing hops without matching, adding, removing or
-remapping them. The third is the remainder of #1215's
-own review — five commits between `ca45aeb6` and the squash, sixteen contract files,
-1245 insertions against 1000 deletions — and it is the one move this document did not
-re-read commit by commit. It did not have to: the contract artefacts in this worktree
-are `ceace07f`'s byte-for-byte, so §0.10's class E re-derives every `[contract]` claim
-here from the landed text on every run, and drift against the basis is a red gate
-rather than a reading.
-
-Re-reading on each move is not bookkeeping, and this round proves it twice over. Two of
-the three frame-versus-contract conflicts in §0.6 existed only at `176b41b7`. And at
-`ca45aeb6`, **D-28 turned out to be ruling on `order_enrolled_by`, a field S-1 deletes**
-— a decision that still read as a live citation because a citation to a removed name
-looks exactly like a citation to a present one. Nothing flags it; only re-reading the
-basis does. It is re-derived in §2 with that history attached rather than quietly
-repointed.
-
-**What S-1 deleted, and what this file does about it.** §1.1's legend note,
-`gateway.row.followsOrder` / `gateway.row.custom`, and the whole of §1.2's follow/custom
-machinery specified a derivation S-1 abolishes. They were `[frame]` strings measured from
-frames 01 and 02 as they were drawn before the rebuild. **Frame 02 has since been redrawn
-under S-1 and merged**, so the resolution is no longer a scheduled rewrite: the stale
-specification is deleted, and the current export remains the visual authority. §1.2
-registers only its controls' semantics and the interaction states that cannot live in a
-drawing; §1.1 keeps the same boundary for its legend note and the two model-row keys. The
-rule this follows is the one this file uses everywhere: **a decision may be written down;
-a fact about a drawing may not be written down twice.** Prose that reproduces a frame is
-a second copy of the frame, and second copies go stale silently — which is exactly how
-these three passages survived S-1 in the first place.
+**Verification basis.** The routing behavior and wire contract were frozen at
+`2db273891`, its Engine Registration Amendment at `f8d14358a`, and the API-key scope
+and registration-synchronization decision at `c1d398d5f`. Approved routing
+frames are published by AVIBE Docs design commit `f846e515`; their ids remain those
+listed in the routing revision. The retained legacy frame catalog describes unrelated
+Source/OAuth/repair surfaces. It cannot restore the retired stored-chain-only policy.
+D26/D27 and API/schema parity validate current producer/consumer contracts on one head.
 
 ### 0.3 Provenance markers
 
@@ -260,11 +294,11 @@ half named in its Missing cell has an owner.
 | # | Surface | Missing | Evidence / disposition (contract baseline `1993f4fd0`) |
 | --- | --- | --- | --- |
 | G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** | a way to retire a *discovered* model from the drawn inventory; ~~a place to remember that it was retired~~ | `DELETE /api/models/sources/<source_id>/models/<model_id>` now persists `models[].retired: true` for a discovered row instead of deleting it. `source.schema.json` keeps that row readable, never supplying, and refresh never revives it; §4.5 applies the same exact-hop and last-supplier guards. §1.6 registers that representation as the ordinary row chrome with muted ink and the existing tag component. Frame 06 still draws removal only for manual entries, so no registered control invokes the discovered-row route; only that producer half remains live instead of treating wire reachability as a UI consumer. |
-| G-9 | ~~03 order save that drops sources~~ **withdrawn — this was never a gap** | ~~the guarded-change response for the whole-order `PUT`~~ nothing | The row read the absence of a `409` branch on the whole-order `PUT` (§1.3 Saving names the route; a withdrawn row deliberately does not, so it can excuse nothing) as something `api.md` still owed, on the strength of FC-12's 「row-for-row」 clause. It owed nothing. `model-hub.md` §4.5's Source-mutation envelope matrix is declared **authoritative and exhaustive** over 「all Source/inventory mutations, including writes that cannot remove supply」, and its eight rows do not include this route; FC-12 names 「the explicit backend Source-order PUT」 as a separate item from the mirroring clause. The PUT still has no guard and only stores the order; the separate `chains/reorder` operation now applies that order to existing Routes. Kept as a withdrawn row rather than deleted, because the number is cited in this file's own history and because a gap register that silently loses entries cannot be audited. The row names no route and quotes no body, so there is nothing left in it for a checker to excuse — but a withdrawn row is still a *number* the register defines, and a citation resolves against numbers, not against verdicts. So the rule that keeps it inert is written here rather than enforced: **no surface may carry `[contract-gap]` G-9**, and the number is not reused |
+| G-9 | Default membership guard, revised 2026-09-06 | Existing exact-plan fields | Sources PUT and compatibility reorder compare effective plans. Pure reorder needs no guard; removal may require confirmation. Closed by the routing contract. |
 | G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; any mounted surface observing durable `installing` owns the derived 2s status loop, while a held initiating sequence only decides whether settlement lands at Not started or continues through Starting. Unmount stops the loop; reload owns G-10's first read and restores no intent. |
 | G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. |
 | G-12 | 01 upstream card and 06 header, `needs_action` — **registered by frame 12** | ~~the control that replaces a dead credential~~ nothing | §1.11 registers the two repair producers drawn on the source cards: 更换 Key sends the credential-replacement flow to `PUT /api/models/sources/<id>/credential`, and 重新授权 starts `POST /api/models/sources/<id>/reauth`. §1.1 and §1.6 cite that owner instead of pointing at each other. Kept as a registered row so the former absence and its closing frame remain auditable |
-| G-13 | 03 order drawer, chains that already exist — **registered by the global priority save** | ~~an action that re-applies the current order to chains built before it~~ ~~the route behind it~~ | `POST /api/models/agents/<backend>/chains/reorder` is the sole explicit operation that stores a supplied Source order and reorders every stored Route by it. The combined mutation is idempotent, adds/removes/remaps nothing and has no guard; a failure leaves the drawer draft untouched for retry. |
+| G-13 | Default routing save | Complete default order and guard plan | Sources PUT preserves manual arrays and returns authoritative AgentSupply. Failed saves retain the draft. |
 | G-14 | 08 adopt-gateway confirm, `effects.1` — **registered against the mode transaction** | ~~the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source~~ nothing | A qualifying `direct` → `hub` mode `PATCH` now atomically adopts the recognized CLI login as the first singleton `native_cli` Source and returns the updated `AgentSupply`; an absent or unrecognized login or an existing native Source creates and reorders nothing, and repeats create no duplicate. §1.9's consequence pair states both branches and never treats `cli_present` as recognition evidence; its M5 handoff rereads Sources before the committed result lands because the response cannot carry the possibly created Source. |
 | G-15 | 06 source detail, a source's own name and Base URL — **registered by frame 11** | ~~any affordance that edits them~~ nothing | §1.10 registers the overflow action, edit dialog and guarded `PATCH /api/models/sources/<id>` producer drawn in frame 11. Kept as a registered row so the former absence and its closing frame remain auditable |
 | G-16 | 01 upstream card and 06 source detail — **registered by frame 11** | ~~any affordance that removes a source~~ nothing | §1.10 registers the overflow action and the source-removal guard dialog drawn in frame 11 for `DELETE /api/models/sources/<id>`. The existing 06 model-row 移除 remains a different operation. Kept as a registered row so the former ambiguity and its closing frame remain auditable |
@@ -277,7 +311,7 @@ half named in its Missing cell has an owner.
 | G-23 | `Qp6FI`, the shared guarded-change confirm — both callers, §1.6's *Refetch refused* and *Guard refused* | a body block that lists `would_interrupt` | **The refusal carries a list and the dialog draws a sentence.** `would_interrupt` is `SupplyGap[]`, each entry `{backend, model_id, agents}` with `model_id` the protected **menu** model and `agents` the enabled named Vibe Agents that pinned it `[contract]`, and `model-hub.md` requires that 「the confirm copy names affected Agents when any exist」. `Qp6FI` as measured has exactly one label, one count pill, one row list and one hint line, and all four are the `would_remove_hops` side; the only rendering of the gap array is `guard.hint.interrupt`, one sentence that reports the array is non-empty. The strings are specified — `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, with `gateway.modelCount` as the pill — because copy is this document's register and an authority requires these; the block that holds them is drawing, so it is a gap rather than an invention. The same absence makes `source_last_supplier` unrenderable: its `api.md` example carries `would_remove_hops: []` beside a populated `would_interrupt`, which this dialog would draw as an empty list under a bare sentence |
 | G-24 | 01 run pill, *Unsupported host* — **registered against RuntimeDependency** | ~~a host-platform or installability discriminator in the runtime payload~~ nothing | Every runtime response now carries server-authoritative `host_platform`; an exact match in `manifest.assets[].platform` is the support predicate. §1.0 never substitutes the browser platform. |
 | G-25 | 01 gateway group, the unavailable marker — **registered against AgentSupply model supply; collapse ownership retired 2026-08-23** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it only to choose the row marker: a nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. The six-row prefix owns collapse independently of this field. |
-| G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` stores the supplied Source-order sequence and applies a stable total sort over every stored Route in the same mutation. A source outside the order remains a later Route hop when it is already configured there. |
+| G-26 | Default membership/manual independence | Shared effective planner | Sources outside defaults may remain in manual routes. Defaults update inherited routes under effective guards. |
 | G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol`, `client_nonce` and `accept_unavailable_inventory` `[contract]`. On `custom` with Auto, `protocol` is omitted and the server still requires matching response proof. A supplied protocol is persisted when observation is authenticated and either the vendor catalog pins it, the client declared it on `custom`, or a matching response proves it. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to establish the protocol before a failed inventory may commit. |
 | G-28 | `Qp6FI` guarded-change hop rows — **registered against `RouteHopRef.position`** | ~~the hop's position, on the reference the refusal returns~~ nothing | `guard-refusal.schema.json` carries one-based pre-mutation `position` on every `RouteHopRef`. §1.6 and §1.10 render it directly and issue no per-chain lookup. |
 | G-29 | 05 add-by-key, ⑦'s lost-response reconciliation — **registered against Source-create nonce totality** | ~~anything the client holds *before* the send that the committed Source can afterwards be recognized by~~ nothing | The client generates `SourceCreate.client_nonce` before send. A list read finds exact `Source.client_nonce` after commit; in-flight and committed retries return distinct `409` conflicts, released/list-miss retries are fresh. A committed retry never replays an old response; it returns `source_nonce_conflict` and the client rereads the list to claim the Source. |
@@ -558,7 +592,7 @@ list is supposed to empty — by being decided elsewhere:
   rather than as a property of how the frame happens to be drawn.
 - **Which projection a backend-order surface consumes** — ruled. Order surfaces read
   `AgentSupply.sources`, the backend's stored Source order; source cards read
-  `adopted_by`; the stored chain is a third projection owned by §1.2; **none may stand in
+  `adopted_by`; the effective chain is a third projection owned by §1.2; **none may stand in
   for another**. D-28 carries the rule, the reason, the restatement that the Source order
   is a backend priority and never a runtime capability filter, and the note that S-1
   deleted the field the ruling originally named.
@@ -613,7 +647,7 @@ registration, not something a reviewer is expected to infer from prose.
 | C4 — in-flight response owner | A busy state with no cancellation route cannot be dismissed; if cancellation is contracted, name the state that owns its late response | [x] Saving owns the route `PUT`; Cancel, close, Escape and outside dismissal stay disabled until its response is classified | [x] Saving source and Removing source disable Cancel, close, Escape and outside dismissal until the request settles | [x] Pre-flow reauth and credential replacement are locked while busy; after a flow is acquired §1.4 Dismissing owns cancellation and any late answer | [x] N/A — the menu sends no request; selection transfers ownership synchronously to §1.4 |
 | C5 — existing visual state | Hold the exact rendered origin; a no-op exit must not manufacture another state | [x] The exact opening AgentChain and invoking row are held; abandoning a reversible draft restores that origin | [x] Edit/remove dialogs hold the exact §1.6 origin | [x] Blocked-card, vendor-observation, source-detail and key-entry origins are held exactly | [x] Closed is the same footer/trigger state that existed before Open |
 | C6 — committed-report exit | Once a mutation has committed, every dismissal path is the report's Done-equivalent exit and may neither restore a pre-write origin nor discard held response or D-36 commit evidence. A failed projection member adds read-only Retry for only that subset and MUST NOT remove Done or any equivalent dismissal | [x] Route impact reported retains R6 through AR-M3; successful members remain installed while failed members become stale. Empty-tail and matching-readback commits enter Route committed, reconciling, whose DP-4 exits retain evidence and transfer the active generation | [x] Save/remove impact reports retain their envelopes and every Done exit through M1/M2 read failure; inferred commits retain their exact Source/absence evidence through the same reads | [x] Repair impact retains R3/R4's distinct envelopes through M3/M4 read failure, and Repair unresolved retains R3 through M3; Retry is additive and no path restores the invoking origin | [x] N/A — the menu commits nothing and owns no response report |
-| C7 — authoritative field validation | Register every editable field against the authority that normalizes or rejects it; no field may rely on a generic request failure as its validator | [x] V5 consumes exact-pair uniqueness, server eligibility and callable-inventory authority while permitting unchanged stale pairs | [x] V1/V2 register every frame-11 field, including the complete Base URL normalizer | [x] V3/V4 register the replacement key and paste-back value; the shared reauth acknowledgement is the contracted literal `true`, not a free-form draft | [x] N/A — vendor rows emit closed enum values and expose no editable field |
+| C7 — authoritative field validation | Register every editable field against the authority that normalizes or rejects it; no field may rely on a generic request failure as its validator | [x] V5 consumes exact-pair uniqueness, server eligibility and retirement; API-key targets may be absent from inventory, while subscriptions retain known-model admission and unchanged stale pairs | [x] V1/V2 register every frame-11 field, including the complete Base URL normalizer | [x] V3/V4 register the replacement key and paste-back value; the shared reauth acknowledgement is the contracted literal `true`, not a free-form draft | [x] N/A — vendor rows emit closed enum values and expose no editable field |
 | C8 — acknowledgement consequence coverage | For every capability that requires acknowledgement, register every applicable channel, the exact confirmed request value and one complete consequence sentence that is true for that channel before the irreversible boundary | [x] N/A — route replacement has no capability acknowledgement; F3 confirms an exact current server impact plan under the guard-totality table | [x] The existing overflow reauth action transfers its exact Source/channel to §1.11's shared confirmation phase; frame 11 adds no alternate shortcut | [x] Hub and `native_cli` both confirm and send literal `true`, but select separate complete bodies: Hub names only the failure-time cost and safe cancellation; native names the immediate shared-login outage and selected-Source-only recovery | [x] N/A — vendor selection starts create intent and crosses no existing-credential boundary |
 | C9 — report-free reconciliation failure | For every committed mutation that skips its report because impact arrays are empty or unavailable after D-36 inference, register the pending/failure states, held write evidence and read-only Retry | [x] Route committed, reconciling holds the returned chain plus empty tails, or the exact matching AgentChain GET readback plus unavailable response tails, while AR-M is pending. An Agents-first failure settles as the exact failed Retry subset while mode-dependent companions remain deferred and non-stale; every other AR-M3 result likewise retains every success and retries only its exact acquired failed subset | [x] M1, or M2 through M0, enters Committed projection stale with the updated Source or committed absence plus exact empty/unavailable disposition held; Retry repeats only its complete-surface read | [x] A non-blocked M3/M4 empty envelope or RR-7 inferred commit with an unavailable response tail enters the same state; a blocked R3 result stays in Repair unresolved instead | [x] N/A — the menu commits nothing and invalidates no projection |
 | C10 — mutation attempt scope and commit evidence | For every mutation covered by this frame group, name every projection its attempt may invalidate before the response is observed; both a received success envelope and authoritative D-36 commit evidence MUST pass through the owning M row before visible exit, with response-only members marked unavailable rather than invented | [x] R6 owns every received member; exact ordered D-36 readback enters Route committed, reconciling / M6 with `removed_hops` / `interrupted` unavailable | [x] R1/R2 own received save/delete envelopes; D-36 inferred save/delete commits enter the same M1/M2 reads with response-only impact arrays unavailable | [x] RR-1–RR-10 name repair attempt scope; R3/R4 classify received Source outcome, while RR-7 inferred repair commit enters M3/M4 with its absent response tail explicitly unavailable | [x] N/A — vendor selection commits nothing; create's later mutation remains owned by §1.4/RR-3 rather than the menu |
@@ -721,7 +755,7 @@ consumed by frame 02, frames 11/12 and their shared OAuth form.
 | V2 | frame 11 `base_url` | `normalize_model_hub_base_url`, used by the source metadata handler | Empty draft → `null`. Otherwise trim, require a parseable HTTP(S) URL with a hostname, no username/password or fragment, no credential-bearing query key and no credential-shaped material; compare/send the normalizer output, including its lowercase scheme and trailing-path-slash removal | Disable Save; keep the draft local. The field is editable only for an `api_key` / Hub Source with a stored credential |
 | V3 | frame 12 replacement `key` | credential-replacement handler: required non-empty string; `force` remains a separate boolean | Trim; a non-empty result enables submit and is held through F1/F3 | Disable submit; never send an empty key |
 | V4 | §1.4 paste-back `value` consumed by frame 12 reauth | OAuth submit shape plus the selected `presentation.expects` | Trim; a non-empty code or callback URL enables submit, and the same normalized value is retained through reconciliation | Disable submit; never infer a second format beyond the server-declared enum |
-| V5 | frame 02 ordered `hops` draft | `model-hub.md` §4.4/§4.6 server-validated Route invariants plus AgentSupply eligibility and Source inventory | Project every row to the exact `{source_id, model_id}` pair sent on the wire. Pairs are unique. A newly added or changed pair must name an existing server-eligible Source and one exact callable, non-retired inventory model; identity and explicit cross-model mappings are both legal. An unchanged persisted pair may be retained or reordered even while its live annotation is stale/non-runnable | Exclude invalid pairs from the Add-hop chooser and disable Save while any new/changed draft row is invalid or duplicated. Never delete or rewrite an unchanged stale pair merely because it cannot be offered as a new choice. When a reconciliation refresh invalidates a new/changed row, ET-17e alone enters Invalid after refresh, renders `route.invalidAfterRefresh` on every offending row, keeps Remove enabled and gives Save that visible line as its disabled description |
+| V5 | frame 02 ordered `hops` draft | `model-hub.md` §4.4/§4.6 server-validated Route invariants plus AgentSupply eligibility and Source inventory evidence | Project every row to the exact `{source_id, model_id}` pair sent on the wire. Pairs are unique. A newly added or changed pair must name an existing server-eligible Source and a canonical nonempty, non-retired model id. API-key targets need not be in inventory; subscriptions retain known-model admission. Identity and explicit cross-model mappings are both legal. An unchanged persisted pair may be retained or reordered even while its live annotation is stale/non-runnable | Exclude invalid pairs from the Add-hop chooser and disable Save while any new/changed draft row is invalid or duplicated. Inventory absence alone cannot invalidate an API-key target. Never delete or rewrite an unchanged stale pair merely because it cannot be offered as a new choice. When a reconciliation refresh invalidates a new/changed row, ET-17e alone enters Invalid after refresh, renders `route.invalidAfterRefresh` on every offending row, keeps Remove enabled and gives Save that visible line as its disabled description |
 
 **F1's last clause used to read 「nothing is persisted」, and a lost answer is not a
 refusal** `[derived]`. Several states this treatment lands on are creates that are not
@@ -734,8 +768,9 @@ promise is how a user ends up with the same source listed twice. So the promise 
 what the evidence covers, and 重试 out of a no-answer failure re-reads the collection it
 was writing into before it re-sends — a row already sitting there closes as the success it
 is, rather than colliding with itself. An unguarded idempotent replacement may owe nothing
-extra: §1.3's 保存顺序 sends the same complete order to the atomic chains/reorder
-operation, so retrying the save lands the same result without a persisted half-state.
+extra only when its computed guard plan is empty. §1.3 default membership saves may
+have effective impact: retain the draft, read canonical defaults after ambiguous results,
+and apply the existing exact-plan confirmation before another write.
 §1.2 is deliberately different even though it also replaces an array: the write
 has a guarded plan and response-only impact evidence, so D-36 reads the exact Route before
 any resend and an inferred commit marks that evidence unavailable. Which side a state
@@ -820,7 +855,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Group interrupted — a source needs action | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member is blocked by a source in `needs_action` or `error` `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → whichever aggregate the named Agents then produce. Frame 12 owns the credential repair controls; 06 keeps 重新拉取 for a source whose stored credential still works `[contract]` |
 | §1.1 | Group unconfigured | `named_agents` is nonempty and every member either has no `effective_model_id` or reads `route_reason: route_unconfigured` `[derived from contract]` | F5 — a rendered configuration statement, not a request or a Source-health failure | `gateway.group.status.unconfigured` — 未配置型号路由 / No model route configured | Any member gains both an effective model and a configured Route → whichever aggregate the named Agents then produce. Distinct from *No enabled Agent uses this backend*, where there is no Agent member, and from *Group interrupted*, where at least one configured Route exists but cannot currently supply |
 | §1.1 | Group interrupted — a hop's source is gone | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's chain names a source that no longer exists `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → whichever aggregate the named Agents then produce. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is §1.2's explicit remove/change of that exact stale pair |
-| §1.1 | Group interrupted — a hop's model is no longer callable | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's chain pins a model its source no longer advertises `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | 重新拉取 on 06 puts the model back into that source's inventory → whichever aggregate the named Agents then produce. The contract keeps the hop visible and non-runnable until an explicit refresh or edit and never re-points it `[contract]`; §1.2 owns the explicit remove/change while allowing the unchanged stale pair to remain |
+| §1.1 | Group interrupted — a hop's model is no longer callable | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and the chain reports a model-admission blocker. Missing subscription inventory or explicit retirement may explain that blocker; missing API-key inventory alone cannot `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | Render only the server's current projection. Subscription refresh may restore known-model admission; refresh never un-retires a row. Retained manual hops remain visible and never silently re-point; §1.2 owns explicit remove/change |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Fixed backend has no models | A fixed-menu backend resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | OpenCode menu has no selection | OpenCode is in Hub mode and `menu.checked` is empty `[contract]` | F5 | `gateway.group.emptySelection`, `gateway.selectedModelCount_*`, `gateway.manageModels` | **Manage models** opens the OpenCode model-menu dialog; saving at least one eligible identifier returns to Ready with one route row per saved model |
@@ -849,7 +884,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.3 | Zero eligible sources | No source is eligible for this backend | F5 | `order.empty.noEligible` | 关闭. A source becomes eligible → Ready. 保存顺序 is disabled |
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
 | §1.3 | Dirty (uncommitted moves) | 排进来, 移出, a drag, or a keyboard move | F5 — nothing has been sent, so nothing can fail | `order.action.include`, `order.action.exclude` | 保存顺序 → Saving; 取消 → discard, close |
-| §1.3 | Saving | 保存顺序 pressed — send `{order: string[]}` to `POST /api/models/agents/<backend>/chains/reorder`, which stores the order and applies it to existing Routes in one mutation `[contract]` | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; failure → keep every move held and 重试 the same save |
+| §1.3 | Saving | 保存顺序 pressed — send `{order: string[]}` to `PUT /api/models/agents/<backend>/sources`, which stores defaults and preserves manual overrides under effective guards `[contract]` | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; failure → keep every move held and 重试 the same save |
 | §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it. 去登录 synchronously preallocates PD-1's blank browser context, then sends `POST /api/models/oauth/start`; RR-1/RR-2 classify any accepted flow **before** presentation: non-terminal transfers the context to PD-2, then `presentation.expects: none` → Awaiting sign-in, a paste presentation in E3a `starting` / `awaiting_action` → Awaiting paste-back, and a paste presentation already in E3b `verifying` → Awaiting paste-back completion; each navigates when `presentation.auth_url` is non-null now or on a later flow read. Terminal → immediate status read with no form reopened. Refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed; either path closes an unused blank context. Polling, re-render and reconciliation never auto-open a second context `[derived]` |
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | An acquired flow carries `presentation.expects: none` and no `device_code`; Form B remains G-33. `GET /api/models/oauth/status/<flow_id>` is polled every 2s until the §1.4 evidence-class matrix selects an exit `[contract]` | → OAuth failed / OAuth materialization failed. E2 transport/outage evidence, including `engine_down`, is inconclusive and the next 2s tick retries under the same bound (D-16); E4 or E8/E9 with the held Source present/unread stops at OAuth failed; only E6's two materialization codes stop at OAuth materialization failed | `addSub.signIn`; PD-4 resolves `presentation.instructions_key` and uses the device-code helper on null or lookup failure | PD-2 keeps the authorization link actionable. E5 `success` → `intent: create` closes **into 06 for the source that terminal names** with `added_to` and `adopted_by` in hand; `intent: reauth` → §1.11's R3 repair terminal `[contract]`; E4 → OAuth failed; E8/E9 first run RR-5's registered read, then absent → M0 / Source gone, present or unread → OAuth failed (the unread branch retains read-only Retry); E7 → M0 / Source gone; the polling bound passes with no terminal reading → OAuth failed — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from acquisition when it does not `[derived]`; dismissed any of the three ways → Dismissing |
@@ -1071,7 +1106,7 @@ sections. §1.8 states the direct-only body condition.
 | Tabs ×3 | Section switch | — | yes | 来源与网关 / 用量 / 日志; the active one gets the mint underline |
 | Upstream module | Source inventory + info icon | `GET /api/models/sources` `[spec]` | info icon and rows: yes | Tooltip: `upstream.info`; open 06 for that source |
 | Wire corridor | Routing space between Sources and Agents; it draws no independent axis | derived, decorative | no | — |
-| Gateway module | One group per backend, each with model rows + info icon | per-backend supply + chains `[spec]` | info icon, rows, collapse, 「调整优先级」, mode switch | Tooltip: `gateway.info`; open 02 / expand / open 03 for **that backend** / open 10's confirm |
+| Gateway module | One group per backend, each with model rows + info icon | per-backend supply + chains `[spec]` | info icon, rows, collapse, 「默认路由」, mode switch | Tooltip: `gateway.info`; open 02 / expand / open 03 for **that backend** / open 10's confirm |
 | Legend | Colour → meaning | static; kept in bijection with the inks the page draws | no | — |
 
 **The Logs tab owns the switch-history feed** `[derived]`. It is absent from the
@@ -1456,7 +1491,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.heading` | 网关路由 | Gateway routes |
 | `gateway.infoLabel` `[derived]` | 什么是网关路由 | What gateway routes are |
 | `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号在已有路由中的来源里先使用哪个上游来源;当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
-| `gateway.sourceOrder` | 调整优先级 | Adjust priority |
+| `gateway.sourceOrder` | 默认路由 | Default routing |
 | `gateway.manageModels` `[derived]` | 管理模型 | Manage models |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
 | `gateway.switchToDirect` | 切到直连 | Switch to direct |
@@ -1745,7 +1780,7 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | 添加订阅 opens frame 13; its selected vendor opens 04. 添加 API Key opens 05 |
 | `f8w6Xp` + `pnYa0` wire corridor | the relations cross between the columns without an independent axis | decorative | no | — |
 | `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line. For an open menu the count is the explicit selected count, never the number of models available from Sources | per-backend mode + supply health | head: buttons only | OpenCode's **Manage models** opens its model-menu dialog; other actions are registered below |
-| `ehGRK` / `bGsC7` 「调整优先级」 | — | — | yes | Open 03 **for that backend** |
+| `ehGRK` / `bGsC7` 「默认路由」 | — | — | yes | Open 03 **for that backend** |
 | OpenCode 「管理模型」 `[derived]` | — | `menu.checked` plus the server-owned eligible Source inventory | yes | Open the OpenCode model-menu dialog; the same action remains available in the empty row area |
 | `IyKyp` 「切换到网关」 | — | backend in 直连 | yes | Open the 10 confirm for that backend |
 | `z02Ep` / `gbrq2` 「切到直连」 | — | backend on the gateway | yes | That backend leaves the gateway immediately — **no confirm** (D-30) |
@@ -1810,7 +1845,7 @@ exit keys on elapsed time」 is the rule the two source rows above are written t
 
 **The three head buttons are mutually constrained** `[frame]`, and the constraint is
 the whole model in one line: a backend is either on the gateway or not. On the gateway
-it carries 调整优先级 + 切到直连; in 直连 it carries 切换到网关 and **nothing else** —
+it carries 默认路由 + 切到直连; in 直连 it carries 切换到网关 and **nothing else** —
 Claude Code's head has no order button, because a direct backend consults no source
 order and an editor there would edit a list nothing reads. D-9a states the rule, and it
 is a set equality over the three groups.
@@ -1951,15 +1986,15 @@ Other limits `[derived]`:
 **The question it answers:** *for this one model, which sources will be tried, and in
 what order?*
 
-**S-1 removed the mode choice this section used to specify.** A configured chain is
-stored configuration executed as written; there is no `follow` / `custom` pair, no
-segmented control to switch between them, and no second projection derived from a
-recommendation. Everything this section previously said about those two modes — the
-element inventory, the foot semantics, the metrics, the three inks, the mode copy —
-described a frame that no longer exists, and is deleted rather than rewritten.
+**Sparse manual intent replaces the historical stored-chain-only model.** The
+server's effective projection owns Automatic, Manual, Passthrough or Unconfigured;
+there is no `follow` / `custom` discriminator or client-side recommendation engine.
+Inherited routes enter editing through Edit route. Manual arrays execute as saved;
+Restore automatic stages null, previews the effective plan, and removes the saved
+override only on Save. The routing revision above owns the approved current frames.
 
 **The current export remains the visual authority; this section registers its behaviour.**
-The normal dialog contains one ordered list of exact hops, a grip and ordinal on each row,
+The manual-edit branch contains one ordered list of exact hops, a grip and ordinal on each row,
 the Source display name and exact upstream model id, a per-row remove action, 添加一跳,
 按来源顺序重排, the persisted-configuration hint, 取消 and 保存 `[frame]`. The title holds
 the menu model, the subtitle holds the backend product name, and the opening model row is
@@ -1982,17 +2017,22 @@ while `route.sourceMissing` means the chain annotation and never the local join 
 
 **One held identity, one origin and one wire projection** `[contract]` `[derived]`.
 Opening 02 holds `(backend, menu_model)` and reads
-`GET /api/models/agents/<backend>/chain?model=<id>`. The draft is only the ordered
-projection of `AgentChain.chain` to `{source_id, model_id}`; live `channel`, `health`,
-`runnable`, `reason`, `retry_at`, `current` and `supply_state` remain read annotations and
-are never echoed into the write. The returned projection becomes the exact reversible
-origin. All local edits operate on a copy, so 取消 can restore that value without another
-authority. Empty `hops` is a valid explicit unconfigured Route, not absence of a Route.
+`GET /api/models/agents/<backend>/chain?model=<id>`. Hold `manual_override` separately
+from the effective `chain`. Edit route initializes a manual draft from effective exact
+pairs; Restore automatic stages null. Live `channel`, `health`, `runnable`, `reason`,
+`retry_at`, `current` and `supply_state` remain read annotations and are never echoed
+into a write. The reversible origin includes saved intent as well as pairs, so equal
+arrays cannot settle a lost response with different manual intent. Local edits operate
+on a copy; Cancel never writes. Empty `hops` is an explicit empty manual override,
+not absence of a Route. Preview reports the draft and cannot replace saved authority.
 
 V5 is the sole Add-hop and draft validator. 添加一跳 opens the product's standard anchored
 selection surface without assigning new frame geometry: candidates come from the current
-AgentSupply eligibility plus Source inventory, are grouped by Source, name the exact
-upstream model id, and exclude duplicate pairs. The selector owns exactly one active
+AgentSupply eligibility plus Source inventory evidence, are grouped by Source, name the exact
+upstream model id, and exclude duplicate pairs. Eligible API-key Sources additionally
+accept a canonical typed upstream id absent from inventory; subscription candidates
+retain known-model admission. Typed ids never create inventory or capability metadata.
+The selector owns exactly one active
 candidate, which is also its selected pair: ET-5a selects the first listed candidate as the
 surface opens, and every ET-5d move atomically replaces both values. Which element holds DOM
 focus is the standard surface's business — the filter field owns the caret and carries the
@@ -2013,13 +2053,12 @@ the list and may be reordered or removed, because the contract validates only ne
 changed pairs. ET-17e alone owns the state edge when refreshed Hub authority invalidates a
 new or changed row; this paragraph supplies the predicate, not a parallel destination.
 
-**按来源顺序重排 is a local sort of this draft, not the all-chain mutation** `[spec]`
+**按来源顺序重排 is a local sort of this manual draft** `[spec]`
 `[derived]` `[contract]`. `model-hub.md` §4.2/§4.6 and `api.md` Per-backend source order
-make the sole-consumer rule govern server-side implicit application of stored Source order:
-the all-chain route is the only such post-creation operation. The per-model PUT accepts only
-explicit `hops`, its handler never reads `sources.order`, and the contract explicitly permits
-an editor to use its page-held Source-order projection as a local draft-sorting aid. The
-control applies §4.6's stable total key to the current draft only: a hop whose
+make `sources.order` the shared automatic planner's default membership/order. The
+per-model PUT persists the explicit `hops` without sorting them; an editor may use
+its page-held default-order projection as an explicit local draft-sorting aid. The
+control applies a stable total key to the current draft only: a hop whose
 Source is in the backend's page-held current Source order sorts by `(0, source_order_index,
 original_index)`; an unlisted Source sorts by `(1, original_index, original_index)`.
 Membership, exact model mappings and within-Source relative order are preserved. The
@@ -2027,22 +2066,22 @@ result remains local until 保存. This editor reads an already page-held displa
 under an explicit user gesture and produces only that one local draft: it never reruns
 placement or matching. The per-model write body remains only explicit `hops`; Source order
 is neither sent nor interpreted by that route. This control never calls
-`POST /api/models/agents/<backend>/chains/reorder`, because that route changes every
-stored Route. Frame 03's global-priority save owns that broader action (G-13); this
+`PUT /api/models/agents/<backend>/sources`, because that route changes backend
+defaults. Frame 03 owns that backend-scoped action (G-13); this
 control only sorts the one route draft held by frame 02.
 
 **Save sequencing is total** `[contract]` `[derived]`:
 
 | Step | Evidence held | Request / disposition |
 | --- | --- | --- |
-| RS-1 — local edit | opening AgentChain + V5-valid ordered draft | Send nothing. ET-5a–ET-7f own the atomic selector/draft/focus transitions; Save is enabled only when the ordered pair array differs from the opening origin; empty is allowed |
-| RS-2 — first save | one immutable submitted `hops` array | ET-9a sends the complete array without `force` or plan echoes and transfers focus/ownership to Saving |
+| RS-1 — local edit | opening AgentChain intent + V5-valid ordered draft or restored null | No mutation. Preview may project the draft read-only. Save compares intent as well as pairs: equal-to-automatic manual saves and explicit empty overrides are valid changes. Undo restore reinstates the previous draft; Cancel never writes |
+| RS-2 — first save | one immutable submitted manual override or restored null | Send the complete manual array with PUT, or DELETE for restored null, without `force` or plan echoes; transfer focus/ownership to Saving |
 | RS-3 — ordinary success | R6 `{chain, removed_hops, interrupted}` | Hold all three members; cardinality is evidence consumed by ET-10/ET-11, which alone select the report or report-free M6 edge |
-| RS-4 — guarded refusal | HTTP 409 `source_last_supplier` + complete `would_remove_hops` and nonempty `would_interrupt` | ET-12 renders shared `Qp6FI`. The refusal persisted nothing and the draft remains unchanged. G-23 still records the missing drawn SupplyGap block; this section registers the data/copy consumer but invents no block geometry |
-| RS-5 — confirm | the immutable submitted `hops` + both exact arrays from the currently displayed refusal | ET-13b verifies the exact held plan and re-sends it with `force: true`, `would_remove_hops` and `would_interrupt`; confirmation never creates a new mutation body |
+| RS-4 — guarded refusal | Existing HTTP 409 guard envelope and both complete refusal arrays | PUT guards protected-supply interruption; DELETE Restore guards actual effective removal or supply loss. Render the applicable existing guard and evidence blocks. The refusal persists nothing and retains draft intent |
+| RS-5 — confirm | immutable submitted intent + both exact arrays from the currently displayed refusal | Re-send the same PUT or DELETE with `force: true`, `would_remove_hops` and `would_interrupt`; confirmation never changes the submitted intent |
 | RS-6 — plan changed | a forced request returns another guarded 409 | ET-12 replaces both displayed arrays with the recomputed plan and requires another explicit confirmation; the old preview is discarded |
 | RS-7 — impact disappeared | the forced request recomputes an empty guarded plan | The server returns ordinary R6 success; ET-10/ET-11 consume the actual envelope and the UI fabricates no refusal |
-| RS-8 — shaped rejection | a non-guard, non-`direct_mode` error response | ET-14 settles that attempt terminal-rejected. Retry is a new explicit workflow: revalidate the retained draft, freeze a new submitted generation and send one ordinary **non-forced** PUT; any new guard starts its own Qp6FI phase. It never runs D-36 or reuses prior force/plan evidence |
+| RS-8 — shaped rejection | a non-guard, non-`direct_mode` error response | Settle that attempt terminal-rejected. Retry revalidates retained intent, freezes a new generation and sends one ordinary non-forced PUT or DELETE as appropriate. It never runs D-36 or reuses prior force/plan evidence |
 | RS-9 — no response / no Route authority | transport no-answer or `direct_mode` without an exact Route result | ET-15/ET-18a set attempt settlement `unknown`. D-36 may read only: matching proves commit; nonmatching or failed observation never proves the old PUT terminal and never emits a recovery PUT. The user may abandon; any later edit begins a distinct workflow from newly read authority |
 
 **Direct-mode evidence retires the editor; only `AgentSupply` projects the destination
@@ -2074,8 +2113,9 @@ receipt or server-held confirmation state** `[contract]`. Only an exact unchange
 both refusal arrays confirms a nonempty recomputed plan. For `mutation.route_replace`,
 submitted removals by themselves do not activate the guard: a visible noninterrupting
 removal succeeds ordinarily and appears in `removed_hops`; only nonempty
-`would_interrupt` refuses. Every 409 therefore names a current nonempty interruption plan
-and mutates nothing. ET-13a and ET-13b separately own abandoning and confirming that refusal.
+`would_interrupt` refuses. For `mutation.route_restore`, actual effective removals also
+activate the existing guard even without interruption. Every refusal carries its exact
+current plan and mutates nothing. ET-13a and ET-13b own abandoning and confirming it.
 
 **R6 and M6 own the success before the dialog may disappear** `[contract]` `[derived]`.
 The returned `chain` is the post-write projection and commit evidence. Later reads may
@@ -2278,7 +2318,7 @@ cannot name the reducer/CA result for one row is incomplete.
 | RT-2 — M6 chain becomes Direct | AR-M has installed Hub Agents; its chain member returns `direct_mode` | AR-MD provisionally removes prior Route work, preserves independent successes and uses ET-18aM/ET-18aP to acquire landing Agents authority. Direct keeps Route not applicable; Hub acquires a new post-landing chain epoch |
 | RT-3 — Direct after Source success | Source settles successfully before either AR-D5 or AR-MD | Keep that Source installed/carried; disown only pending siblings. The landing Agents result, not the Direct error, selects the page form |
 | RT-4 — active Retry loses admission | Activate Retry in save reconciliation, mounted M6, transferred M6 or error-handoff page phases | CA synchronously moves focus to the destination phase's first FF-1-valid owner before disabling/inerting Retry; ET supplies no competing focus patch |
-| RT-5 — local Source-order draft sort | Activate frame-02 sort, then save its explicit pairs | Follow `model-hub.md` §4.2/§4.6 and `api.md`'s negative fixture: the local gesture may reorder the draft; the per-model PUT transmits only explicit `hops`, its server path never reads `sources.order`; frame 03 separately applies the global priority through the all-chain reorder operation |
+| RT-5 — local Source-order draft sort | Activate frame-02 sort, then save its explicit pairs | Follow `model-hub.md` §4.2/§4.6 and `api.md`'s negative fixture: the local gesture may reorder the draft; the per-model PUT transmits only explicit `hops`, its server path never reads `sources.order`; frame 03 separately saves default membership/order while preserving manual routes |
 | RT-6 — Hub landing closes Sources | DM-1–DM-3 owns the landing Agents read; before it settles another client completes Direct → Hub and atomically creates a native Source | LF-H installs exact Hub AgentSupply, invokes M5's Source read outside M6 and calls the landing current only after that read. Failure keeps AgentSupply, marks only Sources stale and retries only Sources |
 | RT-7 — CA activation modality | For every enabled CA row, activate its control once by pointer, Enter and Space; repeat for disabled/inert rows | All three enabled gestures emit that row's one `Activation`, including CA-P1 → ET-18c. Every disabled/inert gesture emits nothing; no keyboard enumeration may restate CA IDs |
 | RT-8 — DM-2 unknown crosses ordinary M5 | Route PUT returns shaped `direct_mode`; LF-D installs Direct; the ordinary §1.9 mode PATCH later returns exact Hub | DM-2 creates `(unknown, page session, Direct-suspended)` before modal handoff. M5/LF-H closes Source, the common hook changes legality and RO-O sends exactly one chain GET: match enters M6; nonmatch installs current Route and remains page-owned unknown; neither branch sends PUT |
@@ -2598,276 +2638,49 @@ shared `models.hub.guard.*` owner.
 
 ---
 
-### 1.3 Frame 03 `qZhJ3` — Source-order drawer (per backend)
+### 1.3 Default routing - per backend (approved frame `ztAos`)
 
-**The question it answers:** *for one backend, which upstream sources should the gateway
-try first, and what should it try next when the first one cannot serve the request?* One
-ordered list, scoped to one backend, controls both the persisted priority and the order
-of that backend's existing Route hops.
+The backend action is Default routing / 默认路由. It edits that backend's default Source
+membership and priority. Inherited Automatic and Passthrough routes follow it; Manual
+overrides retain their exact arrays. Show affected inherited/manual model counts from
+server projections without claiming historical human authorship or current health.
 
-**It governs global route priority** `[spec]`. `POST /api/models/agents/<backend>/chains/reorder`
-stores the supplied complete order and applies the current Source-order sequence to every
-stored Route with a stable total sort, without adding, removing or remapping a hop
-`[contract]`. The combined mutation is atomic; if it fails, the drawer keeps the draft and
-retries the same save, so no partial success is presented as complete.
+Read `AgentSupply.sources.order` and eligibility; save the complete subset with
+`PUT /api/models/agents/<backend>/sources`. Optional `force`, `would_remove_hops`
+and `would_interrupt` follow the existing exact-plan guard. Pure reordering needs no
+guard; membership removal can remove effective hops or supply and must display the
+actual refusal, echoing both arrays unchanged on confirmation. Success returns the
+authoritative `{agent: AgentSupply}`; reconcile chains and adoption through existing
+reads. A failed or ambiguous save keeps the draft and reads canonical defaults before
+another write. Switching backends cannot reuse another backend's draft.
 
-The scope in that sentence is the whole point of the frame, and it is what the frame
-used to get wrong. An earlier version drew one product-global order with native
-sources held out of it; `model-hub.md` §3 defines 来源顺序 as an ordered subset
-eligible for **one backend** and never product-global. The owner ruled for the
-behaviour spec and the frame was rebuilt. See §0.6 E-1 — kept as a closed conflict
-rather than deleted, because the resolution went against the drawing.
+Both include and exclude actions exist. Sources outside defaults remain available for
+manual routes. Empty defaults are valid and leave inherited routes Unconfigured; existing
+manual arrays survive. Zero eligible Sources shows the empty state. Blocked Sources keep
+their rank. Rank is configured priority only, never the currently serving Source.
 
-**Entry point.** The 调整优先级 button on a backend's group head in the gateway module
-— `ehGRK` on Codex, `bGsC7` on OpenCode in frame 01, redrawn as `N50iJ7` / `nzwR3` in
-03's own dimmed background `[frame]`. **A backend in 直连 mode has no
-such button** — Claude Code's head carries only 切换到网关 `[frame]`. This is not an
-omission to be tidied up: a direct backend uses its own login and consults no source
-order, so an order editor there would edit a list nothing reads. §2 D-9a states the
-rule, and it is a set equality.
+Keyboard/touch operate the same list: include/exclude buttons are focusable; Space
+grabs/drops; arrows move a grabbed row or focus; Escape cancels the grab before closing.
+Announce new positions and retain moved-row focus. Long lists scroll with header/footer
+visible; labels and controls fit desktop/mobile and both color schemes.
 
-**Geometry** `[frame]`
+Retain the approved helper text: inherited routes first use matching Sources in default
+order; without a match eligible Hub API-key Sources forward the original id in that order.
+Subscriptions are not speculative candidates. Manual routes remain
+independent. Helpers must respect existing fallback and streaming boundaries.
 
-| Element | Metric |
-| --- | --- |
-| Scrim `UA2Q1` | 1440×1100, `#05050BE0` |
-| Drawer `hnsO5` | 460 wide, **full 1100 height**, right-anchored, `$--surface`, left border only |
-| `head` `qNs0K` | `padding [18,20]`, vertical, `gap 6`, 82 tall `[frame]` — the only overlay head in the product that is not `[16,20]` / `gap 4`, because it stacks a title over a subtitle |
-| Title | 15 / 700, `$--foreground`, + 13px info icon `#FFFFFF59` |
-| Close `fUvS9` | 15px, `#FFFFFF59`; `order.cancel` is its accessible name in both locales (§1.0) `[derived]` |
-| Subtitle | 11.5 / normal, `#FFFFFF73` |
-| `dbody` `Gd4Bl` | `fill_container` height, `padding 20`, `gap 18` `[frame]`, **the sole scroll owner** `[derived]` |
-| Section label | 10.5 / 700, `#FFFFFF73` |
-| Ordered row | 58 tall, radius 9, `#FFFFFF08`, `gap 12` |
-| Held-out row | 58 tall, radius 9, `#FFFFFF05` |
-| Grip icon | 14px — `#FFFFFF4D` on ordered rows, `#FFFFFF33` on held-out rows |
-| Ordinal badge | 22×22, radius 6; **#1** `#5BFFA01A` / `$--mint`; **#2+** `#FFFFFF0A` / `$--muted` |
-| Source name / meta | 12.5 / 600 `$--foreground` over 10.5 / normal `#9BA3B8B3` |
-| Type tag | radius 999, 10 / 600 — the provenance palette in §2 D-19 |
-| `foot` | `#FFFFFF05`, 1px top border, buttons radius 7, 12 / 600 |
-
-**The ordinal badge inks the first position, and only the first** `[frame]`. Rank 1 is
-mint; every later rank is the muted neutral. Mint here is **control ink, not relation
-ink** (§1.0): it means *first in this stored order*. On save, the explicit
-`chains/reorder` operation uses that order to sort each existing Route's hops; the badge
-still does not claim that this source is healthy or carrying the current request. The
-badge moves only when the order is edited `[derived]`.
-
-**This drawer must not claim live supply, and the reason is the contract, not caution**
-`[contract]`. The per-backend order is a persisted priority and an explicit input to
-`chains/reorder`, while execution still reads each model's exact stored chain and takes
-the first runnable hop. A source can therefore be first in the priority list while its
-hop is cooling, out of quota or process-unavailable. The list controls ordering; the
-chain's live annotations decide which hop answers. A backend-level surface that inked
-rank 1 as the live answer would still be wrong when another hop is runnable.
-
-The rule generalises past this drawer: **a surface may only assert a fact whose inputs
-it displays.** The per-model current source is owned by the frame that shows models —
-01 and 08's 当前 … rows, at per-model grain, including 当前 aihub(接管). This drawer
-owns the order and asserts the order. Two surfaces, two claims, one owner each; where
-they overlap they would have had to agree, and the way to guarantee agreement is to
-stop one of them from making the claim at all.
-
-**Element inventory**
-
-| Element | Displays | Interactive | On activate |
-| --- | --- | --- | --- |
-| Ordered rows | The order, ranked from 1 | drag, and fully by keyboard | Reorder |
-| Grip | Drag affordance | drag / Space | Grab and drop |
-| 排进来 `MJZ2I` | Add a held-out source to the order | yes | Append at the end, then focus the moved row `[derived]` |
-| 移出 `A2Hz9O` / `FjqVJ` | Take an ordered source out of the order | yes | Move the row to the held-out section, then focus the moved row `[derived]` |
-| 取消 / 关闭 `fUvS9` | Leave without saving; the icon is the button's second press and carries `order.cancel` as its name (§1.0) | yes | Close, discarding uncommitted moves |
-| 保存顺序 | Commit | yes | Persist the order, apply it to existing Routes, close |
-
-**排进来 and 移出 are one control in two directions, and both are drawn** `[frame]`. The
-held-out row carries `MJZ2I`; each ordered row carries the same button reversed —
-`A2Hz9O` on `YXG4r`, `FjqVJ` on `m18t4` — in an identical treatment (`#FFFFFF0A`,
-`radius 8`, `$--border-strong`, `padding [9,12]`, `gap 6`, label Inter 11.5 / 700).
-Membership in this order is a two-way relation, so it gets one affordance with two
-labels rather than one affordance and one omission. A drawer whose only way *out* of the
-order was drag-and-drop would make the two directions unequal for no reason: one a
-button, the other a gesture — and the gesture is the direction with no keyboard
-equivalent that produces the same result.
-
-**Changing the order is not a guarded change, and this drawer starts no confirmation
-at all** `[contract]`. The drawer sends the complete order to the explicit
-`POST /api/models/agents/<backend>/chains/reorder` route. That response is the
-authoritative `AgentSupply` echo after the order has been stored and existing Routes
-have been stably reordered in one mutation. A source removed from the priority list
-remains a valid Route hop when it is still present in a chain; the reorder operation only
-places listed Sources first and preserves every hop pair. There is nothing for a guard to
-refuse, and a failed request leaves the draft available for retry.
-
-*An earlier version of this section had it removing hops.* It read the order save as
-「a save that drops sources is not a different kind of change from any other that would
-remove hops」, gave §1.3 a Guard-refused state, and promised in the confirm copy that
-移出的来源会从这个后端的所有路由链里消失 — while four paragraphs above, this same section
-said reordering leaves every existing chain untouched *and called that the property which
-makes the list safe to edit*. Both could not be true, and the one that had authority is
-the one this file was not free to choose: `model-hub.md` §4.5's Source-mutation envelope
-matrix is declared **authoritative and exhaustive** over 「all Source/inventory
-mutations, including writes that cannot remove supply」, its eight rows do not include
-this route, and FC-12 lists 「the explicit backend Source-order PUT」 as its own item
-beside 「every Source/inventory mutation mirrors §4.5's total matrix row-for-row」. An
-exhaustive table that omits a route is not a table with a hole in it. So the success echo
-`api.md` gives this route, and its 「no policy state exists」, are the matrix being
-mirrored correctly rather than a mirror left half-finished, and what G-9 recorded as owed
-was never owed — which is why it is now recorded as withdrawn rather than left standing.
-The cost of leaving it standing was not a documentation defect: a registered gap reads as
-*not built yet*, so the next reader to close it would have taught the server to delete
-configured routes on a reorder, and the copy above would have been the warning that made
-it look intended.
-
-**There is no mode, and the drawer has no ownership state** `[frame]` `[spec]`. Every
-element on this surface is either part of one stored order or an action that edits it:
-two sections, the rows in them, and a foot that commits or discards. The order the user
-sees is the backend's global priority and the order applied to existing Routes on save;
-the only way it changes is that somebody changes it here or a new source is placed by the
-add transaction.
-*This section used to specify the opposite, and what it lost is worth naming.* An earlier
-version drew a 跟随推荐 / 自定义 segmented control, a three-state ownership machine, a
-hint row reading 「顺序已改成「自定义」:新来源不会自动排进来。」 and a 恢复推荐顺序 escape.
-All four are deleted. Under the configured-chain ruling (`model-hub.md`, owner 2026-08-09)
-there is **no `follow | custom` state and no second projection from a recommendation**, so
-a mode switch would have been a pointer standing where a result belongs — the drawer would
-have shown the *name of a policy* rather than the order that executes. The escape hatch
-went with it, and that is a real loss: 恢复推荐顺序 was a one-press way back from a
-reorder the user regretted. What replaced it is not a smaller version of the same thing —
-it is nothing, because the honest replacement is *undo the last change*, which this
-version does not build. D-10a's one-way-door concern is therefore **not** answered by this
-frame; it is answered by the order still being fully editable by hand, which is weaker and
-is recorded as such.
-*The hint row's job disappeared rather than moving.* It existed because 自定义 froze the
-order, so a newly added source could be silently held out and the user had to be told.
-Under the add-time placement policy (`model-hub.md` §4.2) every accepted match is written
-at a determinate position by the same transaction that adds the source, and the
-transaction returns it: `POST /api/models/sources` answers with `added_to`, whose entries
-carry `backend`, `menu_model`, `source_id`, `model_id` and `position`, the last one-based
-in the persisted Route chain after commit `[contract]`. So 「新来源不会自动排进来」 is no
-longer true and the state it warned about no longer exists — the warning was retired
-because the condition was, not because the surface moved.
-
-*Nothing renders where it landed, and that is a gap rather than a decision.* A user who
-has just added a source needs to know where it went, and the one moment the answer is in
-hand is the add transaction's own response — a drawer opened later cannot read it back,
-unlike persisted `Source.adopted_by`. **No frame in this document
-draws `added_to`** `[contract-gap]` **G-22**. The surface that would own it is the add
-flow's terminal, 06 for the source just created — §1.4's *Awaiting sign-in* and §1.5's ②
-both land there, and both land holding the array. This file states the landing and not the
-rendering, because specifying an element no frame draws would be this document inventing
-design (§0.2).
-
-**The held-out section is not an exclusion list.** Its label reads 「未排入这条顺序」
-`[frame]`. A source outside this backend's order is still a source: it may sit in another
-backend's order, and a chain elsewhere can name it. The earlier design read this section
-as 「不参与排序」, which said something much stronger and false. The two sections
-partition the eligible sources exactly: no source is in both, and none is in neither.
-
-**Keyboard operation** `[derived]`. Drag-and-drop is the drawn affordance; it is not the
-specified one, because a reorder surface that only accepts a pointer is unusable by
-keyboard and by assistive tech, and this drawer is the only way to express a preference
-the resolver reads. Required bindings, on a focused row:
-
-| Key | Effect |
-| --- | --- |
-| `Space` | Grab the row, or drop a grabbed row at its current position |
-| `↑` / `↓` | Grabbed: move the row one position. Not grabbed: move focus between rows |
-| `Escape` | Grabbed: cancel the grab and restore the pre-grab order. Not grabbed: close the drawer |
-| `Enter` | On 排进来 / 移出: move that source between the two sections and put focus on the moved row |
-
-Ordinals renumber contiguously from 1 after every move, grabbed state is announced
-(`aria-grabbed` plus a live-region message naming the new position), and the order a
-keyboard produces is byte-identical to the one a drag produces — they must write the
-same value through the same commit path, not two paths that agree today. Every binding in
-the table above commits through that one path, and so does every button on a row.
-
-**The subtitle says what this drawer stores and what its Save applies** `[contract]`.
-The `chains/reorder` request persists the complete Source order and applies it to every
-existing Route using the stable sort defined in `model-hub.md` §4.6. Therefore the first
-source is tried first and the next priority is used automatically for fallback-eligible
-quota, rate-limit, server, authentication, and network failures. If the request fails,
-the drawer keeps the same draft and retries it; no partial priority state is visible.
-
-**Copy** — namespace `models.hub.order.*`
-
-| Key | 中文 | English |
+| UI label | English | Chinese |
 | --- | --- | --- |
-| `title` | {{backend}} · 全局路由优先级 | {{backend}} · Global route priority |
-| `subtitle` | 在每个型号已有路由中的来源里，排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
-| `infoLabel` `[derived]` | 什么是全局路由优先级 | What global route priority is |
-| `section.ordered` | 排在这条顺序里 | In this order |
-| `section.ordered.note` | 拖动排序 | Drag to reorder |
-| `section.heldOut` | 未排入这条顺序 | Not in this order |
-| `section.heldOut.note` | 这些来源仍保留在已有路由里，排在这条顺序之后。要从路由中移除，请编辑对应型号的网关路由。 | These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route. |
-| `action.include` | 排进来 | Add to order |
-| `action.exclude` | 移出 | Remove from order |
-| `empty.noEligible` `[derived]` | 这个后端还没有可用来源。 | No source is available to this backend yet. |
-| `empty.ordered` `[derived]` | 这条顺序现在是空的。把下面的来源排进来。 | This order is empty. Add a source from below. |
-| `cancel` | 取消 | Cancel |
-| `save` | 保存顺序 | Save order |
-| `fail.read` `[derived]` | 来源列表没读到 | The source list could not be read |
-| `fail.save` `[derived]` | 顺序没保存上 | The order was not saved |
-| `retry` `[derived]` | 重试 | Retry |
+| Group action/title | Default routing | 默认路由 |
+| Route origin | Automatic / Manual / Passthrough | 自动 / 手动 / 透传 |
+| Empty plan | Unconfigured | 未配置 |
+| Empty inherited action | Configure default routing | 配置默认路由 |
+| Dialog footer action | Restore automatic | 恢复自动 |
+| Draft recovery | Undo restore | 撤销恢复 |
 
-**One failed read is not an engine verdict** `[derived]`. This drawer's list came from
-one request, and that request failing says the request failed. Sending the drawer to §1.0
-Unreachable — as this section read until this round — makes the page behind it declare the
-runtime down on that single piece of evidence, and it does so while the page's own runtime
-read may be sitting right there saying `ok`. The two readings then disagree on screen, and
-the one with less evidence wins. So the failure stays where the evidence is: the drawer
-keeps its own row, says what it could not read, and offers the read again. A runtime that
-really is down is reported by the read that actually watches it, and 重试 from here will
-find that out honestly rather than announce it.
-
-**These three keys are what F1 costs, and 重试 is bought once** `[derived]`. Saving and
-Sources unread are both F1 states, and F1 is 「the message is replaced in the slot the
-result would have used, the primary becomes 重试」 (§0.8) — so each owes one line, and a
-drawer that carried neither would be specifying a treatment it cannot render. The label is
-shared because it is the same word in the same place on a surface that never shows both
-lines at once: a drawer with no list to reorder has nothing to save. Both lines say what
-did not happen and nothing about why. The save sends the complete order to the atomic
-reorder operation, while the drawer keeps every move the user made, and the frozen rule against enumerating request-level failure
-kinds means a 401, a 409 and a timeout are the same sentence here — the same shape
-§1.6 gives `fail.tier`.
-
-**The copy says priority and fallback** `[derived]`. 保存顺序 stores the source order and
-applies it to existing Route hops (§4.6), so the first listed upstream is tried first and
-the next priority is used automatically for fallback-eligible quota, rate-limit, server,
-authentication, and network failures.
-The two section labels remain about membership in the priority list: 排在这条顺序里 and
-未排入这条顺序.
-
-**Extreme data** `[derived]`
-
-- **13 rows**: `dbody` scrolls; the head and the foot with its two buttons stay pinned.
-  The page behind the scrim does not scroll.
-- **Zero eligible sources**: both sections are empty; the drawer shows one line —
-  「这个后端还没有可用来源。」 — and 保存顺序 is disabled. The drawer still opens; a
-  surface that refuses to open cannot explain why it is empty.
-- **Empty order, held-out sources remaining** `[derived]`: the *ordered* section renders
-  「这条顺序现在是空的。把下面的来源排进来。」 and the held-out rows stay listed with their
-  排进来 buttons; 保存顺序 stays enabled. This is a different emptiness from the one above
-  and needs saying, because it is reachable by two routes and the repair is already on
-  screen: a user can empty the order by hand with 移出, and a source that stops being
-  eligible for this backend leaves both sections, so an order can also empty itself while
-  a usable source sits one press away. 保存顺序 is deliberately **not** disabled here: an empty order is a real
-  configuration — it means *place no source automatically when a new route is built* —
-  and refusing to save it would trap a user who genuinely wants that in a drawer they
-  cannot leave without undoing their work. What it does **not** mean is that the backend
-  stops being supplied. This save stores the order and stably reorders existing
-  Route hops without changing their membership or mappings; frame 01 goes on rendering
-  whichever hop is runnable first. 没有可用来源 appears when a backend has no runnable
-  hop, which an empty priority order neither causes nor prevents — it decides only what
-  the next 加入 finds waiting for it.
-- **Exactly one source**: it renders at rank 1 with the mint badge, the grip is present
-  but inert, and the drawer is still reachable — the order is trivially satisfied, not
-  meaningless.
-- **A `needs_action` source already in the order** keeps its rank and shows its cause;
-  it is not silently dropped.
-- **Long names**: source name truncates at the row width with the full value in
-  `title`; the meta line truncates from the middle, keeping both ends.
-
----
+Reuse existing localized Save/Cancel/Retry and guard-impact copy. Origin-help behavior
+follows the routing revision above. Compatibility chains/reorder is not the new UI save
+path; when called it uses the same default guards and preserves manual arrays.
 
 ### 1.4 Frame 04 `XvCC4` — Add subscription
 
@@ -5461,19 +5274,12 @@ instead (§1.6, E-2), and the reasoning it replaced that with is better: the hin
 never a decision the user can revisit, so making it findable buys nothing and teaches
 everyone else that protocols are their problem.
 
-**D-9 — The source order is a backend-scoped priority, persisted separately and applied
-explicitly to existing Routes.** One order per gateway-mode backend. The atomic
-`chains/reorder` operation stores the complete order and stably places listed Sources
-first in every existing Route while preserving each exact hop pair. Runtime then reads
-the stored chain and chooses its first runnable hop among the sources already configured
-there. No later state of the list changes a chain until the user saves the drawer again.
-*Why:* N sources × M models of hand-wiring is a configuration surface nobody can hold in
-their head, so a backend-level priority gives one clear way to update all existing
-chains without inventing a second per-model policy. The operation changes order only,
-never membership or mappings. Per-backend rather than global because eligibility already
-differs per backend: a global list would have to render entries that cannot apply.
+**D-9 — Default routing belongs to one backend.** Its ordered subset supplies the
+effective planner for inherited models. Sources PUT changes this subset under exact-plan
+guards and leaves manual arrays unchanged. Inventory chooses the matching tier before
+passthrough; health determines which planned hop is runnable.
 
-**D-9a — A backend in 直连 mode exposes no order surface at all.** No 调整优先级 button
+**D-9a — A backend in 直连 mode exposes no order surface at all.** No 默认路由 button
 on its group head, and the drawer is unreachable for it.
 *Why:* a direct backend consults no source order, so the editor would edit a list
 nothing reads — the most expensive kind of dead control, because it looks like it
@@ -5548,7 +5354,7 @@ is caught by users.
 
 **D-18 — Placement is the mode surface; there is no mode switch widget.** A backend's
 mode is expressed by *where its configuration lives* — a 直连 backend has a
-切换到网关 action and nothing else, a 网关 backend has 调整优先级, model rows and
+切换到网关 action and nothing else, a 网关 backend has 默认路由, model rows and
 切到直连.
 *Why:* a mode toggle would make the two modes look like two settings of one thing,
 inviting the user to flip it and see. They are two different configuration models with
@@ -5671,62 +5477,12 @@ fact a source can carry, while an unknown protocol is a value every later reques
 have to guess. Stated as a property rather than as a permission, it also decides cases
 nobody has drawn yet: any future add path inherits the same test.
 
-**D-28 — A backend-order surface reads `AgentSupply.sources`, that backend's stored Source
-order; a source card reads `adopted_by`. Neither substitutes for the other.** §1.3 owns
-the first reading — it is the list the atomic `POST /api/models/agents/<backend>/chains/reorder`
-stores and re-echoes in `{agent: AgentSupply}` —
-and §1.0 owns the second; this decision is only about the prohibition on deriving either
-from the other.
-*Why:* the two diverge on an ordinary page, not only in edge cases, and they diverge in
-**both** directions. `adopted_by` names Hub-mode backends whose persisted Route chains
-reference the source, de-duplicated by backend and carrying no position. The Source order
-names the sources a user placed under a backend, in a sequence, and `agent-supply.schema.json`
-calls it 「stored configuration and an Add-time placement input」. Those are different sets
-in each direction: a source can sit in a backend's order while no chain on that backend
-names it, and a source can be adopted by a backend whose order does not contain it,
-because a chain may name any source and 移出 does not remove the hop. Read the order into
-the card and it reports a priority rather than adoption; read `adopted_by` into the drawer
-and every held-out source and every ordered-but-unreferenced source vanishes from the list
-the drawer exists to edit, while the field's missing position makes an order impossible to
-reconstruct at all.
-
-*And neither is the stored chain, which is a third projection with its own owner.* §1.2's
-route-chain editor is where hop order lives, at per-model grain. The prohibition covers
-that pair too: a card that read a chain would have to pick one hop — first, serving, any —
-and each answer is a different sentence that changes under the user with no edit and no
-notification. **Naming the Source order here does not make it live supply state.**
-`model-hub.md` §4.2 is explicit that it is a visible Gateway priority and that runtime
-executes the exact hop order stored for each model. The drawer's atomic chains/reorder
-save is the explicit bridge: it stores the priority and applies it to existing Routes
-without changing hop membership or mappings. This decision assigns each surface
-the projection it displays; it does not promote any of the three into an input for another.
-
-Neither projection reports live supply, and the card must not be written as though one
-did. `api.md` calls `adopted_by` 「the stable Source-card projection of persisted
-references」, and *stable* is the whole property: the array is unchanged by a cooldown, a
-revoked credential, or a takeover routing past this hop. So the card's question is 「who
-has this configured」, the drawer's is 「in what order」, and 「who is drawing from it right
-now」 is a third question **neither field answers** — it needs the per-chain runnability
-read, at row grain, on a payload this page does not fetch. Naming it as a third question
-rather than assigning it to `adopted_by` is the point of this decision: the earlier
-wording claimed the field 「combines runnability」, which the contract does not say and the
-word *stable* rules out, and a card built on that reads 使用中 beside a source whose
-credential died an hour ago.
-
-*This decision was re-derived at `ca45aeb6`, and the field it originally named is gone.*
-It used to read 「a backend-order surface reads `order_enrolled_by`」, with a divergence
-argued from enrolment-without-adoption. S-1 deletes enrolment, and `order_enrolled_by`
-goes with it, so the old sentence named a field no implementation can read. The decision
-survives because what it actually governs is *which projection answers which question*,
-and the projections that answer them still exist — `AgentSupply.sources` and `adopted_by`
-— but it survives as a re-derivation, not as a citation that quietly kept pointing at a
-deleted field. The first re-derivation replaced the deleted field with 「the stored
-chain」, which was the wrong substitute for a second time: §1.3 saves and reads back
-`AgentSupply`, never a chain, so the rule named a projection its own owning section does
-not fetch. The correction is recorded here rather than applied silently, because the
-failure mode is the interesting part — a re-derivation done in one pass over the decision
-and not over the section it governs. Worth recording, because nothing in the review
-flagged it: a citation to a deleted name reads exactly like a citation to a live one.
+**D-28 — Each surface consumes its server-owned projection.** Default routing reads
+`AgentSupply.sources`; Source cards read effective `adopted_by`; model rows/editors
+read effective AgentChain with actual `manual_override` and `route_origin`.
+Default Sources may be absent from matching tiers; manual routes may name other eligible
+Sources. Neither membership nor adoption is live health. No frontend inventory matching
+or array-equality heuristic derives route intent.
 
 **D-29 — The page is 「模型」, the module is 「来源与网关」, and 「模型网关」 is never
 rendered.** The project's name for this work is not a string in the product.
@@ -5893,10 +5649,10 @@ rather than spot-corrected.
 | Which nouns UI copy may use, and which are required | `model-hub.md` §3 — *Vocabulary (v3 recut; UI copy uses only these nouns)* |
 | What a source is and what it carries | `model-hub.md` §4.1 — *Supply — Sources (global assets, no ordering)* |
 | How a chain is populated when a Source is added | `model-hub.md` §4.2 — *Gateway strategy — add-time defaults, then explicit configuration* |
-| **How a request executes a stored chain — the sole authority** | `model-hub.md` §4.3 — *The only normative configured-chain execution algorithm* |
+| **How a request executes an effective chain — the sole authority** | `model-hub.md` §4.3 — *The only normative effective-chain execution algorithm* |
 | Whether eligibility is client- or server-decided | `model-hub.md` §4.4 — *Configuration eligibility is server-authoritative (v3)* |
 | Source states, self-healing classes, `detail_key` vocabulary | `model-hub.md` §4.5 — *State taxonomy — classified by "does it heal itself"* |
-| How a configured chain is stored and mutated | `model-hub.md` §4.6 — *Configured-chain storage and mutation* |
+| How a configured chain is stored and mutated | `model-hub.md` §4.6 — *Route intent storage and mutation* |
 | Downstream Agents | `model-hub.md` §4.7 |
 | OpenCode identifier scheme | `model-hub.md` §4.8 — *locked 07-23, retained in v3* |
 | Which module owns which class of configuration | `model-hub.md` §5 — *Surfaces — two modules, one understandable handoff* |

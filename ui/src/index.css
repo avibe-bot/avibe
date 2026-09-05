@@ -244,6 +244,7 @@
   --ring: rgba(91, 255, 160, 0.6);
 
   --mint: #5bffa0;
+  --route-manual: #8bb4ff;
   --mint-soft: rgba(91, 255, 160, 0.16);
   --mint-ink: #5bffa0;
   --mint-hover: #6fffab;
@@ -376,6 +377,7 @@
        there by the owner decision of 2026-08-14 above. The washes below mix
        from the fill, which is why they carry the fill's hex. */
     --mint: #10b981;
+    --route-manual: #245bcd;
     --mint-soft: rgba(16, 185, 129, 0.14);
     --mint-ink: #10b981;
     --mint-hover: #0ea372;
@@ -480,6 +482,7 @@
   --ring: rgba(16, 185, 129, 0.5);
 
   --mint: #10b981;
+  --route-manual: #245bcd;
   --mint-soft: rgba(16, 185, 129, 0.14);
   --mint-ink: #10b981;
   --mint-hover: #0ea372;

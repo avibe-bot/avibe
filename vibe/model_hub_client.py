@@ -159,10 +159,24 @@ class ModelHubRemoteService:
             {"backend": backend, "sources": sources},
         )
 
-    async def reorder_agent_chains(self, backend: str, order: object = _REORDER_ORDER_UNSET) -> dict:
+    async def reorder_agent_chains(
+        self,
+        backend: str,
+        order: object = _REORDER_ORDER_UNSET,
+        *,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
+    ) -> dict:
         payload = {"backend": backend}
         if order is not _REORDER_ORDER_UNSET:
             payload["order"] = order
+            if force:
+                payload["force"] = force
+            if confirmed_remove_hops is not None:
+                payload["would_remove_hops"] = confirmed_remove_hops
+            if confirmed_interruptions is not None:
+                payload["would_interrupt"] = confirmed_interruptions
         return await _rpc("reorder_agent_chains", payload)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
@@ -199,6 +213,16 @@ class ModelHubRemoteService:
         return await _rpc(
             "set_agent_chain",
             {"backend": backend, "model_id": model_id, "chain": chain},
+        )
+
+    async def delete_agent_chain(self, backend: str, model_id: str, chain: object = None) -> dict:
+        return await _rpc(
+            "delete_agent_chain", {"backend": backend, "model_id": model_id, "chain": chain},
+        )
+
+    def preview_agent_chain(self, backend: str, model_id: str, chain: object) -> dict:
+        return _rpc_sync(
+            "preview_agent_chain", {"backend": backend, "model_id": model_id, "chain": chain},
         )
 
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:
@@ -271,6 +295,9 @@ class ModelHubRemoteService:
 
     def get_turn_provenance(self, turn_id: str) -> dict:
         return _rpc_sync("get_turn_provenance", {"turn_id": turn_id})
+
+    def get_model_provenance(self, backend: str, model_id: str) -> dict | None:
+        return _rpc_sync("get_model_provenance", {"backend": backend, "model_id": model_id})
 
     async def oauth_start(self, payload: dict) -> dict:
         return await _rpc("oauth_start", {"oauth": payload})

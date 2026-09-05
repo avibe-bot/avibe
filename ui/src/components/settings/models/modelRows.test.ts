@@ -11,7 +11,7 @@ const baseModel: BackendModel = {
 
 const agent: AgentSupply = {
   backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', sources: { order: [], eligibility: [] },
-  routes: { 'route-only': { hops: [] } }, builtin_models: ['builtin'], model_supply: [{ model_id: 'builtin', chain_length: 0, has_runnable_hop: false }],
+  routes: { 'route-only': { hops: [] } }, builtin_models: ['builtin'], model_supply: [{ route_origin: null, model_id: 'builtin', chain_length: 0, has_runnable_hop: false }],
   selected_model_id: null, selected_model_explicit: false, supply_status: null, named_agents: [], menu: null,
 };
 
@@ -56,7 +56,7 @@ describe('collapsedModelRows', () => {
     ...agent,
     builtin_models: menu,
     routes: {},
-    model_supply: menu.map((modelId, index) => ({ model_id: modelId, chain_length: index < count ? 0 : 1, has_runnable_hop: index >= count })),
+    model_supply: menu.map((modelId, index) => ({ route_origin: "manual" as const, model_id: modelId, chain_length: index < count ? 0 : 1, has_runnable_hop: index >= count })),
   });
 
   it.each([0, 2, 5, menu.length])('shows at most the first six rows regardless of supply state (%i unsupplied)', (unsupplied) => {
@@ -73,7 +73,7 @@ describe('collapsedModelRows', () => {
   it('keeps a nonempty but wholly unrunnable Route classified while folding it beyond the limit', () => {
     const paused = {
       ...withEmptyRoutes(0),
-      model_supply: menu.map((modelId, index) => ({
+      model_supply: menu.map((modelId, index) => ({ route_origin: "manual" as const,
         model_id: modelId,
         chain_length: 1,
         has_runnable_hop: index !== menu.length - 1,

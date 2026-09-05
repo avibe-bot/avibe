@@ -1,5 +1,5 @@
 {
-  "contract_version": 8,
+  "contract_version": 9,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -395,6 +395,76 @@
     }
   ],
   "decision_tables": [
+    {
+      "id": "D28",
+      "domain": "recorded-error diagnostic selection",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Recorded-error diagnostic selection",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "recorded_error."
+        }
+      ]
+    },
+    {
+      "id": "D26",
+      "domain": "effective route origin",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "agent-chain.schema.json",
+        "paths": [
+          "/properties/route_origin"
+        ],
+        "exclude": [
+          null
+        ]
+      },
+      "consumers": [
+        {
+          "kind": "schema_vocabulary",
+          "schema": "agent-supply.schema.json",
+          "paths": [
+            "/properties/model_supply/items/properties/route_origin"
+          ],
+          "exclude": [
+            null
+          ]
+        },
+        {
+          "kind": "python_string_assignment",
+          "file": "core/handlers/model_hub/resolver.py",
+          "name": "RouteOrigin"
+        },
+        {
+          "kind": "typescript_string_union",
+          "file": "ui/src/components/settings/models/types.ts",
+          "name": "RouteOrigin"
+        }
+      ]
+    },
+    {
+      "id": "D27",
+      "domain": "effective route planning",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Effective-route decision matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "route_plan."
+        }
+      ]
+    },
     {
       "id": "D1",
       "domain": "credential failure handling",

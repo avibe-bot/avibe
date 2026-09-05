@@ -13,16 +13,16 @@ const leaves = (node: unknown): string[] =>
 describe('Models page vocabulary', () => {
   it('contains none of the retired user-facing terms', () => {
     const copy = leaves(zh.settings.models).join('\n');
-    expect(copy).not.toMatch(/菜单固定|跟随推荐|中枢 Hub|按量\s*\$|映射|供给|来源|型号|上游|自定义顺序|已改为手动|恢复默认/);
+    expect(copy).not.toMatch(/菜单固定|跟随推荐|中枢 Hub|按量\s*\$|映射|供给|来源|型号|自定义顺序|已改为手动|恢复默认/);
     expect(copy).not.toMatch(/按量(?!付费)/);
     expect(zh.settings.models.billing.monthly).toBe('订阅');
     expect(zh.settings.models.billing.metered).toBe('按量付费');
     expect(en.settings.models.billing.monthly).toBe('Subscription');
     expect(en.settings.models.billing.metered).toBe('Pay as you go');
-    expect(zh.settings.models.order.subtitle).toBe('在每个模型已有路由中，排在前面的供应商优先使用；当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，模型网关会自动切换到下一优先级。');
-    expect(en.settings.models.order.subtitle).toBe("Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.");
-    expect(zh.settings.models.order.section['heldOut.note']).toBe('这些供应商仍保留在已有路由末尾。要从路由中移除，请编辑对应模型的路由。');
-    expect(en.settings.models.order.section['heldOut.note']).toBe("These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route.");
+    expect(zh.settings.models.order.subtitle).toBe('作用于自动和透传路由，已保存的手动路由保持不变。');
+    expect(en.settings.models.order.subtitle).toBe('Applies to automatic and passthrough routes. Saved manual routes stay unchanged.');
+    expect(zh.settings.models.order.section['heldOut.note']).toBe('可用于手动路由。');
+    expect(en.settings.models.order.section['heldOut.note']).toBe('Available for manual routes.');
     expect(zh.settings.models.supplyMode.fixHint).toBe('去「模型」页添加或启用供应商即可恢复。');
     expect('policy' in zh.settings.models.agents).toBe(false);
   });

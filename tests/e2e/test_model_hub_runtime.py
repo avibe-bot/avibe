@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +48,49 @@ def _engine_app(model_hub_app_factory):
     return model_hub_app_factory(
         extra_env={"VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest}
     )
+
+
+@contextmanager
+def _isolated_engine_adapter(tmp_path, monkeypatch):
+    """Use the existing verified offline archive seeder without starting a backend CLI."""
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+    from vibe.model_hub_runtime.state import EngineStateStore
+    from vibe.model_hub_runtime.supervisor import EngineSupervisor
+
+    manifest = _local_engine_manifest()
+    fixture = ModelHubTestApp(
+        Path(__file__).resolve().parents[2], tmp_path,
+        extra_env={"VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest},
+    )
+    with monkeypatch.context() as isolated:
+        for key, value in fixture.env.items():
+            isolated.setenv(key, value)
+        fixture.home.mkdir(parents=True)
+        (tmp_path / "tmp").mkdir()
+        fixture._seed_local_engine_archive()
+        root = fixture.avibe_home / "runtime" / "model-hub"
+        installer = EngineRuntimeManager(runtime_dir=root / "engine", manifest_path=manifest, offline=True)
+        installed = installer.ensure()
+        assert installed["installed"], installed
+
+        def spawn(args, **kwargs):
+            if sys.platform == "darwin":
+                args = [
+                    "/usr/bin/sandbox-exec", "-p",
+                    '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))'
+                    '(allow network-outbound (remote ip "localhost:*"))',
+                    *args,
+                ]
+            return subprocess.Popen(args, **kwargs)
+
+        state = EngineStateStore(root / "state")
+        supervisor = EngineSupervisor(installer=installer, state_store=state, process_factory=spawn)
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state)
+        try:
+            yield adapter
+        finally:
+            supervisor.stop()
 
 
 def _install_engine(app) -> list[str]:
@@ -599,7 +643,7 @@ def test_a1_feature_flag_disables_the_complete_models_api(
         assert response.status == 404, (method, path, body)
         assert body == {
             "ok": False,
-            "contract_version": 8,
+            "contract_version": 9,
             "error": "feature_disabled",
         }
 
