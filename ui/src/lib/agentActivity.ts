@@ -1,5 +1,6 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 import { specFor } from './messageTypes';
+import { timestampOrderTimeMs } from './transcriptOrder';
 
 // One turn's activity, as rendered by the Chat Activity panel. Mirrors the
 // backend ``storage/agent_activity_service.py`` shape (see the /activity endpoint).
@@ -10,6 +11,19 @@ export type ActivityRow = {
   kind: 'assistant' | 'tool_call';
   text: string;
   created_at: string;
+  order_micros?: number; // authoritative durable key; absent on live SSE rows
+};
+
+// Storage owns persisted order, including clocks recovered from migration metadata.
+// Live rows without a durable key still carry their emission clock in the id.
+const activityRowTimeMs = (row: ActivityRow): number => {
+  if (row.order_micros !== undefined) return row.order_micros / 1000;
+  const clock = /^[^_]{3}_([0-9a-f]{15})/i.exec(row.id)?.[1];
+  if (clock) {
+    const micros = Number.parseInt(clock, 16);
+    if (Number.isSafeInteger(micros)) return micros / 1000;
+  }
+  return timestampOrderTimeMs(row.created_at);
 };
 
 // A group is positioned relative to a transcript message that is AT OR BEFORE the
@@ -69,7 +83,7 @@ export type TurnActivityGroupWire = {
   duration_ms: number | null;
   started_at?: string | null;
   ended_at?: string | null;
-  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string }>;
+  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string; order_micros?: number }>;
 };
 
 export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
@@ -81,7 +95,9 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   steps: wire.steps,
   durationMs: wire.duration_ms ?? null,
   startedAt: wire.started_at ?? null,
-  rows: wire.rows?.map((r) => ({ id: r.id, kind: r.kind, text: r.text, created_at: r.created_at })),
+  rows: wire.rows?.map((r) => ({
+    id: r.id, kind: r.kind, text: r.text, created_at: r.created_at, order_micros: r.order_micros,
+  })),
 });
 
 // A live ``message.new`` of type assistant/tool_call → an activity row (the live
@@ -95,7 +111,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
 
 // ===== Live running-card buffer: a pure state machine (state, not timing) =====
 // The live buffer drives ONLY the in-flight running card; all SETTLED groups come
-// from the durable endpoint. Each turn is tagged with a monotonic GENERATION so
+// from the durable endpoint. Each Activity phase is tagged with a monotonic GENERATION so
 // that a stale buffer is invisible by construction and a late settle-refresh is a
 // structural no-op for a newer turn:
 //   - the running card renders only while ``working`` AND ``rows`` are non-empty,
@@ -105,7 +121,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
 //     resolution is dropped). This subsumes the "stale/late buffer" class without
 //     promise-cancellation or grace-timer bookkeeping.
 export type LiveActivityState = {
-  gen: number; // current turn generation (monotonic)
+  gen: number; // current Activity phase generation (monotonic)
   settled: boolean; // the current generation has settled (terminal / turn.end seen)
   rows: ActivityRow[]; // current-generation buffer (empty ⇒ nothing to show)
   startedAt: number | null; // elapsed-clock start for the running card
@@ -148,10 +164,12 @@ export const liveActivityReducer = (
       // previous generation are dropped by construction).
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'reset':
-      // Turning Activity off invalidates every in-flight refresh from the visible
-      // generation. Re-enabling may then hydrate only the current durable turn.
+      // Visibility changes, navigation and output phase boundaries invalidate
+      // every in-flight read from the previous visible group without settling work.
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'row':
+      // Storage hydration can include a row before its SSE envelope arrives.
+      if (state.rows.some((row) => row.id === event.row.id)) return state;
       if (state.settled) {
         // First row after a settle with no turn.start = an agent-initiated new turn.
         return { gen: state.gen + 1, settled: false, rows: [event.row], startedAt: event.now };
@@ -169,11 +187,19 @@ export const liveActivityReducer = (
       // this resolution is a stale no-op and must not wipe the new turn's rows).
       return event.gen === state.gen ? { ...state, rows: [], startedAt: null } : state;
     case 'rehydrate_for_gen':
-      // In-flight re-hydrate from storage, only if still the current generation and
-      // the live stream hasn't already filled the buffer.
-      return event.gen === state.gen && state.rows.length === 0
-        ? { ...state, rows: event.rows, startedAt: event.startedAt }
-        : state;
+      if (event.gen !== state.gen || state.settled) return state;
+      // Match storage's (emission time, id) order even when its bounded window
+      // advances. Stable timestamp-only sorting would move retained tied rows last.
+      // Durable rows win overlap so SSE cannot erase storage-only ordering keys.
+      return {
+        ...state,
+        rows: [...new Map([...state.rows, ...event.rows].map((row) => [row.id, row])).values()]
+          .sort((a, b) => {
+            const timeOrder = activityRowTimeMs(a) - activityRowTimeMs(b);
+            return timeOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+          }),
+        startedAt: Math.min(state.startedAt ?? event.startedAt, event.startedAt),
+      };
     default:
       return state;
   }

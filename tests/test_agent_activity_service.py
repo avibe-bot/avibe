@@ -393,6 +393,45 @@ def test_migrated_terminal_uses_original_message_clock_for_same_second_order(
     assert groups[0]["anchor_message_id"] == _clock_id("msg", base + 1_000)
 
 
+def test_detail_exposes_the_same_order_contract_consumed_by_ui(isolated_state):
+    fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "ui/src/lib/agentActivity.order.fixture.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    wire_keys = ("id", "kind", "text", "created_at", "order_micros")
+    expected_rows = [{key: row[key] for key in wire_keys} for row in fixture["rows"]]
+    engine = create_sqlite_engine()
+    sid = "ses_activity_order_contract"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn, scope, sid, mid="fixture-prompt", mtype="user", author="user",
+            created_at="2026-09-04T23:59:59Z", source="user", text="start",
+        )
+        for row in fixture["rows"]:
+            if row["kind"] == "assistant":
+                _msg(
+                    conn, scope, sid, mid=row["id"], mtype="assistant", author="agent",
+                    created_at=row["created_at"], text=row["text"],
+                )
+            else:
+                assert row["kind"] == "tool_call"
+                metadata = {"legacy_message_id": row["legacy_message_id"]} if "legacy_message_id" in row else {}
+                _evt(
+                    conn, scope, sid, eid=row["id"], created_at=row["created_at"],
+                    text=row["text"], metadata=metadata,
+                )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        assert len(groups) == 1
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=groups[0]["id"])
+    assert detail is not None
+    assert detail["open"] is True
+    assert detail["rows"] == expected_rows
+
+
 def test_duration_measured_from_turn_opener(isolated_state):
     """The chip duration spans the turn opener → terminal (what the history endpoint
     reports), not first-activity → terminal — so live and reloaded chips agree."""

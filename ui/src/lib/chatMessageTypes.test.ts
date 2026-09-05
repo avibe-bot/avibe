@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isAgentActivityBoundaryMessage,
   isBoundaryMessage,
   isDetachedCompletionMessage,
   isNotifyMessageType,
@@ -99,6 +100,24 @@ describe('isBoundaryMessage', () => {
     expect(statusTypes.length).toBeGreaterThan(0);
     for (const type of statusTypes) {
       expect(isBoundaryMessage({ type, metadata: { detached: true } }), type).toBe(false);
+    }
+  });
+});
+
+describe('isAgentActivityBoundaryMessage', () => {
+  it('advances Activity only for the catalog effective boundary role', () => {
+    for (const type of messageTypeNames()) {
+      const spec = specFor(type);
+      for (const detached of [false, true]) {
+        for (const event of [undefined, ...spec.terminalWhenEvents]) {
+          const message = { type, metadata: { detached, event } };
+          const isBoundary = spec.activityRole === 'boundary'
+            && !(detached && spec.detachedCompletion)
+            && event === undefined;
+          expect(isAgentActivityBoundaryMessage({ ...message, author: 'agent' }), type).toBe(isBoundary);
+          expect(isAgentActivityBoundaryMessage({ ...message, author: 'user' }), type).toBe(false);
+        }
+      }
     }
   });
 });

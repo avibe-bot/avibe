@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
+import orderFixture from './agentActivity.order.fixture.json';
 import {
   activityGroupsForForeground,
   activityRowFromMessage,
@@ -349,7 +350,10 @@ describe('activityRowFromMessage', () => {
 });
 
 describe('liveActivityReducer (generation invariant)', () => {
-  const row = (id: string): ActivityRow => ({ id, kind: 'tool_call', text: id, created_at: `t-${id}` });
+  const row = (id: string): ActivityRow => ({
+    id, kind: 'tool_call', text: id,
+    created_at: new Date(Date.UTC(2026, 8, 5, 0, 0, Number(id) || 0)).toISOString(),
+  });
 
   it('turn_start bumps the generation and clears the buffer', () => {
     let s = initialLiveActivity();
@@ -410,7 +414,7 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(cleared.rows).toEqual([]);
   });
 
-  it('rehydrate_for_gen fills only an empty buffer of the current generation', () => {
+  it('rehydrate_for_gen preserves the live tail and only applies to its generation', () => {
     const s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
     const gen = s.gen;
     const hydrated = liveActivityReducer(s, {
@@ -420,11 +424,110 @@ describe('liveActivityReducer (generation invariant)', () => {
       startedAt: 50,
     });
     expect(hydrated.rows.map((r) => r.id)).toEqual(['x', 'y']);
-    // Does not clobber an already-filled buffer, nor a stale generation:
+    // Re-reading a snapshot preserves newer live rows without duplicating overlap.
     const withLive = liveActivityReducer(hydrated, { type: 'row', row: row('z'), now: 60 });
-    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('w')], startedAt: 70 });
+    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('x'), row('y')], startedAt: 50 });
     expect(noClobber.rows.map((r) => r.id)).toEqual(['x', 'y', 'z']);
     const staleGen = liveActivityReducer(hydrated, { type: 'rehydrate_for_gen', gen: gen - 1, rows: [row('w')], startedAt: 70 });
     expect(staleGen.rows.map((r) => r.id)).toEqual(['x', 'y']);
+  });
+
+  it('merges durable history with overlapping live rows in emission order', () => {
+    const history = Array.from({ length: 300 }, (_, index) => row(String(index)));
+    let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    state = liveActivityReducer(state, { type: 'row', row: history[299], now: 500 });
+    state = liveActivityReducer(state, { type: 'row', row: row('300'), now: 600 });
+    state = liveActivityReducer(state, {
+      type: 'rehydrate_for_gen', gen: state.gen, rows: history, startedAt: 100,
+    });
+    expect(state.rows).toEqual([...history, row('300')]);
+    expect(state.startedAt).toBe(100);
+    expect(liveActivityReducer(state, { type: 'row', row: history[299], now: 700 })).toBe(state);
+  });
+
+  it.each(['overlapping', 'disjoint'] as const)('retains emission order when the durable window moves (%s)', (window) => {
+    const rows = Array.from({ length: 6 }, (_, i): ActivityRow => ({
+      id: `${i % 2 ? 'evt' : 'msg'}_${(1_700_000_000_000_000 + i).toString(16).padStart(15, '0')}12345678`,
+      kind: i % 2 ? 'tool_call' : 'assistant',
+      text: `step ${i}`,
+      created_at: '2023-11-14T22:13:20Z',
+    }));
+    let state = liveActivityReducer(initialLiveActivity(), {
+      type: 'rehydrate_for_gen', gen: 0, rows: rows.slice(0, 3), startedAt: 100,
+    });
+    state = liveActivityReducer(state, {
+      type: 'rehydrate_for_gen', gen: state.gen,
+      rows: rows.slice(window === 'overlapping' ? 2 : 3), startedAt: 200,
+    });
+    expect(state.rows).toEqual(rows);
+    expect(state.startedAt).toBe(100);
+  });
+
+  it.each(['legacy ids', 'clock ids'] as const)('preserves durable tie order across hydration windows with %s', (idShape) => {
+    // The endpoint orders equal emission clocks by id, not locale or source.
+    const ids = idShape === 'legacy ids'
+      ? ['evt_A', 'evt_a', 'msg_A', 'msg_a', 'opaque_A', 'opaque_a']
+      : Array.from({ length: 6 }, (_, i) => `${i < 3 ? 'evt' : 'msg'}_${(1_700_000_000_000_000).toString(16).padStart(15, '0')}${String(i).padStart(8, '0')}`);
+    const rows = ids.map((id, i): ActivityRow => ({
+      id, kind: id.startsWith('msg_') ? 'assistant' : 'tool_call', text: `step ${i}`,
+      created_at: '2023-11-14T22:13:20Z',
+    }));
+    // Cover every boundary, including a later disjoint snapshot and a stale
+    // earlier snapshot after reconnect. The union must always match durable order.
+    for (let split = 1; split < rows.length; split += 1) {
+      for (const overlap of [0, 1]) {
+        const windows = [rows.slice(0, split), rows.slice(split - overlap)];
+        for (const snapshots of [windows, [...windows].reverse()]) {
+          let state = initialLiveActivity();
+          for (const snapshot of snapshots) {
+            state = liveActivityReducer(state, {
+              type: 'rehydrate_for_gen', gen: state.gen, rows: snapshot, startedAt: 100,
+            });
+          }
+          expect(state.rows).toEqual(rows);
+        }
+      }
+    }
+  });
+
+  it('does not rehydrate a settled generation or the next turn', () => {
+    let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    const late = { type: 'rehydrate_for_gen' as const, gen: state.gen, rows: [row('old')], startedAt: 1 };
+    state = liveActivityReducer(state, { type: 'settle' });
+    expect(liveActivityReducer(state, late)).toBe(state);
+    state = liveActivityReducer(state, { type: 'turn_start' });
+    expect(liveActivityReducer(state, late)).toBe(state);
+  });
+});
+
+describe('durable Activity order contract', () => {
+  // This same fixture is asserted against real SQLite grouping by the Python
+  // service test, including migrated tool hashes whose clocks are metadata-only.
+  const wireRows = orderFixture.rows.map(({ id, kind, text, created_at, order_micros }) => ({
+    id, kind: kind as ActivityRow['kind'], text, created_at, order_micros,
+  }));
+  const rows = groupFromWire({
+    id: wireRows[0].id, anchor_message_id: null, anchor_position: 'after',
+    open: true, status: 'interrupted', steps: wireRows.length, duration_ms: null,
+    rows: wireRows,
+  }).rows!;
+
+  it.each(['forward', 'reverse'] as const)('preserves server ordering across %s hydration windows and live overlap', (arrival) => {
+    for (let split = 0; split <= rows.length; split += 1) {
+      const snapshots = [rows.slice(0, split), rows.slice(Math.max(0, split - 1))];
+      if (arrival === 'reverse') snapshots.reverse();
+      const migrated = wireRows[3];
+      let state = liveActivityReducer(initialLiveActivity(), {
+        type: 'row', now: 100,
+        row: { id: migrated.id, kind: migrated.kind, text: migrated.text, created_at: migrated.created_at },
+      });
+      for (const snapshot of snapshots) {
+        state = liveActivityReducer(state, {
+          type: 'rehydrate_for_gen', gen: state.gen, rows: snapshot, startedAt: 100,
+        });
+      }
+      expect(state.rows).toEqual(wireRows);
+      expect(liveActivityReducer(state, { type: 'row', row: rows[3], now: 200 })).toBe(state);
+    }
   });
 });
