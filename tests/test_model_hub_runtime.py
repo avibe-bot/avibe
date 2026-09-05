@@ -1669,6 +1669,109 @@ def test_source_record_requires_valid_reasoning_state() -> None:
 
 
 @pytest.mark.parametrize(
+    ("persisted", "expected_reason"),
+    [
+        pytest.param(
+            json.dumps(
+                {
+                    "sources": [
+                        {
+                            "source_id": "src_fixture123",
+                            "vendor": "custom",
+                            "protocol": "openai_chat",
+                            "base_url": "https://api.example.test/v1",
+                            "credential_ref": "cred_fixture123",
+                            "allowed_origins": [],
+                            "model_ids": ["model-a"],
+                            "prefix": "avibe-fixture",
+                        }
+                    ]
+                }
+            ),
+            "invalid engine source reasoning state",
+            id="missing-reasoning-state",
+        ),
+        pytest.param(
+            "{not-json",
+            "invalid engine state file: sources.json",
+            id="corrupt-json",
+        ),
+    ],
+)
+def test_unreadable_source_state_is_discarded_rebuilt_and_reaches_ready(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    persisted: str,
+    expected_reason: str,
+) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    credential_ref = store.store_api_key(
+        "upstream-secret",
+        base_url="https://api.example.test/v1",
+    )
+    sources_path = store.root / "sources.json"
+    sources_path.write_text(persisted, encoding="utf-8")
+
+    with pytest.raises(EngineStateError):
+        store.revoke_credential(credential_ref)
+    assert store.credential_metadata(credential_ref)["value"] == "upstream-secret"
+    assert sources_path.read_text(encoding="utf-8") == persisted
+    assert not sources_path.with_name("sources.json.invalid").exists()
+
+    async def sync_and_start() -> None:
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+        await adapter.sync_sources([_binding(credential_ref)])
+        try:
+            status = await adapter.start()
+            assert status.health is EngineHealth.OK
+        finally:
+            await adapter.stop()
+
+    with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.state"):
+        asyncio.run(sync_and_start())
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "vibe.model_hub_runtime.state"
+        and record.levelno == logging.WARNING
+    ]
+    assert [record.getMessage() for record in warnings] == [
+        f"Discarded invalid engine state file sources.json: {expected_reason}"
+    ]
+    assert sources_path.with_name("sources.json.invalid").read_text(encoding="utf-8") == persisted
+    rebuilt = json.loads(sources_path.read_text(encoding="utf-8"))
+    assert rebuilt["sources"][0]["model_reasoning_efforts"] == []
+
+def test_valid_source_state_is_loaded_without_touching_the_file(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    credential_ref = store.store_api_key(
+        "upstream-secret",
+        base_url="https://api.example.test/v1",
+    )
+    expected = store.sync_sources([_binding(credential_ref)])
+    sources_path = store.root / "sources.json"
+    persisted = sources_path.read_bytes()
+    persisted_mtime = sources_path.stat().st_mtime_ns
+
+    with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.state"):
+        assert store.list_sources() == expected
+
+    assert sources_path.read_bytes() == persisted
+    assert sources_path.stat().st_mtime_ns == persisted_mtime
+    assert not sources_path.with_name("sources.json.invalid").exists()
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "vibe.model_hub_runtime.state"
+        and record.levelno == logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize(
     ("vendor", "expected_base_url"),
     [
         *[
