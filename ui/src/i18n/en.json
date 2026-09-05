@@ -382,6 +382,11 @@
     "dependencies": {
       "autoBanner": "Avibe installs and updates these for you. Re-check, repair, or update manually below.",
       "recheckAll": "Re-check all",
+      "recheck": "Re-check",
+      "checking": "Checking",
+      "checkFailed": "Check failed",
+      "checkTimeout": "Check timed out",
+      "statusUnknown": "Unknown",
       "required": "Required",
       "statusReady": "Ready",
       "statusDetected": "Detected",

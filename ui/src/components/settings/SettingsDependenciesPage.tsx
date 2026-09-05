@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -31,6 +31,7 @@ import {
   memoryRuntimeSidecarRunning,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
+import { useDependencyChecks } from './useDependencyChecks';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
@@ -44,8 +45,8 @@ type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
-  'model-hub-engine': { icon: Network, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan-ink' },
+  'model-hub-engine': { icon: Network, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   'memory-package': { icon: Brain, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
   'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
@@ -57,27 +58,22 @@ export const SettingsDependenciesPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
 
-  const [deps, setDeps] = useState<DependencyItem[] | null>(null);
+  const { checks, refresh: refreshDependencies, checking } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
   const [memoryStatus, setMemoryStatus] = useState<MemoryStatusResult | null>(null);
   const [memoryStatusLoaded, setMemoryStatusLoaded] = useState(false);
-
-  const refreshDependencies = useCallback(async () => {
-    try {
-      const res = await api.listDependencies();
-      setDeps(res.deps ?? []);
-    } catch {
-      setDeps([]);
-    }
-  }, [api]);
+  const memoryRequest = useRef(0);
 
   const refreshMemoryStatus = useCallback(async () => {
+    const request = ++memoryRequest.current;
+    setMemoryStatusLoaded(false);
     try {
-      setMemoryStatus(await api.getMemoryStatus());
+      const status = await api.getMemoryStatus();
+      if (request === memoryRequest.current) setMemoryStatus(status);
     } catch {
-      setMemoryStatus(null);
+      if (request === memoryRequest.current) setMemoryStatus(null);
     } finally {
-      setMemoryStatusLoaded(true);
+      if (request === memoryRequest.current) setMemoryStatusLoaded(true);
     }
   }, [api]);
 
@@ -87,6 +83,7 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   useEffect(() => {
     void refreshAll();
+    return () => { memoryRequest.current += 1; };
   }, [refreshAll]);
 
   // A closed backend reason/message is often a snake_case token (e.g.
@@ -118,10 +115,11 @@ export const SettingsDependenciesPage: React.FC = () => {
           : localizedFailure(res),
         res.ok ? 'success' : 'error'
       );
-      await refreshAll();
     } catch (e) {
       showToast(errorMessage(e) || t('settings.dependencies.installFailed'), 'error');
     } finally {
+      if (dep.id.startsWith('memory-')) void refreshMemoryStatus();
+      await refreshDependencies(dep.id);
       setBusy(null);
     }
   };
@@ -132,6 +130,7 @@ export const SettingsDependenciesPage: React.FC = () => {
     // of the generic "not installed" fallback.
     if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
     if (d.status === 'error') return t('settings.dependencies.statusError');
+    if (d.status === 'unknown') return t('settings.dependencies.statusUnknown');
     if (d.status === 'not_required') return t('settings.dependencies.statusNotRequired');
     if (!d.installed) return t('settings.dependencies.statusMissing');
     if (d.status === 'upgrade_required') {
@@ -146,6 +145,7 @@ export const SettingsDependenciesPage: React.FC = () => {
     if (memoryPackageIsSourceManaged(d)) return 'secondary';
     if (d.status === 'not_required') return 'secondary';
     if (d.status === 'error') return 'destructive';
+    if (d.status === 'unknown') return 'warning';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
     return d.installed ? 'success' : 'destructive';
   };
@@ -169,29 +169,70 @@ export const SettingsDependenciesPage: React.FC = () => {
       title={t('settings.dependenciesTitle')}
       subtitle={t('settings.dependenciesSubtitle')}
       actions={
-        <Button variant="secondary" size="sm" onClick={() => void refreshAll()}>
+        <Button variant="secondary" size="sm" disabled={checking || busy !== null} onClick={() => void refreshAll()}>
           <RefreshCw className="size-3.5" />
           {t('settings.dependencies.recheckAll')}
         </Button>
       }
     >
-      {deps === null ? (
-        <div className="text-sm text-muted">{t('common.loading')}</div>
-      ) : (
         <div className="flex flex-col gap-3.5">
           <div className="flex items-center gap-3 rounded-xl border border-mint/30 bg-mint/[0.08] px-5 py-3.5">
             <ShieldCheck className="size-4 shrink-0 text-mint-ink" />
             <span className="text-[13px] leading-snug text-foreground">{t('settings.dependencies.autoBanner')}</span>
           </div>
 
-          {deps.map((d) => {
-            const meta = DEP_META[d.id] ?? DEP_META.node;
+          {Object.entries(DEP_META).map(([id, meta]) => {
+            const check = checks[id];
+            const d = check.data;
+            const checkFailure = check.error
+              ? t(`settings.dependencies.${check.error === 'timeout' ? 'checkTimeout' : 'checkFailed'}`)
+              : null;
+            const retryCheck = check.error && !check.checking ? (
+              <Button
+                variant="secondary"
+                size="icon"
+                className="size-8"
+                title={t('settings.dependencies.recheck')}
+                aria-label={t('settings.dependencies.recheck')}
+                disabled={busy !== null}
+                onClick={() => void refreshDependencies(id)}
+              >
+                <RefreshCw className="size-3.5" />
+              </Button>
+            ) : null;
+            const checkProgress = check.checking ? (
+              <Loader2
+                className="size-3.5 shrink-0 animate-spin text-muted"
+                aria-label={t('settings.dependencies.checking')}
+              />
+            ) : null;
+            if (!d) {
+              return (
+                <SettingsResourceRow
+                  key={id}
+                  icon={meta.icon}
+                  tileClassName={meta.tileCls}
+                  iconClassName={meta.iconCls}
+                  title={t(`settings.dependencies.items.${id}.label`)}
+                  detail={t(`settings.dependencies.items.${id}.detail`)}
+                  actions={
+                    <>
+                      {checkProgress}
+                      <Badge variant={check.error ? 'destructive' : 'secondary'} className="font-mono">
+                        {checkFailure || t('settings.dependencies.checking')}
+                      </Badge>
+                      {retryCheck}
+                    </>
+                  }
+                />
+              );
+            }
             const installing = busy === d.id;
             const showAction = dependencyHasInstallAction(d);
             const isMemoryRuntime = d.id === 'memory-runtime';
             const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
             const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
-            const dependencyOperationBusy = busy !== null;
+            const dependencyOperationBusy = busy !== null || check.checking || check.error !== null;
             const sourceManaged = memoryPackageIsSourceManaged(d);
             const notice = sourceManaged
               ? t('settings.dependencies.memoryPackageSourceManaged')
@@ -229,9 +270,11 @@ export const SettingsDependenciesPage: React.FC = () => {
                 }
                 actions={
                   <>
-                    <Badge variant={statusVariant(d)} className="font-mono">
-                      {statusText(d)}
+                    {checkProgress}
+                    <Badge variant={check.error ? 'destructive' : statusVariant(d)} className="font-mono">
+                      {checkFailure || statusText(d)}
                     </Badge>
+                    {retryCheck}
                     {isMemoryRuntime && d.installed && (
                       <Button asChild variant="secondary" size="xs">
                         <Link to="/settings/memory">
@@ -259,7 +302,13 @@ export const SettingsDependenciesPage: React.FC = () => {
                     )}
                   </>
                 }
-                footer={notice ? (
+                footer={checkFailure ? (
+                  <div role="alert" className="border-t border-destructive/30 pt-3 text-[11px] leading-snug text-destructive-ink">
+                    {checkFailure}
+                    {persistedFailure && <div className="mt-1">{persistedFailure}</div>}
+                    {notice && <div className="mt-1 text-muted">{notice}</div>}
+                  </div>
+                ) : notice ? (
                   <div className="border-t border-border pt-3 text-[11px] leading-snug text-muted">
                     {notice}
                   </div>
@@ -292,7 +341,6 @@ export const SettingsDependenciesPage: React.FC = () => {
             }
           />
         </div>
-      )}
     </SettingsPageShell>
   );
 };

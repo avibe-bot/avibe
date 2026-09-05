@@ -7906,7 +7906,12 @@ def get_dependencies():
     """Status of local tool, package, and managed-runtime dependencies."""
     from vibe import api
 
-    return jsonify(api.dependencies_status())
+    dependency_ids = request.args.getlist("id")
+    if not dependency_ids:
+        return jsonify(api.dependencies_status())
+    if any(dep not in api.DEPENDENCY_IDS for dep in dependency_ids):
+        return jsonify({"ok": False, "error": "unknown_dependency"}), 400
+    return jsonify(api.dependencies_status(dependency_ids=dependency_ids))
 
 
 @app.route("/api/dependencies/<dep>/install", methods=["POST"])
