@@ -1,27 +1,18 @@
 # Model Hub contracts
 
-Status: **FINAL shape, implementation-gated. `contract_version` is 8 (2026-09-05
-OpenCode bare ids and per-protocol overlay); 7 defined 2026-09-03 for
-backend-catalog composition and reasoning-tier provenance; 6 published 2026-08-19
-usage metering; 5 published the 2026-08-11 contract completion.**
+Status: **contract_version 9**, 2026-09-06: sparse manual overrides, shared effective
+planning and guarded Restore/default membership. The approved routing contract is
+`../model-hub-routing-modes.md`, frozen at `2db273891` before implementation, amended by owner decision `c1d398d5f`.
 
-These files describe the terminal contract for Model Hub before first release. No bump
-carries a data migration, compatibility reader, conversion transaction, or version
-discriminator: Model Hub has not shipped, so republishing the shape converts nothing.
-`contract_version` is 8 wherever a versioned object exists. The owner-approved
-pre-release correction adds OpenCode bare ids, server-owned native protocols, and
-per-protocol runtime providers while deleting the prefixed-id compatibility paths.
-
-`v5` is still written throughout these files and stays: it names the contract-completion
-generation they were authored in, and sentences such as "Minimum v5 set" or
-`adapter-interface.py`'s dated header describe what that generation said. Only
-`contract_version` — the value a consumer reads and the closure below guards — moves.
-
-Which of the two a sentence means is not left to the reader. A claim about the current
-value spells `contract_version`, which is the token the closure guard matches, so a bare
-`vN` is a generation name by construction. Prose that restated the number in its own
-words is exactly how `api.md` came to advertise one value in its envelopes and another
-in its own declarations.
+Supported persisted configuration shapes remain readable under the repository's
+persisted-shape rule. Existing explicit arrays, including empty, stale and dormant
+OpenCode routes, retain their exact intent. Do not infer old authorship from array
+contents or Source order. Ephemeral envelopes use the terminal version; persisted
+TurnProvenance accepts historical versions through the terminal one without new
+required route fields. Existing persistence readers normalize retired reason values
+before current-schema validation without changing the writer generation; raw historical
+bytes need not already use today's reason vocabulary. Generation names in older implementation history are not a
+current version declaration.
 
 The contracts and their consumers must coexist on one tested PR head before Model Hub
 can be enabled. CI evaluates that head, not individual commits. A green intermediate
@@ -30,13 +21,14 @@ commit is not evidence that the complete final protocol has landed.
 ## Product model
 
 - Sources are upstream assets. A Source never owns ordering.
-- Gateway stores one explicit Source order per backend and one exact ordered Route chain
-  per menu model. Neither has a `follow | custom` or other policy discriminator.
-- Add Source, a menu-model add, and a built-in reconcile add each run the same matching
-  and placement policies once and persist the accepted hops. Runtime never repeats
-  placement, model matching, vendor matching, or substitution.
-- Runtime walks the stored Route hops verbatim, rechecking only whether each exact hop is
-  runnable now and whether a failure permits fallthrough.
+- Gateway stores one default Source membership/order per backend and sparse manual
+  overrides per model. Absence inherits; presence overrides, including an empty array.
+- The shared pure planner returns manual hops verbatim, otherwise all accepted matches
+  in default order, otherwise unchanged-id passthrough on eligible non-retired Hub API-key defaults.
+- Reads, previews, summaries, guards, adoption, probes, launches and execution use that
+  effective plan. Health and process readiness annotate it without changing its origin.
+- New catalog rows have no override; Source creation appends defaults but never writes
+  manual hops. Restoring automatic deletes the key; saving equal hops remains manual.
 - A hop whose upstream `model_id` differs from its menu model is an explicit configured
   mapping. There is no separate mapping object or runtime mapping event.
 - The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat`.
@@ -48,10 +40,13 @@ commit is not evidence that the complete final protocol has landed.
 - Supply state is pull-oriented. Successful fallback is silent; Gateway and Usage are
   the user-visible inspection surfaces.
 
-Normative routing behavior lives only in `docs/plans/model-hub.md`: §4.2 owns one-time
-matching and placement, §4.3 owns exact-chain execution and credential failures, §4.5 owns state,
+Normative routing behavior lives only in `docs/plans/model-hub.md`: §4.2 owns effective planning and default placement, §4.3 owns effective-chain execution and credential failures, §4.5 owns state,
 turn copy, and guarded mutation envelopes, and §6 owns native-config import actions.
 Contract prose points to those authorities and does not add branches.
+
+API-key passthrough is the delivery scope. Subscriptions continue automatic matching and
+known-model manual routes; an unmatched subscription-only default set is Unconfigured.
+No underlying engine expansion or OAuth alias substitution is part of this change.
 
 ## Invariants
 
@@ -68,13 +63,17 @@ Contract prose points to those authorities and does not add branches.
    still require reachability and authentication; they never bypass those failures.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs
-   must validate.
+   must validate Source existence/eligibility, canonical identifiers and explicit retirement.
+   Missing API-key inventory alone is not an invocation or manual-write rejection.
+   Subscription Sources retain existing model admission and stale-hop retention.
+   Normalized persisted catalog/target identities do not lose edit, preview, restore
+   or history-read capability when a later new-identifier length bound is shorter.
 4. Source deletion atomically removes its id from every backend Source order and every
    exact Route chain, preserving survivor order. Serialization and reload reject a
    dangling Source id.
-5. Given the same stored configuration and request, the selected Route hops are stable
-   across time, quota, and health changes. Live runnability and current execution
-   position may change; Route membership and order may not.
+5. Manual Route membership and order survive unrelated state changes. Automatic routes
+   follow current defaults and matching evidence. For the same planning inputs, health,
+   quota and process readiness may change runnability/current but never tier or origin.
 6. Every Source model id is unique within that Source. The final model item shape is
    `{id, origin, reasoning_efforts, reasoning_efforts_source, retired?, display_name?,
    discovered_at?}`. The tier source is `upstream | catalog | user | null`; only `user`
@@ -104,7 +103,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 8 must coexist in all registered version locations on the same tested head:
+`contract_version` 9 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -152,10 +151,10 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | --- | --- |
 | `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
 | `source-create.schema.json` | API-key Source creation request, transient credential boundary, optional single-protocol constraint, and lost-response correlation. |
-| `agent-supply.schema.json` | Backend mode, explicit policy-free Source order, configuration eligibility, model-supply and backend-health projections. |
+| `agent-supply.schema.json` | Backend mode, default Source membership/order and sparse manual intent, configuration eligibility, model-supply and backend-health projections. |
 | `backend-model.schema.json` | Backend Agent model identity, editable capability metadata, and server-owned lock/routeability projection. |
-| `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, live connection backoff, retry metadata, and model supply state. |
-| `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops, including the live connection-backoff reason without persistent network health. |
+| `agent-chain.schema.json` | Effective route, manual override and origin projection plus current execution position, runnability, blockers, live connection backoff, retry metadata, and model supply state. |
+| `probe-result.schema.json` | Saved recovery probes and route probes over the shared effective plan, including the live connection-backoff reason without persistent network health. |
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, protocol-establishment, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
@@ -164,9 +163,9 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, persisted enablement intent, lifecycle, and health. |
 | `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
-| `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, usage, and runtime status. |
+| `api.md` | Routes, envelopes, default Source order and manual Route writes/Restore/preview, guards, OAuth/import results, provenance, usage, and runtime status. |
 | `api-response.schema.json` | Machine-readable response contract and real-response exercise for every route in `api.md`, at exact route-table parity. |
-| `opencode-overlay.md` | Stable OpenCode provider/model identifiers and exact configured-hop overlay behavior. |
+| `opencode-overlay.md` | Stable OpenCode provider/model identifiers and effective-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |
 | `mirror-registry.json` | Executable authority/mirror registry and terminal contract version. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

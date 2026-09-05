@@ -91,6 +91,7 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
     await requireModelHub(api);
     await requireMockUpstream(mock);
     await requireRuntimeRunning(api);
+    const sourceIdsAtStart = new Set((await api.sources()).map((source) => source.id));
     await mock.configure({
       auth: 'ok',
       protocol: 'anthropic',
@@ -204,7 +205,7 @@ export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
         try {
           if (sourcesBeforeSwitch) await restoreNativeSources(api, sourcesBeforeSwitch);
         } finally {
-          await api.removeSuiteSources();
+          await api.removeSuiteSources(sourceIdsAtStart);
         }
       }
     }

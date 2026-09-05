@@ -281,58 +281,6 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     )
 
 
-def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
-    """Adapt fixed-menu route keys to the current bundled catalog on reload.
-
-    Newly introduced menu ids receive empty routes. Legacy route keys remain
-    intact so the canonical agent loader can preserve them as manual catalog
-    rows; matching and placement never run here.
-    """
-
-    model_hub = payload.get("model_hub")
-    if not isinstance(model_hub, dict):
-        return payload
-    agents = model_hub.get("agents")
-    if not isinstance(agents, dict):
-        return payload
-
-    migrated_agents = dict(agents)
-    changed = False
-    for backend in ("claude", "codex"):
-        raw_agent = agents.get(backend)
-        if not isinstance(raw_agent, dict):
-            continue
-        if "models" in raw_agent:
-            continue
-        routes = raw_agent.get("routes")
-        expected_menu_ids = model_hub_fixed_menu_ids(backend)
-        if not isinstance(routes, dict) or not expected_menu_ids:
-            continue
-        migrated_routes = {
-            model_id: routes.get(model_id, {"hops": []})
-            for model_id in expected_menu_ids
-        }
-        migrated_routes.update(
-            (model_id, route)
-            for model_id, route in routes.items()
-            if model_id not in migrated_routes
-        )
-        if migrated_routes == routes:
-            continue
-        migrated_agent = dict(raw_agent)
-        migrated_agent["routes"] = migrated_routes
-        migrated_agents[backend] = migrated_agent
-        changed = True
-
-    if not changed:
-        return payload
-    migrated_model_hub = dict(model_hub)
-    migrated_model_hub["agents"] = migrated_agents
-    migrated_payload = dict(payload)
-    migrated_payload["model_hub"] = migrated_model_hub
-    return migrated_payload
-
-
 def _legacy_source_eligible_for_backend(source: object, backend: str) -> bool:
     if not isinstance(source, dict):
         return False
@@ -456,8 +404,8 @@ def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str 
 
     Claude's old native CLI resolver treated ``opus``/``sonnet``/``haiku`` as
     family selectors and persisted the newest concrete model it observed. Keep
-    that behavior at the disk migration boundary; the current runtime resolver
-    intentionally only follows persisted exact hops.
+    that behavior at the disk migration boundary so the resulting override
+    retains its exact historical target independently of automatic routing.
     """
 
     if source.get("vendor") != "anthropic":
@@ -811,7 +759,6 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
 
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
-    migrated = _migrate_fixed_menu_routes_on_load(migrated)
     model_hub_changed = changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
     return migrated, model_hub_changed, warnings
@@ -3051,10 +2998,7 @@ class ModelHubRouteHopConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
-        # A hop names a model in some source's inventory, and membership is decided
-        # by an exact comparison against that inventory. So the reference has to be
-        # spelled by whatever spells the thing it refers to: normalizing one side
-        # only would turn a working chain into `model_unsupported` on upgrade.
+        # Keep saved targets in the same canonical namespace as inventory evidence.
         from core.handlers.model_hub.identifiers import normalized_model_id
 
         return cls(source_id=source_id, model_id=normalized_model_id(model_id))
@@ -3375,7 +3319,6 @@ class ModelHubAgentSupplyConfig:
             backend=backend,
             mode=mode,
             menu_kind="fixed",
-            routes={model_id: ModelHubRouteConfig() for model_id in model_hub_fixed_menu_ids(backend)},
             models=_default_backend_models(backend),
         )
 
@@ -3629,14 +3572,6 @@ class ModelHubConfig:
             expected_menu_ids = tuple(
                 model.id for model in agents[backend].models
             )
-            missing_route = next(
-                (model_id for model_id in expected_menu_ids if model_id not in agents[backend].routes),
-                None,
-            )
-            if missing_route is not None:
-                raise ValueError(
-                    f"Config 'model_hub.agents.{backend}.routes' is missing menu model '{missing_route}'"
-                )
             extra_route = next(
                 (
                     model_id

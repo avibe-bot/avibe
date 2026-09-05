@@ -439,7 +439,7 @@
     },
     "adopted_by": {
       "type": "array",
-      "description": "Server-derived Source-card projection of persisted Route references, sorted by backend then menu_model. It is returned on every current Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains.",
+      "description": "Server-derived Source-card projection of effective Route references, sorted by backend then menu_model. It is returned on every current Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains.",
       "uniqueItems": true,
       "items": {
         "type": "object",

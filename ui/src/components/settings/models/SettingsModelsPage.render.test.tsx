@@ -33,7 +33,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 8,
+  contract_version: 9,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -77,14 +77,14 @@ const takeoverAgent: AgentSupply = {
   sources: { order: ['src_head', 'src_relay'], eligibility: [] },
   routes: { 'gpt-5.6-sol': { hops: [{ source_id: 'src_head', model_id: 'gpt-5.6-sol' }, { source_id: 'src_relay', model_id: 'gpt-5.6-sol' }] } },
   supply_status: 'degraded',
-  model_supply: [{ model_id: 'gpt-5.6-sol', chain_length: 2, has_runnable_hop: true }],
+  model_supply: [{ route_origin: "manual" as const, model_id: 'gpt-5.6-sol', chain_length: 2, has_runnable_hop: true }],
   builtin_models: ['gpt-5.6-sol'],
   named_agents: [],
   menu: null,
 };
 
-const takeoverChain: AgentChain = {
-  contract_version: 8,
+const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
+  contract_version: 9,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -155,6 +155,7 @@ const closeSourceDetails = async () => {
 };
 
 beforeEach(() => {
+  vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
   vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
 });
 
@@ -176,7 +177,7 @@ describe('SettingsModelsPage surface branches', () => {
       ...takeoverAgent,
       selected_model_id: modelIds[0] ?? null,
       routes: {},
-      model_supply: modelIds.map((modelId) => ({ model_id: modelId, chain_length: 0, has_runnable_hop: false })),
+      model_supply: modelIds.map((modelId) => ({ route_origin: null, model_id: modelId, chain_length: 0, has_runnable_hop: false })),
       builtin_models: modelIds,
       catalog_models: modelIds.map(model),
     });
@@ -866,7 +867,7 @@ describe('SettingsModelsPage surface branches', () => {
     const agent: AgentSupply = {
       ...takeoverAgent,
       builtin_models: [takeoverChain.model_id, secondModel],
-      model_supply: [takeoverChain.model_id, secondModel].map((model_id) => ({
+      model_supply: [takeoverChain.model_id, secondModel].map((model_id) => ({ route_origin: "manual" as const,
         model_id,
         chain_length: 2,
         has_runnable_hop: true,
@@ -904,7 +905,7 @@ describe('SettingsModelsPage surface branches', () => {
     }));
     await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
     expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
-    expect(screen.getByText(/Later Source order changes reorder its hops to match\.|以后调整供应商优先级时，其中的供应商会按新顺序重排。/i)).toBeTruthy();
+    expect(screen.getByText(/Changes to default routing do not overwrite|默认路由的调整不会覆盖/i)).toBeTruthy();
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -975,7 +976,7 @@ describe('SettingsModelsPage surface branches', () => {
       selected_model_id: 'claude-opus-4-6',
       sources: { order: [retainedSource.id], eligibility: [{ source_id: retainedSource.id, eligible: true }] },
       routes: { 'claude-opus-4-6': { hops: [{ source_id: retainedSource.id, model_id: 'claude-opus-4-6' }] } },
-      model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 1, has_runnable_hop: true }],
+      model_supply: [{ route_origin: "manual" as const, model_id: 'claude-opus-4-6', chain_length: 1, has_runnable_hop: true }],
       builtin_models: ['claude-opus-4-6'],
     };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
@@ -1011,11 +1012,11 @@ describe('SettingsModelsPage surface branches', () => {
           eligibility: [{ source_id: retainedSource.id, eligible: true }],
         },
         routes: { [modelId]: { hops: [{ source_id: retainedSource.id, model_id: modelId }] } },
-        model_supply: [{ model_id: modelId, chain_length: 1, has_runnable_hop: true }],
+        model_supply: [{ route_origin: "manual" as const, model_id: modelId, chain_length: 1, has_runnable_hop: true }],
         builtin_models: [modelId],
       };
-      const affectedChain: AgentChain = {
-        contract_version: 8,
+      const affectedChain: AgentChain = { manual_override: {hops:[{source_id:retainedSource.id,model_id:modelId}]}, route_origin: "manual" as const,
+        contract_version: 9,
         backend: 'claude',
         model_id: modelId,
         current: { source_id: retainedSource.id, model_id: modelId },
@@ -1157,6 +1158,7 @@ describe('SettingsModelsPage surface branches', () => {
     const pendingReconciliation = deferred<AgentSupply[]>();
     const committedChain: AgentChain = {
       ...takeoverChain,
+      manual_override: { hops: [{ source_id: 'src_head', model_id: 'gpt-5.6-sol' }] },
       current: { source_id: 'src_head', model_id: 'gpt-5.6-sol' },
       chain: [{ ...takeoverChain.chain[0], health: 'healthy', runnable: true, retry_at: null }],
     };
@@ -1210,7 +1212,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
     vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
     vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
-      chain: { ...takeoverChain, chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0] },
+      chain: { ...takeoverChain, manual_override: { hops: [takeoverChain.chain[0]] }, chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0] },
       removed_hops: [],
       interrupted: [],
     });

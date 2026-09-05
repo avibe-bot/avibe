@@ -34,6 +34,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.async_owner import run_owned_in_thread
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
     EngineClient,
@@ -916,6 +917,9 @@ class CLIProxyEngineAdapter:
         self.supervisor = supervisor or get_engine_supervisor()
         self.state_store = state_store or self.supervisor.state_store
         self._routing_lock = asyncio.Lock()
+        self._active_transports = 0
+        self._transports_idle = asyncio.Event()
+        self._transports_idle.set()
         self._installation_lock = asyncio.Lock()
         self._install_task: asyncio.Task[None] | None = None
         self._install_admission: asyncio.Future[EngineStatus] | None = None
@@ -1258,7 +1262,8 @@ class CLIProxyEngineAdapter:
                 reason = str(install.get("reason") or "engine_install_failed")
                 raise self._install_failure(reason)
             if install.get("changed"):
-                await asyncio.to_thread(self.supervisor.restart_if_running)
+                await self._transports_idle.wait()
+                await run_owned_in_thread(self.supervisor.restart_if_running)
             return EngineEnsureResult(
                 status=await self.status(),
                 changed=bool(install.get("changed")),
@@ -1350,24 +1355,46 @@ class CLIProxyEngineAdapter:
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
         async with self._routing_lock:
-            try:
-                previous = await asyncio.to_thread(self.state_store.list_sources)
-            except EngineStateError:
-                previous = []
-            was_running = await asyncio.to_thread(self.supervisor.client_if_running) is not None
-            await asyncio.to_thread(self.state_store.sync_sources, bindings)
-            try:
-                await asyncio.to_thread(self.supervisor.restart_if_running)
-            except Exception:
-                await asyncio.to_thread(self.state_store.replace_sources, previous)
-                if was_running:
-                    try:
-                        await asyncio.to_thread(self.supervisor.ensure_running)
-                    except Exception as restore_error:
-                        raise EngineStateError(
-                            "source sync failed and the previous engine state could not be restored"
-                        ) from restore_error
-                raise
+            await self._transports_idle.wait()
+            # Cancellation must retain the barrier until the finite transaction
+            # has either restarted or restored the prior projection.
+            await run_owned_in_thread(self._sync_sources_transaction, tuple(bindings))
+
+    def _sync_sources_transaction(self, bindings: Sequence[SourceBinding]) -> None:
+        try:
+            previous = self.state_store.list_sources()
+        except EngineStateError:
+            previous = []
+        was_running = self.supervisor.client_if_running() is not None
+        self.state_store.sync_sources(bindings)
+        try:
+            self.supervisor.restart_if_running()
+        except Exception:
+            self.state_store.replace_sources(previous)
+            if was_running:
+                try:
+                    self.supervisor.ensure_running()
+                except Exception as restore_error:
+                    raise EngineStateError(
+                        "source sync failed and the previous engine state could not be restored"
+                    ) from restore_error
+            raise
+
+    def _acquire_transport(self) -> Callable[[], None]:
+        self._active_transports += 1
+        self._transports_idle.clear()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._active_transports -= 1
+            if self._active_transports == 0:
+                self._transports_idle.set()
+
+        return release
 
     async def provision_credential(
         self,
@@ -1942,6 +1969,8 @@ class CLIProxyEngineAdapter:
         request: Mapping[str, Any],
         stream: bool,
         origin: str,
+        *,
+        on_admitted: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
         async with self._routing_lock:
             source = await asyncio.to_thread(self.state_store.get_source, source_id)
@@ -1963,18 +1992,30 @@ class CLIProxyEngineAdapter:
                         source_id=source_id,
                     )
                 )
-        request_protocol = {
-            "claude": "anthropic",
-            "codex": "openai_responses",
-        }.get(origin, getattr(request, "protocol", None) or source.protocol)
-        return await client.invoke(
-            source,
-            model_id,
-            request,
-            stream=stream,
-            request_protocol=request_protocol,
-            request_headers=getattr(request, "headers", None),
-        )
+            release = self._acquire_transport()
+            try:
+                if on_admitted is not None:
+                    on_admitted()
+            except BaseException:
+                release()
+                raise
+        try:
+            request_protocol = {
+                "claude": "anthropic",
+                "codex": "openai_responses",
+            }.get(origin, getattr(request, "protocol", None) or source.protocol)
+            return await client.invoke(
+                source,
+                model_id,
+                request,
+                stream=stream,
+                request_protocol=request_protocol,
+                request_headers=getattr(request, "headers", None),
+                on_transport_done=release,
+            )
+        except BaseException:
+            release()
+            raise
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True

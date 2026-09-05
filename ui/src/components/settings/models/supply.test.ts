@@ -211,8 +211,8 @@ describe('attribution (AC-9)', () => {
     const agent = hubAgent({
       named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' }],
       model_supply: [
-        { model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true },
-        { model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false },
+        { route_origin: "manual" as const, model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true },
+        { route_origin: null, model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false },
       ],
     });
     expect(attribution(agent)).toEqual({
@@ -225,7 +225,7 @@ describe('attribution (AC-9)', () => {
   it('never double-counts a model an Agent runs', () => {
     const agent = hubAgent({
       named_agents: [{ name: 'claude', effective_model_id: 'claude-haiku-4-5', supply_status: 'interrupted' }],
-      model_supply: [{ model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false }],
+      model_supply: [{ route_origin: null, model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false }],
     });
     expect(attribution(agent)).toEqual({ interrupted: ['claude'], waiting: [], unassignedModels: [] });
   });

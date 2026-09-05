@@ -5,7 +5,6 @@
 // Baseline discipline (§5a): `fix-first` scenarios land as `test.fixme` with
 // the open decision named, never as red tests. Four of them do so below; each
 // says what would have to change for it to become an assertion.
-import type { RouteHop } from './support/api';
 import { hasCopy, hub as copy } from './support/copy';
 import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import {
@@ -39,7 +38,7 @@ test.describe('G · supply guards and failure copy', () => {
     // routing is not this spec's to keep. Real routing is also all it captures:
     // the source deleted below may already be a hop here, and restoring a hop
     // this spec is about to delete is how the whole restore gets refused.
-    const original: RouteHop[] = await captureAgentChain(api, gateway);
+    const original = await captureAgentChain(api, gateway);
     try {
       // Entered BEFORE the arranged PUT, not after it succeeds: a response
       // lost to a timeout or disconnect rejects that await with the chain

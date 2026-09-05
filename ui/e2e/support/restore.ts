@@ -26,71 +26,42 @@
 // what "running" IS. One declaration each, so a site cannot answer them
 // differently, and so the next site added inherits the answer instead of
 // picking one.
-import type { HubApi, RouteHop, Runtime } from './api';
-import { isSuiteSource } from './api';
+import type { AgentChain, HubApi, Runtime } from './api';
 import { expect, runtimeIsRunning } from './fixtures';
 
-/**
- * Reads the baseline `restoreAgentChain` puts back: the OPERATOR's chain, which
- * is not the same thing as the chain that is there when a spec looks.
- *
- * Adding a source is not an inert act. `_apply_source_placement` walks every
- * backend's menu and appends the new source to each route whose model it
- * matches, so by the time a spec captures its baseline the gateway fixture's
- * own two sources may already be hops in it. Those hops are arrangement, not
- * state: the fixture's sweep deletes the sources that supply them, so they do
- * not outlive the spec either way.
- *
- * Restoring them is worse than pointless, because a spec may delete or rebuild
- * one of those sources mid-body — B7 deletes it to raise the supply guard, B6
- * deletes and recreates it to shake off a sticky cooldown — and `set_agent_chain`
- * rejects a PUT containing ANY unknown source id outright. So one stale
- * suite-owned hop takes every real hop down with it and the route the operator
- * had is gone.
- *
- * Hence the pair: capture and restore live together and are written once,
- * because the defect was capture being re-derived at each site while only the
- * restore was shared.
- */
+export type AgentChainSnapshot = Pick<AgentChain, 'manual_override'>;
+
+/** Capture persisted intent, not an effective chain that includes fixture sources. */
 export const captureAgentChain = async (
   api: HubApi,
   route: { backend: string; model: string },
-): Promise<RouteHop[]> => {
-  const ours = new Set((await api.sources()).filter(isSuiteSource).map((source) => source.id));
-  const chain = (await api.chains(route.backend)).find((entry) => entry.model_id === route.model);
-  return (chain?.chain ?? [])
-    .filter((hop) => !ours.has(hop.source_id))
-    .map((hop) => ({ source_id: hop.source_id, model_id: hop.model_id }));
+): Promise<AgentChainSnapshot> => {
+  const chain = await api.agentChain(route.backend, route.model);
+  expect(chain).toHaveProperty('manual_override');
+  return {
+    manual_override: chain.manual_override === null ? null : {
+      hops: chain.manual_override.hops.map((hop) => ({ source_id: hop.source_id, model_id: hop.model_id })),
+    },
+  };
 };
 
-/**
- * Puts one model's route chain back to `original` — including back to EMPTY.
- *
- * Unconditional, where three copies of this used to guard on
- * `original.length`. That guard is the same proxy as the rest of this file: it
- * asks "was there a chain?" when the postcondition is "the chain is what it
- * was", and the one case it gets wrong is the spec that arranged hops onto a
- * route that had none — precisely the arrangement most worth removing. The
- * server treats clearing a route as a first-class mutation (it is what
- * `newly_empty_routes` in `set_agent_chain` exists for), so an empty `original`
- * is a request, not a no-op.
- *
- * A refusal is reported, never swallowed: nothing downstream can reconstruct a
- * displaced chain — the source sweep that follows only deletes rows — so a
- * silent `false` here leaves the instance's routing changed while teardown
- * reads clean.
- */
+/** Automatic absence and a persisted empty manual route are different states. */
 export const restoreAgentChain = async (
   api: HubApi,
   route: { backend: string; model: string },
-  original: RouteHop[],
+  original: AgentChainSnapshot,
 ): Promise<void> => {
-  const restored = await api.putAgentChain(route.backend, route.model, original);
+  const restored = original.manual_override === null
+    ? await api.deleteAgentChain(route.backend, route.model)
+    : await api.putAgentChain(route.backend, route.model, original.manual_override.hops);
   expect(
     restored,
     `Teardown failed to restore the original route chain for ${route.backend}/${route.model} — `
       + "the instance is left with the scenario's arrangement.",
   ).toBe(true);
+  const actual = await api.agentChain(route.backend, route.model);
+  expect(actual.manual_override, 'Teardown must restore route intent, not only effective hops')
+    .toEqual(original.manual_override);
 };
 
 /**

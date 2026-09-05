@@ -49,7 +49,9 @@ def _enable_model_hub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class EngineLossAdapter(ModelHubScenarioAdapter):
-    async def invoke(self, source_id, model_id, request, stream, origin):
+    async def invoke(self, source_id, model_id, request, stream, origin, *, on_admitted=None):
+        if on_admitted is not None:
+            on_admitted()
         self.invocations.append((source_id, model_id, origin))
         self.requests.append(request)
         raise RuntimeError("scenario engine unavailable")
@@ -93,7 +95,9 @@ class MidTurnEngineLossHandle:
 
 
 class MidTurnEngineLossAdapter(ModelHubScenarioAdapter):
-    async def invoke(self, source_id, model_id, request, stream, origin):
+    async def invoke(self, source_id, model_id, request, stream, origin, *, on_admitted=None):
+        if on_admitted is not None:
+            on_admitted()
         self.invocations.append((source_id, model_id, origin))
         self.requests.append(request)
         return MidTurnEngineLossHandle(source_id, model_id)

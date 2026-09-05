@@ -136,6 +136,9 @@ async def dispatch_model_hub_rpc(
             return await service.reorder_agent_chains(
                 payload.get("backend"),
                 payload.get("order"),
+                force=payload.get("force") is True,
+                confirmed_remove_hops=payload.get("would_remove_hops"),
+                confirmed_interruptions=payload.get("would_interrupt"),
             )
         return await service.reorder_agent_chains(payload.get("backend"))
     if operation == "set_agent_mode":
@@ -163,6 +166,14 @@ async def dispatch_model_hub_rpc(
             payload.get("backend"),
             payload.get("model_id"),
             payload.get("chain"),
+        )
+    if operation == "delete_agent_chain":
+        return await service.delete_agent_chain(
+            payload.get("backend"), payload.get("model_id"), payload.get("chain"),
+        )
+    if operation == "preview_agent_chain":
+        return service.preview_agent_chain(
+            payload.get("backend"), payload.get("model_id"), payload.get("chain"),
         )
     if operation == "add_custom_model":
         return await service.add_custom_model(payload.get("source_id"), payload.get("model"))
@@ -203,6 +214,8 @@ async def dispatch_model_hub_rpc(
         )
     if operation == "get_turn_provenance":
         return service.get_turn_provenance(payload.get("turn_id"))
+    if operation == "get_model_provenance":
+        return await asyncio.to_thread(service.get_model_provenance, payload.get("backend"), payload.get("model_id"))
     if operation == "oauth_start":
         return await service.oauth_start(payload.get("oauth"))
     if operation == "oauth_status":

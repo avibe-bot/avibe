@@ -16,7 +16,7 @@ import { freshRuntimeProjection } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, Source } from './types';
 
 const runtime: RuntimeDependency = {
-  contract_version: 8,
+  contract_version: 9,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
 };
@@ -45,7 +45,7 @@ const hubAgent: AgentSupply = {
   backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', selected_model_id: 'claude-opus-4-6', selected_model_explicit: true,
   sources: { order: ['src_a', 'src_b'], eligibility: [{ source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: true }] },
   routes: { 'claude-opus-4-6': { hops: [{ source_id: 'src_a', model_id: 'claude-opus-4-6' }, { source_id: 'src_b', model_id: 'claude-opus-4-6' }] } },
-  supply_status: 'degraded', model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true }], named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'degraded' }], builtin_models: ['claude-opus-4-6'], menu: null,
+  supply_status: 'degraded', model_supply: [{ route_origin: "manual" as const, model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true }], named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'degraded' }], builtin_models: ['claude-opus-4-6'], menu: null,
 };
 const openCodeAgent: AgentSupply = {
   backend: 'opencode',
@@ -77,7 +77,7 @@ describe('AgentCard', () => {
     const agentWithRetainedRoute = {
       ...openCodeAgent,
       routes: { [retainedModelId]: { hops: [{ source_id: 'src_a', model_id: 'gpt-5.6-luna' }] } },
-      model_supply: [{ model_id: retainedModelId, chain_length: 1, has_runnable_hop: true }],
+      model_supply: [{ route_origin: "manual" as const, model_id: retainedModelId, chain_length: 1, has_runnable_hop: true }],
     };
     render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
@@ -98,7 +98,7 @@ describe('AgentCard', () => {
       ...hubAgent,
       backend,
       routes: {},
-      model_supply: ids.map((modelId) => ({ model_id: modelId, chain_length: 1, has_runnable_hop: true })),
+      model_supply: ids.map((modelId) => ({ route_origin: "manual" as const, model_id: modelId, chain_length: 1, has_runnable_hop: true })),
       catalog_models: ids.map((id) => ({
         id, display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
         input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,
@@ -134,7 +134,7 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[{
       ...openCodeAgent,
       menu: { view: 'featured', checked: [modelId] },
-      model_supply: [{ model_id: modelId, chain_length: 0, has_runnable_hop: false }],
+      model_supply: [{ route_origin: null, model_id: modelId, chain_length: 0, has_runnable_hop: false }],
     }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText('1 个模型')).toBeTruthy();
@@ -181,7 +181,7 @@ describe('AgentCard', () => {
     ['zh', 'Backup → claude-opus-4-6（已自动切换）', '打开 claude-opus-4-6 的路由 · Backup → claude-opus-4-6（已自动切换）'],
   ] as const)('derives and announces takeover from the exact current hop in %s', (lng, mappingCopy, accessibleName) => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
-    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 8, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 9, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Backup/)).toBeTruthy();
     expect(screen.getByTitle(mappingCopy)).toBeTruthy();
     expect(screen.getByRole('button', { name: accessibleName })).toBeTruthy();
@@ -198,8 +198,8 @@ describe('AgentCard', () => {
           agents={[hubAgent]}
           sources={[source('src_b', 'Backup source')]}
           chains={{
-            [key]: readyRegion({
-              contract_version: 8,
+            [key]: readyRegion({ manual_override: {hops:[{source_id:'src_b',model_id:'routed-opus'}]}, route_origin: "manual" as const,
+              contract_version: 9,
               backend: 'claude',
               model_id: 'claude-opus-4-6',
               current: { source_id: 'src_b', model_id: 'routed-opus' },
@@ -221,14 +221,15 @@ describe('AgentCard', () => {
 
     const routeButton = screen.getByRole('button', { name: accessibleName });
     const mapping = screen.getByTitle(mappingCopy);
-    expect(routeButton.contains(mapping)).toBe(true);
-    expect(mapping.parentElement?.textContent).toContain(modeCopy);
+    expect(routeButton.parentElement?.contains(mapping)).toBe(true);
+    expect(mapping.parentElement?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
+    expect(modeCopy).toBeTruthy();
     expect(mapping.textContent).toBe(mappingCopy);
   });
 
   it('does not call a later current hop takeover unless the head is unavailable for cooldown', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 8, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'native_cli', health: 'healthy', runnable: false, reason: 'native_cli_unavailable', retry_at: null }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 9, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'native_cli', health: 'healthy', runnable: false, reason: 'native_cli_unavailable', retry_at: null }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Backup/)).toBeTruthy();
     expect(screen.queryByText(/takeover/i)).toBeNull();
   });
@@ -236,18 +237,19 @@ describe('AgentCard', () => {
   it('hides current and takeover projections while the runtime is stopped', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
-    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 8, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 9, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
-    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('button', { name: 'Manual' })).toBeTruthy();
   });
 
   it('hides gateway-owned catalog and supply actions in direct mode', () => {
     const onOpenModels = vi.fn();
     const key = modelChainKey('claude', 'claude-opus-4-6');
     const directAgent: AgentSupply = { ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null };
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[directAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 8, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[directAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 9, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.queryByText(/Adjust priority/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /route chain/i })).toBeNull();
     expect(screen.queryByText(/Backup/)).toBeNull();
@@ -259,8 +261,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Adjust priority', 'Switch to direct', 'Switch to gateway'],
-    ['zh', '调整优先级', '切到直连', '切换到模型网关'],
+    ['en', 'Default routing', 'Switch to direct', 'Switch to gateway'],
+    ['zh', '默认路由', '切到直连', '切换到模型网关'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,
@@ -312,7 +314,7 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
       ...hubAgent,
       builtin_models: models,
-      model_supply: models.map((modelId) => ({ model_id: modelId, chain_length: 1, has_runnable_hop: true })),
+      model_supply: models.map((modelId) => ({ route_origin: "manual" as const, model_id: modelId, chain_length: 1, has_runnable_hop: true })),
       routes: {},
     }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={onProbeSettled} /></I18nextProvider>);
 
@@ -336,7 +338,7 @@ describe('AgentCard', () => {
       ...hubAgent,
       builtin_models: models,
       routes: {},
-      model_supply: models.map((modelId) => ({
+      model_supply: models.map((modelId) => ({ route_origin: "manual" as const,
         model_id: modelId,
         chain_length: 1,
         has_runnable_hop: modelId !== pausedModel,
@@ -355,7 +357,7 @@ describe('AgentCard', () => {
     const catalogued = (ids: string[]): AgentSupply => ({
       ...hubAgent,
       routes: {},
-      model_supply: ids.map((modelId) => ({ model_id: modelId, chain_length: 0, has_runnable_hop: false })),
+      model_supply: ids.map((modelId) => ({ route_origin: null, model_id: modelId, chain_length: 0, has_runnable_hop: false })),
       catalog_models: ids.map((id) => ({
         id, display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
         input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,

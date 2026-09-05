@@ -1,7 +1,7 @@
 import { catalogModelIds } from './backendCatalog';
 import { eligibleSources } from './eligibility';
 import type { RegionRead } from './regionRead';
-import type { AgentBackend, AgentChain, AgentSupply, Source } from './types';
+import type { AgentBackend, AgentChain, AgentSupply, Source, RouteOrigin } from './types';
 
 export type ModelChainRead = RegionRead<AgentChain>;
 
@@ -60,6 +60,8 @@ export type CollapsedModelRows = {
 };
 
 export type ModelSupplyState = 'available' | 'paused' | 'unconfigured';
+export const modelRouteOrigin = (agent: AgentSupply, modelId: string): RouteOrigin =>
+  agent.model_supply?.find((row) => row.model_id === modelId)?.route_origin ?? null;
 
 /** Structural emptiness wins before live runnability, exactly as the contract specifies. */
 export function modelSupplyState(agent: AgentSupply, modelId: string): ModelSupplyState {

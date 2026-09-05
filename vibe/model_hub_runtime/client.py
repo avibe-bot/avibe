@@ -358,6 +358,7 @@ class EngineClient:
         stream: bool,
         request_protocol: str | None = None,
         request_headers: Mapping[str, str] | None = None,
+        on_transport_done: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
         request_protocol = request_protocol or source.protocol
         endpoint = _endpoint_for_protocol(request_protocol)
@@ -388,6 +389,7 @@ class EngineClient:
         first_received = False
         model_output_started = False
         ownership_transferred = False
+        transport_transferred = False
         prelude: _StreamPrelude | None = None
         # Held here rather than inside the prelude reader so every way out of this
         # call can still see what the wire already reported. A stream that reports
@@ -557,12 +559,17 @@ class EngineClient:
                 protocol=request_protocol,
                 outcome_future=outcome_future,
                 wire_state=wire_state,
+                on_transport_done=on_transport_done,
             )
 
             async def close_response_stream() -> None:
                 prelude.close()
                 response.close()
-                await session.close()
+                try:
+                    await session.close()
+                finally:
+                    if on_transport_done is not None:
+                        on_transport_done()
                 outcome = _observed_stream_terminal_outcome(
                     wire_state,
                     source,
@@ -579,6 +586,7 @@ class EngineClient:
                 observed=wire_state,
             )
             ownership_transferred = True
+            transport_transferred = True
             return handle
         except asyncio.TimeoutError:
             if response is not None:
@@ -622,12 +630,16 @@ class EngineClient:
                 )
             )
         finally:
-            if not ownership_transferred:
-                if prelude is not None:
-                    prelude.close()
-                if response is not None:
-                    response.close()
-                await session.close()
+            try:
+                if not ownership_transferred:
+                    if prelude is not None:
+                        prelude.close()
+                    if response is not None:
+                        response.close()
+                    await session.close()
+            finally:
+                if not transport_transferred and on_transport_done is not None:
+                    on_transport_done()
 
     def _request_json(
         self,
@@ -1312,6 +1324,7 @@ async def _response_stream(
     protocol: str,
     outcome_future: asyncio.Future[RawCallOutcome],
     wire_state: ProtocolSSEState,
+    on_transport_done: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
     try:
@@ -1382,7 +1395,11 @@ async def _response_stream(
             )
         prelude.close()
         response.close()
-        await session.close()
+        try:
+            await session.close()
+        finally:
+            if on_transport_done is not None:
+                on_transport_done()
         if outcome is not None and not outcome_future.done():
             outcome_future.set_result(outcome)
 

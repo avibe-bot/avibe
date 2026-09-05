@@ -106,7 +106,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 8
+    assert schema["properties"]["contract_version"]["const"] == 9
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -130,7 +130,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 8,
+            "contract_version": 9,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -384,7 +384,7 @@ def test_opencode_persisted_rows_use_bare_canonical_ids_and_require_native_proto
     payload = ModelHubConfig().to_payload()
     source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
     payload["sources"] = [source]
-    codex_route = next(iter(payload["agents"]["codex"]["routes"].values()))
+    codex_route = payload["agents"]["codex"]["routes"].setdefault("gpt-5.6", {"hops": []})
     codex_route["hops"] = [
         {
             "source_id": source["id"],
@@ -650,37 +650,13 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
         assert required in ac_54
 
 
-def test_per_model_route_put_does_not_consume_stored_source_order():
-    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
-    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
-
-    route_row = next(
-        line
-        for line in api_contract.splitlines()
-        if line.startswith("| PUT `/api/models/agents/<backend>/chain?model=<id>`")
-    )
-    assert "handler never reads `sources.order`" in route_row
-    assert "submitted `hops` carry no Source-order semantics" in route_row
-
-    source_order_contract = api_contract.split("## Per-backend source order", 1)[1].split(
-        "### Direct-to-Gateway native adoption", 1
-    )[0]
-    assert "only server-side post-creation" in source_order_contract
-    assert "implicitly reads and applies the stored Source order" in source_order_contract
-
-    exact_route_contract = api_contract.split("### Exact Route-chain configuration", 1)[1].split(
-        "## Source creation outcome", 1
-    )[0]
-    assert "per-model PUT persists the explicit submitted order" in exact_route_contract
-    assert "never reads `sources.order`" in exact_route_contract
-    assert "request still carries only explicit `hops`" in exact_route_contract
-
-    section_42 = model_hub_plan.split("### 4.2 Gateway strategy", 1)[1].split("### 4.3 Runtime resolution", 1)[0]
-    section_46 = model_hub_plan.split("### 4.6 Configured-chain storage and mutation", 1)[1].split("### 4.7", 1)[0]
-    for authority in (section_42, section_46):
-        assert "server" in authority
-        assert "per-model" in authority
-        assert "does not read `sources.order`" in authority or "never reads `sources.order`" in authority
+def test_sparse_override_contract_has_one_default_order_owner():
+    contract = (CONTRACTS.parent / "model-hub-routing-modes.md").read_text(encoding="utf-8")
+    assert "sources.order` is the sole backend-default" in contract
+    assert "Key absence means automatic" in contract
+    assert "Restoring automatic deletes the key" in contract
+    assert "Never reorder manual arrays" in contract
+    assert "no inference from array equality" in contract
 
 
 def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
@@ -709,7 +685,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 8,
+        "contract_version": 9,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -725,7 +701,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 8,
+        "contract_version": 9,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -795,7 +771,7 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
         },
         "supply_status": "ok",
         "menu": None,
-        "model_supply": [{"model_id": "claude-opus-4-5", "chain_length": 1}],
+        "model_supply": [{"model_id": "claude-opus-4-5", "chain_length": 1, "route_origin": "automatic"}],
         "builtin_models": ["claude-opus-4-5"],
         "named_agents": [],
     }
@@ -807,7 +783,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 8
+    assert registry["contract_version"] == 9
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -894,6 +870,20 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
     )
     assert declared is not None
     assert int(declared.group(1)) == terminal
+
+    ui_types = Path("ui/src/components/settings/models/types.ts").read_text(encoding="utf-8")
+    persisted_versions = re.search(
+        r"export const PERSISTED_TURN_CONTRACT_VERSIONS\s*=\s*(\[[^\]]*\])\s+as const;",
+        ui_types,
+    )
+    assert persisted_versions is not None
+    provenance_schema = json.loads((CONTRACTS / "turn-provenance.schema.json").read_text(encoding="utf-8"))
+    assert json.loads(persisted_versions.group(1)) == provenance_schema["properties"]["contract_version"]["enum"]
+    assert re.search(
+        r"export type TurnProvenance\s*=\s*\{\s*contract_version:\s*"
+        r"\(typeof PERSISTED_TURN_CONTRACT_VERSIONS\)\[number\];",
+        ui_types,
+    )
 
 
 def test_contracts_readme_indexes_every_file_beside_it():
@@ -1025,8 +1015,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8],
-        "expected": [5, 6, 7, 8],
+        "values": [6, 7, 8, 9],
+        "expected": [5, 6, 7, 8, 9],
     } in result["findings"]
 
 
@@ -1313,15 +1303,17 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     chain_validator = Draft7Validator(chain_schema)
     for example in chain_schema["examples"]:
         chain_validator.validate(example)
-    for waiting in chain_schema["examples"][:2]:
+    for waiting in (example for example in chain_schema["examples"] if example["supply_state"] == "waiting"):
         interrupted = copy.deepcopy(waiting)
         interrupted["supply_state"] = "interrupted"
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 8,
+        "contract_version": 9,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
+        "manual_override": None,
+        "route_origin": "automatic",
         "chain": [
             {
                 "source_id": "src_claudepro1",
@@ -1352,6 +1344,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         "model_id": "claude-opus-4-6",
         "chain_length": 0,
         "has_runnable_hop": False,
+        "route_origin": None,
     }
     model_supply_validator.validate(empty_model_supply)
     with pytest.raises(ValidationError):
@@ -1880,7 +1873,8 @@ def test_config_reload_spells_route_hops_like_the_inventory_they_name(monkeypatc
     ]
     current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     current["model_hub"]["sources"] = [source]
-    menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
+    menu_model = "claude-opus-4-6"
+    route = current["model_hub"]["agents"]["claude"]["routes"].setdefault(menu_model, {"hops": []})
     route["hops"] = [{"source_id": source["id"], "model_id": model["id"]} for model in source["models"]]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
@@ -1917,7 +1911,8 @@ def test_loading_a_persisted_config_yields_one_this_product_can_load_again(monke
     ]
     current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     current["model_hub"]["sources"] = [source]
-    menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
+    menu_model = "claude-opus-4-6"
+    route = current["model_hub"]["agents"]["claude"]["routes"].setdefault(menu_model, {"hops": []})
     route["hops"] = [{"source_id": source["id"], "model_id": spelling} for spelling in (padded.strip(), padded)]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
@@ -2969,7 +2964,7 @@ def test_recommended_order_is_backend_native_then_created_at_and_id():
     ]
 
 
-def test_persisted_hub_config_requires_explicit_complete_route_rows():
+def test_persisted_hub_config_requires_sparse_override_object():
     payload = ModelHubConfig().to_payload()
 
     missing = json.loads(json.dumps(payload))
@@ -2982,10 +2977,8 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
     with pytest.raises(ValueError, match="routes.*object"):
         ModelHubConfig.from_payload(non_object)
 
-    incomplete = json.loads(json.dumps(payload))
-    incomplete["agents"]["claude"]["routes"].pop("claude-opus-4-6")
-    with pytest.raises(ValueError, match="missing menu model"):
-        ModelHubConfig.from_payload(incomplete)
+    sparse = ModelHubConfig.from_payload(payload)
+    assert sparse.agents["claude"].routes == {}
 
     extra = json.loads(json.dumps(payload))
     extra["agents"]["claude"]["routes"]["claude-hidden-model"] = {"hops": []}
@@ -3015,8 +3008,7 @@ def test_persisted_hub_config_requires_explicit_complete_route_rows():
         }
     ]
     dynamic["agents"]["opencode"]["routes"] = {}
-    with pytest.raises(ValueError, match="missing menu model 'model'"):
-        ModelHubConfig.from_payload(dynamic)
+    assert ModelHubConfig.from_payload(dynamic).agents["opencode"].routes == {}
 
     dormant = json.loads(json.dumps(payload))
     dormant["agents"]["opencode"]["routes"]["dormant-model"] = {"hops": []}
@@ -3033,10 +3025,11 @@ def test_backend_model_modalities_match_the_contract_directions():
         ModelHubBackendModelConfig.from_payload({"id": "custom-model", "output_modalities": ["pdf"]})
 
 
-def test_config_reload_adds_bundled_routes_without_discarding_legacy_models(tmp_path):
+def test_config_reload_preserves_legacy_routes_without_seeding_missing_models(tmp_path):
     payload = api.config_to_payload(default_config())
     claude = payload["model_hub"]["agents"]["claude"]
-    original_ids = tuple(claude["routes"])
+    original_ids = tuple(model["id"] for model in claude["models"])
+    claude["routes"] = {model_id: {"hops": []} for model_id in original_ids}
     removed_id = original_ids[0]
     stale_id = "claude-catalog-removed-after-save"
     routes = claude["routes"]
@@ -3050,8 +3043,8 @@ def test_config_reload_adds_bundled_routes_without_discarding_legacy_models(tmp_
     migrated_routes = loaded.model_hub.agents["claude"].routes
     migrated_models = loaded.model_hub.agents["claude"].models
 
-    assert set(migrated_routes) == {*original_ids, stale_id}
-    assert migrated_routes[removed_id].hops == ()
+    assert set(migrated_routes) == ({*original_ids, stale_id} - {removed_id})
+    assert removed_id not in migrated_routes
     assert migrated_routes[stale_id].hops == ()
     assert next(model for model in migrated_models if model.id == stale_id).origin == "manual"
 

@@ -2,17 +2,17 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/probe-result.schema.json",
   "title": "ProbeResult",
-  "description": "Outcome of probing the first runnable exact configured hop. Runtime never performs model matching or substitution.",
+  "description": "Outcome of probing the first runnable exact hop from the shared effective route plan. Probes use the same manual, automatic or passthrough tier as reads and execution; live restrictions never create another tier. Unknown-model passthrough is Hub API-key-only; subscriptions retain existing model admission.",
   "type": "object",
   "required": ["contract_version", "backend", "channel", "reachable", "source_id", "model_id", "latency_ms", "error"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 8 },
+    "contract_version": { "const": 9 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "channel": { "enum": ["hub", "native_cli"] },
     "reachable": { "type": "boolean" },
     "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
-    "model_id": { "type": "string", "minLength": 1, "description": "The exact upstream model id stored in the selected hop." },
+    "model_id": { "type": "string", "minLength": 1, "description": "The exact upstream model id selected by the effective planner." },
     "latency_ms": { "type": ["integer", "null"], "minimum": 0 },
     "error": {
       "type": ["string", "null"],
@@ -62,10 +62,10 @@
     }
   ],
   "examples": [
-    { "contract_version": 8, "backend": "codex", "channel": "hub", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": 412, "error": null },
-    { "contract_version": 8, "backend": "claude", "channel": "hub", "reachable": false, "source_id": "src_relay9c1x", "model_id": "glm-5.2", "latency_ms": 287, "error": "models.source.needs_action.balance_exhausted" },
-    { "contract_version": 8, "backend": "codex", "channel": "hub", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.source.backoff.connection_failed" },
-    { "contract_version": 8, "backend": "codex", "channel": "native_cli", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": null },
-    { "contract_version": 8, "backend": "codex", "channel": "native_cli", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.probe.native_cli_unavailable" }
+    { "contract_version": 9, "backend": "codex", "channel": "hub", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": 412, "error": null },
+    { "contract_version": 9, "backend": "claude", "channel": "hub", "reachable": false, "source_id": "src_relay9c1x", "model_id": "glm-5.2", "latency_ms": 287, "error": "models.source.needs_action.balance_exhausted" },
+    { "contract_version": 9, "backend": "codex", "channel": "hub", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.source.backoff.connection_failed" },
+    { "contract_version": 9, "backend": "codex", "channel": "native_cli", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": null },
+    { "contract_version": 9, "backend": "codex", "channel": "native_cli", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.probe.native_cli_unavailable" }
   ]
 }

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/turn-provenance.schema.json",
   "title": "TurnProvenance",
-  "description": "Persisted debug record for one exactly attributed Gateway turn. It records exact configured Source/model attempts in stored order and one terminal outcome. No route-policy or runtime-mapping discriminator exists; ambiguous attempts produce no record.",
+  "description": "Persisted debug record for one exactly attributed Gateway turn. It records exact Source/model attempts from the effective plan in attempted order and one terminal outcome. Historical records remain readable without a route_origin or manual_override field; ambiguous attempts produce no record.",
   "type": "object",
   "definitions": {
     "strippedReasoningEfforts": {
@@ -36,9 +36,9 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": {
-      "enum": [5, 6, 7, 8],
-      "$comment": "The only versioned object that is written to disk instead of exchanged inside one request, so its released values are a set rather than a constant. A record a v5 build persisted keeps validating -- tests/fixtures/model_hub/released_v5_permission_denied.json is the evidence -- while new records carry the terminal value, which is the last member. Every other versioned object is an in-process envelope and stays pinned to that value alone.",
-      "description": "Generation that wrote this record. Nothing branches on it: readers accept every released value and the shape is identical across them."
+      "enum": [5, 6, 7, 8, 9],
+      "$comment": "The only versioned object written to disk, so released versions form a set rather than a constant. Historical records validate after the existing persistence-read normalization of retired reasons; tests/fixtures/model_hub/released_v5_permission_denied.json exercises that boundary, not raw-file validation. Reading preserves the writer generation and requires no new route fields. New records carry the terminal member. Other versioned objects are ephemeral envelopes pinned to that value alone.",
+      "description": "Generation that wrote this record. Readers retain every supported released value, apply existing retired-reason normalization independently of version, and do not require route_origin or manual_override."
     },
     "turn_id": {
       "type": "string",
@@ -160,7 +160,42 @@
             "engine_down"
           ]
         },
-        "stream_started": { "type": "boolean" }
+        "stream_started": { "type": "boolean" },
+        "http_status": {
+          "type": ["integer", "null"],
+          "minimum": 100,
+          "maximum": 599,
+          "description": "Optional observed upstream HTTP status for this exact terminal attempt. Null means no valid HTTP status was observed. Historical records may omit it; no value is reconstructed from the classification."
+        },
+        "upstream_error_code": {
+          "enum": [
+            "permission_error",
+            "authentication_error",
+            "invalid_api_key",
+            "account_banned",
+            "account_disabled",
+            "account_suspended",
+            "request_too_large",
+            "invalid_parameter",
+            "invalid_request_error",
+            "validation_error",
+            "context_length_exceeded",
+            "model_not_found",
+            "not_found_error",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "quota_exceeded",
+            "insufficient_quota",
+            "billing_error",
+            "overloaded",
+            "overloaded_error",
+            "server_error",
+            "internal_error",
+            "api_error",
+            null
+          ],
+          "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, raw messages, bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
+        }
       },
       "dependencies": {
         "stripped_reasoning_efforts": ["declared_reasoning_efforts"],
@@ -359,7 +394,7 @@
   ],
   "examples": [
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -384,7 +419,7 @@
       "blockers": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -405,7 +440,7 @@
       "blockers": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -425,7 +460,7 @@
       ]
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -445,7 +480,29 @@
       "blockers": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
+      "turn_id": "turn_modelmissing01",
+      "ts": "2026-09-05T17:31:10Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "failed_terminal",
+      "failed_attempts": [],
+      "served": null,
+      "terminal_error": {
+        "source_id": "src_anthkey01",
+        "configured_model_id": "unlisted-upstream-model",
+        "channel": "hub",
+        "reason": "invalid_parameter",
+        "stream_started": false,
+        "http_status": 404,
+        "upstream_error_code": "model_not_found"
+      },
+      "canceled_attempt": null,
+      "model_supply_state": null,
+      "blockers": []
+    },
+    {
+      "contract_version": 9,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",

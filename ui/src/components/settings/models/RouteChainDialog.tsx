@@ -7,6 +7,9 @@ import {
   LoaderCircle,
   Pencil,
   Plus,
+  RefreshCw,
+  RotateCcw,
+  Undo2,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -15,12 +18,15 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { GuardGapList } from "./GuardGapList";
 import { RouteCandidatePopover } from "./RouteCandidatePopover";
+import { RouteOriginBadge } from "./RouteOriginBadge";
+import { RouteRecordedTurn } from './RouteRecordedTurn';
+import { eligibleSources } from "./eligibility";
 import { equalHopIdentity, hopBelongsToSource } from "./hopIdentity";
 import { apiFailure, modelsApi, type GuardConfirmation } from "./modelsApi";
 import type { ModelChainRead } from "./modelRows";
 import {
   routeCandidates,
-  reorderRouteDraft,
+  sameManualOverride,
   sameRouteDraft,
   validateRouteDraft,
   type RouteCandidate,
@@ -36,6 +42,8 @@ import type {
   RouteHop,
   RouteHopRef,
   Source,
+  ManualRouteOverride,
+  AgentChain,
 } from "./types";
 
 const sourceName = (sources: Source[], sourceId: string): string =>
@@ -85,6 +93,7 @@ export type SuspendedRouteAttempt = {
   modelId: string;
   stage: "initial" | "confirmed";
   submitted: RouteHop[];
+  manual_override: ManualRouteOverride | null;
 };
 
 export const RouteChainDialog: React.FC<{
@@ -94,6 +103,8 @@ export const RouteChainDialog: React.FC<{
   onCommitted?: (result: RouteReport) => void;
   commitReconciliation?: RouteCommitReconciliation | null;
   onObserved?: (chain: AgentChainMutation["chain"]) => void;
+  onOpenDefaults?: () => void;
+  covered?: boolean;
   readAgents: () => Promise<RouteCollectionObservation<AgentSupply[]>>;
   readSources: () => Promise<RouteCollectionObservation<Source[]>>;
   onDirectMode?: (
@@ -107,6 +118,8 @@ export const RouteChainDialog: React.FC<{
   onCommitted,
   commitReconciliation,
   onObserved,
+  onOpenDefaults,
+  covered = false,
   readAgents,
   readSources,
   onDirectMode,
@@ -114,6 +127,14 @@ export const RouteChainDialog: React.FC<{
   const { t } = useTranslation();
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [origin, setOrigin] = React.useState<RouteHop[]>([]);
+  const [savedOverride, setSavedOverride] = React.useState<ManualRouteOverride | null>(null);
+  const [manualDraft, setManualDraft] = React.useState(false);
+  const [preview, setPreview] = React.useState<AgentChain | null>(null);
+  const [previewPending, setPreviewPending] = React.useState(false);
+  const [previewFailed, setPreviewFailed] = React.useState(false);
+  const previewGeneration = React.useRef(0);
+  const restoreUndo = React.useRef<RouteHop[] | null>(null);
+  const submittedOverride = React.useRef<ManualRouteOverride | null>(null);
   const interactionRef = React.useRef(createRouteChainInteraction());
   const [interaction, setInteraction] = React.useState(interactionRef.current);
   const [chain, setChain] = React.useState<AgentChainMutation["chain"] | null>(
@@ -149,6 +170,7 @@ export const RouteChainDialog: React.FC<{
   const openedIdentity = React.useRef<string | null>(null);
   const invalidSignature = React.useRef("");
   const generation = React.useRef(0);
+  React.useEffect(() => () => { generation.current += 1; previewGeneration.current += 1; }, []);
 
   const agent = selection?.agent ?? null;
   const modelId = selection?.modelId ?? "";
@@ -166,6 +188,9 @@ export const RouteChainDialog: React.FC<{
     [],
   );
   const addCandidates = agent ? routeCandidates(agent, sources, draft) : [];
+  const targetSources = agent ? eligibleSources(sources, agent) : [];
+  const canEditRoute = draft.length > 0 || addCandidates.length > 0
+    || targetSources.some((source) => source.kind === 'api_key');
   const backend = agent
     ? (t(`settings.models.backends.${agent.backend}`, {
         defaultValue: agent.backend,
@@ -174,7 +199,8 @@ export const RouteChainDialog: React.FC<{
   const valid = agent
     ? validateRouteDraft(agent, sources, origin, draft)
     : { invalidIndexes: [], valid: false };
-  const dirty = !sameRouteDraft(origin, draft);
+  const dirty = manualDraft ? savedOverride === null || !sameRouteDraft(savedOverride.hops, draft) : savedOverride !== null;
+  const draftOrigin = manualDraft ? (draft.length ? 'manual' : null) : (preview ?? chain)?.route_origin ?? null;
   const announce = (key: string, params?: Record<string, unknown>) =>
     setAnnouncement({ key, params });
   const focusAfterRender = (ref: React.RefObject<HTMLElement | null>) => {
@@ -193,6 +219,10 @@ export const RouteChainDialog: React.FC<{
         model_id,
       }));
       setChain(next);
+      setSavedOverride(next.manual_override);
+      setManualDraft(next.manual_override !== null);
+      setPreview(null);
+      setPreviewFailed(false);
       onObserved?.(next);
       setOrigin(hops);
       advanceInteraction({ type: "reset", draft: hops, focusIndex: 0 });
@@ -217,6 +247,11 @@ export const RouteChainDialog: React.FC<{
     if (nextIdentity === openedIdentity.current) return;
     openedIdentity.current = nextIdentity;
     generation.current += 1;
+    previewGeneration.current += 1;
+    restoreUndo.current = null;
+    setPreview(null);
+    setPreviewPending(false);
+    setPreviewFailed(false);
     setGuard(null);
     setSubmitted(null);
     setSubmittedStage("initial");
@@ -274,6 +309,7 @@ export const RouteChainDialog: React.FC<{
       return;
     }
     if (phase !== "saving") {
+      previewGeneration.current += 1;
       if (phase !== "impact" && phase !== "refreshing") {
         generation.current += 1;
       }
@@ -387,6 +423,10 @@ export const RouteChainDialog: React.FC<{
   ) => {
     generation.current += 1;
     setChain(nextReport.chain);
+    setSavedOverride(nextReport.chain.manual_override);
+    setManualDraft(nextReport.chain.manual_override !== null);
+    setPreview(null);
+    restoreUndo.current = null;
     setReport(nextReport);
     setOrigin(committedHops);
     advanceInteraction({ type: "reset", draft: committedHops });
@@ -402,34 +442,35 @@ export const RouteChainDialog: React.FC<{
   };
 
   const submit = async (confirmation?: GuardState) => {
-    if (!selection || !agent || phase === "saving" || !valid.valid || !dirty)
+    if (!selection || !agent || phase === "saving" || previewPending || (!manualDraft && previewFailed) || (manualDraft && !valid.valid) || !dirty)
       return;
     const hops = (confirmation ? (submitted ?? draft) : draft).map((hop) => ({
       ...hop,
     }));
     setSubmitted(hops);
+    if (!confirmation) submittedOverride.current = manualDraft ? { hops } : null;
     setSubmittedStage(confirmation ? "confirmed" : "initial");
     setPhase("saving");
     setGuard(null);
     requestAnimationFrame(() => savingStatusRef.current?.focus());
     try {
-      const result = await modelsApi.putAgentChain(agent.backend, modelId, {
-        hops,
-        ...(confirmation
+      const guardFields = confirmation
           ? {
               force: true as const,
               would_remove_hops: confirmation.hops,
               would_interrupt: confirmation.gaps,
             }
-          : {}),
-      });
+          : {};
+      const result = submittedOverride.current === null
+        ? await modelsApi.restoreAgentChain(agent.backend, modelId, confirmation ? guardFields as GuardConfirmation : undefined)
+        : await modelsApi.putAgentChain(agent.backend, modelId, { hops, ...guardFields });
       beginCommitted(
         {
           chain: result.chain,
           removed_hops: result.removed_hops,
           interrupted: result.interrupted,
         },
-        hops,
+        result.chain.chain.map(({ source_id, model_id }) => ({ source_id, model_id })),
       );
     } catch (error) {
       const failure = apiFailure(error);
@@ -441,14 +482,15 @@ export const RouteChainDialog: React.FC<{
             modelId,
             stage: confirmation ? "confirmed" : "initial",
             submitted: hops,
+            manual_override: submittedOverride.current,
           },
           null,
         );
         return;
       }
       if (
-        failure?.code === "source_last_supplier" &&
-        failure.wouldInterrupt.length > 0
+        (failure?.code === "source_last_supplier" || failure?.code === 'source_in_route_chain') &&
+        (failure.wouldInterrupt.length > 0 || failure.wouldRemoveHops.length > 0)
       ) {
         setGuard({
           hops: failure.wouldRemoveHops,
@@ -508,6 +550,7 @@ export const RouteChainDialog: React.FC<{
             modelId,
             stage: submittedStage,
             submitted,
+            manual_override: submittedOverride.current,
           },
           observedAgent ?? null,
         );
@@ -527,7 +570,7 @@ export const RouteChainDialog: React.FC<{
       const observedHops = chainAnswer.value.chain.map(
         ({ source_id, model_id }) => ({ source_id, model_id }),
       );
-      if (sameRouteDraft(observedHops, submitted)) {
+      if (sameManualOverride(chainAnswer.value.manual_override, submittedOverride.current)) {
         beginCommitted(
           {
             chain: chainAnswer.value,
@@ -594,6 +637,7 @@ export const RouteChainDialog: React.FC<{
             modelId,
             stage: submittedStage,
             submitted,
+            manual_override: submittedOverride.current,
           },
           observedAgent,
         );
@@ -617,6 +661,44 @@ export const RouteChainDialog: React.FC<{
   const addCandidate = (candidate: RouteCandidate) => {
     const next = advanceInteraction({ type: "append", hop: candidate.hop });
     requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
+  };
+  const restoreAutomatic = React.useCallback(async () => {
+    if (!agent || previewPending || phase !== 'ready') return;
+    const token = ++previewGeneration.current;
+    const previousDraft = draft.map((hop) => ({ ...hop }));
+    setPreviewPending(true);
+    setPreviewFailed(false);
+    try {
+      const next = await modelsApi.previewAgentChain(agent.backend, modelId, { manual_override: null });
+      if (token !== previewGeneration.current) return;
+      if (manualDraft) restoreUndo.current = previousDraft;
+      setPreview(next);
+      setManualDraft(false);
+      advanceInteraction({ type: 'reset', draft: next.chain.map(({ source_id, model_id }) => ({ source_id, model_id })) });
+      setAnnouncement({ key: 'settings.models.routing.restorePending' });
+    } catch {
+      if (token === previewGeneration.current) setPreviewFailed(true);
+    } finally {
+      if (token === previewGeneration.current) setPreviewPending(false);
+    }
+  }, [advanceInteraction, agent, draft, manualDraft, modelId, phase, previewPending]);
+  const wasCovered = React.useRef(covered);
+  React.useEffect(() => {
+    const returning = wasCovered.current && !covered;
+    wasCovered.current = covered;
+    if (!returning || manualDraft) return;
+    // Defaults can change while this dialog is hidden; explicit drafts remain local.
+    if (restoreUndo.current) void restoreAutomatic();
+    else void readChain();
+  }, [covered, manualDraft, readChain, restoreAutomatic]);
+  const undoRestore = () => {
+    previewGeneration.current += 1;
+    setPreview(null);
+    setPreviewFailed(false);
+    setManualDraft(true);
+    advanceInteraction({ type: 'reset', draft: restoreUndo.current ?? origin });
+    restoreUndo.current = null;
+    announce('settings.models.routing.undoDone');
   };
   const renderHop = (hop: RouteHop, index: number) => {
     const chainLink = chain?.chain.find((entry) =>
@@ -727,6 +809,7 @@ export const RouteChainDialog: React.FC<{
           <RouteCandidatePopover
             key={`edit:${selectorEpoch}:${index}`}
             candidates={replacementCandidates}
+            sources={targetSources}
             confirmLabel={t("settings.models.routeDialog.edit.confirm") as string}
             initialHop={hop}
             label={t("settings.models.routeDialog.editHop") as string}
@@ -939,20 +1022,38 @@ export const RouteChainDialog: React.FC<{
       </div>
     ) : (
       <div className="model-hub-route-body flex flex-col">
+        <div className="model-hub-route-origin-line">
+          <RouteOriginBadge origin={draftOrigin} backend={agent!.backend} interactive={false} />
+          <span>{t(manualDraft ? 'settings.models.routing.frozen' : 'settings.models.routing.follows', { backend })}</span>
+        </div>
+        {preview && <div className="model-hub-route-preview" data-origin={preview.route_origin ?? 'unconfigured'} role="status">
+          <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`)}</strong>
+          <span>{t('settings.models.routing.restorePending')}</span>
+        </div>}
         <h3 className="model-hub-route-label font-bold">
-          {t("settings.models.routeDialog.section")}
+          {t(preview ? 'settings.models.routing.afterSave' : "settings.models.routeDialog.section")}
         </h3>
-        <div className="model-hub-route-list flex flex-col border border-border bg-background">
+        <div inert={previewPending} className="model-hub-route-list flex flex-col border border-border bg-background">
           {draft.length ? (
-            draft.map(renderHop)
+            manualDraft ? draft.map(renderHop) : draft.map((hop, index) => (
+              <div key={`${hop.source_id}:${hop.model_id}`} className="model-hub-route-hop model-hub-fill-08 flex items-center border border-border">
+                <span className="model-hub-route-ordinal grid shrink-0 place-items-center font-mono" data-origin={draftOrigin ?? 'unconfigured'}>{index + 1}</span>
+                <span className="model-hub-route-hop-copy flex min-w-0 flex-1 flex-col">
+                  <span className="model-hub-route-hop-name truncate font-semibold" title={sourceName(sources, hop.source_id)}>{sourceName(sources, hop.source_id)}</span>
+                  <span className="model-hub-route-hop-model truncate font-mono text-muted" title={hop.model_id}>{hop.model_id}</span>
+                </span>
+              </div>
+            ))
           ) : (
             <div className="model-hub-route-empty text-xs text-muted">
-              {t("settings.models.routeDialog.empty")}
+              <p>{t(manualDraft ? 'settings.models.routing.manualEmpty' : 'settings.models.routing.noDefaults')}</p>
+              {!manualDraft && onOpenDefaults && <Button variant="outline" onClick={onOpenDefaults}><ListOrdered aria-hidden />{t('settings.models.routing.configureDefaults')}</Button>}
             </div>
           )}
-          <RouteCandidatePopover
+          {manualDraft && <RouteCandidatePopover
             key={`add:${selectorEpoch}`}
             candidates={addCandidates}
+            sources={targetSources}
             confirmLabel={t("settings.models.routeDialog.add.confirm") as string}
             label={t("settings.models.routeDialog.addHop") as string}
             width="trigger"
@@ -962,7 +1063,7 @@ export const RouteChainDialog: React.FC<{
               <button
                 ref={addButtonRef}
                 type="button"
-                disabled={addCandidates.length === 0}
+                disabled={targetSources.length === 0 || previewPending}
                 aria-describedby={
                   addCandidates.length === 0
                     ? "model-hub-route-add-none"
@@ -974,25 +1075,13 @@ export const RouteChainDialog: React.FC<{
                 {t("settings.models.routeDialog.addHop")}
               </button>
             }
-          />
+          />}
         </div>
-        <button
-          ref={reseedButtonRef}
-          type="button"
-          onClick={() => {
-            const sorted = reorderRouteDraft(agent as AgentSupply, draft);
-            advanceInteraction({ type: "reset", draft: sorted });
-            announce(
-              sameRouteDraft(sorted, draft)
-                ? "settings.models.routeDialog.reorder.unchanged"
-                : "settings.models.routeDialog.reorder.sorted",
-            );
-          }}
-          className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan-ink"
-        >
+        {onOpenDefaults && <button type="button" disabled={previewPending} onClick={onOpenDefaults} className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan-ink">
           <ListOrdered aria-hidden="true" />
-          {t("settings.models.routeDialog.reorder.label")}
-        </button>
+          {t('settings.models.routing.defaultRouting')}
+          <span className="text-muted">{(agent?.sources?.order ?? []).map((id) => sourceName(sources, id)).join(' → ')}</span>
+        </button>}
         {addCandidates.length === 0 && (
           <span className="sr-only" id="model-hub-route-add-none">
             {t("settings.models.routeDialog.add.none")}
@@ -1001,9 +1090,10 @@ export const RouteChainDialog: React.FC<{
         <p className="model-hub-route-hint flex items-start">
           <Info aria-hidden="true" className="shrink-0" />
           <span className="model-hub-route-hint-copy">
-            {t("settings.models.routeDialog.hint")}
+            {t(manualDraft ? 'settings.models.routing.manualHint' : 'settings.models.routing.editHint')}
           </span>
         </p>
+        {previewFailed && <div role="alert" className="text-destructive-ink text-xs"><p>{t('settings.models.routing.previewFailed')}</p><Button variant="ghost" size="sm" disabled={previewPending} onClick={() => void restoreAutomatic()}><RefreshCw aria-hidden />{t('settings.models.routeDialog.retry')}</Button></div>}
         {valid.invalidIndexes.length > 0 && (
           <p
             id="model-hub-route-invalid-summary"
@@ -1019,7 +1109,7 @@ export const RouteChainDialog: React.FC<{
     );
 
   return (
-    <DialogPrimitive.Root open onOpenChange={(open) => !open && close()}>
+    <DialogPrimitive.Root open={!covered} onOpenChange={(open) => !open && close()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="model-hub-route-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
@@ -1073,6 +1163,7 @@ export const RouteChainDialog: React.FC<{
             </DialogPrimitive.Description>
           </header>
           {body}
+          <RouteRecordedTurn key={`${selectionBackend}:${modelId}`} backend={selectionBackend!} modelId={modelId} />
           <footer className="model-hub-route-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
             {phase === "impact" || phase === "refreshing" ? (
               <Button
@@ -1113,6 +1204,10 @@ export const RouteChainDialog: React.FC<{
               </span>
             ) : (
               <>
+                {(manualDraft || restoreUndo.current) && <Button ref={reseedButtonRef} variant="outline" className="model-hub-dialog-action mr-auto" disabled={phase !== 'ready' || previewPending} onClick={() => restoreUndo.current ? undoRestore() : void restoreAutomatic()}>
+                  {previewPending ? <LoaderCircle className="animate-spin" aria-hidden /> : restoreUndo.current ? <Undo2 aria-hidden /> : <RotateCcw aria-hidden />}
+                  {t(restoreUndo.current ? 'settings.models.routing.undoRestore' : 'settings.models.routing.restoreAutomatic')}
+                </Button>}
                 <Button
                   ref={cancelButtonRef}
                   type="button"
@@ -1120,9 +1215,9 @@ export const RouteChainDialog: React.FC<{
                   className="model-hub-dialog-action"
                   onClick={close}
                 >
-                  {t("settings.models.routeDialog.cancel")}
+                  {t(manualDraft || preview ? "settings.models.routeDialog.cancel" : 'settings.models.routing.close')}
                 </Button>
-                <Button
+                {!manualDraft && !preview ? (canEditRoute && <Button variant="outline" className="model-hub-dialog-action" disabled={phase !== 'ready'} onClick={() => setManualDraft(true)}><Pencil aria-hidden />{t('settings.models.routing.editRoute')}</Button>) : <Button
                   ref={saveButtonRef}
                   type="button"
                   className="model-hub-dialog-action"
@@ -1136,11 +1231,11 @@ export const RouteChainDialog: React.FC<{
                         ].join(" ")
                       : undefined
                   }
-                  disabled={phase !== "ready" || !dirty || !valid.valid}
+                  disabled={phase !== "ready" || previewPending || (!manualDraft && previewFailed) || !dirty || (manualDraft && !valid.valid)}
                   onClick={() => void submit()}
                 >
                   {t("settings.models.routeDialog.save")}
-                </Button>
+                </Button>}
               </>
             )}
           </footer>

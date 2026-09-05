@@ -93,6 +93,21 @@ export type Probe = {
   error?: string | null;
 };
 
+export type RecordedTurn = {
+  turn_id: string;
+  ts: string;
+  agent: string;
+  requested_model_id: string;
+  terminal_error: null | {
+    source_id: string;
+    configured_model_id: string;
+    reason: string;
+    http_status?: number | null;
+    upstream_error_code?: string | null;
+  };
+  served: null | { source_id: string; configured_model_id: string };
+};
+
 export type Runtime = {
   enabled: boolean;
   status: {
@@ -190,6 +205,8 @@ const refusedPlan = (body: unknown): { would_remove_hops: unknown[]; would_inter
 
 export type AgentChain = {
   backend: string;
+  manual_override: { hops: RouteHop[] } | null;
+  route_origin: 'automatic' | 'manual' | 'passthrough' | null;
   /** The menu model this chain routes. Named `model_id` on the wire — the
    *  server writes `{model_id, chain}`, so a reader keying on `model` finds
    *  nothing and quietly treats every existing route as empty. */
@@ -331,6 +348,56 @@ export class HubApi {
     return (await this.read<{ agents: Agent[] }>('/api/models/agents')).agents ?? [];
   }
 
+  async latestRecordedTurn(backend: string, model: string): Promise<RecordedTurn | null> {
+    const payload = await this.read<{ ok: boolean; contract_version: number; provenance: RecordedTurn | null }>(
+      `/api/models/agents/${backend}/provenance?model=${encodeURIComponent(model)}`,
+    );
+    if (payload.ok !== true || payload.contract_version !== 9 || !('provenance' in payload)) {
+      throw new Error('Latest recorded turn did not use the v9 provenance envelope');
+    }
+    return payload.provenance;
+  }
+
+  async createTurnAgent(name: string, backend: string, model: string): Promise<void> {
+    const result = await this.mutate('post', '/api/agents', {
+      name, backend, model, system_prompt: 'Return only the upstream fixture response. Do not use tools.',
+    });
+    if (!result.ok) throw new Error(`Create turn agent failed: ${JSON.stringify(result.body)}`);
+  }
+
+  async createTurnSession(projectId: string, agentName: string, model: string): Promise<string> {
+    const result = await this.mutate('post', '/api/sessions', { project_id: projectId, agent_name: agentName, model });
+    const body = result.body as { id?: string } | null;
+    if (!result.ok || !body?.id) throw new Error(`Create turn session failed: ${JSON.stringify(result.body)}`);
+    return body.id;
+  }
+
+  async sendTurn(sessionId: string, text: string): Promise<void> {
+    const result = await this.mutate('post', `/api/sessions/${sessionId}/messages`, { text });
+    if (result.status !== 202) throw new Error(`Send turn failed: ${JSON.stringify(result.body)}`);
+  }
+
+  async removeTurnFixture(agentName: string, sessionId: string | null): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      if (sessionId) {
+        const canceled = await this.mutate('post', `/api/sessions/${sessionId}/cancel`, {});
+        if (!canceled.ok) throw new Error(`Cancel fixture turn failed: ${JSON.stringify(canceled.body)}`);
+        const archived = await this.mutate('delete', `/api/sessions/${sessionId}`);
+        if (!archived.ok) throw new Error(`Archive fixture session failed: ${JSON.stringify(archived.body)}`);
+      }
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      const removed = await this.mutate('delete', `/api/agents/${encodeURIComponent(agentName)}`);
+      if (!removed.ok && removed.status !== 404) throw new Error(`Remove fixture agent failed: ${JSON.stringify(removed.body)}`);
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length) throw new AggregateError(failures, 'Recorded-turn fixture cleanup failed');
+  }
+
   /**
    * Whether this instance answers the read the picker's built-in and provider
    * groups are made of.
@@ -459,6 +526,38 @@ export class HubApi {
     return (await this.read<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`)).chains ?? [];
   }
 
+  async defaultSourceOrder(backend: string): Promise<string[]> {
+    return (await this.read<{ agent: { sources: { order: string[] } } }>(
+      `/api/models/agents/${backend}/sources`,
+    )).agent.sources.order;
+  }
+
+  async setDefaultSourceOrder(backend: string, order: string[]): Promise<void> {
+    const path = `/api/models/agents/${backend}/sources`;
+    const first = await this.mutate('put', path, { order });
+    if (!first.ok) {
+      const forced = await this.mutate('put', path, { order, force: true, ...refusedPlan(first.body) });
+      if (!forced.ok) throw new Error(`Default routing was not restored: ${JSON.stringify(forced.body)}`);
+    }
+    if (JSON.stringify(await this.defaultSourceOrder(backend)) !== JSON.stringify(order)) {
+      throw new Error('Default routing readback differs from the requested order');
+    }
+  }
+
+  async agentChain(backend: string, model: string): Promise<AgentChain> {
+    return (await this.read<{ chain: AgentChain }>(
+      `/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`,
+    )).chain;
+  }
+
+  async deleteAgentChain(backend: string, model: string): Promise<boolean> {
+    const path = `/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`;
+    const first = await this.mutate('delete', path, {});
+    if (first.ok) return true;
+    const forced = await this.mutate('delete', path, { force: true, ...refusedPlan(first.body) });
+    return forced.ok;
+  }
+
   /** Replaces one model's chain outright. Used to arrange the preconditions a
    *  guard scenario needs — a source that supplies a live route cannot be
    *  removed without the guard, which is the whole point of the scenario. */
@@ -558,7 +657,7 @@ export class HubApi {
    * `/api/models/*` to sweep, and that is the one case where nothing to clean is
    * a fact about the instance rather than a failed read.
    */
-  async removeSuiteSources(): Promise<void> {
+  async removeSuiteSources(preserveIds: ReadonlySet<string> = new Set()): Promise<void> {
     if (!(await this.modelHubEnabled())) return;
     // Every match is attempted before any failure is raised: the gateway
     // fixture leaves two sources behind, and a first delete that throws used
@@ -567,7 +666,7 @@ export class HubApi {
     // failure that already stopped this one.
     const failures: string[] = [];
     for (const source of await this.sources()) {
-      if (!isSuiteSource(source)) continue;
+      if (!isSuiteSource(source) || preserveIds.has(source.id)) continue;
       try {
         await this.deleteSource(source.id);
       } catch (error) {

@@ -16,7 +16,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 8 },
+    "contract_version": { "const": 9 },
     "outcome": {
       "enum": [
         "observed",
@@ -150,7 +150,7 @@
   ],
   "examples": [
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "outcome": "observed",
       "reachable": true,
       "authenticated": "authenticated",
@@ -165,7 +165,7 @@
       ]
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "outcome": "authentication_failed",
       "reachable": true,
       "authenticated": "rejected",
@@ -175,7 +175,7 @@
       "model_metadata": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "outcome": "ambiguous",
       "reachable": true,
       "authenticated": "unknown",
@@ -185,7 +185,7 @@
       "model_metadata": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "outcome": "unreachable",
       "reachable": false,
       "authenticated": "unknown",
@@ -195,7 +195,7 @@
       "model_metadata": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "outcome": "adapter_error",
       "reachable": null,
       "authenticated": "unknown",
@@ -205,7 +205,7 @@
       "model_metadata": []
     },
     {
-      "contract_version": 8,
+      "contract_version": 9,
       "outcome": "timeout",
       "reachable": null,
       "authenticated": "unknown",

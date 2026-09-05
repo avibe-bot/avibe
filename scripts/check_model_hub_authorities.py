@@ -270,6 +270,32 @@ def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> s
     raise ValueError(f"assignment not found: {spec['name']}")
 
 
+def _typescript_string_union(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
+    declaration = re.search(
+        rf"^export\s+type\s+{re.escape(spec['name'])}\s*=\s*([^;]+);",
+        source.text(spec["file"]),
+        flags=re.MULTILINE,
+    )
+    if declaration is None:
+        raise ValueError(f"exported type not found: {spec['name']}")
+    body = declaration.group(1).strip()
+    literal = re.compile(r'''\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|null)\s*(\||$)''')
+    values: set[str] = set()
+    offset = 1 if body.startswith("|") else 0
+    while offset < len(body):
+        token = literal.match(body, offset)
+        if token is None:
+            raise ValueError(f"not a string/null union: {spec['name']}")
+        if token.group(1) != "null":
+            values.add(ast.literal_eval(token.group(1)))
+        offset = token.end()
+        if token.group(2) and offset == len(body):
+            raise ValueError(f"incomplete union: {spec['name']}")
+    if not values:
+        raise ValueError(f"empty string union: {spec['name']}")
+    return values
+
+
 def _versioned_schema_nodes(node: Any):
     """Yield every contract_version subschema from an arbitrary schema tree."""
 
@@ -325,6 +351,8 @@ def _extract(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
         return _python_literal_annotation(source, spec)
     if kind == "python_string_assignment":
         return _python_string_assignment(source, spec)
+    if kind == "typescript_string_union":
+        return _typescript_string_union(source, spec)
     if kind == "json_object_keys":
         return _json_object_keys(source, spec)
     raise ValueError(f"unknown extractor: {kind}")

@@ -4625,12 +4625,17 @@ async def model_hub_agent_chains_reorder_post(backend):
             if request.has_body:
                 raise ModelHubError("invalid_source_order")
             payload = {}
-        if not isinstance(payload, dict) or set(payload) - {"order"}:
+        if not isinstance(payload, dict) or set(payload) - {"order", "force", "would_remove_hops", "would_interrupt"} or (
+            "force" in payload and not isinstance(payload["force"], bool)
+        ):
             raise ModelHubError("invalid_source_order")
         if "order" in payload:
             agent = await _model_hub_service().reorder_agent_chains(
                 backend,
                 payload["order"],
+                force=payload.get("force") is True,
+                confirmed_remove_hops=payload.get("would_remove_hops"),
+                confirmed_interruptions=payload.get("would_interrupt"),
             )
         else:
             agent = await _model_hub_service().reorder_agent_chains(backend)
@@ -4858,6 +4863,35 @@ async def model_hub_agent_chain_put(backend):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/agents/<backend>/chain", methods=["DELETE"])
+async def model_hub_agent_chain_delete(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        model_id = str(request.args.get("model") or "").strip()
+        result = await _model_hub_service().delete_agent_chain(
+            backend, model_id,
+            _model_hub_json_object("mapping_target_unavailable") if request.has_body else {},
+        )
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/chain/preview", methods=["POST"])
+def model_hub_agent_chain_preview(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        model_id = str(request.args.get("model") or "").strip()
+        chain = _model_hub_service().preview_agent_chain(
+            backend, model_id, _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(chain=chain)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/agents/<backend>/probe", methods=["POST"])
 async def model_hub_agent_probe_post(backend):
     from core.handlers.model_hub import ModelHubError
@@ -4885,6 +4919,17 @@ def model_hub_turn_provenance_get(turn_id):
 
     try:
         provenance = _model_hub_service().get_turn_provenance(turn_id)
+        return _model_hub_success(provenance=provenance)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/provenance", methods=["GET"])
+def model_hub_model_provenance_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        provenance = _model_hub_service().get_model_provenance(backend, request.args.get("model"))
         return _model_hub_success(provenance=provenance)
     except ModelHubError as exc:
         return _model_hub_error(exc)

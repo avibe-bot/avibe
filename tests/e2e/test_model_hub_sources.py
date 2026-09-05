@@ -13,7 +13,7 @@ from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 
 pytestmark = pytest.mark.e2e_model_hub
 
-CONTRACT_VERSION = 8
+CONTRACT_VERSION = 9
 MENU_MODEL = "claude-sonnet-4-6"
 SYNTHETIC_API_KEY = "sk-model-hub-e2e-not-real"
 
@@ -29,6 +29,7 @@ def _configure_protocol(
         stream="healthy",
         protocol=protocol,
         models_endpoint="ok",
+        model_errors={},
         models=models
         if models is not None
         else [{"id": "mock-model"}],

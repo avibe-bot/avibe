@@ -10,6 +10,7 @@ import type {
   AddedTo,
   AgentBackend,
   AgentChain,
+  TurnProvenance,
   AgentChainMutation,
   AgentChainPut,
   AgentMode,
@@ -126,10 +127,13 @@ export type ModelsApi = {
   reorderAgentChains(backend: AgentBackend, order?: string[]): Promise<AgentSupply>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
+  getAgentProvenance(backend: AgentBackend, model: string): Promise<TurnProvenance | null>;
   /** Complete overview chain projection for one Hub backend. */
   getAgentChains(backend: AgentBackend): Promise<AgentChain[]>;
   /** Total replacement of the exact stored chain. */
   putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut): Promise<AgentChainMutation>;
+  previewAgentChain(backend: AgentBackend, model: string, body: { manual_override: { hops: RouteHop[] } | null }): Promise<AgentChain>;
+  restoreAgentChain(backend: AgentBackend, model: string, body?: GuardConfirmation): Promise<AgentChainMutation>;
   /** One real request through the chain. Hub mode only, same reason. */
   probeAgent(backend: AgentBackend, model?: string): Promise<ProbeResult>;
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
@@ -596,8 +600,11 @@ export const modelsApi: ModelsApi = {
     jsonInit('POST', order === undefined ? undefined : { order }),
   ).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  getAgentProvenance: (backend, model) => call<{ provenance: TurnProvenance | null }>(`/api/models/agents/${backend}/provenance?model=${encodeURIComponent(model)}`).then((r) => r.provenance),
   getAgentChains: (backend) => call<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`).then((r) => r.chains),
   putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),
+  previewAgentChain: (backend, model, body) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain/preview?model=${encodeURIComponent(model)}`, jsonInit('POST', body)).then((r) => r.chain),
+  restoreAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('DELETE', body ?? {})),
   probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
   putAgentModels: (backend, body) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/models`, jsonInit('PUT', body)).then((r) => (r.agent ?? r) as AgentSupply),

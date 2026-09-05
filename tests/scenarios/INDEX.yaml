@@ -140,8 +140,12 @@ capabilities:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
+      - tests/test_model_hub_admission.py
       - tests/test_model_hub_config.py
+      - tests/test_model_hub_provenance.py
       - tests/test_model_hub_resolution.py
+      - tests/test_model_hub_routing_modes.py
+      - tests/test_model_hub_transport_leases.py
       - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
       - tests/test_model_hub_l3.py

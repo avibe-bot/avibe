@@ -1,4 +1,4 @@
-"""Pure Model Hub resolution over the persisted per-model route."""
+"""Pure Model Hub routing from explicit overrides and backend defaults."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Literal
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
     ModelHubConfig,
+    ModelHubRouteConfig,
     ModelHubRouteHopConfig,
     ModelHubSourceConfig,
 )
@@ -18,11 +19,19 @@ from config.v2_config import (
 BackendName = Literal["claude", "codex", "opencode"]
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
 SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
+RouteOrigin = Literal["automatic", "manual", "passthrough"]
+
+
+@dataclass(frozen=True)
+class EffectiveModelRoute:
+    manual_override: ModelHubRouteConfig | None
+    route_origin: RouteOrigin | None
+    hops: tuple[ModelHubRouteHopConfig, ...]
 
 
 @dataclass(frozen=True)
 class ExactHopInspection:
-    """Canonical identity and live eligibility for one persisted Route hop."""
+    """Canonical identity and live eligibility for one effective Route hop."""
 
     backend: BackendName
     menu_model: str
@@ -49,6 +58,8 @@ class ModelHubTurnResolution:
     requested_model: str
     target_model: str
     source: ModelHubSourceConfig | None
+    manual_override: ModelHubRouteConfig | None = None
+    route_origin: RouteOrigin | None = None
     matching_sources: tuple[ModelHubSourceConfig, ...] = ()
     candidates: tuple[ModelHubSourceConfig, ...] = ()
     candidate_hops: tuple[ExactHopInspection, ...] = ()
@@ -165,7 +176,7 @@ def matching_v1_model_id(
     source: ModelHubSourceConfig,
     include_manual: bool = False,
 ) -> str | None:
-    """Return one concrete observed model for the frozen add-time matching-v1."""
+    """Match one inventory id using the established literal/native Claude policy."""
 
     observed_models = tuple(
         model
@@ -208,6 +219,53 @@ def matching_v1_model_id(
     )
 
 
+def source_model_retired(source: ModelHubSourceConfig, model_id: str) -> bool:
+    return any(model.id == model_id and model.retired for model in source.models)
+
+
+def source_supports_passthrough(source: ModelHubSourceConfig) -> bool:
+    return source.kind == "api_key" and source.supply_channel == "hub"
+
+
+def effective_model_route(
+    config: ModelHubConfig,
+    backend: BackendName,
+    requested_model: str,
+) -> EffectiveModelRoute:
+    """Choose one route tier before live health or transport restriction."""
+
+    agent = config.agents[backend]
+    if requested_model in agent.routes:
+        override = agent.routes[requested_model]
+        return EffectiveModelRoute(override, "manual" if override.hops else None, override.hops)
+    if not requested_model or not any(model.id == requested_model for model in agent.models):
+        return EffectiveModelRoute(None, None, ())
+    by_id = {source.id: source for source in config.sources}
+    sources = [
+        by_id[source_id]
+        for source_id in agent.sources.order
+        if source_id in by_id and source_eligible_for_backend(by_id[source_id], backend)
+    ]
+    matches = tuple(
+        ModelHubRouteHopConfig(source.id, matched)
+        for source in sources
+        if (matched := matching_v1_model_id(
+            backend=backend,
+            requested_model=requested_model,
+            source=source,
+            include_manual=True,
+        )) is not None
+    )
+    if matches:
+        return EffectiveModelRoute(None, "automatic", matches)
+    hops = tuple(
+        ModelHubRouteHopConfig(source.id, requested_model)
+        for source in sources
+        if source_supports_passthrough(source) and not source_model_retired(source, requested_model)
+    )
+    return EffectiveModelRoute(None, "passthrough" if hops else None, hops)
+
+
 def inspect_exact_hop(
     config: ModelHubConfig,
     backend: BackendName,
@@ -218,7 +276,7 @@ def inspect_exact_hop(
     unavailable_source_ids: frozenset[str] = frozenset(),
     supply_channel: Literal["hub"] | None = None,
 ) -> ExactHopInspection:
-    """Inspect one stored hop without matching, substituting, or reordering it."""
+    """Inspect one exact hop without matching, substituting, or reordering it."""
 
     if hop is None:
         return ExactHopInspection(
@@ -259,16 +317,19 @@ def inspect_exact_hop(
         for model in source.models
     )
     channel_eligible = supply_channel is None or source.supply_channel == supply_channel
-    supply_eligible = configuration_eligible and inventory_member and channel_eligible
+    model_supported = inventory_member or (
+        source_supports_passthrough(source) and not source_model_retired(source, hop.model_id)
+    )
+    supply_eligible = configuration_eligible and model_supported and channel_eligible
     runnable = supply_eligible and source_runnable(
         source,
         now=now,
         unavailable_source_ids=unavailable_source_ids,
-        model_supported=inventory_member,
+        model_supported=model_supported,
     )
     reason: str | None = None
     structural_blocker = False
-    if not inventory_member or not configuration_eligible:
+    if not model_supported or not configuration_eligible:
         reason = "model_unsupported"
         structural_blocker = True
     elif source.id in unavailable_source_ids:
@@ -327,12 +388,7 @@ def resolve_model_hub_turn(
     unavailable_source_ids: frozenset[str] = frozenset(),
     supply_channel: Literal["hub"] | None = None,
 ) -> ModelHubTurnResolution:
-    """Resolve a turn by walking the route persisted for ``requested_model``.
-
-    This function deliberately does not inspect source inventory, vendor names,
-    or source order to create a route. Those decisions belong to source-add and
-    explicit chain-edit operations.
-    """
+    """Annotate the effective route without changing its membership or tier."""
 
     requested_model = str(requested_model or "").strip()
     agent = config.agents[backend]
@@ -356,18 +412,7 @@ def resolve_model_hub_turn(
                 supply_status="interrupted",
             )
 
-    route = agent.routes.get(requested_model)
-    if route is None:
-        return ModelHubTurnResolution(
-            backend=backend,
-            channel="unavailable",
-            requested_model=requested_model,
-            target_model=requested_model,
-            source=None,
-            supply_status="interrupted",
-            route_unconfigured=True,
-            route_reason="route_unconfigured",
-        )
+    route = effective_model_route(config, backend, requested_model)
 
     inspected_hops = tuple(
         inspect_exact_hop(
@@ -460,6 +505,8 @@ def resolve_model_hub_turn(
         requested_model=requested_model,
         target_model=target_model or requested_model,
         source=first,
+        manual_override=route.manual_override,
+        route_origin=route.route_origin,
         matching_sources=matching_sources,
         candidates=candidates,
         candidate_hops=runnable_inspections,

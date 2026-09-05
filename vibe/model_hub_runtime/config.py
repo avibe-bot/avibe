@@ -75,7 +75,7 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
     api_key = store.read_api_key(source.credential_ref)
     reasoning_by_model = dict(source.model_reasoning_efforts)
     models = []
-    for model in source.model_ids:
+    for model in dict.fromkeys((*source.model_ids, *source.route_model_ids)):
         entry: dict[str, Any] = {"name": model, "alias": model}
         reasoning_efforts = reasoning_by_model.get(model, ())
         if reasoning_efforts:

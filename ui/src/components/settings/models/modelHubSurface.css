@@ -40,6 +40,8 @@
  * general case is a re-implementation of the cascade.
  */
 :root {
+  --route-manual-soft: color-mix(in srgb, var(--route-manual) 12%, transparent);
+  --route-manual-border: color-mix(in srgb, var(--route-manual) 25%, transparent);
   /* Neutral wash channel: white over the dark frame. */
   --model-hub-wash-channel: 255 255 255;
   --model-hub-wash-03: rgb(var(--model-hub-wash-channel) / 1.2%);
@@ -190,7 +192,7 @@
 
   /* Provider order drawer. */
   --model-hub-order-row-height: 58px;
-  --model-hub-order-row-radius: 9px;
+  --model-hub-order-row-radius: 8px;
   --model-hub-order-grip-size: 14px;
   --model-hub-order-grip-dim: var(--model-hub-wash-33);
   --model-hub-order-meta-size: 10.5px;
@@ -509,7 +511,48 @@
   --model-hub-upstream-detail-ink: var(--model-hub-muted-cc);
   color: var(--model-hub-upstream-detail-ink);
 }
+.model-hub-route-origin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 44px;
+  height: 23px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.model-hub-route-origin--automatic { color: var(--mint-ink); background: var(--model-hub-mint-1a); border-color: var(--model-hub-mint-4d); }
+.model-hub-route-origin--manual { color: var(--route-manual); background: var(--route-manual-soft); border-color: var(--route-manual-border); }
+.model-hub-route-origin--passthrough { color: var(--gold-ink); background: var(--model-hub-gold-1a); border-color: var(--model-hub-gold-4d); }
+.model-hub-route-origin:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
+.model-hub-model-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.model-hub-model-row > span > span:first-child { flex: 0 1 28%; }
+.model-hub-origin-help { width: 340px; max-width: calc(100vw - 32px); white-space: pre-line; font-size: 12px; line-height: 1.6; }
+.model-hub-route-origin-line { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; }
+.model-hub-route-preview { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 8px; background: var(--model-hub-mint-1a); color: var(--mint-ink); font-size: 12px; }
+.model-hub-route-preview[data-origin="passthrough"] { background: var(--model-hub-gold-1a); color: var(--gold-ink); }
+.model-hub-route-preview[data-origin="unconfigured"] { background: var(--model-hub-wash-08); color: var(--muted); }
+.model-hub-route-ordinal[data-origin="automatic"] { color: var(--mint-ink); background: var(--model-hub-mint-1a); }
+.model-hub-route-ordinal[data-origin="passthrough"] { color: var(--gold-ink); background: var(--model-hub-gold-1a); }
+.model-hub-route-custom { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: 8px; align-items: center; padding: 12px; font-size: 12px; }
+.model-hub-route-custom select { min-width: 0; height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 0 8px; }
+.model-hub-default-counts { margin-top: auto; padding: 20px; font-size: 12px; color: var(--muted); }
+.model-hub-recorded-turn { display: flex; flex-direction: column; gap: 6px; margin: 0 20px 16px; padding: 12px; border-left: 2px solid var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
+.model-hub-recorded-turn strong { color: var(--destructive-ink); }
+@media (max-width: 640px) {
+  .model-hub-model-row { height: 72px; }
+  .model-hub-model-row > span { flex-wrap: wrap; padding-bottom: 24px; }
+  .model-hub-model-row > span > span:first-child { flex: 1; }
+  .model-hub-model-row .model-hub-model-current { position: absolute; left: 12px; right: 32px; bottom: 10px; text-align: left; }
+  .model-hub-route-foot { flex-wrap: wrap; min-height: var(--model-hub-dialog-foot-height); height: auto; }
+}
 .model-hub-model-row {
+  border-radius: 8px;
   --model-hub-model-row-fill: var(--model-hub-wash-05);
   background: var(--model-hub-model-row-fill);
 }
