@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 import yaml
 
 from config.atomic_io import write_atomic
+from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
@@ -114,11 +116,21 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
             base_url = official_api_key_base_url(source.vendor)
         if not base_url:
             raise EngineStateError("OpenAI-compatible source requires a base URL")
+        normalized_base_url = normalize_model_hub_base_url(base_url)
+        assert normalized_base_url is not None
+        if not urlsplit(normalized_base_url).path.rstrip("/"):
+            # CLIProxyAPI appends /chat/completions; Source origins use the
+            # standard /v1 endpoint root used by discovery and probes.
+            normalized_base_url = normalize_model_hub_base_url(
+                normalized_base_url,
+                append_path="/v1",
+            )
+            assert normalized_base_url is not None
         payload.setdefault("openai-compatibility", []).append(
             {
                 "name": source.prefix,
                 "prefix": source.prefix,
-                "base-url": base_url,
+                "base-url": normalized_base_url,
                 "api-key-entries": [{"api-key": api_key}],
                 "models": models,
             }

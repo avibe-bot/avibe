@@ -250,7 +250,9 @@ def _send_through_opencode_gateway_engine(
     native_protocol: str,
     stored_model: str,
     variant: dict[str, Any],
-) -> dict[str, Any]:
+    prompt_start_delay_seconds: float = 0,
+    require_terminal_result: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     binary = shutil.which("opencode")
     if binary is None:
         pytest.skip("OpenCode executable is unavailable")
@@ -259,11 +261,11 @@ def _send_through_opencode_gateway_engine(
         if native_protocol == "anthropic"
         else "deepseek-v3.2"
     )
-    upstream_path = (
-        "/v1/messages"
-        if upstream_protocol == "anthropic"
-        else "/v1/responses"
-    )
+    upstream_path = {
+        "anthropic": "/v1/messages",
+        "openai_responses": "/v1/responses",
+        "openai_chat": "/v1/chat/completions",
+    }[upstream_protocol]
     with _engine_app(model_hub_app_factory) as app:
         configured = app.client.post(
             "/api/config",
@@ -378,6 +380,17 @@ def _send_through_opencode_gateway_engine(
             },
         )
         assert agent.status == 200, agent.json()
+        if prompt_start_delay_seconds > 0:
+            plugin_dir = app.runtime_root / ".opencode" / "plugins"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "delay-prompt.js").write_text(
+                "export const DelayPrompt = async () => ({\n"
+                '  "chat.message": async () => {\n'
+                f"    await Bun.sleep({prompt_start_delay_seconds * 1000});\n"
+                "  },\n"
+                "});\n",
+                encoding="utf-8",
+            )
         project = app.client.post(
             "/api/projects",
             {
@@ -412,8 +425,9 @@ def _send_through_opencode_gateway_engine(
             {"text": "hello"},
         )
         assert sent.status == 202, sent.json()
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 60
         captured: list[dict[str, Any]] = []
+        result: dict[str, Any] | None = None
         while time.monotonic() < deadline:
             captured = [
                 request
@@ -422,10 +436,29 @@ def _send_through_opencode_gateway_engine(
                 and "You are a title generator"
                 not in json.dumps(request["body"], sort_keys=True)
             ]
-            if captured:
+            if require_terminal_result:
+                transcript = app.client.get(
+                    f"/api/sessions/{session.json()['id']}/messages?tail=1"
+                )
+                assert transcript.status == 200, transcript.json()
+                result = next(
+                    (
+                        row
+                        for row in reversed(transcript.json()["messages"])
+                        if row["type"] == "result"
+                    ),
+                    None,
+                )
+            if captured and (result is not None or not require_terminal_result):
                 break
             time.sleep(0.1)
         assert len(captured) == 1, app.diagnostics()
+        if require_terminal_result:
+            assert result is not None, app.diagnostics()
+            assert result["text"] == "mock response", {
+                "result": result,
+                "diagnostics": app.diagnostics(),
+            }
         overlay = json.loads(
             (
                 app.avibe_home
@@ -484,7 +517,7 @@ def _send_through_opencode_gateway_engine(
         assert set(live_providers["avibe-anthropic"]["models"]) == {
             "claude-opus-5"
         }
-        return captured[0]["body"]
+        return captured[0]["body"], result
 
 
 @pytest.mark.parametrize(
@@ -524,7 +557,7 @@ def test_opencode_v4_s4_variant_shapes_are_frozen_against_mock_capture(
     mock_llm_upstream,
     fixture: dict[str, Any],
 ) -> None:
-    captured_body = _send_through_opencode_gateway_engine(
+    captured_body, _ = _send_through_opencode_gateway_engine(
         model_hub_app_factory,
         mock_llm_upstream,
         upstream_protocol=fixture["protocol"],
@@ -534,6 +567,53 @@ def test_opencode_v4_s4_variant_shapes_are_frozen_against_mock_capture(
     )
 
     assert captured_body["model"] == fixture["stored_model"]
+    for key, value in fixture["upstream_fragment"].items():
+        assert captured_body.get(key) == value, captured_body
+
+
+def test_opencode_responses_turn_completes_through_openai_chat_upstream(
+    model_hub_app_factory,
+    mock_llm_upstream,
+) -> None:
+    fixture = OPENCODE_V4_S4_VARIANT_FIXTURES["responses_to_openai_chat"]
+
+    captured_body, result = _send_through_opencode_gateway_engine(
+        model_hub_app_factory,
+        mock_llm_upstream,
+        upstream_protocol=fixture["protocol"],
+        native_protocol=fixture["frontend_protocol"],
+        stored_model=fixture["stored_model"],
+        variant=fixture["variant"],
+        require_terminal_result=True,
+    )
+
+    assert captured_body["model"] == fixture["stored_model"]
+    assert result is not None
+    assert result["text"] == "mock response"
+    for key, value in fixture["upstream_fragment"].items():
+        assert captured_body.get(key) == value, captured_body
+
+
+def test_opencode_anthropic_turn_waits_for_accepted_prompt_worker(
+    model_hub_app_factory,
+    mock_llm_upstream,
+) -> None:
+    fixture = OPENCODE_V4_S4_VARIANT_FIXTURES["anthropic_same_protocol"]
+
+    captured_body, result = _send_through_opencode_gateway_engine(
+        model_hub_app_factory,
+        mock_llm_upstream,
+        upstream_protocol=fixture["protocol"],
+        native_protocol=fixture["frontend_protocol"],
+        stored_model=fixture["stored_model"],
+        variant=fixture["variant"],
+        prompt_start_delay_seconds=6.5,
+        require_terminal_result=True,
+    )
+
+    assert captured_body["model"] == fixture["stored_model"]
+    assert result is not None
+    assert result["text"] == "mock response"
     for key, value in fixture["upstream_fragment"].items():
         assert captured_body.get(key) == value, captured_body
 
