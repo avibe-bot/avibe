@@ -3741,7 +3741,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ["thread/inject_items", "turn/start", "turn/start"],
         )
         self.assertEqual(calls[0].args[1]["items"][0]["role"], "developer")
-        self.assertEqual(calls[0].args[1]["items"][0]["content"][0]["text"], "stable prompt")
+        self.assertEqual(
+            calls[0].args[1]["items"][0]["content"][0]["text"],
+            agent._render_developer_prompt_snapshot("stable prompt"),
+        )
         for entry in calls[1:]:
             self.assertNotIn("collaborationMode", entry.args[1])
             self.assertEqual(entry.args[1]["model"], "gpt-5.4")
@@ -4181,7 +4184,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["effort"], "high")
         self.assertEqual(
             transport.send_request.await_args_list[1].args[1]["items"][0]["content"][0]["text"],
-            "stable prompt",
+            agent._render_developer_prompt_snapshot("stable prompt"),
         )
         self.assertEqual(agent.sessions.set_agent_session_runtime_marker.call_count, 3)
         self.assertEqual(
@@ -4770,8 +4773,19 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             ["thread/inject_items", "turn/start", "thread/inject_items", "turn/start"],
         )
         self.assertEqual(calls[1].args[1], calls[3].args[1])
-        self.assertEqual(calls[0].args[1]["items"][0]["content"][0]["text"], "prompt one")
-        self.assertEqual(calls[2].args[1]["items"][0]["content"][0]["text"], "prompt two")
+        self.assertEqual(
+            calls[0].args[1]["items"][0]["content"][0]["text"],
+            agent._render_developer_prompt_snapshot("prompt one"),
+        )
+        self.assertEqual(
+            calls[2].args[1]["items"][0]["content"][0]["text"],
+            agent._render_developer_prompt_snapshot("prompt two"),
+        )
+        latest = calls[2].args[1]["items"][0]["content"][0]["text"]
+        self.assertIn("Only the most recent snapshot is active", latest)
+        self.assertIn("including untagged versions", latest)
+        self.assertIn("omitted from this snapshot no longer apply", latest)
+        self.assertNotIn("prompt one", latest)
 
     async def test_start_turn_does_not_reinject_when_explicit_model_reset_is_unsupported(self):
         agent = object.__new__(CodexAgent)
@@ -4820,7 +4834,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].args[0], "thread/inject_items")
         self.assertEqual(
             calls[0].args[1]["items"][0]["content"][0]["text"],
-            "stable prompt",
+            agent._render_developer_prompt_snapshot("stable prompt"),
         )
         self.assertEqual(calls[1].args[0], "turn/start")
         self.assertIsNone(calls[1].args[1]["collaborationMode"])
@@ -4869,7 +4883,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].args[0], "thread/inject_items")
         self.assertEqual(
             calls[0].args[1]["items"][0]["content"][0]["text"],
-            "stable prompt",
+            agent._render_developer_prompt_snapshot("stable prompt"),
         )
         self.assertNotIn("collaborationMode", calls[1].args[1])
 

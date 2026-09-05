@@ -195,7 +195,7 @@ async def test_native_model_receives_prompt_once_across_turns_and_restart(tmp_pa
         for _ in range(2):
             await agent._start_turn(native, request, thread_id, developer_instructions=PROMPT)
             await finish_turn()
-            assert _developer_texts(requests[-1]).count(PROMPT) == 1
+            assert _developer_texts(requests[-1]).count(CodexAgent._render_developer_prompt_snapshot(PROMPT)) == 1
             assert requests[-1]["model"] == MODEL
             assert requests[-1]["reasoning"]["effort"] == "high"
 
@@ -207,19 +207,27 @@ async def test_native_model_receives_prompt_once_across_turns_and_restart(tmp_pa
         agent = _agent(marker)
         await agent._start_turn(native, request, thread_id, developer_instructions=PROMPT)
         await finish_turn()
-        assert _developer_texts(requests[-1]).count(PROMPT) == 1
+        assert _developer_texts(requests[-1]).count(CodexAgent._render_developer_prompt_snapshot(PROMPT)) == 1
 
-        changed = PROMPT + "\nUPDATED_SESSION_RULE"
+        # Removing a prompt source must revoke its earlier positive rules,
+        # including when retained history still contains the old snapshot.
+        changed = (Path(__file__).resolve().parents[1] / "core/prompts/session-title.md").read_text()
+        changed_snapshot = CodexAgent._render_developer_prompt_snapshot(changed)
         await agent._start_turn(native, request, thread_id, developer_instructions=changed)
         await finish_turn()
-        assert _developer_texts(requests[-1]).count(changed) == 1
+        assert _developer_texts(requests[-1]).count(changed_snapshot) == 1
+        assert "## Quick-reply buttons" not in changed_snapshot
+        assert "omitted from this snapshot no longer apply" in changed_snapshot
+        assert "including untagged versions" in changed_snapshot
 
         await native.send_request("thread/compact/start", {"threadId": thread_id})
         await finish_turn()
         assert any(item.get("type") == "compaction_trigger" for item in requests[-1]["input"])
         await agent._start_turn(native, request, thread_id, developer_instructions=changed)
         await finish_turn()
-        assert _developer_texts(requests[-1]).count(changed) == 1
+        snapshots = [text for text in _developer_texts(requests[-1]) if text.startswith("<avibe_runtime_instructions>")]
+        assert snapshots.count(changed_snapshot) == 1
+        assert snapshots[-1] == changed_snapshot
     finally:
         await native.stop()
         server.close()

@@ -3,7 +3,9 @@
 ## Contract
 
 Avibe-owned instructions must enter model-visible developer messages independently
-of model-owned collaboration text. Unchanged instructions must not accumulate on
+of model-owned collaboration text. Only the latest complete Avibe runtime snapshot
+is active; omitted rules and catalog entries revoke their earlier declarations.
+Unchanged instructions must not accumulate on
 each turn or process restart. Prompt delivery must not change model routing or
 reasoning effort, and ambiguous native mutations must retain at-most-once recovery.
 
@@ -16,7 +18,11 @@ Both quick-reply and session-title rules can be present in the turn parameters
 while absent from the model request.
 
 Avibe now uses `thread/inject_items` with explicit developer messages for its
-instructions. The existing durable `fallback` marker name and write-ahead states
+instructions. Each message declares complete-snapshot replacement semantics,
+including superseding legacy untagged snapshots. History is retained, but removed
+rules and capability, Agent, and Skill declarations must not remain active. User
+and project instructions are outside this replacement boundary.
+The existing durable `fallback` marker name and write-ahead states
 remain unchanged. Legacy `collaboration` threads migrate through the existing
 pending-clear path, even when their model and prompt fingerprint are unchanged.
 Model and reasoning overrides remain top-level turn parameters.
