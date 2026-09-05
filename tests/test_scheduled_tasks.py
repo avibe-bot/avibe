@@ -114,6 +114,15 @@ from storage.agent_session_rows import create_agent_session_row
 from storage.settings_service import upsert_scope
 
 
+@pytest.fixture(autouse=True)
+def _prepare_behavior_state(tmp_path, sqlite_db_factory, request):
+    # Preserve per-test databases while avoiding a full migration for each
+    # explicit store path used by the scheduling/binding cases below.
+    if not request.node.get_closest_marker("no_sqlite_template"):
+        sqlite_db_factory(tmp_path / "vibe.sqlite")
+        sqlite_db_factory(tmp_path / "state" / "vibe.sqlite")
+
+
 class _StubScheduler:
     def __init__(self) -> None:
         self.jobs = {}

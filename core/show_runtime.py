@@ -96,7 +96,9 @@ _SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED = "archive_removal_failed"
 _ARCHIVE_CLEANUP_OUTCOMES = frozenset({"cleaned", "partial", "skipped"})
 _INSTALL_REFERENCE_RE = re.compile(r"^[0-9a-f]{32}\.lock$")
 _INSTALL_REFERENCE_LOCKS: dict[tuple[str, str], "_ShowRuntimeInstallReference"] = {}
-_INSTALL_REFERENCE_LOCKS_GUARD = threading.Lock()
+# Allocations inside the guard can collect a manager and run its finalizer
+# synchronously on the same thread.
+_INSTALL_REFERENCE_LOCKS_GUARD = threading.RLock()
 
 
 class _ArchiveMetadataError(Exception):
@@ -2182,13 +2184,8 @@ class ShowRuntimeManager:
             return True
         key = (str(runtime_root), str(resolved))
         with _INSTALL_REFERENCE_LOCKS_GUARD:
-            local_markers = {
-                reference.marker
-                for reference_key, reference in _INSTALL_REFERENCE_LOCKS.items()
-                if reference_key == key
-            }
-        if local_markers:
-            return True
+            if key in _INSTALL_REFERENCE_LOCKS:
+                return True
 
         reference_dir = self._install_reference_dir(resolved)
         try:

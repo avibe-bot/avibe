@@ -60,7 +60,29 @@ if [ -z "$PYTHON_BIN" ]; then
   fi
 fi
 
-PYTEST=("$PYTHON_BIN" -m pytest)
+FILE_TIMEOUT="${CI_TEST_FILE_TIMEOUT_SECONDS:-300}"
+case "$FILE_TIMEOUT" in
+  ''|*[!0-9]*)
+    echo "CI_TEST_FILE_TIMEOUT_SECONDS must be a positive integer, got: $FILE_TIMEOUT" >&2
+    exit 2
+    ;;
+esac
+if ! [ "$FILE_TIMEOUT" -gt 0 ]; then
+  echo "CI_TEST_FILE_TIMEOUT_SECONDS must be a positive integer, got: $FILE_TIMEOUT" >&2
+  exit 2
+fi
+
+# Keep one interpreter per file. The watchdog also covers collection and
+# interpreter shutdown; pytest's per-test faulthandler timer would replace it.
+PYTEST=("$PYTHON_BIN" -u -c '
+import faulthandler, os, sys
+# Retain the original output even while pytest redirects descriptor 2.
+diagnostics = os.fdopen(os.dup(sys.stderr.fileno()), "w")
+faulthandler.enable(file=diagnostics)
+faulthandler.dump_traceback_later(int(sys.argv.pop(1)), file=diagnostics, exit=True)
+import pytest
+sys.exit(pytest.main(sys.argv[1:]))
+' "$FILE_TIMEOUT")
 
 select_unit_test_files() {
   "$PYTHON_BIN" scripts/ci_unit_test_shards.py "$SHARD_INDEX" "$SHARD_TOTAL"
@@ -74,7 +96,8 @@ while IFS= read -r f; do
   discovered=$((discovered + 1))
   selected=$((selected + 1))
   started_at=$(date +%s)
-  "${PYTEST[@]}" "$f" -m "not integration" -p no:randomly -o addopts="" -q
+  echo "Starting $f (timeout ${FILE_TIMEOUT}s)."
+  "${PYTEST[@]}" "$f" -m "not integration" -p no:randomly -p no:faulthandler -o addopts="" -v
   rc=$?
   finished_at=$(date +%s)
   elapsed=$((finished_at - started_at))

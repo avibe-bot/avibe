@@ -114,6 +114,7 @@ jobs:
   unit-test-shards:
     name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -266,9 +267,14 @@ jobs:
         working-directory: npm/avibe
         run: npm pack --dry-run
 
-  install-upgrade-regression:
+  install-upgrade-shards:
+    name: install-upgrade-regression (${{ matrix.suite }})
     runs-on: ubuntu-latest
     needs: build-linux-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [packaged-memory, installer]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -303,6 +309,7 @@ jobs:
         run: python scripts/prepare_local_show_runtime_manifest.py
 
       - name: Run packaged Memory package-shape smoke
+        if: matrix.suite == 'packaged-memory'
         run: |
           set -o pipefail
           test -f vibe/show_runtime_manifest.json
@@ -314,6 +321,7 @@ jobs:
           fi
 
       - name: Run install and upgrade regressions
+        if: matrix.suite == 'installer'
         run: |
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/*.whl)"
@@ -323,6 +331,21 @@ jobs:
             tests/e2e/test_install_command.py \
             tests/e2e/test_upgrade_command.py \
             -v
+
+  install-upgrade-regression:
+    runs-on: ubuntu-latest
+    needs: install-upgrade-shards
+    if: always()
+    steps:
+      - name: Verify all install and upgrade suites
+        env:
+          INSTALL_RESULT: ${{ needs['install-upgrade-shards'].result }}
+        run: |
+          if [ "$INSTALL_RESULT" != "success" ]; then
+            echo "Install/upgrade suites finished with result: $INSTALL_RESULT"
+            exit 1
+          fi
+          echo "All install and upgrade suites passed."
 
   windows-install-smoke:
     runs-on: windows-latest

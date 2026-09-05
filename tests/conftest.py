@@ -139,6 +139,25 @@ def _sqlite_state_template_factory(tmp_path_factory):
     return get_template
 
 
+@pytest.fixture
+def sqlite_db_factory(tmp_path, _sqlite_state_template_factory):
+    """Give behavioral tests independent, fully initialized state databases.
+
+    This is opt-in: migration/import tests still initialize their own empty DBs.
+    Only new paths inside this test's temporary directory may receive a copy.
+    """
+
+    def create(db_path: Path) -> Path:
+        db_path = db_path.resolve()
+        db_path.relative_to(tmp_path.resolve())
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with _sqlite_state_template_factory().open("rb") as source, db_path.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        return db_path
+
+    return create
+
+
 @pytest.fixture(autouse=True)
 def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     if request.node.get_closest_marker("uses_real_paths"):
@@ -266,13 +285,14 @@ def _reset_cached_sqlite_engines():
     """
 
     def _reset() -> None:
-        try:
-            from storage.db import dispose_cached_sqlite_engines
-            from storage.importer import reset_ensured_sqlite_state
-        except Exception:
-            return
-        dispose_cached_sqlite_engines()
-        reset_ensured_sqlite_state()
+        # A module that has never been imported cannot own cached state. Re-read
+        # at teardown to include modules first imported by the test itself.
+        db = sys.modules.get("storage.db")
+        if db is not None:
+            db.dispose_cached_sqlite_engines()
+        importer = sys.modules.get("storage.importer")
+        if importer is not None:
+            importer.reset_ensured_sqlite_state()
 
     _reset()
     yield
@@ -358,19 +378,19 @@ def _reset_oauth_runtime_state():
     so without this they would leak across tests sharing a pytest process — e.g. the
     rate limiter accumulating across files and spuriously 429-ing an unrelated test.
     """
-    try:
-        from vibe import remote_access, ui_server
-    except Exception:
-        yield
-        return
-    caches = (remote_access._oauth_handshakes, ui_server._oauth_diag_log_state, ui_server._auth_ratelimit)
-    remote_access._clear_active_hostnames_cache()
-    for cache in caches:
-        cache.clear()
+    def _reset() -> None:
+        remote_access = sys.modules.get("vibe.remote_access")
+        if remote_access is not None:
+            remote_access._clear_active_hostnames_cache()
+            remote_access._oauth_handshakes.clear()
+        ui_server = sys.modules.get("vibe.ui_server")
+        if ui_server is not None:
+            ui_server._oauth_diag_log_state.clear()
+            ui_server._auth_ratelimit.clear()
+
+    _reset()
     yield
-    remote_access._clear_active_hostnames_cache()
-    for cache in caches:
-        cache.clear()
+    _reset()
 
 
 @pytest.fixture(autouse=True)
