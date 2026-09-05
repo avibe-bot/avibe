@@ -187,6 +187,108 @@ afterEach(() => {
 });
 
 describe("RouteChainDialog", () => {
+  describe('manual edit capability from an empty inherited route', () => {
+    const inherited: AgentChain = {
+      ...chain,
+      manual_override: null,
+      route_origin: null,
+      current: null,
+      chain: [],
+      supply_state: 'interrupted',
+    };
+    const alternateSubscription: Source = {
+      ...sources[1],
+      models: [{ id: 'sonnet-5', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null }],
+    };
+    const renderEmptyRoute = (nextAgent: AgentSupply, nextSources: Source[], initial = inherited) => {
+      vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(initial);
+      render(<I18nextProvider i18n={i18n}><RouteChainDialog
+        selection={{ agent: nextAgent, modelId: inherited.model_id, read: readyRegion(initial) }}
+        sources={nextSources}
+        onClose={vi.fn()}
+        onOpenDefaults={vi.fn()}
+        readAgents={vi.fn()}
+        readSources={vi.fn()}
+      /></I18nextProvider>);
+    };
+
+    it('selects another known subscription model and saves the exact manual mapping', async () => {
+      const user = userEvent.setup();
+      const hop = { source_id: alternateSubscription.id, model_id: 'sonnet-5' };
+      const put = vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue(mutation({
+        ...chain, manual_override: { hops: [hop] }, current: hop, chain: [{ ...chain.chain[1], ...hop }],
+      }));
+      renderEmptyRoute({ ...agent, sources: {
+        order: [alternateSubscription.id], eligibility: [{ source_id: alternateSubscription.id, eligible: true }],
+      } }, [alternateSubscription]);
+
+      await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+      await user.click(screen.getByRole('button', { name: 'Add a hop' }));
+      await user.click(screen.getByRole('option', { name: /sonnet-5/ }));
+      await user.click(screen.getByRole('button', { name: 'Add' }));
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(put).toHaveBeenCalledWith('claude', 'opus-5', { hops: [hop] }));
+    });
+
+    it('allows an eligible API key outside defaults to save an exact unlisted target', async () => {
+      const user = userEvent.setup();
+      const hop = { source_id: sources[0].id, model_id: 'unlisted-model' };
+      const put = vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue(mutation({
+        ...chain, manual_override: { hops: [hop] }, current: hop,
+        chain: [{ ...chain.chain[0], ...hop, health: 'healthy', runnable: true, retry_at: null }],
+      }));
+      renderEmptyRoute({ ...agent, sources: {
+        order: [], eligibility: [{ source_id: sources[0].id, eligible: true }],
+      } }, [sources[0]]);
+
+      await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+      await user.click(screen.getByRole('button', { name: 'Add a hop' }));
+      await user.type(screen.getByLabelText('Exact model ID'), hop.model_id);
+      await user.click(screen.getByRole('button', { name: 'Add' }));
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(put).toHaveBeenCalledWith('claude', 'opus-5', { hops: [hop] }));
+      expect(sources[0].models).toEqual([]);
+    });
+
+    it.each([
+      { name: 'no sources', available: [], eligible: true },
+      { name: 'an eligible subscription with no known models', available: [sources[1]], eligible: true },
+      { name: 'an eligible subscription with only retired models', available: [{ ...alternateSubscription, models: alternateSubscription.models.map((model) => ({ ...model, retired: true })) }], eligible: true },
+      { name: 'ineligible API-key and subscription sources', available: [sources[0], alternateSubscription], eligible: false },
+    ])('keeps the unconfigured view without Edit for $name', async ({ available, eligible }) => {
+      renderEmptyRoute({ ...agent, sources: {
+        order: [], eligibility: available.map((source) => ({ source_id: source.id, eligible })),
+      } }, available);
+
+      await screen.findByRole('button', { name: 'Configure default routing' });
+      expect(screen.queryByRole('button', { name: 'Edit route' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Restore automatic' })).toBeNull();
+    });
+
+    it('retains restore and undo for a saved manual-empty route without admissible targets', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(modelsApi, 'previewAgentChain').mockResolvedValue(inherited);
+      const restore = vi.spyOn(modelsApi, 'restoreAgentChain').mockResolvedValue(mutation(inherited));
+      const put = vi.spyOn(modelsApi, 'putAgentChain');
+      renderEmptyRoute({ ...agent, sources: { order: [], eligibility: [] } }, [], {
+        ...inherited, manual_override: { hops: [] },
+      });
+
+      await user.click(await screen.findByRole('button', { name: 'Restore automatic' }));
+      await user.click(await screen.findByRole('button', { name: 'Undo restore' }));
+      expect(screen.queryByRole('button', { name: 'Edit route' })).toBeNull();
+      expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+      await user.click(screen.getByRole('button', { name: 'Restore automatic' }));
+      await screen.findByRole('button', { name: 'Undo restore' });
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(restore).toHaveBeenCalledWith('claude', 'opus-5', undefined));
+      expect(put).not.toHaveBeenCalled();
+    });
+  });
+
   it('refreshes inherited routing after returning from Default routing', async () => {
     const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
     const next: AgentChain = { ...inherited, chain: [chain.chain[1]] };
@@ -267,9 +369,8 @@ describe("RouteChainDialog", () => {
     vi.mocked(modelsApi.getAgentChain).mockResolvedValue(inherited);
     // Reopen on a fresh mount so the initial read observes inherited intent.
     cleanup();
-    const fixture = stocked();
     const put = vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue(mutation(chain));
-    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent: fixture.agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={fixture.sources} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={[]} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
     await user.click(await screen.findByRole('button', { name: 'Edit route' }));
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(put).toHaveBeenCalledWith('claude', 'opus-5', { hops: chain.manual_override!.hops }));

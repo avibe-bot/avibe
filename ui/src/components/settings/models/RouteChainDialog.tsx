@@ -189,6 +189,8 @@ export const RouteChainDialog: React.FC<{
   );
   const addCandidates = agent ? routeCandidates(agent, sources, draft) : [];
   const targetSources = agent ? eligibleSources(sources, agent) : [];
+  const canEditRoute = draft.length > 0 || addCandidates.length > 0
+    || targetSources.some((source) => source.kind === 'api_key');
   const backend = agent
     ? (t(`settings.models.backends.${agent.backend}`, {
         defaultValue: agent.backend,
@@ -1215,7 +1217,7 @@ export const RouteChainDialog: React.FC<{
                 >
                   {t(manualDraft || preview ? "settings.models.routeDialog.cancel" : 'settings.models.routing.close')}
                 </Button>
-                {!manualDraft && !preview ? (draft.length > 0 && <Button variant="outline" className="model-hub-dialog-action" disabled={phase !== 'ready'} onClick={() => setManualDraft(true)}><Pencil aria-hidden />{t('settings.models.routing.editRoute')}</Button>) : <Button
+                {!manualDraft && !preview ? (canEditRoute && <Button variant="outline" className="model-hub-dialog-action" disabled={phase !== 'ready'} onClick={() => setManualDraft(true)}><Pencil aria-hidden />{t('settings.models.routing.editRoute')}</Button>) : <Button
                   ref={saveButtonRef}
                   type="button"
                   className="model-hub-dialog-action"
