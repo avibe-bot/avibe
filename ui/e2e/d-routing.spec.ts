@@ -13,7 +13,7 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
     await requireMockUpstream(mock);
   });
 
-  test('D: inherited inspection stays read-only until Edit route', async ({ api, hub, gateway }) => {
+  test('D: inherited inspection stays read-only until Edit route', async ({ api, hub, gateway, page }) => {
     const original = await captureAgentChain(api, gateway);
     try {
       expect(await api.deleteAgentChain(gateway.backend, gateway.model)).toBe(true);
@@ -23,6 +23,41 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await expect(dialog).toBeVisible();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toHaveCount(0);
       await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true })).toHaveCount(0);
+      await labelledButton(dialog, copy('routeDialog.cancel')).click();
+      await expect(dialog).toHaveCount(0);
+
+      const row = hub.routeRow(gateway.backend, gateway.model);
+      const badge = row.locator('button.model-hub-route-origin');
+      const help = page.locator('.model-hub-origin-help');
+      await badge.hover();
+      await expect(help).toBeVisible();
+      await expect(dialog).toHaveCount(0);
+      await page.mouse.move(0, 0);
+      await expect(help).toHaveCount(0);
+      await badge.focus();
+      await expect(help).toBeVisible();
+      await expect(dialog).toHaveCount(0);
+      await badge.press('Escape');
+      await expect(help).toHaveCount(0);
+      await badge.click();
+      await expect(help).toBeVisible();
+      await expect(dialog).toHaveCount(0);
+      await badge.press('Escape');
+      await expect(help).toHaveCount(0);
+
+      // The label is pointer-transparent over the actual opener; its center
+      // avoids the separate badge that can cover the full-size button's center.
+      const opener = hub.routeOpener(gateway.backend, gateway.model);
+      const labelBox = await row.getByText(gateway.model, { exact: true }).boundingBox();
+      const openerBox = await opener.boundingBox();
+      expect(labelBox).not.toBeNull();
+      expect(openerBox).not.toBeNull();
+      await opener.click({ position: {
+        x: labelBox!.x + labelBox!.width / 2 - openerBox!.x,
+        y: labelBox!.y + labelBox!.height / 2 - openerBox!.y,
+      } });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toHaveCount(0);
       await labelledButton(dialog, copy('routing.editRoute')).click();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true }).first()).toBeVisible();
@@ -53,6 +88,13 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await search.press('ArrowDown');
       await search.press('Enter');
       await search.press('Tab');
+      const selector = page.locator('.model-hub-route-selector');
+      const source = selector.getByLabel(copy('routeDialog.add.source'), { exact: true });
+      const exactModel = selector.getByLabel(copy('routing.exactModel'), { exact: true });
+      await expect(source).toBeFocused();
+      await source.press('Tab');
+      await expect(exactModel).toBeFocused();
+      await exactModel.press('Tab');
       const confirm = page.getByRole('button', { name: copy('routeDialog.add.confirm'), exact: true });
       await expect(confirm).toBeFocused();
       await confirm.press(' ');

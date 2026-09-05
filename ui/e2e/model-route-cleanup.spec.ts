@@ -1,7 +1,8 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 import type { AgentChain, HubApi } from './support/api';
 import { HubApi as HubApiClient } from './support/api';
+import { ModelHubPage } from './support/hub';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
 
 for (const override of [null, { hops: [] }, { hops: [{ source_id: 'src_operator', model_id: 'vendor/model' }] }]) {
@@ -65,3 +66,52 @@ test('gateway fixture cleanup keeps every source that preceded this test', async
   await HubApiClient.prototype.removeSuiteSources.call(client, new Set(['src_previous_fixture', 'src_operator']));
   expect(removed).toEqual(['src_this_fixture']);
 });
+
+for (const collapsed of [false, true]) {
+  test(`route opening targets the model command, not the badge-covered row (${collapsed ? 'collapsed' : 'visible'})`, async () => {
+    let expanded = !collapsed;
+    let opened = false;
+    let helpOpened = false;
+    const commands: string[] = [];
+    const opener = {
+      focus: async () => { commands.push('focus model opener'); },
+      press: async (key: string) => {
+        expect(key).toBe('Enter');
+        expect(commands.at(-1)).toBe('focus model opener');
+        commands.push('activate model opener');
+        opened = true;
+      },
+    };
+    const row = {
+      count: async () => expanded ? 1 : 0,
+      // Models the live failure: the whole-row center activates its separate badge.
+      click: async () => { helpOpened = true; },
+      locator: (selector: string) => {
+        expect(selector).toBe('button.model-hub-model-open');
+        return opener;
+      },
+    };
+    const card = {
+      waitFor: async () => {},
+      locator: (selector: string) => {
+        expect(selector).toBe('.model-hub-model-collapse');
+        return { first: () => ({ count: async () => 1, click: async () => { expanded = true; commands.push('expand models'); } }) };
+      },
+    };
+    const page = {
+      locator: (selector: string) => {
+        if (selector === '[data-agent-backend="claude"]') return card;
+        expect(selector).toBe('[data-route-backend="claude"][data-route-model="model-id"]');
+        return row;
+      },
+    } as unknown as Page;
+
+    await new ModelHubPage(page).openRoute('claude', 'model-id');
+
+    expect(opened).toBe(true);
+    expect(helpOpened).toBe(false);
+    expect(commands).toEqual([
+      ...(collapsed ? ['expand models'] : []), 'focus model opener', 'activate model opener',
+    ]);
+  });
+}

@@ -43,7 +43,7 @@ Out of scope (documented, not dropped silently):
 | ID | Steps | Expect | Status |
 |---|---|---|---|
 | B1 | observe against mock for each protocol, `protocol:'auto'` | correct protocol chosen by response shape; observation payload contract_version 9 | assert |
-| B2 | manual protocol ≠ actual | create refused with matching proof error | assert |
+| B2 | custom user-declared protocol differs from response shape, authentication succeeds | declaration badge and runtime-risk warning stay visible; explicit confirmation persists exactly the chosen protocol, not an inferred one. Authentication remains required. Auto still needs matching shape evidence (2026-09-04 declaration rule; adapter consumer rejects authenticated but unshaped Auto responses). | assert |
 | B3 | pull models (mock returns `display_name`, `context_length`, `pricing`, `supported_parameters`) | unrelated metadata is dropped; `supported_parameters` is retained in observation and the provenance ladder applies protocol-default tiers | assert |
 | B4 | discovery fails | 422 `inventory_unavailable` unless `accept_unavailable_inventory:true`; then source commits with `state.status=error` | assert |
 | B5 | replay create with same `client_nonce` | idempotent, no duplicate source | assert |

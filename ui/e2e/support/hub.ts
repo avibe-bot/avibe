@@ -132,6 +132,10 @@ export class ModelHubPage {
     return this.page.locator(attr('data-route-backend', backend) + attr('data-route-model', model));
   }
 
+  routeOpener(backend: string, model: string): Locator {
+    return this.routeRow(backend, model).locator('button.model-hub-model-open');
+  }
+
   async openRoute(backend: string, model: string): Promise<void> {
     await this.agentCard(backend).waitFor({ state: 'visible' });
     const row = this.routeRow(backend, model);
@@ -139,7 +143,10 @@ export class ModelHubPage {
       const expand = this.agentCard(backend).locator('.model-hub-model-collapse').first();
       if (await expand.count()) await expand.click();
     }
-    await row.click();
+    // The row center can belong to its separate origin-help badge.
+    const opener = this.routeOpener(backend, model);
+    await opener.focus();
+    await opener.press('Enter');
   }
 
   /** The card collapses its model list, so a spec that just needs *a* route

@@ -10,7 +10,6 @@ import type { HubApi } from './support/api';
 import { hub as copy } from './support/copy';
 import { E2E_SOURCE_PREFIX, mockBaseUrl } from './support/env';
 import {
-  expectVisibleWithout,
   requireMockUpstream,
   requireModelHub,
   requireRuntimeRunning,
@@ -187,32 +186,35 @@ test.describe('B · add an API-key source', () => {
     await expect(hub.addKeyDialog).toBeVisible();
   });
 
-  test('B2 · naming the wrong interface is refused, and says why', async ({ hub, mock }) => {
-    // The upstream speaks OpenAI Chat Completions; the user insists on Anthropic
-    // Messages. The probe path then 404s, so nothing proves the interface.
+  test('B2 · a declared interface is warned about and persisted without claiming response proof', async ({ hub, mock, api }) => {
+    // A concrete custom interface is a declaration, not a response-shape claim.
+    // Authentication still gates it; Auto's shape-proof branch is covered by B1
+    // and test_source_observation_accepts_catalog_pin_and_custom_declaration_without_shape_proof.
     await mock.configure({ auth: 'ok', protocol: 'openai_chat', models_endpoint: 'ok' });
+    const name = `${E2E_SOURCE_PREFIX}mismatch`;
 
     await hub.goto();
     await hub.addApiKeyButton.click();
     await fillApiKeyForm(hub.addKeyDialog, {
-      // Prefixed for the same reason as B1's rejected credential: a mismatch
-      // that commits anyway must still be sweepable.
-      name: `${E2E_SOURCE_PREFIX}mismatch`,
+      name,
       baseUrl: mockBaseUrl(),
       apiKey: 'e2e-mismatch',
       protocol: copy('addKey.protocol.anthropicMessages'),
     });
     await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
 
-    // "Connected and authenticated, but we cannot tell which interface" — the
-    // distinction from a credential failure is the whole point of the copy.
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.undetermined.title'), { timeout: 30_000 });
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.undetermined.detail'));
-    await expectVisibleWithout(hub.addKeyDialog, copy('addKey.fail.auth'));
-    // Retry stays available because a different choice is a different probe.
-    await expect(
-      hub.addKeyDialog.getByRole('button', { name: copy('addKey.retry'), exact: true }),
-    ).toBeEnabled();
+    await expect(hub.addKeyDialog.locator('.model-hub-add-key-protocol-badge')).toHaveText(copy('addKey.protocol.declared'));
+    await expect(hub.addKeyDialog).toContainText(copy('addKey.field.protocol.hint'));
+    const confirm = hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true });
+    await expect(confirm).toBeEnabled({ timeout: 30_000 });
+    expect((await api.sources()).filter((source) => source.display_name === name)).toEqual([]);
+    await confirm.click();
+    await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
+    await expect(hub.sourceDetailDialog).toBeVisible();
+    await expect(hub.sourceDetailDialog).toContainText(name);
+    const saved = (await api.sources()).filter((source) => source.display_name === name);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ vendor: 'custom', protocol: 'anthropic' });
   });
 
   test('B3 · Detect reports the count, and only ids survive the save', async ({ hub, mock, api }) => {
