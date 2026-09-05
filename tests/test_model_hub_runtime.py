@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
@@ -1506,7 +1507,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
     assert payload["openai-compatibility"][0]["api-key-entries"][0]["api-key"] == ("upstream-secret-value")
     assert {
         entry["base-url"] for entry in payload["openai-compatibility"]
-    } == {"https://api.example.test/v1", "https://api.deepseek.com"}
+    } == {"https://api.example.test/v1", "https://api.deepseek.com/v1"}
     assert len(payload["codex-api-key"]) == 2
     assert {entry["base-url"] for entry in payload["codex-api-key"]} == {"https://api.openai.com/v1"}
     responses_entry = next(
@@ -1836,6 +1837,56 @@ def test_api_key_vendor_catalog_populates_runtime_official_base_urls(
 
 
 @pytest.mark.parametrize(
+    ("base_url", "expected_base_url"),
+    [
+        ("https://relay.example.test", "https://relay.example.test/v1"),
+        (
+            "https://relay.example.test/custom/root?tenant=one",
+            "https://relay.example.test/custom/root?tenant=one",
+        ),
+    ],
+)
+def test_openai_compatibility_engine_base_url_uses_configured_api_root(
+    tmp_path: Path,
+    base_url: str,
+    expected_base_url: str,
+) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    credential_ref = store.store_api_key(
+        "secret",
+        vendor="custom",
+        protocol="openai_chat",
+        base_url=base_url,
+    )
+    store.sync_sources(
+        [
+            _binding(
+                credential_ref,
+                source_id="src_custom123",
+                vendor="custom",
+                protocol="openai_chat",
+                base_url=base_url,
+            )
+        ]
+    )
+    config_path = instance_dir / "config.yaml"
+
+    write_engine_config(
+        config_path,
+        host="127.0.0.1",
+        port=18231,
+        auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets,
+        sources=store.list_sources(),
+        state_store=store,
+    )
+
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert payload["openai-compatibility"][0]["base-url"] == expected_base_url
+
+
+@pytest.mark.parametrize(
     ("vendor", "protocol", "expected_base_url"),
     API_KEY_VENDOR_RUNTIME_CASES,
 )
@@ -1885,7 +1936,10 @@ def test_catalog_owned_api_key_sources_without_explicit_base_url_sync_and_write_
     if protocol == "openai_responses":
         assert payload["codex-api-key"][0]["base-url"] == expected_base_url
         return
-    assert payload["openai-compatibility"][0]["base-url"] == expected_base_url
+    expected_engine_base_url = expected_base_url
+    if not urlsplit(expected_engine_base_url).path.rstrip("/"):
+        expected_engine_base_url = f"{expected_engine_base_url.rstrip('/')}/v1"
+    assert payload["openai-compatibility"][0]["base-url"] == expected_engine_base_url
 
 
 def test_state_removes_secret_bearing_configs_on_upgrade_and_revocation(tmp_path: Path) -> None:

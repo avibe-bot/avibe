@@ -109,9 +109,6 @@ _CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
 _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
 _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY = "opencode_managed_skill_builtin_snapshot"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
-# OpenCode returns 204 after forking prompt work, before that worker necessarily
-# registers the session as busy.
-_ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS = 5.0
 # OpenCode can report idle just before the completed assistant message becomes
 # visible through the message-list endpoint.
 _ASYNC_PROMPT_RESULT_CONFIRMATION_TIMEOUT_SECONDS = 5.0
@@ -162,7 +159,7 @@ class _OpenCodeSteerState:
     closing: bool = False
     awaiting_after_message_ids: set[str] | None = None
     awaiting_user_text: str | None = None
-    awaiting_start_confirmation_deadline: float | None = None
+    awaiting_prompt_accepted: bool = False
     awaiting_active_status_observed: bool = False
     awaiting_result_confirmation_deadline: float | None = None
     idle_reconciliation_message: str = ""
@@ -364,7 +361,7 @@ class _SteeringAwareOpenCodeServer:
     def _clear_awaiting_reconciliation(self) -> None:
         self._state.awaiting_after_message_ids = None
         self._state.awaiting_user_text = None
-        self._state.awaiting_start_confirmation_deadline = None
+        self._state.awaiting_prompt_accepted = False
         self._state.awaiting_active_status_observed = False
         self._state.awaiting_result_confirmation_deadline = None
 
@@ -531,6 +528,8 @@ class _SteeringAwareOpenCodeServer:
                                         < 0
                                     )
                                 )
+                                if not inserted_user_missing:
+                                    self._state.awaiting_active_status_observed = True
                                 last_message_id = (
                                     messages[-1].get("info", {}).get("id")
                                     if messages
@@ -540,8 +539,7 @@ class _SteeringAwareOpenCodeServer:
                                     inserted_user_missing
                                     and final_snapshot
                                     and last_message_id in awaiting
-                                    and self._state.awaiting_start_confirmation_deadline
-                                    is None
+                                    and not self._state.awaiting_prompt_accepted
                                 ):
                                     self._clear_awaiting_reconciliation()
                                     self._state.closing = True
@@ -564,16 +562,7 @@ class _SteeringAwareOpenCodeServer:
                                     if has_final_insert_result:
                                         self._state.closing = True
                                     return messages
-                                start_deadline = (
-                                    self._state.awaiting_start_confirmation_deadline
-                                )
-                                if (
-                                    start_deadline is not None
-                                    and not self._state.awaiting_active_status_observed
-                                    and time.monotonic() < start_deadline
-                                ):
-                                    wait_for_insert = True
-                                elif self._state.awaiting_active_status_observed:
+                                if self._state.awaiting_active_status_observed:
                                     result_deadline = (
                                         self._state.awaiting_result_confirmation_deadline
                                     )
@@ -593,6 +582,11 @@ class _SteeringAwareOpenCodeServer:
                                             name="NativeSessionEndedBeforeResult",
                                             message=self._idle_reconciliation_error_text(),
                                         )
+                                elif self._state.awaiting_prompt_accepted:
+                                    # A successful prompt_async response transfers
+                                    # ownership before OpenCode must publish a
+                                    # message or mark the session busy.
+                                    wait_for_insert = True
                                 else:
                                     self._clear_awaiting_reconciliation()
                                     return self._terminal_reconciliation_failure(
@@ -660,12 +654,12 @@ class _SteeringAwareOpenCodeServer:
             if snapshot_ids is not None:
                 self._state.awaiting_after_message_ids = set(snapshot_ids)
                 self._state.awaiting_user_text = prompt_text or None
-                self._state.awaiting_start_confirmation_deadline = (
-                    time.monotonic() + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
-                )
+                self._state.awaiting_prompt_accepted = False
                 self._state.awaiting_active_status_observed = False
                 self._state.awaiting_result_confirmation_deadline = None
             await self._server.prompt_async(*args, **{k: v for k, v in kwargs.items() if k != "awaiting_after_ids"})
+            if snapshot_ids is not None:
+                self._state.awaiting_prompt_accepted = True
 
     async def abort_session(self, *args, **kwargs) -> bool:
         async with self._state.lock:
@@ -1673,10 +1667,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 baseline_message_ids=set(baseline_message_ids),
                 awaiting_after_message_ids=set(baseline_message_ids),
                 awaiting_user_text=prompt_text,
-                awaiting_start_confirmation_deadline=(
-                    time.monotonic()
-                    + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
-                ),
+                awaiting_prompt_accepted=True,
                 idle_reconciliation_message=self._idle_reconciliation_message(
                     display_model_dict,
                     reasoning_effort,
@@ -2054,15 +2045,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError):
                     state.awaiting_after_message_ids = before_insert
                     state.awaiting_user_text = request.text
-                    state.awaiting_start_confirmation_deadline = None
+                    state.awaiting_prompt_accepted = False
                     state.awaiting_active_status_observed = False
                     raise
                 state.awaiting_after_message_ids = before_insert
                 state.awaiting_user_text = request.text
-                state.awaiting_start_confirmation_deadline = (
-                    time.monotonic()
-                    + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
-                )
+                state.awaiting_prompt_accepted = True
                 state.awaiting_active_status_observed = False
                 await asyncio.sleep(_STEER_POST_WRITE_STATUS_SETTLE_SECONDS)
                 try:

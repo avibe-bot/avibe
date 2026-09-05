@@ -151,6 +151,15 @@ OPENCODE_V4_S4_VARIANT_FIXTURES = {
             "output_config": {"effort": "high"},
         },
     },
+    "responses_to_openai_chat": {
+        "protocol": "openai_chat",
+        "frontend_protocol": "openai_responses",
+        "stored_model": "deepseek-v3.2",
+        "variant": {"reasoningEffort": "high"},
+        "upstream_fragment": {
+            "reasoning_effort": "high",
+        },
+    },
 }
 CAPTURED_HEADER_NAMES = (
     "accept",
