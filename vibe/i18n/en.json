@@ -788,6 +788,10 @@
     }
   },
   "memory": {
+    "sender": {
+      "user": "User",
+      "agent": "Agent"
+    },
     "cli": {
       "help": {
         "command": "Use local Memory through the running controller",

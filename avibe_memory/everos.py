@@ -129,6 +129,7 @@ class ProviderCapture:
     text: str
     provider_timestamp_ms: int
     attachments: tuple[CaptureAttachment, ...] = ()
+    sender_name: str | None = None
 
 
 def attachment_add_rejection_proves_no_write(
@@ -335,6 +336,7 @@ class EverOSPort:
                 "messages": [
                     {
                         "sender_id": capture.session_ref.principal_id,
+                        **({"sender_name": capture.sender_name} if capture.sender_name is not None else {}),
                         "role": "user",
                         "timestamp": capture.provider_timestamp_ms,
                         "content": content,

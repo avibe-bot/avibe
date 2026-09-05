@@ -125,6 +125,15 @@ class _SettingsUserBindings:
         user = store.get_user(user_id, platform=platform)
         return bool(user is not None and user.enabled)
 
+    def display_name(self, platform: str, user_id: str) -> str | None:
+        manager = self._managers.get(platform)
+        if manager is None:
+            return None
+        store = manager.get_store()
+        store.maybe_reload()
+        user = store.get_user(user_id, platform=platform)
+        return user.display_name if user is not None and user.enabled else None
+
 
 class RemovedPlatformIMClient(BaseIMClient):
     """No-op sink for stale replies after an IM platform is hot-disabled."""
@@ -1332,6 +1341,11 @@ class Controller:
             _load_memory_capture_types()
         )
         del _CaptureAccepted, _CaptureRequest
+        if request.provenance == "agent":
+            request = replace(
+                request,
+                sender_name=i18n_t("memory.sender.agent", getattr(self.config, "language", "en")),
+            )
         async with self._memory_replacement_lock():
             implementation_error = getattr(self, "_memory_implementation_error", None)
             if implementation_error is not None:
@@ -3277,6 +3291,25 @@ class Controller:
     #
     # The policy lives in ``avibe_memory.admission``. The controller only
     # collects the facts one turn carries and acts on the verdict.
+
+    def memory_sender_name_for_context(self, context: MessageContext) -> str | None:
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return None
+        from core.memory_adapter import normalize_memory_sender_name
+
+        name = None
+        try:
+            payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+            platform = context.platform or payload.get("platform")
+            if platform != "avibe":
+                name = _SettingsUserBindings(
+                    getattr(self, "platform_settings_managers", None)
+                ).display_name(platform, context.user_id)
+        except Exception:
+            pass
+        return normalize_memory_sender_name(name) or i18n_t(
+            "memory.sender.user", getattr(self.config, "language", "en")
+        )
 
     def _memory_admission(self) -> CaptureAdmission:
         # ``getattr`` keeps a controller assembled without a Memory runtime

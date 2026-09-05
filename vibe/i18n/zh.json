@@ -788,6 +788,10 @@
     }
   },
   "memory": {
+    "sender": {
+      "user": "用户",
+      "agent": "Agent"
+    },
     "cli": {
       "help": {
         "command": "通过运行中的控制器使用本地记忆",

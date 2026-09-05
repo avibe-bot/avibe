@@ -73,6 +73,112 @@ def _sidecar_transport(handler):
     return patch("avibe_memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
 
 
+def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_path) -> None:
+    """MEMORY-SEARCH-019: accepted source identity survives named provider capture."""
+    from types import SimpleNamespace
+
+    from avibe_memory.capture_adapter import EnabledMemoryAdapter
+    from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+    from avibe_memory.types import CaptureRequest
+    from core.controller import Controller
+    from core.handlers.message_handler import memory_turn_event
+    from modules.im.base import MessageContext
+
+    requests = []
+    text = "原文\n`u-synthetic` https://example.invalid/u-synthetic"
+
+    def handler(request):
+        payload = json.loads(request.content)
+        if request.url.path.endswith("/add"):
+            requests.append(payload)
+        return httpx.Response(200, json={"request_id": "synthetic", "data": {"status": "accumulated"}})
+
+    async def acquire(_session_id):
+        return SimpleNamespace(release=lambda: None)
+
+    async def run():
+        store = MemoryStore(tmp_path / "state/memory/memory.sqlite", effective_home=tmp_path)
+        module = MemoryModule(
+            store, EverOSPort(tmp_path / "synthetic.sock"), enabled=True,
+            disk_free_bytes=lambda: MIN_FREE_DISK_BYTES, effective_home=tmp_path,
+        )
+        controller = Controller.__new__(Controller)
+        controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True), language="en")
+        controller.memory_runtime = SimpleNamespace(available=True, module=module)
+        bound_users = SimpleNamespace(
+            maybe_reload=lambda: None,
+            get_user=lambda *_args, **_kwargs: SimpleNamespace(enabled=True, display_name="小王 Élodie 🌱"),
+        )
+        controller.platform_settings_managers = {"slack": SimpleNamespace(get_store=lambda: bound_users)}
+        adapter = EnabledMemoryAdapter(
+            module=module, principals=store, is_enabled_user=lambda *_args: True,
+            lifecycle_snapshot_matches=lambda *_args: True,
+            acquire_lifecycle_admission=acquire,
+            attachment_capture_status=lambda: asyncio.sleep(0, result="ready"),
+            attachment_config_generation=lambda: 1,
+        )
+        adapter.start(task_factory=asyncio.create_task)
+        expected_owners = []
+        try:
+            sources = [("avibe", source) for source in ("local", "remote:owner", "remote:other")]
+            sources.extend([("slack", "user-1"), ("slack", "user-2")])
+            for platform, source in sources:
+                context = MessageContext(
+                    user_id=source, channel_id="shared-project-session", platform=platform,
+                    message_id=source,
+                    platform_specific={"author_id": source, "author_name": "Untrusted", "is_dm": True},
+                    is_original_human_text=True,
+                )
+                event = memory_turn_event(
+                    context, text, "shared-project-session", 1,
+                    sender_name=controller.memory_sender_name_for_context(context),
+                )
+                adapter.offer(event)
+                expected_owners.append(store.principal_for_user_key(f"{platform}:{source}"))
+            await adapter.wait_idle_for_tests()
+            principal = expected_owners[0]
+            await controller.capture_memory(CaptureRequest(
+                source_message_id="explicit", session_id="shared-project-session",
+                principal_id=principal, project_id="default", provenance="agent",
+                text=text, occurred_at_ms=1_725_000_001_234,
+            ))
+            await module.wait_writer_idle_for_tests()
+            messages = [payload["messages"][0] for payload in requests]
+            names = ["User", "User", "User", "小王 Élodie 🌱", "小王 Élodie 🌱", "Agent"]
+            assert {message["sender_id"]: message["sender_name"] for message in messages} == dict(
+                zip([*expected_owners, principal + "-agent"], names)
+            )
+            assert len(messages) == len({message["sender_id"] for message in messages}) == 6
+            assert all(message["content"] == text and message["role"] == "user" for message in messages)
+            assert all(isinstance(message["timestamp"], int) for message in messages)
+        finally:
+            await adapter.cancel_memory_capture_tasks()
+            await module.close_writer()
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize("name", [None, "", "小王 Élodie 🌱"])
+def test_sender_name_is_optional_in_provider_payload(name) -> None:
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"request_id": "synthetic", "data": {"status": "accumulated"}})
+
+    with _sidecar_transport(handler):
+        asyncio.run(EverOSPort(Path("/tmp/synthetic.sock")).add(ProviderCapture(
+            session_ref=SESSION_REF, text="原文 stays", provider_timestamp_ms=1_725_000_001_234,
+            sender_name=name,
+        )))
+    message = requests[0]["messages"][0]
+    assert message == {
+        "sender_id": PRINCIPAL, "role": "user", "timestamp": 1_725_000_001_234,
+        "content": "原文 stays", **({"sender_name": name} if name is not None else {}),
+    }
+
+
 class _FailingResponseStream(httpx.AsyncByteStream):
     def __init__(
         self,
@@ -262,6 +368,7 @@ def test_provider_capture_has_one_canonical_session_identity() -> None:
         "text",
         "provider_timestamp_ms",
         "attachments",
+        "sender_name",
     )
     assert capture.session_ref.principal_id == PRINCIPAL
     derived_session_ids = {

@@ -42,6 +42,7 @@ def memory_turn_event(
     session_id: str,
     lifecycle_snapshot: object,
     attachment_lease: object = None,
+    sender_name: str | None = None,
 ) -> TurnAccepted:
     """Close one live message context into immutable host-owned facts."""
 
@@ -64,6 +65,7 @@ def memory_turn_event(
         is_ordinary_attachment=context.is_original_human_attachment,
         lifecycle_snapshot=lifecycle_snapshot,
         attachment_lease=attachment_lease,
+        sender_name=sender_name,
     )
 
 
@@ -304,7 +306,11 @@ class MessageHandler(BaseHandler):
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             capture_session_id = base_session_id
             capture_lifecycle_snapshot: object | None = None
+            capture_sender_name = None
             if is_human:
+                sender_name_for_context = getattr(self.controller, "memory_sender_name_for_context", None)
+                if callable(sender_name_for_context):
+                    capture_sender_name = sender_name_for_context(context)
                 capture_lifecycle_snapshot = lifecycle_snapshot
                 if capture_lifecycle_snapshot is None:
                     snapshot = getattr(
@@ -334,6 +340,7 @@ class MessageHandler(BaseHandler):
                         control_message,
                         capture_session_id,
                         capture_lifecycle_snapshot,
+                        sender_name=capture_sender_name,
                     )
                 )
                 capture_lifecycle_snapshot = None
@@ -731,6 +738,7 @@ class MessageHandler(BaseHandler):
                                 control_message,
                                 capture_session_id,
                                 capture_lifecycle_snapshot,
+                                sender_name=capture_sender_name,
                             )
                         )
                     raise
@@ -758,6 +766,7 @@ class MessageHandler(BaseHandler):
                         capture_session_id,
                         capture_lifecycle_snapshot,
                         attachment_lease,
+                        sender_name=capture_sender_name,
                     )
                 )
                 capture_lifecycle_snapshot = None
