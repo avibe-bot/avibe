@@ -154,6 +154,13 @@ validate canonical nonempty identifiers, source existence/eligibility, and expli
 retirement, but do not require source inventory membership. Manual override hops
 may use an eligible source outside the backend default subset.
 
+Identity normalization and new-identifier admission are distinct. An existing
+catalog identifier or retained exact target may exceed a later admission length
+bound without losing edit, preview, restore, or provenance-read capability. Use
+the persisted normalized identity and existing catalog/target evidence for those
+operations; apply admission bounds to newly introduced identifiers. This does not
+admit new padded aliases or bypass source, channel, or retirement validation.
+
 Server handlers, RPC, UI server, CLI/client wrappers, endpoint tables, response
 schemas and UI client must expose the same operations. Preview is read-only even
 when runtime is stopped. Mutation responses are authoritative after Save; failed
@@ -288,9 +295,12 @@ constraint, not evidence about upstream model availability.
 Add `SourceBinding.route_model_ids: tuple[str, ...] = ()` and the corresponding
 internal SourceRecord field, loading its absence as empty. The service produces
 this deterministic, deduplicated, sorted set from effective Hub-channel route
-targets across all backend catalog models. It is independent of health and of
-backend direct/hub mode, and never changes per request. Every actual mapped target,
-including a manual target missing from inventory, must be represented before use.
+targets across all backend catalog models and retained route keys, including
+dormant OpenCode overrides that the resolver can still select. It is independent
+of health and of backend direct/hub mode, and never changes per request. Every
+actual mapped target, including a manual target missing from inventory, must be
+represented before use.
+Retaining transport coverage does not add a catalog row or expand model admission.
 
 `model_ids` continues to carry truthful non-retired source inventory. The engine
 config compiler may register the stable union of inventory ids and route target

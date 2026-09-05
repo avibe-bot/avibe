@@ -8,12 +8,13 @@ import pytest
 
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES, classify_outcome
+from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from core.handlers.model_hub.service import ModelHubError
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from tests.test_model_hub_resolution import _service
-from tests.test_model_hub_routing_modes import MODEL, _sparse_config
+from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config, _sparse_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import model_hub_client, ui_server
 
@@ -164,6 +165,23 @@ def test_model_history_validates_backend_and_canonical_catalog_id(tmp_path, back
     service, _, _ = _service(tmp_path, _sparse_config())
     with pytest.raises(ModelHubError):
         service.get_model_provenance(backend, model)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_latest_history_reads_exact_persisted_legacy_catalog_identity(tmp_path, backend):
+    legacy = "legacy-" + "x" * MODEL_ID_MAX_LENGTH
+    service, store, adapter = _service(tmp_path, _loaded_catalog_config(backend, legacy))
+    before = store.config.to_payload()
+    assert service.get_model_provenance(backend, legacy) is None
+    record = _record("legacy-long", backend=backend, model=legacy)
+    service.provenance.put(record)
+    assert service.get_model_provenance(backend, legacy) == record
+    with pytest.raises(ModelHubError):
+        service.get_model_provenance(backend, f" {legacy} ")
+    with pytest.raises(ModelHubError):
+        service.get_model_provenance(backend, "new-" + "x" * MODEL_ID_MAX_LENGTH)
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
 
 
 def test_model_history_client_rpc_http_share_nullable_read_only_result(monkeypatch, tmp_path):

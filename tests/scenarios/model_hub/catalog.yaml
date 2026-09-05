@@ -203,6 +203,12 @@ scenarios:
     kind: recovery
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gateway_cpa
+  - id: MH-ROUTING-012
+    name: Persisted dormant OpenCode overrides reach the exact API-key source and unlisted target without menu or inventory mutation
+    status: assert
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source_and_target
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered

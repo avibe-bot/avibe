@@ -1585,7 +1585,8 @@ Source-card projection of those effective Hub-mode references; transient health 
 
 The committed Engine Registration Amendment (`f8d14358a`) separates truthful
 `SourceBinding.model_ids` inventory from default-empty `route_model_ids` transport
-targets. The service derives sorted unique effective Hub targets across backend catalogs,
+targets. The service derives sorted unique effective Hub targets across backend catalogs
+and retained resolver-selectable route keys, including dormant OpenCode overrides,
 independent of health and backend mode; the compiler registers their union for transport.
 Targets never enter Source.models, discovery, matching evidence or reasoning capabilities.
 Load and config synchronization use the existing owner and preserve active requests.

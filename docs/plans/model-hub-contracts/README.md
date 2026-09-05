@@ -66,6 +66,8 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    must validate Source existence/eligibility, canonical identifiers and explicit retirement.
    Missing API-key inventory alone is not an invocation or manual-write rejection.
    Subscription Sources retain existing model admission and stale-hop retention.
+   Normalized persisted catalog/target identities do not lose edit, preview, restore
+   or history-read capability when a later new-identifier length bound is shorter.
 4. Source deletion atomically removes its id from every backend Source order and every
    exact Route chain, preserving survivor order. Serialization and reload reject a
    dangling Source id.

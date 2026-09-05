@@ -88,7 +88,7 @@ from .events import (
     redact_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id
+from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -983,8 +983,8 @@ class ModelHubService:
         route_targets: dict[str, set[str]] = {}
         sources = {source.id: source for source in config.sources}
         for backend, agent in config.agents.items():
-            for model in agent.models:
-                for hop in effective_model_route(config, cast(BackendName, backend), model.id).hops:
+            for model_id in self._agent_model_ids(agent, ""):
+                for hop in effective_model_route(config, cast(BackendName, backend), model_id).hops:
                     source = sources.get(hop.source_id)
                     if source is not None and source_supports_passthrough(source) and not source_model_retired(source, hop.model_id):
                         route_targets.setdefault(source.id, set()).add(hop.model_id)
@@ -3621,7 +3621,7 @@ class ModelHubService:
         if (
             backend not in MODEL_HUB_BACKENDS
             or not isinstance(model_id, str)
-            or canonical_model_id(model_id) != model_id
+            or normalized_model_id(model_id) != model_id
             or not isinstance(payload, dict)
             or set(payload)
             - {"hops", "force", "would_remove_hops", "would_interrupt"}
@@ -3631,7 +3631,7 @@ class ModelHubService:
             raise ModelHubError("mapping_target_unavailable", status=409)
         try:
             route = ModelHubRouteConfig.from_payload({"hops": payload["hops"]})
-            if any(canonical_model_id(hop["model_id"]) != hop["model_id"] for hop in payload["hops"]):
+            if any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in payload["hops"]):
                 raise ValueError("noncanonical model")
         except (TypeError, ValueError):
             raise ModelHubError("mapping_target_unavailable", status=409) from None
@@ -3647,7 +3647,7 @@ class ModelHubService:
         agent = self._agent(config, backend)
         if agent.mode == "direct":
             raise self._direct_mode_error()
-        if not isinstance(model_id, str) or canonical_model_id(model_id) != model_id or (
+        if not isinstance(model_id, str) or normalized_model_id(model_id) != model_id or (
             model_id not in self._agent_menu_model_ids(agent)
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -3659,6 +3659,13 @@ class ModelHubService:
         for hop in route.hops if route is not None else ():
             source = by_id.get(hop.source_id)
             if source is None or not self._eligible_for_agent(source, backend):
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            # Existing exact targets keep their load-time identity; only a new
+            # source/target identity is subject to the current admission bound.
+            persisted_target = (hop.source_id, hop.model_id) in old_pairs or any(
+                model.id == hop.model_id for model in source.models
+            )
+            if not persisted_target and canonical_model_id(hop.model_id) != hop.model_id:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             if source_supports_passthrough(source):
                 valid = not source_model_retired(source, hop.model_id)
@@ -3676,7 +3683,7 @@ class ModelHubService:
         raw = payload["manual_override"]
         try:
             route = ModelHubRouteConfig.from_payload(raw) if raw is not None else None
-            if raw is not None and any(canonical_model_id(hop["model_id"]) != hop["model_id"] for hop in raw["hops"]):
+            if raw is not None and any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in raw["hops"]):
                 raise ValueError("noncanonical model")
         except (TypeError, ValueError):
             raise ModelHubError("mapping_target_unavailable", status=409) from None
@@ -5412,7 +5419,7 @@ class ModelHubService:
         )
 
     def get_model_provenance(self, backend: str, model_id: object) -> dict | None:
-        if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or canonical_model_id(model_id) != model_id:
+        if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or normalized_model_id(model_id) != model_id:
             raise ModelHubError("mapping_target_unavailable", status=409)
         agent = self.store.load().agents[backend]
         if model_id not in self._agent_menu_model_ids(agent):

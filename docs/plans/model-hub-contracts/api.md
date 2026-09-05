@@ -448,6 +448,13 @@ retirement. API-key targets do not require inventory membership; subscription ta
 retain existing known-model admission and stale-hop retention. Retained stale hops remain
 editable without inventing inventory.
 
+The new-identifier length bound is not a read or mutation bound for persisted
+identities. Existing normalized catalog ids and retained exact target/source-inventory
+identities remain usable across PUT, preview, DELETE and model-provenance reads even
+when a later admission bound is shorter. Newly introduced identifiers still pass
+admission; padding aliases remain rejected, and existing source, channel, retirement
+and stale-hop policies are unchanged.
+
 PUT uses `mutation.route_replace`: visible noninterrupting removals are ordinary
 success; protected-supply interruption returns the existing exact-plan refusal. DELETE
 uses `mutation.route_restore`: guard actual effective removals and supply loss, then

@@ -38,10 +38,14 @@ compares schema enum minus null with production `UPSTREAM_MACHINE_ERROR_CODES`.
 Transport registration is separate from inventory: SourceBinding.route_model_ids is a
 default-empty tuple, mirrored in the internal SourceRecord with absent-as-empty loading.
 The deterministic sorted/deduplicated set comes from effective Hub-channel targets across
-backend catalog models, independent of health and backend mode. The compiler registers
+backend catalog models and retained resolver-selectable route keys, including dormant
+OpenCode overrides, independent of health and backend mode. The compiler registers
 inventory plus targets for transport only; Source.models, discovery, candidate evidence
 and capabilities remain truthful inventory. All configuration/load synchronization uses
 the existing owner, leaves unchanged target sets running, and preserves in-flight work.
+Persisted normalized catalog/target identities remain usable when longer than a later
+new-identifier admission bound; route edits, preview, restore and history reads must not
+re-admit existing identities as though they were new. New identifiers remain bounded.
 Only Hub API-key Sources receive unknown-model transport targets. Subscriptions retain
 known-model admission and existing registration. No underlying engine expansion, OAuth
 alias substitution or alternate subscription transport belongs to this delivery.

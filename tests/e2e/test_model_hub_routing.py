@@ -21,7 +21,7 @@ from tests.e2e.test_model_hub_runtime import (
     _install_engine,
     _isolated_engine_adapter,
 )
-from config.v2_config import ModelHubBackendModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig
+from config.v2_config import ModelHubBackendModelConfig, ModelHubConfig, ModelHubRouteConfig, ModelHubRouteHopConfig
 from tests.e2e.test_model_hub_sources import (
     MENU_MODEL,
     SYNTHETIC_API_KEY,
@@ -117,6 +117,83 @@ def test_mh_routing_008_real_gateway_cpa_exact_model_and_source(tmp_path, monkey
         assert (config_path.read_bytes(), config_path.stat().st_mtime_ns) == before
         assert adapter.supervisor.client_if_running().connection == connection
         assert service.agent_chain("opencode", menu)["route_origin"] == ("manual" if manual else "passthrough")
+
+    with MockLLMUpstream() as first, MockLLMUpstream() as second, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+        asyncio.run(exercise(adapter, first, second))
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
+@pytest.mark.parametrize("inventory", [[], ["unrelated-listed-model"]], ids=["empty", "incomplete"])
+def test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source_and_target(
+    tmp_path, monkeypatch, protocol, inventory,
+):
+    """MH-ROUTING-012: resolver-selectable dormant routes are registered without expanding the menu or inventory."""
+    async def exercise(adapter, first, second):
+        arranged, dormant, target, sources = _real_route_service(
+            tmp_path, adapter, [first, second], protocol, inventory, manual=True,
+        )
+        config = arranged.store.load()
+        catalog = "vendor/independent-catalog-model"
+        agent = config.agents["opencode"]
+        agent.menu.checked = [catalog]
+        agent.models = [ModelHubBackendModelConfig(
+            id=catalog, origin="manual",
+            native_protocol="anthropic" if protocol == "anthropic" else "openai_responses",
+        )]
+        persisted = tmp_path / "persisted-dormant-route.json"
+        persisted.write_text(json.dumps(config.to_payload()), encoding="utf-8")
+        loaded = ModelHubConfig.from_payload(json.loads(persisted.read_text(encoding="utf-8")))
+        assert dormant in loaded.agents["opencode"].routes
+        assert dormant not in {model.id for model in loaded.agents["opencode"].models}
+        assert loaded.agents["opencode"].menu.checked == [catalog]
+        agent_before = loaded.agents["opencode"].to_payload()
+        inventory_before = [item.to_payload()["models"] for item in loaded.sources]
+        persisted_before = persisted.read_bytes()
+        service = service_for(tmp_path, MemoryModelHubStore(loaded), adapter)
+        await service.runtime_start()
+        connection = adapter.supervisor.client_if_running().connection
+        config_path = next(adapter.state_store.root.glob("instances/*/config.yaml"))
+        engine_before = (config_path.read_bytes(), config_path.stat().st_mtime_ns)
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "opencode", process_scope=str(tmp_path), turn_id="turn_dormant_route",
+            requested_model_id=dormant, resolved_model_id=target, source_id=sources[0].id,
+        )
+        paths = {"anthropic": "messages", "openai_responses": "responses", "openai_chat": "chat/completions"}
+        payload = {"model": dormant, "stream": False}
+        prompt = "Persisted route request: \u4e2d\u6587"
+        if protocol == "openai_responses":
+            payload["input"] = prompt
+        else:
+            payload.update(max_tokens=32, messages=[{"role": "user", "content": prompt}])
+        first.reset_requests()
+        second.reset_requests()
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                async with client.post(f"{base_url}/v1/{paths[protocol]}", json=payload,
+                                       headers={"Authorization": f"Bearer {token}"}) as response:
+                    raw = await asyncio.wait_for(response.read(), timeout=15)
+                    assert response.status == 200, raw
+                    assert b"mock response" in raw
+        finally:
+            await gateway.close()
+        captured = [row for row in first.requests() if row["path"] == f"/v1/{paths[protocol]}"]
+        assert len(captured) == 1, first.requests()
+        assert captured[0]["body"]["model"] == target
+        assert _request_credential(captured[0]) == "sk-synthetic-gateway-0"
+        assert prompt in json.dumps(captured[0]["body"], ensure_ascii=False)
+        assert not [row for row in second.requests() if row["method"] == "POST"]
+        assert service.store.load().agents["opencode"].to_payload() == agent_before
+        assert [item.to_payload()["models"] for item in service.store.load().sources] == inventory_before
+        assert adapter.state_store.get_source(sources[0].id).model_ids == tuple(inventory)
+        assert (config_path.read_bytes(), config_path.stat().st_mtime_ns) == engine_before
+        assert adapter.supervisor.client_if_running().connection == connection
+        assert persisted.read_bytes() == persisted_before
+        assert service.agent_chain("opencode", dormant)["route_origin"] == "manual"
+        (tmp_path / "received-dormant-route.json").write_text(json.dumps({
+            "dormant_model": dormant, "source_id": sources[0].id, "target": target,
+            "inventory": inventory, "menu": agent_before, "received": captured,
+        }, indent=2), encoding="utf-8")
 
     with MockLLMUpstream() as first, MockLLMUpstream() as second, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         asyncio.run(exercise(adapter, first, second))
