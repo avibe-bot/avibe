@@ -1625,6 +1625,14 @@ export const ChatPage: React.FC = () => {
       // new chat (Codex P2).
       onMessageNew: (msg) => {
         if (msg.session_id !== sessionIdRef.current) return;
+        // Activity lifecycle belongs to the Session, not its transcript viewport.
+        // Apply it before history/cap filters can drop the message from this view;
+        // detached completions only refresh storage, never reset the live group.
+        if (showAgentActivityRef.current && shouldRefreshAgentActivityForMessage(msg)) {
+          if (isTerminalAgentMessage(msg)) dispatchLive({ type: 'settle' });
+          else if (isAgentActivityBoundaryMessage(msg)) dispatchLive({ type: 'reset' });
+          scheduleActivityRefresh();
+        }
         // Agent Activity rows (assistant / tool_call) only reach the browser when
         // the toggle streams them (message_mirror). Route them to the running
         // buffer — never the transcript. ``isTranscriptMessage`` already excludes
@@ -1651,14 +1659,6 @@ export const ChatPage: React.FC = () => {
         // Harness live rows can precede read-side provenance enrichment. Pull
         // the enriched REST row so trigger/source chips update without reload.
         if (needsHarnessProvenanceReconcile(msg)) void reconcile();
-        // A phase boundary advances the live group while the Turn keeps running.
-        // Invalidate its old history read before accepting the next phase's rows;
-        // detached completions only refresh storage, never reset the live group.
-        if (showAgentActivityRef.current && shouldRefreshAgentActivityForMessage(msg)) {
-          if (isTerminalAgentMessage(msg)) dispatchLive({ type: 'settle' });
-          else if (isAgentActivityBoundaryMessage(msg)) dispatchLive({ type: 'reset' });
-          scheduleActivityRefresh();
-        }
         // Don't clear ``working`` from a result row here: with the queue, a
         // result can belong to an EARLIER turn while a newer queued turn is
         // already running, so clearing on it would hide Stop on the live turn

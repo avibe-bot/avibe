@@ -65,3 +65,19 @@ Detail failures use the existing bounded refresh retry.
   real SQLite grouping and the consuming frontend reducer across window shifts,
   both snapshot orders, mixed sources, migration hashes, and overlapping live rows.
   No migration, configuration change, new dependency, or alternate grouping owner.
+- Head `85b62d2bd7`: one P2 finding (historical transcript filtering bypassed
+  Activity phase invalidation). Four findings-bearing heads total: ordering on
+  `190c6ef87f` and `f0a1427071`, phase ownership on `0f54955369` and `85b62d2bd7`.
+  The phase-ownership class has now repeated, triggering a second diagnosis pause.
+- Orchestrator diagnosis: the existing generation model expresses the required
+  ownership, but its message-driven transition sits behind transcript-only
+  filtering. Both an already-historical window and a capped, unpinned window can
+  skip it. Turn start/end already bypass these filters; visibility and Session
+  changes already invalidate their generation. The durable ordering fix remains
+  independent and unchanged.
+- Scope decision before further implementation: process Activity lifecycle
+  messages immediately after Session routing, before every transcript-view gate.
+  Preserve historical transcript freezing and Activity-row ingestion policy.
+  Exercise the same phase invariant across live, search-history, and capped-tail
+  views, with boundaries before summary, during detail, and after hydration.
+  Reuse the current reducer and coalesced refresh; no new state or API contract.

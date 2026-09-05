@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { TurnActivityGroupWire } from '../../lib/agentActivity';
@@ -174,12 +174,13 @@ const projectedMessage = (id: string, text: string) => ({
   read_at: null,
 });
 
-const SessionSwitcher = ({ sessionId = 'session-running', label = 'switch chat' }: {
+const SessionSwitcher = ({ sessionId = 'session-running', label = 'switch chat', search = '' }: {
   sessionId?: string;
   label?: string;
+  search?: string;
 }) => {
   const navigate = useNavigate();
-  return <button type="button" onClick={() => navigate(`/chat/${sessionId}`)}>{label}</button>;
+  return <button type="button" onClick={() => navigate({ pathname: `/chat/${sessionId}`, search })}>{label}</button>;
 };
 
 describe('ChatPage transcript hydration', () => {
@@ -696,9 +697,22 @@ describe('ChatPage transcript hydration', () => {
     expect(mocks.api.getSessionActivityGroup).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['before summary', 'during detail', 'after hydration'] as const)(
-    'isolates Activity phases when output arrives %s without ending the Turn',
-    async (arrival) => {
+  it.each((['before summary', 'during detail', 'after hydration'] as const).flatMap((arrival) => (
+    (['live tail', 'search history', 'capped tail'] as const).map((view) => ({ arrival, view }))
+  )))(
+    'isolates Activity phases when output arrives $arrival in $view without ending the Turn',
+    async ({ arrival, view }) => {
+      // No browser layout in jsdom; reader placement is driven explicitly below.
+      vi.stubGlobal('requestAnimationFrame', () => 0);
+      let scrollRoot: HTMLElement | null = null;
+      vi.stubGlobal('IntersectionObserver', class {
+        constructor(_callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+          if (options?.root instanceof HTMLElement) scrollRoot = options.root;
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      });
       const previous: TurnActivityGroupWire = {
         id: 'previous-phase', anchor_message_id: null, anchor_position: 'after',
         open: true, status: 'interrupted', steps: 1, duration_ms: null,
@@ -718,11 +732,26 @@ describe('ChatPage transcript hydration', () => {
         created_at: '2026-09-05T00:00:00Z',
       };
       const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+      const transcript = Array.from({ length: view === 'capped tail' ? 300 : 1 }, (_, index) => ({
+        ...projectedMessage(`prompt-${index}`, `prompt ${index}`),
+        projection: undefined,
+      }));
+      const output = {
+        ...projectedMessage('phase-output', 'phase result'),
+        author: 'agent', type: 'output', source: 'agent', created_at: '2026-09-05T00:00:01Z',
+      };
       mocks.api.getSessionBootstrap.mockResolvedValue({
         ...bootstrapPayload('session-new'),
+        messages: transcript,
         config: { ui: { show_agent_activity: true } }, turn_state: running,
       });
       mocks.api.getTurnState.mockResolvedValue(running);
+      mocks.api.listSessionMessages.mockImplementation((_sid: string, options?: { aroundId?: string }) => (
+        Promise.resolve(options?.aroundId ? {
+          messages: [{ ...projectedMessage('historical-prompt', 'historical prompt'), projection: undefined }],
+          next_after_id: 'historical-prompt',
+        } : { messages: [transcript[0], output] })
+      ));
       mocks.api.getSessionActivity.mockImplementation(() => (
         phaseAdvanced ? Promise.resolve({ groups: [settled, current] }) : oldSummary.promise
       ));
@@ -734,6 +763,7 @@ describe('ChatPage transcript hydration', () => {
       ));
       render(
         <MemoryRouter initialEntries={['/chat/session-new']}>
+          <SessionSwitcher sessionId="session-new" search="?msg=historical-prompt" label="read history" />
           <Routes>
             <Route path="/chat/:sessionId" element={<ChatPage />} />
           </Routes>
@@ -748,12 +778,30 @@ describe('ChatPage transcript hydration', () => {
         await act(async () => oldDetail.resolve({ ...previous, rows: [previousRow] }));
         await screen.findByText(previousRow.text);
       }
+      if (view === 'search history') {
+        act(() => screen.getByRole('button', { name: 'read history' }).click());
+        await screen.findByText('historical prompt');
+      } else if (view === 'capped tail') {
+        // Enter through the real scroll handler; the boundary itself will detach
+        // the capped transcript rather than append an unseen tail message.
+        if (!scrollRoot) throw new Error('transcript scroll root not observed');
+        Object.defineProperties(scrollRoot, {
+          scrollHeight: { value: 10_000, configurable: true },
+          clientHeight: { value: 800, configurable: true },
+          scrollTop: { value: 0, writable: true, configurable: true },
+        });
+        fireEvent.scroll(scrollRoot);
+      }
       phaseAdvanced = true;
       act(() => {
-        mocks.events?.onMessageNew({
-          ...projectedMessage('phase-output', 'phase result'),
-          author: 'agent', type: 'output', source: 'agent', created_at: '2026-09-05T00:00:01Z',
-        });
+        mocks.events?.onMessageNew(output);
+      });
+      if (view !== 'live tail') {
+        expect(screen.queryByText(output.text)).toBeNull();
+        act(() => screen.getByRole('button', { name: 'chat.scrollToBottom' }).click());
+        await screen.findByText(output.text);
+      }
+      act(() => {
         mocks.events?.onMessageNew({
           ...projectedMessage('current-live', 'current phase live step'),
           author: 'agent', type: 'assistant', source: 'agent', created_at: '2026-09-05T00:00:03Z',
