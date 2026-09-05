@@ -144,14 +144,16 @@ def sqlite_db_factory(tmp_path, _sqlite_state_template_factory):
     """Give behavioral tests independent, fully initialized state databases.
 
     This is opt-in: migration/import tests still initialize their own empty DBs.
+    An explicit template must be closed and checkpointed by its owning fixture.
     Only new paths inside this test's temporary directory may receive a copy.
     """
 
-    def create(db_path: Path) -> Path:
+    def create(db_path: Path, *, template: Path | None = None) -> Path:
         db_path = db_path.resolve()
         db_path.relative_to(tmp_path.resolve())
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with _sqlite_state_template_factory().open("rb") as source, db_path.open("xb") as target:
+        source_path = template if template is not None else _sqlite_state_template_factory()
+        with source_path.open("rb") as source, db_path.open("xb") as target:
             shutil.copyfileobj(source, target)
         return db_path
 

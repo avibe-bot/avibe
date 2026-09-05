@@ -12,44 +12,58 @@ import pytest
 from tests.conftest import _reset_cached_sqlite_engines, _reset_oauth_runtime_state
 
 
+@pytest.fixture(params=[False, True])
+def custom_template(request, tmp_path):
+    if not request.param:
+        return None
+    template = tmp_path / "custom-template.sqlite"
+    with closing(sqlite3.connect(template)) as connection, connection:
+        connection.execute("CREATE TABLE fixture_rows (value TEXT)")
+        connection.execute("INSERT INTO fixture_rows VALUES ('original')")
+    return template
+
+
 def test_database_copies_preserve_the_entire_template_and_isolate_mutations(
-    tmp_path, sqlite_db_factory, _sqlite_state_template_factory
+    tmp_path, sqlite_db_factory, _sqlite_state_template_factory, custom_template,
 ):
-    template = _sqlite_state_template_factory()
+    template = custom_template if custom_template is not None else _sqlite_state_template_factory()
     original = template.read_bytes()
-    first = sqlite_db_factory(tmp_path / "first" / "vibe.sqlite")
-    second = sqlite_db_factory(tmp_path / "second" / "vibe.sqlite")
+    first = sqlite_db_factory(tmp_path / "first" / "vibe.sqlite", template=custom_template)
+    second = sqlite_db_factory(tmp_path / "second" / "vibe.sqlite", template=custom_template)
     assert first.read_bytes() == second.read_bytes() == original
 
     with closing(sqlite3.connect(first)) as connection, connection:
         connection.execute("CREATE TABLE test_mutation (value TEXT)")
         connection.execute("INSERT INTO test_mutation VALUES ('first only')")
-    third = sqlite_db_factory(tmp_path / "third" / "vibe.sqlite")
+    third = sqlite_db_factory(tmp_path / "third" / "vibe.sqlite", template=custom_template)
     assert template.read_bytes() == second.read_bytes() == third.read_bytes() == original
     assert first.read_bytes() != original
     with closing(sqlite3.connect(third)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        if custom_template is None:
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        else:
+            assert connection.execute("SELECT * FROM fixture_rows").fetchall() == [("original",)]
 
 
-def test_database_factory_never_overwrites_existing_state(tmp_path, sqlite_db_factory):
+def test_database_factory_never_overwrites_existing_state(tmp_path, sqlite_db_factory, custom_template):
     target = tmp_path / "vibe.sqlite"
     target.write_bytes(b"existing database")
     with pytest.raises(FileExistsError):
-        sqlite_db_factory(target)
+        sqlite_db_factory(target, template=custom_template)
     assert target.read_bytes() == b"existing database"
 
 
-def test_database_factory_rejects_paths_outside_test_isolation(tmp_path, sqlite_db_factory):
+def test_database_factory_rejects_paths_outside_test_isolation(tmp_path, sqlite_db_factory, custom_template):
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     with pytest.raises(ValueError):
-        sqlite_db_factory(outside / "vibe.sqlite")
+        sqlite_db_factory(outside / "vibe.sqlite", template=custom_template)
     assert not outside.exists()
 
     link = tmp_path / "outside-link"
     link.symlink_to(tmp_path.parent, target_is_directory=True)
     with pytest.raises(ValueError):
-        sqlite_db_factory(link / outside.name / "vibe.sqlite")
+        sqlite_db_factory(link / outside.name / "vibe.sqlite", template=custom_template)
     assert not outside.exists()
 
 

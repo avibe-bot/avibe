@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -180,12 +181,24 @@ def _seed_session(engine, session_id: str = "ses_fsm") -> None:
         )
 
 
+@pytest.fixture(scope="module")
+def _fsm_schema_template(tmp_path_factory):
+    path = tmp_path_factory.mktemp("fsm-schema") / "empty.sqlite"
+    engine = create_sqlite_engine(path)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return path
+
+
 @pytest.fixture
-def managers(tmp_path: Path):
-    db_path = tmp_path / "fsm.sqlite"
+def managers(tmp_path: Path, sqlite_db_factory, _fsm_schema_template):
+    db_path = sqlite_db_factory(tmp_path / "fsm.sqlite", template=_fsm_schema_template)
     engine_a = create_sqlite_engine(db_path)
     engine_b = create_sqlite_engine(db_path)
-    metadata.create_all(engine_a)
     _seed_session(engine_a)
 
     controller_a = _Controller()
@@ -207,6 +220,23 @@ def managers(tmp_path: Path):
     yield manager_a, manager_b, engine_a, engine_b, starts
     engine_a.dispose()
     engine_b.dispose()
+
+
+def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template, sqlite_db_factory):
+    reference = tmp_path / "reference.sqlite"
+    engine = create_sqlite_engine(reference)
+    try:
+        metadata.create_all(engine)
+        with engine.connect() as connection:
+            assert all(connection.execute(select(table)).first() is None for table in metadata.tables.values())
+    finally:
+        engine.dispose()
+    copied = sqlite_db_factory(tmp_path / "copied.sqlite", template=_fsm_schema_template)
+    with closing(sqlite3.connect(reference)) as fresh, closing(sqlite3.connect(copied)) as clone:
+        assert list(fresh.iterdump()) == list(clone.iterdump())
+        for pragma in ("journal_mode", "user_version", "application_id"):
+            assert fresh.execute(f"PRAGMA {pragma}").fetchall() == clone.execute(f"PRAGMA {pragma}").fetchall()
+        assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
 @pytest.mark.anyio
