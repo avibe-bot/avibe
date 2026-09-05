@@ -1,5 +1,6 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 import { specFor } from './messageTypes';
+import { timestampOrderTimeMs } from './transcriptOrder';
 
 // One turn's activity, as rendered by the Chat Activity panel. Mirrors the
 // backend ``storage/agent_activity_service.py`` shape (see the /activity endpoint).
@@ -10,6 +11,17 @@ export type ActivityRow = {
   kind: 'assistant' | 'tool_call';
   text: string;
   created_at: string;
+};
+
+// Match the Activity endpoint's emission clock across Message and event ids.
+// created_at alone loses the order of multiple tool/assistant rows in one second.
+const activityRowTimeMs = (row: ActivityRow): number => {
+  const clock = /^[^_]{3}_([0-9a-f]{15})/i.exec(row.id)?.[1];
+  if (clock) {
+    const micros = Number.parseInt(clock, 16);
+    if (Number.isSafeInteger(micros)) return micros / 1000;
+  }
+  return timestampOrderTimeMs(row.created_at);
 };
 
 // A group is positioned relative to a transcript message that is AT OR BEFORE the
@@ -152,6 +164,8 @@ export const liveActivityReducer = (
       // generation. Re-enabling may then hydrate only the current durable turn.
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'row':
+      // Storage hydration can include a row before its SSE envelope arrives.
+      if (state.rows.some((row) => row.id === event.row.id)) return state;
       if (state.settled) {
         // First row after a settle with no turn.start = an agent-initiated new turn.
         return { gen: state.gen + 1, settled: false, rows: [event.row], startedAt: event.now };
@@ -169,11 +183,15 @@ export const liveActivityReducer = (
       // this resolution is a stale no-op and must not wipe the new turn's rows).
       return event.gen === state.gen ? { ...state, rows: [], startedAt: null } : state;
     case 'rehydrate_for_gen':
-      // In-flight re-hydrate from storage, only if still the current generation and
-      // the live stream hasn't already filled the buffer.
-      return event.gen === state.gen && state.rows.length === 0
-        ? { ...state, rows: event.rows, startedAt: event.startedAt }
-        : state;
+      if (event.gen !== state.gen || state.settled) return state;
+      // Keep the union in emission order even when storage's bounded window moves
+      // past rows already loaded. Stable sorting preserves durable order on ties.
+      return {
+        ...state,
+        rows: [...new Map([...event.rows, ...state.rows].map((row) => [row.id, row])).values()]
+          .sort((a, b) => activityRowTimeMs(a) - activityRowTimeMs(b)),
+        startedAt: Math.min(state.startedAt ?? event.startedAt, event.startedAt),
+      };
     default:
       return state;
   }

@@ -349,7 +349,10 @@ describe('activityRowFromMessage', () => {
 });
 
 describe('liveActivityReducer (generation invariant)', () => {
-  const row = (id: string): ActivityRow => ({ id, kind: 'tool_call', text: id, created_at: `t-${id}` });
+  const row = (id: string): ActivityRow => ({
+    id, kind: 'tool_call', text: id,
+    created_at: new Date(Date.UTC(2026, 8, 5, 0, 0, Number(id) || 0)).toISOString(),
+  });
 
   it('turn_start bumps the generation and clears the buffer', () => {
     let s = initialLiveActivity();
@@ -410,7 +413,7 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(cleared.rows).toEqual([]);
   });
 
-  it('rehydrate_for_gen fills only an empty buffer of the current generation', () => {
+  it('rehydrate_for_gen preserves the live tail and only applies to its generation', () => {
     const s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
     const gen = s.gen;
     const hydrated = liveActivityReducer(s, {
@@ -420,11 +423,51 @@ describe('liveActivityReducer (generation invariant)', () => {
       startedAt: 50,
     });
     expect(hydrated.rows.map((r) => r.id)).toEqual(['x', 'y']);
-    // Does not clobber an already-filled buffer, nor a stale generation:
+    // Re-reading a snapshot preserves newer live rows without duplicating overlap.
     const withLive = liveActivityReducer(hydrated, { type: 'row', row: row('z'), now: 60 });
-    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('w')], startedAt: 70 });
+    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('x'), row('y')], startedAt: 50 });
     expect(noClobber.rows.map((r) => r.id)).toEqual(['x', 'y', 'z']);
     const staleGen = liveActivityReducer(hydrated, { type: 'rehydrate_for_gen', gen: gen - 1, rows: [row('w')], startedAt: 70 });
     expect(staleGen.rows.map((r) => r.id)).toEqual(['x', 'y']);
+  });
+
+  it('merges durable history with overlapping live rows in emission order', () => {
+    const history = Array.from({ length: 300 }, (_, index) => row(String(index)));
+    let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    state = liveActivityReducer(state, { type: 'row', row: history[299], now: 500 });
+    state = liveActivityReducer(state, { type: 'row', row: row('300'), now: 600 });
+    state = liveActivityReducer(state, {
+      type: 'rehydrate_for_gen', gen: state.gen, rows: history, startedAt: 100,
+    });
+    expect(state.rows).toEqual([...history, row('300')]);
+    expect(state.startedAt).toBe(100);
+    expect(liveActivityReducer(state, { type: 'row', row: history[299], now: 700 })).toBe(state);
+  });
+
+  it.each(['overlapping', 'disjoint'] as const)('retains emission order when the durable window moves (%s)', (window) => {
+    const rows = Array.from({ length: 6 }, (_, i): ActivityRow => ({
+      id: `${i % 2 ? 'evt' : 'msg'}_${(1_700_000_000_000_000 + i).toString(16).padStart(15, '0')}12345678`,
+      kind: i % 2 ? 'tool_call' : 'assistant',
+      text: `step ${i}`,
+      created_at: '2023-11-14T22:13:20Z',
+    }));
+    let state = liveActivityReducer(initialLiveActivity(), {
+      type: 'rehydrate_for_gen', gen: 0, rows: rows.slice(0, 3), startedAt: 100,
+    });
+    state = liveActivityReducer(state, {
+      type: 'rehydrate_for_gen', gen: state.gen,
+      rows: rows.slice(window === 'overlapping' ? 2 : 3), startedAt: 200,
+    });
+    expect(state.rows).toEqual(rows);
+    expect(state.startedAt).toBe(100);
+  });
+
+  it('does not rehydrate a settled generation or the next turn', () => {
+    let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    const late = { type: 'rehydrate_for_gen' as const, gen: state.gen, rows: [row('old')], startedAt: 1 };
+    state = liveActivityReducer(state, { type: 'settle' });
+    expect(liveActivityReducer(state, late)).toBe(state);
+    state = liveActivityReducer(state, { type: 'turn_start' });
+    expect(liveActivityReducer(state, late)).toBe(state);
   });
 });

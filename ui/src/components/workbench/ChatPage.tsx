@@ -707,12 +707,15 @@ export const ChatPage: React.FC = () => {
   // every "a turn is starting now" path so clear-on-idle stays race-safe. Also sets
   // ``workingRef`` synchronously so a settle refresh in the same tick reads it.
   const markWorking = useCallback(() => {
+    // Authoritative running can arrive after an early idle read on navigation.
+    // Resume before hydrating, so the next live row cannot discard that history.
+    if (liveStateRef.current.settled) dispatchLive({ type: 'turn_start' });
     turnEpochRef.current += 1;
     workingSetAtRef.current = Date.now();
     activityForegroundRef.current = 'running';
     workingRef.current = true;
     setWorking(true);
-  }, []);
+  }, [dispatchLive]);
 
   // ----- Agent Activity: the live buffer feeds ONLY the in-flight running card, as
   // a pure generation state machine (see liveActivityReducer). Settled groups come
@@ -753,9 +756,10 @@ export const ChatPage: React.FC = () => {
         return groups.map((g) => (g.rows || !prevRows.has(g.id) ? g : { ...g, rows: prevRows.get(g.id) }));
       });
       if (inflight) {
-        // Still running: re-hydrate the card's rows only if the live stream hasn't
-        // already filled them (the reducer also drops a stale-generation rehydrate).
-        if (liveStateRef.current.rows.length === 0) {
+        // A live tail does not prove history is loaded. Always reconcile the
+        // current running generation with its durable rows; the reducer merges
+        // overlap and keeps live events that arrived during this read.
+        if (liveStateRef.current.gen === issuedGen && !liveStateRef.current.settled) {
           try {
             const wire = await api.getSessionActivityGroup(sid, inflight.id);
             if (sid !== sessionIdRef.current || !showAgentActivityRef.current) return true;
@@ -771,7 +775,7 @@ export const ChatPage: React.FC = () => {
               });
             }
           } catch {
-            /* re-hydrate is best-effort; live streaming still fills the card */
+            return false; // use the same bounded retry as a failed summary read
           }
         }
       } else if (foreground === 'idle') {
@@ -1496,14 +1500,6 @@ export const ChatPage: React.FC = () => {
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
       activityForegroundRef.current = bootstrap.turn_state.foreground;
-      // Chat Activity chips for past turns: resync the per-turn summary (row text
-      // lazy-loads on expand). If a turn is in flight, the refresh re-hydrates the
-      // running card instead of showing it as interrupted.
-      if (activityEnabled) {
-        scheduleActivityRefresh();
-      } else {
-        setActivityGroups([]);
-      }
       setQueue(bootstrap.queued ?? []);
       setInitialDraft(bootstrap.draft?.text ?? '');
       setRuntimeState(bootstrap.turn_state);
@@ -1515,6 +1511,13 @@ export const ChatPage: React.FC = () => {
       else if (bootstrap.turn_state.foreground === 'idle') {
         workingRef.current = false;
         setWorking(false);
+      }
+      // Reconcile only after restoring the live generation above, so a recovered
+      // running turn's history request is tagged with the generation it belongs to.
+      if (activityEnabled) {
+        scheduleActivityRefresh();
+      } else {
+        setActivityGroups([]);
       }
     } catch (err) {
       // A superseded failure must not stamp an error onto the newer request's
@@ -1578,9 +1581,9 @@ export const ChatPage: React.FC = () => {
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
     activityForegroundRef.current = 'unknown';
-    liveStateRef.current = initialLiveActivity();
-    setLiveRows([]);
-    setLiveStartedAt(null);
+    // Keep generations monotonic across navigation, including A -> B -> A:
+    // matching the Session id again must not admit A's earlier detail response.
+    dispatchLive({ type: 'reset' });
     setActivityCardExpanded(false);
     setExpandedActivity({});
     setLoadingActivity({});
@@ -1595,7 +1598,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [api, sessionId, applyLocalSession]);
+  }, [api, sessionId, applyLocalSession, dispatchLive]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
