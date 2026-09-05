@@ -16,6 +16,49 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('shell tool-call display', () => {
+  it.each(['live', 'history'])('shows the command body and preserves the original in %s details', (surface) => {
+    const command = "/bin/zsh -lc 'npm test'";
+    const rows = [{
+      id: 'shell-command',
+      kind: 'tool_call' as const,
+      text: `🔧 \`bash\` \`${JSON.stringify({ command, exit_code: 0, output: 'passed' })}\``,
+      created_at: '2026-09-05T02:00:00Z',
+    }];
+    render(surface === 'live' ? (
+      <ActivityCard
+        rows={rows}
+        startedAtMs={Date.now()}
+        expanded
+        onToggleExpanded={vi.fn()}
+        showToolCalls
+        onToggleTools={vi.fn()}
+      />
+    ) : (
+      <ActivityChip
+        group={{
+          id: 'completed-turn', anchorMessageId: 'reply', anchorPosition: 'before',
+          open: false, status: 'done', steps: 1, durationMs: 1000, rows,
+        }}
+        expanded
+        loading={false}
+        onToggle={vi.fn()}
+        showToolCalls
+        onToggleTools={vi.fn()}
+      />
+    ));
+
+    const tool = screen.getByRole('button', { name: /^bash\s*npm test$/ });
+    expect(tool.textContent).toBe('bashnpm test');
+    expect(screen.queryByText(command)).toBeNull();
+
+    fireEvent.click(tool);
+    expect(screen.getByText(command)).toBeTruthy();
+    expect(screen.getByText('passed')).toBeTruthy();
+    expect(tool.textContent).toBe('bashnpm test');
+  });
+});
+
 describe('ActivityCard display shortcut', () => {
   it('shows hour and day units when a live run crosses those boundaries', () => {
     vi.useFakeTimers();

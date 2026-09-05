@@ -176,7 +176,6 @@ const ToolSummary: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
       case 'command':
         return (
           <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground/80">
-            <span className="text-muted">$ </span>
             {recipe.command}
           </span>
         );

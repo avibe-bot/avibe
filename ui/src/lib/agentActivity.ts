@@ -303,13 +303,30 @@ export type FileOp = 'create' | 'modify' | 'delete';
 
 // Tier-1 render intents (keyed on known tool-name prefix + expected arg presence).
 export type ToolRecipe =
-  | { kind: 'command'; command: string } // bash/shell → ``$ <command>``
+  | { kind: 'command'; command: string } // bash/shell → the command body
   | { kind: 'read'; dir: string; base: string } // read/list → dir muted + base bold
   | { kind: 'fileop'; dir: string; base: string; op: FileOp } // edit/write → base + op badge
   | { kind: 'query'; text: string } // web/search/fetch → quoted query / URL
   | { kind: 'text'; text: string }; // task/agent → description
 
 const asStr = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
+
+const summarizeShellCommand = (command: string): string => {
+  const wrapper = /^(?:\/(?:[\w.+-]+\/)*)?(?:bash|zsh|sh)[ \t]+-(?:lc|c)[ \t]+/.exec(command);
+  if (!wrapper) return command;
+
+  // Decode one literal shell argument, not a shell program. Any expansion,
+  // extra argument, or operator keeps the original invocation visible.
+  const argument = command.slice(wrapper[0].length).replace(/[ \t]+$/, '');
+  const parts = /'([^']*)'|"((?:[^"\\$`]|\\[^\r\n])*)"|\\([^\r\n])|([\w@%+=:,./-]+)/gy;
+  let summary = '';
+  while (parts.lastIndex < argument.length) {
+    const part = parts.exec(argument);
+    if (!part) return command;
+    summary += part[1] ?? part[2]?.replace(/\\([$`"\\])/g, '$1') ?? part[3] ?? part[4];
+  }
+  return summary.trim() ? summary : command;
+};
 
 const fileOpFrom = (name: string, args: Record<string, unknown>): FileOp => {
   const type = (asStr(args.type) || '').toLowerCase();
@@ -332,7 +349,7 @@ export const toolRecipe = (name: string, args: Record<string, unknown>): ToolRec
   const command = asStr(args.command) ?? asStr(args.cmd);
 
   if (starts(['bash', 'shell', 'exec', 'run', 'sh', 'zsh', 'terminal', 'command'])) {
-    return command != null ? { kind: 'command', command } : null;
+    return command != null ? { kind: 'command', command: summarizeShellCommand(command) } : null;
   }
   if (starts(['write', 'edit', 'create', 'update', 'apply', 'patch', 'notebook', 'multiedit', 'file_change', 'filechange'])) {
     return path != null ? { kind: 'fileop', ...splitPath(path), op: fileOpFrom(n, args) } : null;
