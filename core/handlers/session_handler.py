@@ -79,7 +79,12 @@ if TYPE_CHECKING:
     from modules.agents.model_hub import ModelHubLaunch
 
 CLAUDE_NO_CONVERSATION_RE = re.compile(r"No conversation found with session ID:\s*(\S+)")
-CLAUDE_REMOTE_DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+CLAUDE_REMOTE_DISALLOWED_TOOLS = [
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "Skill",
+]
 CLAUDE_REMOTE_PERMISSION_MODE = "bypassPermissions"
 CLAUDE_REMOTE_SANDBOX = {"enabled": False}
 
