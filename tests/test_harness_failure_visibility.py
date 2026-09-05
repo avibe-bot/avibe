@@ -36,7 +36,9 @@ from storage.background import (
     RUN_INTERRUPTION_REASONS,
     SQLiteBackgroundTaskStore,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    enqueue_run_in_connection,
     owed_notice_eligible,
+    run_update_event_transaction,
 )
 
 
@@ -53,6 +55,53 @@ def _store(tmp_path: Path) -> tuple[SQLiteBackgroundTaskStore, TaskExecutionStor
     requests = TaskExecutionStore(tmp_path / "task_requests")
     requests._sqlite = sqlite
     return sqlite, requests
+
+
+def _seed_query_history(sqlite: SQLiteBackgroundTaskStore, payloads: list[dict]) -> None:
+    # Static query fixtures need the same durable rows, not one commit per row.
+    with run_update_event_transaction(sqlite.engine) as connection:
+        for payload in payloads:
+            enqueue_run_in_connection(connection, sqlite._run_values(payload))
+
+
+def test_query_history_batch_matches_individual_writes(tmp_path, sqlite_db_factory):
+    from storage.models import agent_runs
+
+    sqlite_db_factory(tmp_path / "reference" / "state" / "vibe.sqlite")
+    reference, _ = _store(tmp_path / "reference")
+    batched, _ = _store(tmp_path)
+    payloads = [
+        {
+            "id": f"run-{index % 2}", "definition_id": "fixture",
+            "request_type": "scheduled", "status": status,
+            "created_at": _EPOCH, "completed_at": _EPOCH,
+            "agent_backend": "codex" if index == 0 else None,
+            "metadata": {"owed_failure_notice": {"state": "pending", "attempts": index}},
+        }
+        for index, status in enumerate(("failed", "succeeded", "running"))
+    ]
+    commits = []
+
+    def committed(connection):
+        commits.append(True)
+
+    try:
+        for store in (reference, batched):
+            _task(store, "fixture")
+        for payload in payloads:
+            reference.enqueue_run(payload)
+        event.listen(batched.engine, "commit", committed)
+        try:
+            _seed_query_history(batched, payloads)
+        finally:
+            event.remove(batched.engine, "commit", committed)
+        assert commits == [True]
+        with reference.engine.connect() as fresh, batched.engine.connect() as clone:
+            statement = select(agent_runs).order_by(agent_runs.c.id)
+            assert fresh.execute(statement).fetchall() == clone.execute(statement).fetchall()
+    finally:
+        reference.close()
+        batched.close()
 
 
 _EPOCH = "2026-07-01T00:00:00+00:00"
@@ -1203,8 +1252,9 @@ def test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans(tmp_path: P
     sqlite, _ = _store(tmp_path)
     _task(sqlite, "task-pred-plan", session_policy="create_per_run")
     backlog = 1200
+    history = []
     for index in range(backlog):
-        sqlite.enqueue_run(
+        history.append(
             {
                 "id": f"run-backlog-{index:05d}",
                 "request_type": "scheduled",
@@ -1215,6 +1265,8 @@ def test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans(tmp_path: P
                 "created_at": f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00",
             }
         )
+
+    _seed_query_history(sqlite, history)
 
     anchor_created = "2026-07-29T00:00:00+00:00"
     now = "2026-07-29T00:05:00+00:00"
@@ -8545,12 +8597,13 @@ def _seed_streak_history(
     """
 
     _task(sqlite_store, definition_id)
+    history = []
     for index in range(total):
         # Successes every seventh run, so the streak containing any given failure is
         # at most six rows long while the lifetime is ``total``.
         status = "succeeded" if ever_succeeded and index % 7 == 0 else "failed"
         instant = f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00"
-        sqlite_store.enqueue_run(
+        history.append(
             {
                 "id": f"run-{index:05d}",
                 "request_type": "scheduled",
@@ -8562,6 +8615,7 @@ def _seed_streak_history(
                 "metadata": {"owed_failure_notice": {"state": "pending", "attempts": 0}},
             }
         )
+    _seed_query_history(sqlite_store, history)
 
 
 def test_the_streak_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) -> None:
