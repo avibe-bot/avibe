@@ -15,9 +15,12 @@ read updates must not reclaim scrolling after the reader resumes input.
 
 The suite covers repeated returns, bottom-up unread triage, removed anchors,
 additional loaded pages, new activity, delayed mark-read updates, content reflow,
-and fresh navigation. Component tests additionally cover empty intermediate
+fresh navigation, and a later Search return without replaying a consumed Chat
+snapshot. Component tests additionally cover empty intermediate
 renders, all visible rows disappearing, every supported input cancellation,
-expiration, and Strict Mode lifecycle replay.
+expiration, and Strict Mode lifecycle replay. Consumption and cancellation both
+prevent the shared snapshot from leaking into a later Inbox remount, while the
+current visit retains its local copy for delayed layout corrections.
 
 All API requests are blocked. No Avibe instance, credentials, or persisted
 messages are used. Screenshots and failure traces are written under

@@ -58,6 +58,7 @@ function mount() {
     <Routes>
       <Route path="/inbox" element={<InboxPage />} />
       <Route path="/chat/:sessionId" element={<Chat />} />
+      <Route path="/search" element={<Chat />} />
     </Routes>
   </MemoryRouter></StrictMode>;
   const view = render(app(), { container: shell });
@@ -141,6 +142,21 @@ describe('Inbox return position', () => {
     expect(shell.scrollTop).toBe(490);
   });
 
+  it('does not replay a consumed Chat snapshot after a later Search return', () => {
+    mount();
+    shell.scrollTop = 650;
+    open(3);
+    back();
+    expect(shell.scrollTop).toBe(650);
+    // A successful restore must consume the shared snapshot even without an
+    // input event. Its local copy still handles layout corrections in this visit.
+    shell.scrollTop = 300;
+    fireEvent.click(screen.getByRole('button', { name: /workbench.search.entry/ }));
+    expect(shell.scrollTop).toBe(0);
+    back();
+    expect(shell.scrollTop).toBe(0);
+  });
+
   it('uses the nearest surviving neighbor when every visible row disappears', () => {
     mount();
     shell.scrollTop = 650;
@@ -211,6 +227,9 @@ describe('Inbox return position', () => {
     expect(resizeCallbacks.size).toBe(0);
     feed.inboxSessions = sessions;
     view.update();
+    expect(shell.scrollTop).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: /workbench.search.entry/ }));
+    back();
     expect(shell.scrollTop).toBe(0);
   });
 

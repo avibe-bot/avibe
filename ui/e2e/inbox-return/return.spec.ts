@@ -114,3 +114,24 @@ test('a fresh Inbox navigation does not inherit an older history entry position'
   await expect(rows(page)).toHaveCount(59);
   expect((await position(page)).top).toBe(0);
 });
+
+test('does not reuse an old Chat position when a later Search visit returns', async ({ page, isMobile }) => {
+  await open(page);
+  await page.getByRole('button', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
+  await row(page, 50).scrollIntoViewIfNeeded();
+  const before = await position(page);
+  await enter(page, 50);
+  await page.goBack();
+  await expect.poll(async () => Math.abs((await position(page)).top - before.top)).toBeLessThan(1);
+  await page.locator('#app-shell-scroll').dispatchEvent('wheel', { deltaY: -1 });
+  await scrollTo(page, 0);
+  if (isMobile) await page.getByText(copy('workbench.search.entry'), { exact: true }).click();
+  else await page.evaluate(() => { window.location.hash = '/search'; });
+  await expect(page.getByTestId('search-detail')).toBeVisible();
+  await page.goBack();
+  await expect(rows(page)).toHaveCount(60);
+  await expect.poll(async () => (await position(page)).top).toBe(0);
+  await row(page, 1).evaluate((el) => { el.style.minHeight = '500px'; });
+  await page.waitForTimeout(150);
+  expect((await position(page)).top).toBe(0);
+});

@@ -58,6 +58,9 @@ export function useInboxScrollRestoration(
         ? owner.scrollTop + row.getBoundingClientRect().top - viewportTop(owner) - anchor.top
         : 0;
       writeAppShellScrollTop(owner, top);
+      // Keep the local copy for late layout changes, but never replay this
+      // consumed Chat return after another route remounts the same Inbox entry.
+      if (saved === snapshot) saved = null;
     };
 
     restore();
@@ -67,6 +70,7 @@ export function useInboxScrollRestoration(
     observer?.observe(owner);
     const stop = () => {
       pending.current = null;
+      if (saved === snapshot) saved = null;
       observer?.disconnect();
       cancelAnimationFrame(frame);
     };

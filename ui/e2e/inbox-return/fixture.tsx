@@ -40,6 +40,13 @@ function Chat({ markRead, addActivity }: { markRead: (id: string) => Promise<voi
   </div>;
 }
 
+function Search() {
+  const navigate = useNavigate();
+  return <div data-testid="search-detail">
+    <button type="button" aria-label="Back" onClick={() => navigate(-1)}><ArrowLeft /></button>
+  </div>;
+}
+
 export function Fixture() {
   const location = useLocation();
   const chat = location.pathname.startsWith('/chat/');
@@ -73,6 +80,7 @@ export function Fixture() {
           <Routes>
             <Route path="/inbox" element={<InboxPage />} />
             <Route path="/chat/:sessionId" element={<Chat markRead={markRead} addActivity={addActivity} />} />
+            <Route path="/search" element={<Search />} />
           </Routes>
         </div>
       </main>
