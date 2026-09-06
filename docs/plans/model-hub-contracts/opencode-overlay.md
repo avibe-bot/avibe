@@ -113,9 +113,12 @@ each perturbation.
 
 ## Persisted compatibility
 
-Supported saved shapes use the existing safe loader. Preserve sparse manual intent,
-including empty, stale and dormant OpenCode entries; do not infer old authorship or
-automatic intent from array equality/default order. Legacy shapes outside supported
+Supported saved shapes use the existing safe loader. Preserve nonempty sparse manual
+intent, including stale and dormant OpenCode entries. Validate the supported original
+payload before normalizing valid empty values to absence and inherited routing. Keep
+catalog identities and unrelated configuration; read/preview never persists, while a
+normal save omits empty route values. Never infer old authorship or automatic intent
+from nonempty array equality/default order. Legacy shapes outside supported
 conversion use documented safe degradation, never a blanket pre-release waiver.
 
 ## Spike record (S1–S6; evidence captured 2026-09-04 on OpenCode 1.18.18 and CLIProxyAPI 7.2.105 `4a2eb54d`, the binary Avibe's manifest pins, with the repo mock upstream recording path/headers/body)

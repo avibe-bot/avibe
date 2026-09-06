@@ -166,7 +166,7 @@ test('Agent-only cleanup preserves the existing missing-Agent policy', async () 
 });
 
 for (const override of [null, { hops: [] }, { hops: [{ source_id: 'src_operator', model_id: 'vendor/model' }] }]) {
-  test(`route cleanup preserves ${override === null ? 'absence' : override.hops.length ? 'manual hops' : 'explicit empty'}`, async () => {
+  test(`route cleanup preserves canonical ${override === null ? 'absence' : override.hops.length ? 'manual hops' : 'empty inheritance'}`, async () => {
     let saved: AgentChain['manual_override'] = override;
     const writes: string[] = [];
     const api = {
@@ -185,21 +185,35 @@ for (const override of [null, { hops: [] }, { hops: [{ source_id: 'src_operator'
     } as unknown as HubApi;
     const route = { backend: 'claude', model: 'menu-model' };
     const snapshot = await captureAgentChain(api, route);
-    expect(snapshot.manual_override).toEqual(override);
+    const canonical = override?.hops.length ? override : null;
+    expect(snapshot.manual_override).toEqual(canonical);
     saved = { hops: [{ source_id: 'src_test', model_id: 'test-target' }] };
     await restoreAgentChain(api, route, snapshot);
-    expect(saved).toEqual(override);
-    expect(writes).toEqual([override === null ? 'DELETE' : 'PUT']);
+    expect(saved).toEqual(canonical);
+    expect(writes).toEqual([canonical === null ? 'DELETE' : 'PUT']);
   });
 }
 
-test('route cleanup rejects successful responses whose persisted intent was not restored', async () => {
+for (const readback of [{ hops: [] }, { hops: [{ source_id: 'src_wrong', model_id: 'wrong-target' }] }, undefined]) {
+  test(`route cleanup rejects noncanonical or false-success readback ${JSON.stringify(readback)}`, async () => {
+    const api = {
+      deleteAgentChain: async () => true,
+      agentChain: async () => ({ manual_override: readback }),
+    } as unknown as HubApi;
+    await expect(restoreAgentChain(api, { backend: 'claude', model: 'menu-model' }, { manual_override: null }))
+      .rejects.toThrow('Teardown must restore route intent');
+  });
+}
+
+test('a legacy empty snapshot restores with DELETE and never recreates an empty manual value', async () => {
+  const writes: string[] = [];
   const api = {
-    deleteAgentChain: async () => true,
-    agentChain: async () => ({ manual_override: { hops: [] } }),
+    deleteAgentChain: async () => { writes.push('DELETE'); return true; },
+    putAgentChain: async () => { writes.push('PUT'); return true; },
+    agentChain: async () => ({ manual_override: null }),
   } as unknown as HubApi;
-  await expect(restoreAgentChain(api, { backend: 'claude', model: 'menu-model' }, { manual_override: null }))
-    .rejects.toThrow('Teardown must restore route intent');
+  await restoreAgentChain(api, { backend: 'codex', model: 'menu-model' }, { manual_override: { hops: [] } });
+  expect(writes).toEqual(['DELETE']);
 });
 
 test('route cleanup preserves existing fixture-source references verbatim', async () => {

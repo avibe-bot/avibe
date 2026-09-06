@@ -106,7 +106,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 9
+    assert schema["properties"]["contract_version"]["const"] == 10
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -130,7 +130,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 9,
+            "contract_version": 10,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -653,10 +653,10 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
 def test_sparse_override_contract_has_one_default_order_owner():
     contract = (CONTRACTS.parent / "model-hub-routing-modes.md").read_text(encoding="utf-8")
     assert "sources.order` is the sole backend-default" in contract
-    assert "Key absence means automatic" in contract
+    assert "Key absence or an empty hop array means inherited routing" in contract
     assert "Restoring automatic deletes the key" in contract
     assert "Never reorder manual arrays" in contract
-    assert "no inference from array equality" in contract
+    assert "inference from nonempty array equality" in contract
 
 
 def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
@@ -685,7 +685,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 9,
+        "contract_version": 10,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -701,7 +701,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 9,
+        "contract_version": 10,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -783,7 +783,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 9
+    assert registry["contract_version"] == 10
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -1015,8 +1015,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8, 9],
-        "expected": [5, 6, 7, 8, 9],
+        "values": [6, 7, 8, 9, 10],
+        "expected": [5, 6, 7, 8, 9, 10],
     } in result["findings"]
 
 
@@ -1309,7 +1309,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 9,
+        "contract_version": 10,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "manual_override": None,
@@ -2245,7 +2245,7 @@ def test_config_reload_allows_empty_target_on_disabled_legacy_mapping(monkeypatc
     loaded = V2Config.load(config_path=config_path)
 
     assert loaded.load_warnings == ()
-    assert loaded.model_hub.agents["claude"].routes["opus"].hops == ()
+    assert "opus" not in loaded.model_hub.agents["claude"].routes
 
 
 def test_invalid_json_recovery_backs_up_the_original_snapshot(monkeypatch, tmp_path):
@@ -3014,7 +3014,7 @@ def test_persisted_hub_config_requires_sparse_override_object():
     dormant["agents"]["opencode"]["routes"]["dormant-model"] = {"hops": []}
     restored = ModelHubConfig.from_payload(dormant)
     assert restored.agents["opencode"].models == []
-    assert "dormant-model" in restored.agents["opencode"].routes
+    assert restored.agents["opencode"].routes == {}
 
 
 def test_backend_model_modalities_match_the_contract_directions():
@@ -3043,10 +3043,50 @@ def test_config_reload_preserves_legacy_routes_without_seeding_missing_models(tm
     migrated_routes = loaded.model_hub.agents["claude"].routes
     migrated_models = loaded.model_hub.agents["claude"].models
 
-    assert set(migrated_routes) == ({*original_ids, stale_id} - {removed_id})
+    assert migrated_routes == {}
     assert removed_id not in migrated_routes
-    assert migrated_routes[stale_id].hops == ()
+    assert {*original_ids, stale_id} <= {model.id for model in migrated_models}
     assert next(model for model in migrated_models if model.id == stale_id).origin == "manual"
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_v2_empty_route_normalizes_on_load_without_writing_until_save(tmp_path, backend):
+    from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config
+    from tests.test_model_hub_resolution import _source
+
+    payload = api.config_to_payload(default_config())
+    payload["model_hub"] = _loaded_catalog_config(backend, MODEL, _source("src_v2empty01", (MODEL,))).to_payload()
+    payload["model_hub"]["agents"][backend]["routes"][MODEL] = {"hops": []}
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+    loaded = V2Config.load(config_path=path)
+    assert loaded.load_warnings == ()
+    assert loaded.model_hub.agents[backend].routes == {}
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob("config.json.bak-*")) == []
+    loaded.save(config_path=path)
+    expected = copy.deepcopy(payload["model_hub"])
+    expected["agents"][backend]["routes"] = {}
+    assert json.loads(path.read_text())["model_hub"] == expected
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("bad_key", ["", "authorization=sk-unsafe-fixture"])
+def test_invalid_empty_route_key_keeps_v2_recovery_fence(tmp_path, backend, bad_key):
+    payload = api.config_to_payload(default_config())
+    payload["model_hub"]["agents"][backend]["routes"][bad_key] = {"hops": []}
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+    loaded = V2Config.load(config_path=path)
+    assert loaded.load_warnings
+    assert "model_hub" in loaded.recovered_sections
+    assert loaded.model_hub.sources == []
+    assert all(agent.mode == "direct" for agent in loaded.model_hub.agents.values())
+    assert path.read_bytes() == before
+    with pytest.raises(ValueError, match="recovery warnings"):
+        loaded.save(config_path=path)
 
 
 @pytest.mark.parametrize(

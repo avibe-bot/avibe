@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -165,7 +166,7 @@ def test_mixed_unmatched_defaults_only_use_api_key_passthrough():
     assert _pairs(plan) == [(api.id, MODEL)]
 
 
-def test_equal_save_has_manual_provenance_and_empty_override_survives_changes(tmp_path):
+def test_equal_save_is_manual_and_empty_save_restores_inherited_changes(tmp_path):
     source = _source("src_first001")
     config = _sparse_config(source)
     service, store, adapter = _service(tmp_path, config)
@@ -173,16 +174,17 @@ def test_equal_save_has_manual_provenance_and_empty_override_survives_changes(tm
     saved = asyncio.run(service.set_agent_chain("claude", MODEL, {"hops": hops}))
     assert saved["chain"]["route_origin"] == "manual"
     assert saved["chain"]["manual_override"] == {"hops": hops}
-    with pytest.raises(ModelHubError) as guard:
-        asyncio.run(service.set_agent_chain("claude", MODEL, {"hops": []}))
-    empty = asyncio.run(service.set_agent_chain("claude", MODEL, {"hops": [], "force": True, **guard.value.data}))
-    assert empty["chain"]["manual_override"] == {"hops": []}
-    assert empty["chain"]["route_origin"] is None
-    asyncio.run(service.set_agent_sources("claude", {"order": []}))
+    empty = asyncio.run(service.set_agent_chain("claude", MODEL, {"hops": []}))
+    assert empty["chain"]["manual_override"] is None
+    assert empty["chain"]["route_origin"] == "automatic"
     store.config.sources[0].models.clear()
     reloaded = ModelHubConfig.from_payload(store.config.to_payload())
-    assert reloaded.agents["claude"].routes[MODEL].hops == ()
-    assert effective_model_route(reloaded, "claude", MODEL).hops == ()
+    assert reloaded.agents["claude"].routes == {}
+    assert effective_model_route(reloaded, "claude", MODEL).route_origin == "passthrough"
+    with pytest.raises(ModelHubError) as guard:
+        asyncio.run(service.set_agent_sources("claude", {"order": []}))
+    asyncio.run(service.set_agent_sources("claude", {"order": [], "force": True, **guard.value.data}))
+    assert service.agent_chain("claude", MODEL)["route_origin"] is None
     assert adapter.synced
 
 
@@ -207,7 +209,7 @@ def test_preview_and_restore_use_same_plan_without_preview_side_effects(tmp_path
     assert MODEL not in store.config.agents["claude"].routes
     repeated = asyncio.run(service.delete_agent_chain("claude", MODEL))
     assert repeated == restored
-    assert len(adapter.synced) == 1
+    assert adapter.synced == []
 
 
 def test_restore_guards_effective_removal_and_accepts_only_exact_echo(tmp_path):
@@ -372,6 +374,249 @@ def _loaded_catalog_config(backend, requested, *sources):
     return ModelHubConfig.from_payload(config.to_payload())
 
 
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("matched", [False, True])
+def test_empty_override_equals_absence_at_all_route_consumers(tmp_path, backend, matched):
+    source = _source("src_inherit01", (MODEL,) if matched else ())
+    config = _loaded_catalog_config(backend, MODEL, source)
+    service, store, adapter = _service(tmp_path, config)
+    expected = service.agent_chain(backend, MODEL)
+    bindings = service._bindings(config)
+    config.agents[backend].routes[MODEL] = ModelHubRouteConfig()
+    assert service.agent_chain(backend, MODEL) == expected
+    assert service._bindings(config) == bindings
+    assert service.get_agent_sources(backend)["routes"] == {}
+    for draft in (None, {"hops": []}):
+        assert service.preview_agent_chain(backend, MODEL, {"manual_override": draft}) == expected
+    assert adapter.synced == []
+    payload = config.to_payload()
+    assert payload["agents"][backend]["routes"] == {}
+    payload["agents"][backend]["routes"][MODEL] = {"hops": []}
+    loaded = ModelHubConfig.from_payload(payload)
+    assert loaded.agents[backend].routes == {}
+    assert effective_model_route(loaded, backend, MODEL).route_origin == ("automatic" if matched else "passthrough")
+    saved = asyncio.run(service.set_agent_chain(backend, MODEL, {"hops": []}))
+    assert saved["chain"] == expected
+    assert store.config.agents[backend].routes == {}
+    assert asyncio.run(service.delete_agent_chain(backend, MODEL)) == saved
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+        stream_started=False, source_id=source.id, model_id=MODEL,
+    ))
+    assert asyncio.run(service.probe_agent(backend, MODEL))["reachable"] is True
+    assert adapter.invocations == [(source.id, MODEL)]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_empty_put_has_exact_restore_guard_and_final_hop_deletion_inherits(tmp_path, backend):
+    default = _source("src_default01", (MODEL,))
+    manual = _source("src_manual001", ("mapped",))
+    config = _loaded_catalog_config(backend, MODEL, default)
+    config.sources.append(manual)
+    config.agents[backend].routes[MODEL] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(manual.id, "mapped"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+    before = config.to_payload()
+    with pytest.raises(ModelHubError) as restored:
+        asyncio.run(service.delete_agent_chain(backend, MODEL))
+    with pytest.raises(ModelHubError) as empty:
+        asyncio.run(service.set_agent_chain(backend, MODEL, {"hops": []}))
+    assert (empty.value.code, empty.value.data) == (restored.value.code, restored.value.data)
+    assert empty.value.data["would_interrupt"] == []
+    assert store.config.to_payload() == before
+    with pytest.raises(ModelHubError) as deletion:
+        asyncio.run(service.delete_source(manual.id))
+    assert deletion.value.data["would_interrupt"] == []
+    asyncio.run(service.delete_source(manual.id, force=True,
+        confirmed_remove_hops=deletion.value.data["would_remove_hops"],
+        confirmed_interruptions=deletion.value.data["would_interrupt"],
+    ))
+    assert store.config.agents[backend].routes == {}
+    assert service.agent_chain(backend, MODEL)["current"] == {"source_id": default.id, "model_id": MODEL}
+    assert service._bindings(store.config)[0].route_model_ids == (MODEL,)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("bad", [{}, {"hops": None}, {"hops": [], "unknown": True}, {"hops": [{}]}])
+def test_invalid_empty_intent_is_validated_before_normalization(tmp_path, backend, bad):
+    config = _loaded_catalog_config(backend, MODEL, _source("src_inherit01", (MODEL,)))
+    raw = config.to_payload()
+    raw["agents"][backend]["routes"][MODEL] = bad
+    for repairing in (False, True):
+        with pytest.raises(ValueError):
+            ModelHubConfig.from_payload(raw, repairing=repairing)
+    service, store, adapter = _service(tmp_path, config)
+    with pytest.raises(ModelHubError):
+        service.preview_agent_chain(backend, MODEL, {"manual_override": bad})
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.set_agent_chain(backend, MODEL, bad))
+    assert store.config.to_payload() == config.to_payload()
+    assert adapter.synced == []
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_legacy_empty_key_keeps_derived_catalog_but_invalid_nonmenu_key_is_not_repaired(backend):
+    config = _loaded_catalog_config(backend, MODEL)
+    raw = config.to_payload()
+    agent = raw["agents"][backend]
+    agent["routes"] = {"legacy-empty-row": {"hops": []}}
+    for repairing in (False, True):
+        with pytest.raises(ValueError, match="non-menu"):
+            ModelHubConfig.from_payload(raw, repairing=repairing)
+    agent.pop("models")
+    loaded = ModelHubConfig.from_payload(raw)
+    assert "legacy-empty-row" in {model.id for model in loaded.agents[backend].models}
+    assert loaded.agents[backend].routes == {}
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("operation", ["retire_discovered", "remove_subscription_manual", "refresh_subscription"])
+def test_final_inventory_hop_removal_uses_inherited_guard_plan(tmp_path, backend, operation):
+    default = _source("src_default01", (MODEL,))
+    manual = _source("src_manual001", ("mapped",), kind="api_key" if operation == "retire_discovered" else "subscription")
+    if operation == "remove_subscription_manual":
+        manual.models[0].provenance = "manual"
+    config = _loaded_catalog_config(backend, MODEL, default)
+    config.sources.append(manual)
+    config.agents[backend].routes[MODEL] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(manual.id, "mapped"),))
+    service, store, adapter = _service(tmp_path, config)
+    adapter.discovered = ()
+
+    def mutate(**kwargs):
+        if operation == "refresh_subscription":
+            return service.refresh_source(manual.id, **kwargs)
+        return service.delete_custom_model(manual.id, "mapped", **kwargs)
+
+    before = config.to_payload()
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(mutate())
+    assert refusal.value.data["would_interrupt"] == []
+    assert refusal.value.data["would_remove_hops"] == [{
+        "backend": backend, "menu_model": MODEL, "source_id": manual.id, "model_id": "mapped", "position": 1,
+    }]
+    assert store.config.to_payload() == before
+    result = asyncio.run(mutate(force=True,
+        confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+        confirmed_interruptions=refusal.value.data["would_interrupt"],
+    ))
+    assert result["interrupted"] == []
+    assert store.config.agents[backend].routes == {}
+    assert service.agent_chain(backend, MODEL)["current"] == {"source_id": default.id, "model_id": MODEL}
+    assert service._bindings(store.config)[0].route_model_ids == (MODEL,)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_normalization_preserves_nonempty_intent_and_other_config_through_refresh(tmp_path, backend):
+    api = _source("src_preserve01", (MODEL,))
+    retired = _source("src_preserve03", ("retired",))
+    retired.models[0].retired = True
+    subscription = _source("src_preserve02", ("known",), kind="subscription")
+    config = _loaded_catalog_config(backend, MODEL, api, subscription)
+    config.sources.append(retired)
+    agent = config.agents[backend]
+    shapes = {
+        "exact": [(api.id, MODEL)],
+        "unknown-long": [(api.id, "legacy-" + "x" * MODEL_ID_MAX_LENGTH)],
+        "retired": [(retired.id, "retired")],
+        "subscription-stale": [(subscription.id, "stale")],
+        "ordered": [(subscription.id, "known"), (api.id, "mapped")],
+    }
+    for name, pairs in shapes.items():
+        agent.models.append(ModelHubBackendModelConfig(id=name, origin="manual", native_protocol="openai_responses" if backend == "opencode" else None))
+        agent.routes[name] = ModelHubRouteConfig(hops=tuple(ModelHubRouteHopConfig(*pair) for pair in pairs))
+    before = config.to_payload()
+    before["agents"][backend]["routes"][MODEL] = {"hops": []}
+    original = copy.deepcopy(before)
+    loaded = ModelHubConfig.from_payload(before)
+    assert before == original
+    expected = copy.deepcopy(before)
+    del expected["agents"][backend]["routes"][MODEL]
+    if backend == "opencode":
+        expected["agents"][backend]["menu"]["checked"] = [model.id for model in agent.models]
+    assert loaded.to_payload() == expected
+    service, store, adapter = _service(tmp_path, loaded)
+    adapter.discovered = (MODEL,)
+    asyncio.run(service.refresh_source(api.id))
+    assert store.config.agents[backend].to_payload() == expected["agents"][backend]
+    assert store.config.sources[1].to_payload() == expected["sources"][1]
+    assert store.config.sources[0].credential_ref == api.credential_ref
+
+
+def test_direct_dormant_empty_is_absent_from_route_and_guard_enumeration(tmp_path):
+    source = _source("src_dormant01", (MODEL,))
+    config = _loaded_catalog_config("opencode", MODEL, source)
+    service, _, _ = _service(tmp_path, config)
+    before = service.agent_chains("opencode")
+    protected = service._protected_menu_models(config, "opencode")
+    config.agents["opencode"].routes["dormant"] = ModelHubRouteConfig()
+    assert service.agent_chains("opencode") == before
+    assert service._protected_menu_models(config, "opencode") == protected
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("restore", [False, True])
+def test_failed_route_sync_rolls_back_canonical_intent_and_retry(tmp_path, backend, restore):
+    source = _source("src_rollback1", ())
+    config = _loaded_catalog_config(backend, MODEL, source)
+    manual = {"hops": [{"source_id": source.id, "model_id": "mapped"}]}
+    config.agents[backend].routes[MODEL] = ModelHubRouteConfig.from_payload(manual) if restore else ModelHubRouteConfig()
+    service, store, adapter = _service(tmp_path, config)
+    before = config.to_payload()
+    payload = {"hops": []} if restore else manual
+    if restore:
+        with pytest.raises(ModelHubError) as refusal:
+            asyncio.run(service.set_agent_chain(backend, MODEL, payload))
+        payload = {**payload, "force": True, **refusal.value.data}
+    original_sync = adapter.sync_sources
+    failures = 1
+
+    async def fail_once(bindings):
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise RuntimeError("synthetic sync failure")
+        await original_sync(bindings)
+
+    adapter.sync_sources = fail_once
+    with pytest.raises(ModelHubError, match="engine_down"):
+        asyncio.run(service.set_agent_chain(backend, MODEL, payload))
+    assert store.config.to_payload() == before
+    assert all(route.hops for route in store.config.agents[backend].routes.values())
+    result = asyncio.run(service.set_agent_chain(backend, MODEL, payload))
+    assert result["chain"]["manual_override"] == (None if restore else manual)
+    assert all(route.hops for route in store.config.agents[backend].routes.values())
+    assert adapter.synced[-1][0].route_model_ids == ((MODEL,) if restore else ("mapped",))
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_empty_intent_follows_refresh_defaults_and_health_without_reseeding(tmp_path, backend):
+    first = _source("src_refresh01", ())
+    second = _source("src_refresh02", ())
+    config = _loaded_catalog_config(backend, MODEL, first, second)
+    config.agents[backend].routes[MODEL] = ModelHubRouteConfig()
+    service, store, adapter = _service(tmp_path, config)
+    assert service.agent_chain(backend, MODEL)["route_origin"] == "passthrough"
+    adapter.discovered = (MODEL,)
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.refresh_source(second.id))
+    asyncio.run(service.refresh_source(second.id, force=True,
+        confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+        confirmed_interruptions=refusal.value.data["would_interrupt"],
+    ))
+    assert service.agent_chain(backend, MODEL)["route_origin"] == "automatic"
+    bindings = service._bindings(store.config)
+    store.config.sources[1].state = ModelHubSourceStateConfig(status="error", detail_key="models.source.error.unclassified")
+    assert service.agent_chain(backend, MODEL)["route_origin"] == "automatic"
+    assert service.agent_chain(backend, MODEL)["current"] is None
+    assert service._bindings(store.config) == bindings
+    with pytest.raises(ModelHubError) as defaults:
+        asyncio.run(service.set_agent_sources(backend, {"order": [first.id]}))
+    asyncio.run(service.set_agent_sources(backend, {"order": [first.id], "force": True, **defaults.value.data}))
+    assert service.agent_chain(backend, MODEL)["route_origin"] == "passthrough"
+    assert store.config.agents[backend].routes == {}
+
+
 @pytest.mark.parametrize("backend", ["claude", "codex"])
 @pytest.mark.parametrize("state", ["automatic", "manual", "empty"])
 @pytest.mark.parametrize("operation", ["put", "preview", "restore_preview", "restore_save"])
@@ -387,10 +632,10 @@ def test_persisted_legacy_catalog_identity_survives_route_consumers(tmp_path, ba
     before = config.to_payload()
     if operation == "put":
         result = asyncio.run(service.set_agent_chain(backend, requested, route))["chain"]
-        assert result["manual_override"] == route
+        assert result["manual_override"] == (route if route["hops"] else None)
     elif operation == "preview":
         result = service.preview_agent_chain(backend, requested, {"manual_override": route})
-        assert result["manual_override"] == route
+        assert result["manual_override"] == (route if route["hops"] else None)
     elif operation == "restore_preview":
         result = service.preview_agent_chain(backend, requested, {"manual_override": None})
         assert result["route_origin"] == "automatic"
@@ -560,7 +805,7 @@ def test_retained_opencode_route_registration_matches_resolver_without_inventing
     binding = service._bindings(config)[0]
     assert binding.route_model_ids == expected_targets
     assert binding.model_ids == tuple(model.id for model in config.sources[0].models if not model.retired)
-    assert {item["model_id"] for item in service.agent_chains("opencode")} == {catalog, dormant}
+    assert {item["model_id"] for item in service.agent_chains("opencode")} == ({catalog} if state == "empty" else {catalog, dormant})
     if state != "empty":
         assert {"backend": "opencode", "menu_model": dormant} in service._adopted_by(source.id)
         assert any(item["menu_model"] == dormant for item in service._added_to(source.id))

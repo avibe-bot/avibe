@@ -50,7 +50,7 @@ def _gate_method(owner, name, *, call_number=1):
 
 
 @pytest.mark.parametrize("probe", [False, True])
-@pytest.mark.parametrize("change", ["target", "source", "empty"])
+@pytest.mark.parametrize("change", ["target", "source", "empty", "no_defaults"])
 def test_demand_snapshot_is_revalidated_before_transport_and_observer(tmp_path, probe, change):
     async def run():
         source = _source("src_race0001", ())
@@ -71,8 +71,13 @@ def test_demand_snapshot_is_revalidated_before_transport_and_observer(tmp_path, 
         elif change == "source":
             await service.patch_source(source.id, {"display_name": "Changed source"})
             expected = MODEL
-        else:
+        elif change == "empty":
             await _save_route(service, [])
+            expected = MODEL
+        else:
+            with pytest.raises(ModelHubError) as refusal:
+                await service.set_agent_sources("claude", {"order": []})
+            await service.set_agent_sources("claude", {"order": [], "force": True, **refusal.value.data})
             expected = None
         adapter.outcomes.append(_outcome(source, expected or MODEL))
         release.set()

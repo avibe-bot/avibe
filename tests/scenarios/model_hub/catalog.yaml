@@ -162,7 +162,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes_membership
   - id: MH-ROUTING-003
-    name: Manual unknown and empty targets survive refresh, default reorder, and reload
+    name: Nonempty manual targets persist while absent and legacy-empty routes inherit current defaults through refresh and reload
     status: covered
     kind: persistence
     layer: scenario
@@ -209,6 +209,12 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source_and_target
+  - id: MH-ROUTING-013
+    name: Legacy-empty and absent routes inherit matching and exact passthrough through pinned CPA without changing nonempty manual intent or registration per request
+    status: assert
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered

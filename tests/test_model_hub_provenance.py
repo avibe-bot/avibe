@@ -22,7 +22,7 @@ from vibe import model_hub_client, ui_server
 def _record(turn_id, *, backend="claude", model=MODEL, outcome="failed_terminal"):
     identity = {"source_id": "src_deleted01", "configured_model_id": "unknown-model", "channel": "hub"}
     return {
-        "contract_version": 9,
+        "contract_version": 10,
         "turn_id": turn_id,
         "ts": "2026-09-06T00:00:00Z",
         "agent": backend,
@@ -58,6 +58,18 @@ def test_latest_record_is_backend_model_isolated_bounded_and_not_latest_error(tm
     assert store.latest_for_model("claude", MODEL) == success
     assert store.get("first") is None
     assert len(json.loads(path.read_text())) == 3
+
+
+@pytest.mark.parametrize("version", range(5, 11))
+def test_persisted_versions_remain_readable_without_rewriting(tmp_path, version):
+    record = {**_record("historical"), "contract_version": version}
+    path = tmp_path / "provenance.json"
+    path.write_text(json.dumps([record]), encoding="utf-8")
+    before = path.read_bytes()
+    store = BoundedProvenanceStore(path)
+    assert store.get("historical") == record
+    assert store.latest_for_model("claude", MODEL) == record
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("status,expected_status", [(404, 404), (True, None), (99, None), (600, None), (None, None)])
@@ -205,6 +217,6 @@ def test_model_history_client_rpc_http_share_nullable_read_only_result(monkeypat
         f"/api/models/agents/claude/provenance?model={MODEL}", headers=csrf_headers(client, origin), base_url=origin
     )
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 9, "provenance": record}
+    assert response.get_json() == {"ok": True, "contract_version": 10, "provenance": record}
     assert store.config.to_payload() == before
     assert adapter.synced == []

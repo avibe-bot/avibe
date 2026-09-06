@@ -5577,6 +5577,7 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",
         "second-model",
+        "empty-route-model",
     }
 
 
@@ -6444,7 +6445,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 9,
+            "contract_version": 10,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -8570,7 +8571,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 9,
+        "contract_version": 10,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,

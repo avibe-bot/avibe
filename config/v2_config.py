@@ -3034,6 +3034,12 @@ class ModelHubRouteConfig:
         return {"hops": [hop.to_payload() for hop in self.hops]}
 
 
+def normalized_model_hub_override(route: ModelHubRouteConfig | None) -> ModelHubRouteConfig | None:
+    """Normalize validated intent: only a nonempty route is a manual override."""
+
+    return route if route is not None and route.hops else None
+
+
 @dataclass
 class ModelHubMenuConfig:
     view: Literal["featured", "full"] = "featured"
@@ -3430,6 +3436,15 @@ class ModelHubAgentSupplyConfig:
             raise ValueError(
                 "Config 'model_hub.agents.models.native_protocol' is only valid for opencode"
             )
+        # Validate original keys before omitting empties. Legacy fixed-menu
+        # readers above may derive catalog identities from those same keys.
+        menu_ids = {model.id for model in models}
+        extra_route = next((model_id for model_id in routes if model_id not in menu_ids), None)
+        # OpenCode retains dormant routes when a checked model is hidden.
+        if extra_route is not None and backend != "opencode":
+            raise ValueError(
+                f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
+            )
         return cls(
             backend=backend,
             mode=mode,
@@ -3439,7 +3454,7 @@ class ModelHubAgentSupplyConfig:
                 if sources_payload is not None
                 else ModelHubAgentSourcesConfig()
             ),
-            routes=routes,
+            routes={model_id: route for model_id, route in routes.items() if normalized_model_hub_override(route) is not None},
             menu=menu,
             models=models,
             removed_model_ids=list(removed_model_ids),
@@ -3454,6 +3469,7 @@ class ModelHubAgentSupplyConfig:
             "routes": {
                 model_id: route.to_payload()
                 for model_id, route in self.routes.items()
+                if normalized_model_hub_override(route) is not None
             },
             "menu": self.menu.to_payload() if self.menu else None,
         }
@@ -3569,24 +3585,6 @@ class ModelHubConfig:
                 expected_backend=backend,
                 repairing=repairing,
             )
-            expected_menu_ids = tuple(
-                model.id for model in agents[backend].models
-            )
-            extra_route = next(
-                (
-                    model_id
-                    for model_id in agents[backend].routes
-                    if model_id not in expected_menu_ids
-                ),
-                None,
-            )
-            # The retained OpenCode menu endpoint can hide a checked model while
-            # preserving its dormant Route for a later re-enable. Fixed-menu
-            # backends have never had that compatibility state.
-            if extra_route is not None and backend != "opencode":
-                raise ValueError(
-                    f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
-                )
         config = cls(
             enabled=enabled,
             sources=sources,
