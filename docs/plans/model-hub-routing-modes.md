@@ -434,6 +434,29 @@ after long-body scrolling and Save performs the intended mutation. Verify EN/ZH,
 light/dark and manual/restore-preview states. Existing required case identities,
 baseline gaps and screenshot stages do not change; add assertions within them.
 
+## Default Routing Action Fidelity
+
+The approved Default Routing frame `ztAos` uses Lucide arrow-up, arrow-down,
+minus and plus icons at 13px within 26px controls, with 6px corner radii and
+3px spacing inside the ordered row's action group. The implementation must not
+inherit the global Button icon size (36px) or the SVG library's default size.
+Retain a subtle theme-token surface and border without the generic outline
+button shadow. Reuse the existing Button primitive and Model Hub scoped styling;
+do not resize unrelated controls or remove the equivalent pointer/keyboard
+ordering paths. Icon controls retain accessible names, hover hints, disabled
+boundaries and visible keyboard focus. Their group does not shrink or displace
+the source identity outside the row at narrow widths. The held-out plus action
+uses the same visual treatment. Scope excludes unrelated drawer typography,
+section composition, source order, inventory, and route persistence changes.
+
+The user's local Codex inspection found saved empty overrides taking precedence
+over otherwise eligible default sources. A read-only restore preview correctly
+returns automatic matching or passthrough. This is an upgrade-experience gap,
+not permission to reinterpret or delete persisted empty overrides. Preserve the
+existing compatibility contract and actual local state during this visual fix;
+the interface distinction and any explicit restoration require their own scope
+decision. Do not make acceptance green by changing the user's route intent.
+
 ## Delivery Ownership
 
 One feature PR is intentional: executable schema/type/mirror closure needs all
