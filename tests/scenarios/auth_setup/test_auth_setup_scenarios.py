@@ -9,12 +9,13 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import jwt
 import pytest
 import yaml
+from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,6 +36,7 @@ from config.v2_config import (
     V2Config,
 )
 from core.agent_auth_service import AgentAuthService
+from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
 from core.handlers.model_hub.service import ModelHubError
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
@@ -58,6 +60,7 @@ from vibe.claude_config import (
 )
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -2683,6 +2686,118 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
             "create_auth_failure",
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("vendor", "protocol"),
+    [(entry.id, entry.protocol) for entry in api_key_vendor_catalog()]
+    + [("custom", protocol) for protocol in SOURCE_PROTOCOLS],
+)
+def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, protocol):
+    """Scenario: AUTH-SETUP-112"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Keep engine lifecycle simulated; exercise real credential custody, HTTP
+    # observation, inventory discovery, and Source admission together.
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    async def scenario():
+        requests = []
+        valid_key = "test-model-free-key"
+        paths = {
+            "anthropic": "/v1/messages",
+            "openai_responses": "/v1/responses",
+            "openai_chat": "/v1/chat/completions",
+        }
+
+        async def upstream(request):
+            body = await request.json() if request.method == "POST" else None
+            requests.append((request.method, request.path, body))
+            supplied_key = (
+                request.headers.get("x-api-key")
+                if protocol == "anthropic"
+                else request.headers.get("Authorization", "").removeprefix("Bearer ")
+            )
+            if supplied_key != valid_key:
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            if request.method == "GET":
+                return web.json_response({"data": [{"id": "relay-model"}]})
+            if "model" in body:
+                return web.json_response(
+                    {"error": {"type": "rate_limit_error", "message": "No available model capacity"}},
+                    status=429,
+                )
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": "model is required"}},
+                status=400,
+            )
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post(paths[protocol], upstream)
+        upstream_app.router.add_get("/v1/models", upstream)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        draft = {
+            "vendor": vendor,
+            "protocol": protocol,
+            "base_url": f"http://127.0.0.1:{port}",
+            "key": valid_key,
+        }
+        harness = SimpleNamespace()
+        runner = ScenarioRunner(harness)
+
+        async def observe(h):
+            result = await service.observe_source(draft)
+            observation = result["observation"]
+            assert observation["outcome"] == "observed"
+            assert observation["protocol"] == protocol
+            assert observation["authenticated"] == "authenticated"
+            assert observation["models"] == ["relay-model"]
+            assert not store.config.sources
+
+        async def confirm(h):
+            await service.create_source({"kind": "api_key", **draft})
+            assert len(store.config.sources) == 1
+            h.source = store.config.sources[0].to_payload()
+            assert h.source["protocol"] == protocol
+            assert h.source["models"][0]["id"] == "relay-model"
+            assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
+
+        async def reject_invalid_key(h):
+            invalid = {**draft, "key": "invalid-test-key"}
+            result = await service.observe_source(invalid)
+            assert result["observation"]["outcome"] == "authentication_failed"
+            with pytest.raises(ModelHubError):
+                await service.create_source({"kind": "api_key", **invalid})
+            assert [source.to_payload() for source in store.config.sources] == [h.source]
+
+        try:
+            await runner.run(
+                ScenarioStep("observe", observe),
+                ScenarioStep("confirm", confirm),
+                ScenarioStep("reject_invalid_key", reject_invalid_key),
+            )
+            ScenarioExpect.step_history(runner, ["observe", "confirm", "reject_invalid_key"])
+            assert [(method, path) for method, path, _ in requests] == [
+                ("POST", paths[protocol]), ("GET", "/v1/models"),
+                ("POST", paths[protocol]), ("GET", "/v1/models"),
+                ("POST", paths[protocol]), ("POST", paths[protocol]),
+            ]
+            assert all("model" not in body for _, _, body in requests if body is not None)
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
 
 
 if __name__ == "__main__":

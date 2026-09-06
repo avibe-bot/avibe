@@ -113,6 +113,13 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
+  - id: AUTH-SETUP-112
+    name: API-key setup authenticates and confirms a Source independently of model scheduling
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_api_key_setup_does_not_schedule_a_model
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

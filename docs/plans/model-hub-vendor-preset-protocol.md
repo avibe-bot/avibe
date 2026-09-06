@@ -147,6 +147,23 @@ invariants change.
 - G-18 / G-27 rows: probe constraint language is now only the Auto
   branch on `custom`.
 
+## Model-independent observation (2026-09-07)
+
+Protocol observation omits `model` for every interface. A fabricated model can
+enter a relay's scheduler and return capacity or upstream errors before request
+validation, making valid credentials impossible to add. A model-free request
+keeps observation independent of model availability and generation. The shared
+request taxonomy applies to API-key and OAuth observation alike.
+
+The proof ladder above remains unchanged: catalog pins and declarations still
+require authentication on their protocol path; Auto still requires response
+evidence. Inventory discovery follows successful observation, and confirmation
+repeats the same model-free check before persisting the Source.
+
+`AUTH-SETUP-112` exercises observe, confirm, and invalid-key rejection against a
+local HTTP relay with model scheduling unavailable. It covers every catalog
+preset and every concrete custom interface without using real user state.
+
 ## Acceptance
 
 - DeepSeek official URL + valid key, vendor `deepseek`, adds as

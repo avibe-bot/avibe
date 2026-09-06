@@ -7837,12 +7837,10 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
     assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_path != _PROTOCOL_OBSERVATION_TAXONOMY[
         "openai_chat"
     ].request_path
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_body == {
-        "model": "__avibe_model_hub_probe__"
-    }
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_body == {
-        "model": "__avibe_model_hub_probe__"
-    }
+    assert all(
+        "model" not in taxonomy.request_body
+        for taxonomy in _PROTOCOL_OBSERVATION_TAXONOMY.values()
+    )
     consumers = {
         node.name: node
         for node in ast.walk(tree)

@@ -289,6 +289,8 @@ def _openai_evidence_rules(
     )
 
 
+# Omit the model so observation stops at request validation, before a relay
+# schedules upstream capacity or applies model-specific availability limits.
 _PROTOCOL_OBSERVATION_TAXONOMY = {
     "anthropic": _ProtocolObservationTaxonomy(
         request_path="/v1/messages",
@@ -344,7 +346,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     ),
     "openai_responses": _ProtocolObservationTaxonomy(
         request_path="/v1/responses",
-        request_body={"model": "__avibe_model_hub_probe__"},
+        request_body={},
         oauth_path="/backend-api/codex/responses",
         evidence_rules=_openai_evidence_rules(
             frozenset({"response"}),
@@ -353,7 +355,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     ),
     "openai_chat": _ProtocolObservationTaxonomy(
         request_path="/v1/chat/completions",
-        request_body={"model": "__avibe_model_hub_probe__"},
+        request_body={},
         oauth_path=None,
         evidence_rules=_openai_evidence_rules(
             frozenset({"chat.completion", "chat.completion.chunk"}),
