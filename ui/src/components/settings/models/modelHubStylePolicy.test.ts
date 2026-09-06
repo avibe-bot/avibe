@@ -37,6 +37,30 @@ describe('Model Hub theme token policy', () => {
 });
 
 describe('Model Hub visual token policy', () => {
+  it('keeps Default Routing actions at the shared compact size after drawer styles apply', () => {
+    const root = postcss.parse(surfaceCss);
+    const declarations = (...selectors: string[]) => {
+      const result: Record<string, string> = {};
+      root.walkRules((rule) => {
+        if (rule.parent?.type === 'root' && rule.selectors.some((selector) => selectors.includes(selector))) {
+          rule.walkDecls((decl) => { result[decl.prop] = decl.value; });
+        }
+      });
+      return result;
+    };
+    // Equal-specificity scoped rules, in source order. Browser geometry is a separate gate.
+    expect(declarations('.model-hub-route-action', '.model-hub-order-row-action')).toMatchObject({
+      width: '26px', height: '26px', 'min-height': '0', padding: '0',
+      'border-radius': '6px', flex: 'none', border: '1px solid var(--border)',
+      background: 'var(--model-hub-wash-0a)',
+    });
+    expect(declarations('.model-hub-route-action > svg', '.model-hub-order-row-action > svg')).toMatchObject({ width: '13px', height: '13px' });
+    expect(declarations('.model-hub-order-row-actions')).toMatchObject({
+      display: 'flex', flex: 'none', 'align-items': 'center', gap: '3px',
+    });
+    expect(declarations('.model-hub-order-identity')).toMatchObject({ flex: '1', 'min-width': '0' });
+  });
+
   it('lets the actual narrow footer grow after the complete surface cascade while preserving body scroll', () => {
     // This checks CSS ownership and source order, not browser geometry.
     const root = postcss.parse(surfaceCss);

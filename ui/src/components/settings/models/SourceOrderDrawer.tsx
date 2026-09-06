@@ -75,11 +75,13 @@ const OrderedRow: React.FC<{
       </button>
       <span className={cn('model-hub-order-ordinal', index === 0 && 'is-first')}>{index + 1}</span>
       <SourceIdentity source={source} />
-      <Button type="button" variant="outline" size="icon" aria-label={t('settings.models.routing.moveUp')} disabled={busy || index === 0} onClick={() => onMove(-1)}><ArrowUp aria-hidden /></Button>
-      <Button type="button" variant="outline" size="icon" aria-label={t('settings.models.routing.moveDown')} disabled={busy || index === count - 1} onClick={() => onMove(1)}><ArrowDown aria-hidden /></Button>
-      <Button type="button" variant="outline" size="icon" aria-label={t('settings.models.order.action.exclude')} disabled={busy} onClick={onExclude}>
-        <Minus aria-hidden />
-      </Button>
+      <span className="model-hub-order-row-actions">
+        <Button type="button" variant="ghost" size="icon" className="model-hub-route-action model-hub-order-row-action" aria-label={t('settings.models.routing.moveUp')} disabled={busy || index === 0} onClick={() => onMove(-1)}><ArrowUp aria-hidden /></Button>
+        <Button type="button" variant="ghost" size="icon" className="model-hub-route-action model-hub-order-row-action" aria-label={t('settings.models.routing.moveDown')} disabled={busy || index === count - 1} onClick={() => onMove(1)}><ArrowDown aria-hidden /></Button>
+        <Button type="button" variant="ghost" size="icon" className="model-hub-route-action model-hub-order-row-action" aria-label={t('settings.models.order.action.exclude')} disabled={busy} onClick={onExclude}>
+          <Minus aria-hidden />
+        </Button>
+      </span>
     </Reorder.Item>
   );
 };
@@ -395,24 +397,26 @@ export const SourceOrderDrawer: React.FC<{
                       <div key={source.id} className="model-hub-order-row model-hub-order-row--held">
                         <Minus className="model-hub-order-held-icon" />
                         <SourceIdentity source={source} />
-                        <Button
-                          ref={(node) => {
-                            if (node) heldOutActions.current.set(source.id, node);
-                            else heldOutActions.current.delete(source.id);
-                          }}
-                          type="button"
-                          variant="outline"
-                          size="icon"
-                          aria-label={t('settings.models.order.action.include')}
-                          className="model-hub-order-row-action"
-                          disabled={saving}
-                          onClick={() => {
-                            persist([...order, source.id]);
-                            focusHandleAfterRender(source.id);
-                          }}
-                        >
-                          <Plus className="size-3.5" />
-                        </Button>
+                        <span className="model-hub-order-row-actions">
+                          <Button
+                            ref={(node) => {
+                              if (node) heldOutActions.current.set(source.id, node);
+                              else heldOutActions.current.delete(source.id);
+                            }}
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label={t('settings.models.order.action.include')}
+                            className="model-hub-route-action model-hub-order-row-action"
+                            disabled={saving}
+                            onClick={() => {
+                              persist([...order, source.id]);
+                              focusHandleAfterRender(source.id);
+                            }}
+                          >
+                            <Plus aria-hidden />
+                          </Button>
+                        </span>
                       </div>
                     ))}
                   </div>

@@ -1873,17 +1873,20 @@
   font-size: var(--model-hub-order-tag-size);
   font-weight: 600;
 }
-.model-hub-order-row-action {
-  --model-hub-order-action-size: 11.5px;
-  --model-hub-order-action-radius: 8px;
-  --model-hub-order-action-padding-x: 12px;
-  --model-hub-order-action-padding-y: 9px;
-  min-height: 31px;
-  padding: var(--model-hub-order-action-padding-y) var(--model-hub-order-action-padding-x);
-  border-radius: var(--model-hub-order-action-radius);
-  font-size: var(--model-hub-order-action-size);
-  font-weight: 700;
+.model-hub-order-row-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
 }
+.model-hub-order-row-action {
+  min-height: 0;
+  padding: 0;
+  flex: none;
+  border: 1px solid var(--border);
+  background: var(--model-hub-wash-0a);
+}
+.model-hub-order-row-action:hover { background: var(--model-hub-wash-14); }
 .model-hub-order-held-icon { width: var(--model-hub-order-grip-size); height: var(--model-hub-order-grip-size); flex: none; color: var(--model-hub-order-grip-dim); }
 .model-hub-order-empty,
 .model-hub-order-state {
