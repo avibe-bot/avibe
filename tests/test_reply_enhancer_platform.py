@@ -2387,6 +2387,53 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(enhanced.text, text)
                 self.assertEqual(enhanced.files, [])
 
+    def test_block_parser_preserves_commonmark_structure_without_inline_children(self):
+        specimens = [
+            "> - [report](<file:///tmp/report.md>) and `code`\n>   continuation\n",
+            "heading\n=======\n\n~~~markdown\n[file](file:///tmp/code.md)\n~~~\n",
+            "    indented code\n\n<div>\nraw HTML\n</div>\n\nvisible\n",
+            "[reference]: /target \"title\"\n\n[reference] and ![image](/image.png)\n",
+            "1. first\r\n   - second\r\n\r\n---\r\n[one] | [two]\r\n",
+            "[" * 1000 + "[report](<file:///tmp/report.md>)",
+        ]
+        reference = reply_enhancer.MarkdownIt("commonmark")
+        for text in specimens:
+            with self.subTest(text=text[:80]):
+                expected = reference.parse(text)
+                actual = reply_enhancer._BLOCK_MARKDOWN.parse(text)
+                self.assertEqual(len(actual), len(expected))
+                for actual_token, expected_token in zip(actual, expected):
+                    actual_fields = actual_token.as_dict()
+                    expected_fields = expected_token.as_dict()
+                    actual_fields.pop("children")
+                    expected_fields.pop("children")
+                    self.assertEqual(actual_fields, expected_fields)
+                    self.assertFalse(actual_token.children)
+
+    def test_block_range_consumers_do_not_run_discarded_inline_parsing(self):
+        text = "> [report](<file:///tmp/report.md>)\n\n```\ncode\n```\n"
+        with patch.object(
+            reply_enhancer._BLOCK_MARKDOWN.inline,
+            "parse",
+            side_effect=AssertionError("block-only consumers must not parse inline children"),
+        ):
+            code, inline, blocking = reply_enhancer._markdown_block_ranges(text)
+            level = reply_enhancer._markdown_container_level_at(
+                "> body\n> [one] | [two]", len("> body")
+            )
+            enhanced = process_reply(text)
+            stripped = reply_enhancer.strip_file_links(text)
+            replaced = reply_enhancer._replace_file_links(text, lambda match: "/media/report")
+
+        self.assertEqual(code, [(text.index("```"), len(text))])
+        self.assertEqual(blocking, code)
+        self.assertEqual(inline, [(0, text.index("\n") + 1, "[report](<file:///tmp/report.md>)")])
+        self.assertEqual(level, 2)
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
+        self.assertEqual(enhanced.text, "> report\n\n```\ncode\n```")
+        self.assertEqual(stripped, "> report\n\n```\ncode\n```\n")
+        self.assertEqual(replaced, "> [report](</media/report>)\n\n```\ncode\n```\n")
+
     def test_file_link_parser_handles_many_openers_in_bounded_time(self):
         text = "[" * 100000 + "[report](<file:///tmp/report.md>)"
 

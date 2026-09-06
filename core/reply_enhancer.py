@@ -36,7 +36,8 @@ from markdown_it.rules_inline.link import link as _commonmark_link
 from markdown_it.rules_inline.state_inline import StateInline
 
 logger = logging.getLogger(__name__)
-_BLOCK_MARKDOWN = MarkdownIt("commonmark")
+# Block consumers use source maps/content/levels, never parsed inline children.
+_BLOCK_MARKDOWN = MarkdownIt("commonmark").disable("inline")
 _INLINE_MARKDOWN = MarkdownIt("commonmark")
 _INLINE_CODE_RANGES_KEY = "avibe_inline_code_ranges"
 _INLINE_ANGLE_RANGES_KEY = "avibe_inline_angle_ranges"
