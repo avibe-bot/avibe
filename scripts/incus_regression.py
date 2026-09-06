@@ -2715,8 +2715,9 @@ def cmd_delete(args: argparse.Namespace) -> int:
         if failed:
             statuses = ", ".join(str(result.returncode) for result in failed)
             commands = "; ".join(shlex.join(result.args) for result in failed)
-            print(f"Could not delete {target.slug} ({commands} exited {statuses}); kept its metadata.", file=sys.stderr)
-            return 1
+            print(f"Delete commands failed for {target.slug} ({commands} exited {statuses}).", file=sys.stderr)
+        # A command's exit status does not say whether its objects still exist.
+        # Confirm the final inventory even after failure before deciding about the row.
         if target.target == WORKTREE_TARGET and not args.dry_run:
             metadata = WorktreeMetadata(repo_root, args.remote)
             if metadata.owned:
@@ -2734,7 +2735,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
                 # daemons would otherwise lose its local port reservation the moment
                 # the remote copy was removed, and lose it silently.
                 print(f"Kept the local metadata for {target.slug}: it describes the local Incus daemon, not remote {args.remote}.")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
