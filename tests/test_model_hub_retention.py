@@ -542,6 +542,7 @@ def test_noninvoking_request_must_exit_before_finalization(tmp_path, no_candidat
         request = _prepared_gateway_request(gateway, turn_id="noninvoking", requested_model=model, source_id=source.id, stream=True)
         if no_candidate:
             service.store.config.agents["codex"].routes[model] = ModelHubRouteConfig()
+            service.store.config.agents["codex"].sources.order = []
         else:
             request.json.return_value = {}
         response_ready = asyncio.Event()

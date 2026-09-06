@@ -108,7 +108,7 @@
     },
     "routes": {
       "type": ["object", "null"],
-      "description": "Sparse persisted manual overrides keyed by caller-facing canonical menu ids. Key absence means automatic. Key presence preserves exact hops, including empty, stale and dormant arrays. Saving equal-to-automatic hops remains manual; Restore deletes the key. New catalog rows receive no key.",
+      "description": "Canonical sparse manual overrides keyed by caller-facing canonical menu ids. Output contains only nonempty arrays, preserving exact stale and dormant overrides. Valid empty configuration/input values normalize to key absence and inherited routing; validate supported raw config before normalization, not against this output-only minimum. Nonempty equal-to-automatic saves remain manual. Restore or empty PUT deletes the key. New catalog rows receive no key; normalization never removes catalog identities.",
       "additionalProperties": {
         "type": "object",
         "required": ["hops"],
@@ -116,6 +116,7 @@
         "properties": {
           "hops": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
               "required": ["source_id", "model_id"],

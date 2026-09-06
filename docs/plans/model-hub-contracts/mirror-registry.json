@@ -1,5 +1,5 @@
 {
-  "contract_version": 9,
+  "contract_version": 10,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -450,7 +450,7 @@
     },
     {
       "id": "D27",
-      "domain": "effective route planning",
+      "domain": "normalized effective route planning",
       "authority": {
         "kind": "markdown_table",
         "file": "docs/plans/model-hub.md",

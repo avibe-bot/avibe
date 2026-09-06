@@ -10,7 +10,7 @@ import { PERSISTED_TURN_CONTRACT_VERSIONS } from './types';
 import type { TurnProvenance } from './types';
 
 const record: TurnProvenance = {
-  contract_version: 9, turn_id: 'turn-recorded', ts: '2026-09-05T15:00:00Z', agent: 'codex', requested_model_id: 'requested-model',
+  contract_version: 10, turn_id: 'turn-recorded', ts: '2026-09-05T15:00:00Z', agent: 'codex', requested_model_id: 'requested-model',
   outcome: 'failed_terminal', failed_attempts: [], served: null, canceled_attempt: null, model_supply_state: null, blockers: [],
   terminal_error: { source_id: 'src_historical', configured_model_id: 'historical-model', channel: 'hub', reason: 'invalid_parameter', stream_started: false, http_status: 404, upstream_error_code: 'model_not_found' },
 };
@@ -28,11 +28,15 @@ describe('recorded turn error', () => {
     await user.click(screen.getByRole('button', { name: 'View error details' }));
     expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(record, null, 2));
   });
-  it('reads old terminal errors without inventing model-not-found evidence', async () => {
-    vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue({ ...record, contract_version: PERSISTED_TURN_CONTRACT_VERSIONS[0], terminal_error: { source_id: 'src_old', configured_model_id: 'old-model', channel: 'hub', reason: 'invalid_parameter', stream_started: false } });
+  it.each(PERSISTED_TURN_CONTRACT_VERSIONS)('reads v%s terminal errors without rewriting records or inventing model-not-found evidence', async (version) => {
+    const user = userEvent.setup();
+    const historical: TurnProvenance = { ...record, contract_version: version, terminal_error: { source_id: 'src_old', configured_model_id: 'old-model', channel: 'hub', reason: 'invalid_parameter', stream_started: false } };
+    vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(historical);
     render(view());
     expect(await screen.findByText(/Latest recorded turn.*Request parameters rejected/)).toBeTruthy();
     expect(screen.queryByText(/model not found/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'View error details' }));
+    expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(historical, null, 2));
   });
   it.each(['served', 'canceled', null] as const)('does not show an old error when latest outcome is %s', async (outcome) => {
     const read = vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(outcome ? { ...record, outcome, terminal_error: null } : null);

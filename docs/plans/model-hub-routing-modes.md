@@ -13,7 +13,8 @@ retain contradictory current-policy claims when this implementation ships.
 For backend defaults `[A, B]`, model M automatically uses B if B lists M and A does
 not. A is not prepended as a speculative candidate. If neither lists M, the chain
 is `[A/M, B/M]`, with M forwarded unchanged. A saved manual chain replaces this
-generated chain completely, including an explicitly empty manual chain.
+generated chain completely only when it contains at least one hop. An empty
+route value is equivalent to absence and inherits the generated route.
 
 The upstream inventory is evidence for matching, not an invocation whitelist.
 Credentials, protocol and channel compatibility, backend model admission, source
@@ -52,17 +53,20 @@ type RouteOrigin = "automatic" | "manual" | "passthrough" | null;
 type ManualRouteOverrides = Record<string, ManualRouteOverride>;
 ```
 
-Key absence means automatic. Key presence means explicit override, including an
-empty array. Saving a model route always creates an override even when identical
-to the generated result. Restoring automatic deletes the key. There is no second
-persisted policy flag and no inference from array equality.
+Key absence or an empty hop array means inherited routing. Only a nonempty
+value is an explicit override. Saving a nonempty model route creates an override
+even when identical to the generated result. Restoring automatic deletes the key;
+empty input is normalized to that same operation. There is no second persisted
+policy flag, empty-route disable state, or inference from nonempty array equality.
 
-Preserve existing override entries and exact arrays losslessly, including empty,
-stale, and dormant OpenCode entries. Historical discriminator-free records cannot
-reveal whether an old empty array was generated or deliberately cleared. Retained
-entries are frozen routes, not a claim of known historical human authorship. The
-UI can restore them explicitly. Do not globally reinterpret old empty arrays as
-automatic or clear existing config during regression deployment.
+Preserve existing nonempty overrides and exact arrays losslessly, including stale
+and dormant OpenCode entries. Historical discriminator-free records cannot reveal
+whether an old empty array was generated or deliberately cleared. The owner now
+explicitly selects inherited behavior for both, superseding the former empty-key
+preservation policy. This is a documented compatibility normalization, not a claim
+of historical human authorship. Validate the original supported payload before
+normalizing empty values; invalid records must not become automatic by accident.
+Do not discard catalog identities or unrelated configuration while normalizing.
 
 New catalog rows and missing fixed-menu rows receive no route key. Stop default
 seeding and source-add appends to persisted routes. Older supported config shapes
@@ -77,7 +81,8 @@ It produces `{manual_override, route_origin, hops}` from current configuration,
 backend, and canonical requested model. Preview may call it with an isolated
 draft configuration; no public sentinel or duplicate matching algorithm is needed.
 
-1. A manual key returns the exact saved hops and order.
+1. A nonempty manual value returns the exact saved hops and order. Empty values
+   are treated exactly as key absence, including for directly constructed config.
 2. Otherwise scan configuration-eligible sources in backend default order for
    matching evidence. Include all accepted matching pairs in that order.
 3. If there are no matching pairs, use each eligible API-key default source with
@@ -112,8 +117,8 @@ unknown passthrough models do not acquire invented capabilities or reasoning tie
 
 ## API Shapes and Responsibilities
 
-Advance the terminal in-request contract to `contract_version` 9 on the complete
-feature head. Retain readable historical TurnProvenance versions through 9.
+Advance the terminal in-request contract to `contract_version` 10 on the complete
+fix head. Retain readable historical TurnProvenance versions 5 through 10.
 
 The server adds the following required fields to `AgentChain`:
 
@@ -122,11 +127,13 @@ manual_override: ManualRouteOverride | null;
 route_origin: RouteOrigin;
 ```
 
-`manual_override` reports actual persisted key presence. `chain` is the effective
+`manual_override` reports the normalized nonempty manual override, or null.
+`chain` is the effective
 ordered plan with existing live annotations, not the persisted map. Existing
 `current`, `supply_state`, health, reason, and retry fields retain their meaning.
-For a saved empty override, `manual_override` is `{hops:[]}`, `chain` is empty and
-`route_origin` is null. Preview reports the draft override rather than saved intent.
+For a legacy or submitted empty override, `manual_override` is null and `chain`
+and `route_origin` come from the inherited plan. Only an actually empty inherited
+plan has null origin. Preview reports normalized draft intent without persistence.
 
 `AgentSupply.routes` contains only manual overrides. Add required `route_origin`
 to each `model_supply` summary and derive `chain_length` from the effective plan.
@@ -142,9 +149,9 @@ passthrough target.
 | PUT `.../agents/<backend>/sources` | `{order, force?, would_remove_hops?, would_interrupt?}`; atomically replace default membership/order and preserve all manual overrides. Guard effective supply/hop removal using the existing exact-plan confirmation protocol. Pure reordering without removal needs no guard. |
 | GET `.../agents/<backend>/chain?model=<id>` | Existing chain success envelope, extended AgentChain. |
 | GET `.../agents/<backend>/chains` | Existing chain-list success envelope, same owner and fields for every routeable model. |
-| PUT `.../agents/<backend>/chain?model=<id>` | `{hops, force?, would_remove_hops?, would_interrupt?}`; persist explicit override, including equal and empty arrays. Return existing chain-mutation success envelope. |
+| PUT `.../agents/<backend>/chain?model=<id>` | `{hops, force?, would_remove_hops?, would_interrupt?}`; persist a nonempty explicit override, including an equal array. Empty hops use the exact restore operation and guards. Return existing chain-mutation success envelope. |
 | DELETE `.../agents/<backend>/chain?model=<id>` | Optional `{force?, would_remove_hops?, would_interrupt?}`; remove override, recompute defaults, return the same mutation envelope. Idempotent if absent. Guard actual effective removal/supply loss. |
-| POST `.../agents/<backend>/chain/preview?model=<id>` | `{manual_override:null \| {hops:RouteHop[]}}`; return chain success envelope for draft replacement/removal. No persistence, events, engine startup/sync, credentials, or upstream egress. |
+| POST `.../agents/<backend>/chain/preview?model=<id>` | `{manual_override:null \| {hops:RouteHop[]}}`; normalize empty hops to null, then return chain success envelope for draft replacement/removal. No persistence, events, engine startup/sync, credentials, or upstream egress. |
 | POST `.../agents/<backend>/chains/reorder` | Existing optional order plus optional guard fields; default-order compatibility entry point with the same effective guards. Never reorder manual arrays. With no order, return the current projection. New UI uses Sources PUT. |
 | PUT `.../agents/<backend>/models` | Preserve existing baseline/concurrency/expected-suppliers/guard contract. New rows automatic, retained rows preserve intent, removal cleans intent through existing guarded mutation. |
 
@@ -190,7 +197,8 @@ Approved design: `avibe-docs/design.pen`, frames `bmi25` (dark), `ziils` (light)
   and disable duplicate submissions. Default configuration changes must not leak
   between backend groups.
 - No eligible defaults show Unconfigured and a Configure default routing action.
-  An explicit empty override stays empty and offers Restore automatic in the dialog.
+  Removing the last manual hop enters the same Restore automatic draft preview;
+  Undo restores the previous unsaved draft and Cancel performs no write.
 - Request errors are separate from route origin. Model-not-found keeps Passthrough
   and shows the recorded-turn detail surface below; do not mark the whole source failed.
 - Apply complete EN/ZH localization and keyboard/touch behavior. Documentation
@@ -207,7 +215,7 @@ introduce a second history store or turn request failures into Source health eve
 Add GET `/api/models/agents/<backend>/provenance?model=<id>` through the existing
 service, RPC, client, and UI-server path. Validate the backend and its canonical
 catalog model identifier. Reuse the existing envelope:
-`{ok:true,contract_version:9,provenance:TurnProvenance|null}`
+`{ok:true,contract_version:10,provenance:TurnProvenance|null}`
 for the most recently persisted retained record matching both backend and requested
 model, regardless of outcome; no record means null, not a fabricated success.
 This is a read-only, on-demand dialog read and never starts or syncs the engine.
@@ -449,13 +457,57 @@ the source identity outside the row at narrow widths. The held-out plus action
 uses the same visual treatment. Scope excludes unrelated drawer typography,
 section composition, source order, inventory, and route persistence changes.
 
-The user's local Codex inspection found saved empty overrides taking precedence
-over otherwise eligible default sources. A read-only restore preview correctly
-returns automatic matching or passthrough. This is an upgrade-experience gap,
-not permission to reinterpret or delete persisted empty overrides. Preserve the
-existing compatibility contract and actual local state during this visual fix;
-the interface distinction and any explicit restoration require their own scope
-decision. Do not make acceptance green by changing the user's route intent.
+The drawer-only correction did not change saved routing intent. The subsequent
+owner-approved Empty Route Inheritance correction below supersedes the former
+empty-override compatibility policy; nonempty manual routes remain unchanged.
+
+## Empty Route Inheritance
+
+The user explicitly requested this correction after inspecting Codex in the local
+regression environment. At the observed configuration, normalizing the fifteen
+empty overrides produces eight Automatic routes, seven Passthrough routes and
+leaves the one nonempty gpt-5.3-codex-spark route Manual. These counts are evidence
+for that snapshot, not hardcoded behavior or immutable acceptance requirements.
+
+The invariant is that absent and empty overrides are equivalent across loading,
+serialization, preview, projection, registration, guards and invocation. Only
+nonempty routes carry manual intent. Canonical route maps omit empty values and
+canonical responses never emit `{hops:[]}` as `manual_override`. Existing empty
+configuration input and PUT/preview input remain accepted after strict shape and
+identifier validation, then normalize to absence; do not introduce an incompatible
+rejection or a separate migration flag. Read/preview does not write config or
+start the engine. Normal persistence writes the normalized sparse route map.
+
+Every mutation that can remove the final hop, including source deletion and
+catalog reconciliation, must use this same normalized planner before computing
+effective removals, interruptions and transport registration. Empty PUT has the
+same exact-plan guard/refusal, idempotency, admission, lease and rollback behavior
+as DELETE; do not bypass confirmation by retaining an empty route object. Existing
+invalid identifiers, explicit retirement, native/backend restrictions and the
+API-key-only unknown-target boundary are unchanged.
+
+In the dialog, removing the final manual hop explicitly previews inherited routing
+using the existing Restore/Undo flow. Do not present a saveable empty Manual state
+or merely relabel an empty chain. Save uses DELETE and the existing exact guard
+confirmation; read-only preview, retry invalidation, Undo/Cancel, success/Done and
+ambiguous-write reconciliation preserve their existing semantics. The saved
+nonempty override remains untouched until a confirmed successful save.
+
+Advance ephemeral API/schema/UI fixtures together to v10. The JSON wire field
+names and RouteOrigin vocabulary do not change; normalized manual output arrays
+have at least one item, while restoration inputs still accept an empty array.
+Historical provenance versions 5-9 and their records remain readable and unchanged;
+new v10 records use existing safe fields. F1 remains byte-identical to production.
+
+Acceptance must assert equivalence by exercising the same config with absent and
+empty values for all backends and protocol surfaces. Preserve every nonempty
+override and other source/default/catalog/credential field through load/save and
+refresh. Cover source deletion, guarded empty PUT versus DELETE, preview purity,
+default changes, live health independence, failed synchronization rollback and
+real gateway-to-pinned-CPA exact target registration. Update existing empty-state
+tests rather than disabling them. Cleanup compares canonical intent and must not
+restore an obsolete empty-disable state. Existing failed live artifacts stay
+immutable; the required browser flows and safety gates are not waived.
 
 ## Delivery Ownership
 

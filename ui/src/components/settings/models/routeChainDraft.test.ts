@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   reorderRouteDraft,
   routeCandidates,
+  routeChainMatchesAttempt,
+  sameManualOverride,
   validateRouteDraft,
 } from "./routeChainDraft";
 import type { AgentSupply, RouteHop, Source } from "./types";
@@ -45,6 +47,16 @@ const sources = [
 ];
 
 describe("routeChainDraft", () => {
+  it('requires a nonempty Manual draft and compares compatibility-empty attempts as inherited intent', () => {
+    expect(validateRouteDraft(agent, sources, [], []).valid).toBe(false);
+    expect(sameManualOverride(null, { hops: [] })).toBe(true);
+    expect(sameManualOverride({ hops: [] }, null)).toBe(true);
+    const hops = [{ source_id: 'src_a', model_id: 'model-a' }];
+    expect(sameManualOverride(null, { hops })).toBe(false);
+    expect(routeChainMatchesAttempt({ backend: 'claude', model_id: 'opus-5', manual_override: null } as Parameters<typeof routeChainMatchesAttempt>[0], {
+      backend: 'claude', modelId: 'opus-5', submitted: [], manual_override: { hops: [] },
+    })).toBe(true);
+  });
   it('allows unknown API-key models while keeping subscription admission and retirement', () => {
     const unknown = { source_id: 'src_a', model_id: 'unlisted' };
     expect(validateRouteDraft(agent, sources, [], [unknown]).valid).toBe(true);

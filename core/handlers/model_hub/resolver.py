@@ -13,6 +13,7 @@ from config.v2_config import (
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
     ModelHubSourceConfig,
+    normalized_model_hub_override,
 )
 
 
@@ -235,9 +236,9 @@ def effective_model_route(
     """Choose one route tier before live health or transport restriction."""
 
     agent = config.agents[backend]
-    if requested_model in agent.routes:
-        override = agent.routes[requested_model]
-        return EffectiveModelRoute(override, "manual" if override.hops else None, override.hops)
+    override = normalized_model_hub_override(agent.routes.get(requested_model))
+    if override is not None:
+        return EffectiveModelRoute(override, "manual", override.hops)
     if not requested_model or not any(model.id == requested_model for model in agent.models):
         return EffectiveModelRoute(None, None, ())
     by_id = {source.id: source for source in config.sources}

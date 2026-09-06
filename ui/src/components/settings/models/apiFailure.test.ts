@@ -33,7 +33,7 @@ afterEach(() => {
 describe('apiFailure — whether the route named the failure', () => {
   it('posts installation to the dedicated runtime route', async () => {
     const runtime = {
-      contract_version: 9,
+      contract_version: 10,
       manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'sha', assets: [] },
       status: { installed_version: null, verified: false, listening: null, health: 'installing', last_check: null },
     } as const;

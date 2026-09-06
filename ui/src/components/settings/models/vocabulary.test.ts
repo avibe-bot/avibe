@@ -11,6 +11,11 @@ const leaves = (node: unknown): string[] =>
       : [];
 
 describe('Models page vocabulary', () => {
+  it('describes an empty inherited route as lacking an eligible default provider', () => {
+    expect(en.settings.models.routeDialog.empty).toBe('This model follows default routing, but no eligible provider can route it.');
+    expect(zh.settings.models.routeDialog.empty).toBe('此模型跟随默认路由，但目前没有符合条件的供应商。');
+  });
+
   it('contains none of the retired user-facing terms', () => {
     const copy = leaves(zh.settings.models).join('\n');
     expect(copy).not.toMatch(/菜单固定|跟随推荐|中枢 Hub|按量\s*\$|映射|供给|来源|型号|自定义顺序|已改为手动|恢复默认/);

@@ -1,10 +1,10 @@
 # Model Hub — REST API contract
 
-Status: **Normative, `contract_version` 9** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 10** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 9, ...}`.
+Success envelope: `{ok: true, contract_version: 10, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 9, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 10, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -16,7 +16,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 9, the
+The shared envelope and every versioned nested contract carry `contract_version` 10, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -46,9 +46,9 @@ remain readable; ephemeral envelopes use only the terminal version.
 | GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, derive `native_protocol` from the model id's last path segment through the vendor map, cap results at 8, and never persist automatically. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
-| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Saves an explicit manual override, including equal-to-automatic and empty arrays. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. `mutation.route_replace` retains its protected-supply-only guard for visible edits. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Nonempty hops save an exact manual override, including equal-to-automatic arrays. Empty hops remain accepted and use DELETE Restore semantics with identical exact effective-removal/supply guards. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. Only nonempty replacement uses the protected-supply-only `mutation.route_replace` guard. |
 | DELETE `/api/models/agents/<backend>/chain?model=<id>` | optional `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | `mutation.route_restore` removes the key and recomputes defaults; absent key is idempotent. Guard actual effective removals and supply loss. |
-| POST `/api/models/agents/<backend>/chain/preview?model=<id>` | `{manual_override: null \| {hops: RouteHop[]}}` → `{chain: AgentChain}` | Shared planner over an isolated draft config. No persistence, events, engine startup/sync, credentials or egress, including when runtime is stopped. |
+| POST `/api/models/agents/<backend>/chain/preview?model=<id>` | `{manual_override: null \| {hops: RouteHop[]}}` → `{chain: AgentChain}` | Accepts empty hops and normalizes them to null before the shared planner evaluates isolated draft config. Output manual_override is nonempty or null; effective chain/origin follows inheritance. No persistence, events, engine startup/sync, credentials or egress, including when runtime is stopped. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
@@ -60,7 +60,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same default placement and effective adoption as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 9 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 10 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
@@ -439,10 +439,16 @@ Owner decision `c1d398d5f` scopes unknown-model passthrough and inventory-indepe
 manual invocation to Hub API-key Sources. Subscriptions retain known-model admission and
 automatic matching; unmatched subscription-only defaults yield an empty/null-origin plan.
 
-`AgentSupply.routes` is a sparse map of `{hops: RouteHop[]}` overrides. No key means
-automatic; a present empty array is deliberately empty. PUT creates a manual key even
-when submitted hops equal the automatic result. DELETE removes that key. Manual arrays
-are exact and can use an eligible Source outside default membership. New or changed
+`AgentSupply.routes` is the canonical sparse map of nonempty `{hops: RouteHop[]}`
+overrides. Missing and valid empty values both inherit. Nonempty PUT creates a manual
+key even when hops equal the generated result; empty PUT and DELETE remove it. Canonical
+output omits empty map values and reports `manual_override: null` for inherited intent.
+Output-only `minItems: 1` is not an input validation rule: empty PUT/preview remains
+accepted, and supported raw config is strictly validated before normalization. Invalid
+records never become automatic accidentally. Normal saves persist the normalized map
+without discarding nonempty/stale/dormant routes, catalog identities or unrelated fields;
+read/preview performs no write. Nonempty manual arrays are exact and may use an eligible
+Source outside default membership. New or changed
 pairs require canonical nonempty ids, Source existence/eligibility and no explicit
 retirement. API-key targets do not require inventory membership; subscription targets
 retain existing known-model admission and stale-hop retention. Retained stale hops remain
@@ -455,18 +461,24 @@ when a later admission bound is shorter. Newly introduced identifiers still pass
 admission; padding aliases remain rejected, and existing source, channel, retirement
 and stale-hop policies are unchanged.
 
-PUT uses `mutation.route_replace`: visible noninterrupting removals are ordinary
-success; protected-supply interruption returns the existing exact-plan refusal. DELETE
-uses `mutation.route_restore`: guard actual effective removals and supply loss, then
+Nonempty PUT uses `mutation.route_replace`: visible noninterrupting removals are ordinary
+success; protected-supply interruption returns the existing exact-plan refusal. Empty
+PUT and DELETE use the same `mutation.route_restore` operation: guard actual effective removals and supply loss, then
 remove the key and recompute. Both return `{chain, removed_hops, interrupted}` and
-preserve the existing error family and confirmation arrays. DELETE is idempotent if
-there is no key.
+preserve the existing error family and confirmation arrays. Both restore entry points
+share idempotency, admission, leases, synchronization and rollback. All final-hop
+removals, including Source deletion/catalog reconciliation, normalize before calculating
+effective removal, interruption and transport registration.
 
 Preview requires `manual_override`, whose value is null for automatic or an object
-with the draft hops. It uses the same pure planner with isolated draft configuration,
+with the draft hops, including an accepted empty array normalized to null. It uses the
+same pure planner with isolated draft configuration,
 returns the existing chain success envelope, and performs no persistent mutation,
 event, runtime startup/sync, credential access or upstream request. The returned
-`manual_override` describes the draft, not persisted intent. Preview is available
+`manual_override` describes normalized draft intent, not persisted intent. Empty input
+may therefore return Automatic or Passthrough; only an empty inherited plan has null
+origin. Removing the final manual hop uses this Restore preview and its existing
+Undo/Save/guard/Done flow; the old nonempty override stays saved until success. Preview is available
 while runtime is stopped. Save responses remain authoritative, and failed/ambiguous
 writes follow existing reconciliation using intent as well as effective hops.
 
@@ -496,7 +508,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 9,
+  "contract_version": 10,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -561,7 +573,8 @@ The protected model set for a backend is the union of:
 
 1. explicit models of enabled named Vibe Agents;
 2. checked open-menu models;
-3. every menu model with a persisted Route row, including an empty `hops` array.
+3. every model with a retained nonempty manual Route row, including dormant routes;
+   legacy empty keys normalize away without removing their catalog identities.
 
 The guard evaluates each protected `(backend, model)` against the post-mutation
 state. It counts only runnable exact hops in that model's effective Route chain, never
@@ -574,7 +587,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 9,
+  "contract_version": 10,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -601,16 +614,18 @@ server-side confirmation state exists.
 The shared layer recomputes the current guarded-impact plan and then applies this total
 decision matrix. For Source, inventory, default-membership and Restore mutations, a plan is nonempty when the staged
 mutation has at least one `would_remove_hops` or `would_interrupt` item. For
-`mutation.route_replace`, only a nonempty `would_interrupt` activates the plan; its
+nonempty `mutation.route_replace`, only a nonempty `would_interrupt` activates the plan; its
 refusal also reports every submitted removal in `would_remove_hops`, while a
 noninterrupting removal skips refusal and appears only in successful `removed_hops`.
+Empty PUT shares `mutation.route_restore` with DELETE and cannot bypass the exact
+effective-removal guard.
 Recalculation, exact-array comparison, and any commit share one atomic boundary. Source DELETE carries `force` in the query and the
 two echoed arrays in its JSON body; every other guarded mutation carries all confirmation
 fields in the JSON body.
 
 | Decision | `force` | Recomputed plan | Echoed refusal plan | HTTP/API result |
 | --- | --- | --- | --- | --- |
-| `guard_decision.unforced_no_impact` | false | empty, including visible noninterrupting `route_replace` removals | absent or supplied; echo is inert | ordinary mutation success |
+| `guard_decision.unforced_no_impact` | false | empty, including visible noninterrupting nonempty-manual `route_replace` removals | absent or supplied; echo is inert | ordinary mutation success |
 | `guard_decision.unforced_confirmation` | false | nonempty | absent or supplied; echo is inert | HTTP 409 `GuardRefusal` with the current plan |
 | `guard_decision.forced_no_impact` | true | empty | absent, exact, or stale | ordinary mutation success; `force` and any echo are inert |
 | `guard_decision.forced_confirmed` | true | nonempty | both arrays exactly equal the recomputed plan | commit once and return the row's success envelope |
@@ -706,7 +721,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 9,
+  "contract_version": 10,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -797,7 +812,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 9,
+  "contract_version": 10,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -827,9 +842,10 @@ reference is created.
 ## Chain and probe
 
 In Hub mode, `AgentChain.chain` is the shared effective per-model route in planner
-order. `manual_override` reports actual key presence and `route_origin` reports
-`automatic | manual | passthrough | null`, independently of live health. Empty chains
-have null origin, even with `{hops: []}` manual intent. Live inspection annotates it: cooling, missing, model-unsupported,
+order. `manual_override` reports a normalized nonempty manual override or null and
+`route_origin` reports `automatic | manual | passthrough | null`, independently of live
+health. Valid empty input inherits; an empty effective chain therefore has both null
+manual_override and null origin. Live inspection annotates it: cooling, missing, model-unsupported,
 source-blocked, live connection-backoff, and process-unavailable native CLI hops stay at their effective-plan
 positions with live annotations.
 `AgentChain.current` is either null or the exact `{source_id, model_id}` identity of
@@ -859,9 +875,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 9,
+  "contract_version": 10,
   "chain": {
-    "contract_version": 9,
+    "contract_version": 10,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -888,7 +904,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 9,
+  "contract_version": 10,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -902,9 +918,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 9,
+  "contract_version": 10,
   "probe": {
-    "contract_version": 9,
+    "contract_version": 10,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -927,7 +943,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 9,
+  "contract_version": 10,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -940,7 +956,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 9,
+  "contract_version": 10,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -956,7 +972,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 9,
+  "contract_version": 10,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1018,7 +1034,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 9, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 10, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 New `terminal_error` records may contain `http_status` (integer 100-599 or null) and
@@ -1058,7 +1074,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 9,
+  "contract_version": 10,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1067,7 +1083,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 9,
+  "contract_version": 10,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }

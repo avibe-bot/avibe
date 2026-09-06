@@ -1,18 +1,28 @@
 # Model Hub contracts
 
-Status: **contract_version 9**, 2026-09-06: sparse manual overrides, shared effective
+Status: **contract_version 10**, 2026-09-06: sparse manual overrides, shared effective
 planning and guarded Restore/default membership. The approved routing contract is
-`../model-hub-routing-modes.md`, frozen at `2db273891` before implementation, amended by owner decision `c1d398d5f`.
+`../model-hub-routing-modes.md`, including the owner-approved Empty Route Inheritance
+correction `352486374`; API-key-only scope remains unchanged.
 
 Supported persisted configuration shapes remain readable under the repository's
-persisted-shape rule. Existing explicit arrays, including empty, stale and dormant
-OpenCode routes, retain their exact intent. Do not infer old authorship from array
-contents or Source order. Ephemeral envelopes use the terminal version; persisted
+persisted-shape rule. Existing nonempty arrays, including stale and dormant OpenCode
+routes, retain their exact intent. Validate supported original shapes before normalizing
+valid empty values to absence; invalid values never silently become inherited. Canonical
+maps omit empty values without dropping catalog identities or other configuration.
+Reads/preview are pure; normal saves persist normalization. Do not infer old authorship
+from array contents or Source order. Ephemeral envelopes use the terminal version; persisted
 TurnProvenance accepts historical versions through the terminal one without new
 required route fields. Existing persistence readers normalize retired reason values
 before current-schema validation without changing the writer generation; raw historical
 bytes need not already use today's reason vocabulary. Generation names in older implementation history are not a
 current version declaration.
+
+The `minItems: 1` constraints on `AgentSupply.routes` values and
+`AgentChain.manual_override.hops` are canonical-output constraints only. Empty PUT
+and preview arrays remain accepted Restore inputs, and supported legacy config must
+validate its original shape before empty-value normalization; it must not be
+rejected against the output-only restriction.
 
 The contracts and their consumers must coexist on one tested PR head before Model Hub
 can be enabled. CI evaluates that head, not individual commits. A green intermediate
@@ -22,13 +32,15 @@ commit is not evidence that the complete final protocol has landed.
 
 - Sources are upstream assets. A Source never owns ordering.
 - Gateway stores one default Source membership/order per backend and sparse manual
-  overrides per model. Absence inherits; presence overrides, including an empty array.
-- The shared pure planner returns manual hops verbatim, otherwise all accepted matches
+  overrides per model. Absent and valid empty values inherit; only nonempty arrays override.
+- The shared pure planner returns nonempty manual hops verbatim, otherwise all accepted matches
   in default order, otherwise unchanged-id passthrough on eligible non-retired Hub API-key defaults.
 - Reads, previews, summaries, guards, adoption, probes, launches and execution use that
   effective plan. Health and process readiness annotate it without changing its origin.
 - New catalog rows have no override; Source creation appends defaults but never writes
-  manual hops. Restoring automatic deletes the key; saving equal hops remains manual.
+  manual hops. Restoring automatic or empty PUT deletes the key with identical exact
+  guards; saving equal nonempty hops remains manual. Removing the final hop previews
+  inherited routing through the same Restore/Undo/Save flow, never empty Manual.
 - A hop whose upstream `model_id` differs from its menu model is an explicit configured
   mapping. There is no separate mapping object or runtime mapping event.
 - The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat`.
@@ -69,8 +81,10 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    Normalized persisted catalog/target identities do not lose edit, preview, restore
    or history-read capability when a later new-identifier length bound is shorter.
 4. Source deletion atomically removes its id from every backend Source order and every
-   exact Route chain, preserving survivor order. Serialization and reload reject a
-   dangling Source id.
+   exact Route chain, preserving nonempty survivor order. Removing the final manual
+   hop drops its override key and recomputes inherited routing before exact removal,
+   supply-gap and transport-target planning. Serialization and reload reject a
+   dangling Source id before empty-value normalization.
 5. Manual Route membership and order survive unrelated state changes. Automatic routes
    follow current defaults and matching evidence. For the same planning inputs, health,
    quota and process readiness may change runnability/current but never tier or origin.
@@ -103,7 +117,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 9 must coexist in all registered version locations on the same tested head:
+`contract_version` 10 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

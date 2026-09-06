@@ -70,14 +70,15 @@ def _routing_config(backend, sources, *, manual=None):
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("inventory", [[], ["unrelated-inventory-model"]], ids=["empty", "incomplete"])
+@pytest.mark.parametrize("override", [None, []], ids=["absent-route", "legacy-empty-route"])
 def test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes_membership(
-    tmp_path, backend, inventory,
+    tmp_path, backend, inventory, override,
 ):
     """MH-ROUTING-002: inventory evidence selects the tier; health only annotates its ordered members."""
     first = source("src_routefirst", inventory)
     second = source("src_routesecond", inventory)
     outside = source("src_routeoutside", [])
-    config, model = _routing_config(backend, [first, second, outside])
+    config, model = _routing_config(backend, [first, second, outside], manual=override)
     outside.models = [source_model(model)]
     config.agents[backend].sources.order = [second.id, first.id]
     store = MemoryModelHubStore(config)
@@ -104,30 +105,40 @@ def test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-@pytest.mark.parametrize("empty", [False, True], ids=["unknown-target", "explicit-empty"])
-def test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reload(tmp_path, backend, empty):
-    """MH-ROUTING-003: manual targets, including empty overrides, survive unrelated configuration changes."""
+@pytest.mark.parametrize("intent", ["manual", "absent", "legacy-empty"])
+def test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reload(tmp_path, backend, intent):
+    """MH-ROUTING-003: nonempty manual targets persist; absent and empty routes inherit current defaults."""
     first = source("src_manualfirst", ["listed-only"])
     second = source("src_manualsecond", ["listed-only"])
-    manual = [] if empty else [(first.id, "vendor/unlisted-original")]
+    manual = {"manual": [(first.id, "vendor/unlisted-original")], "absent": None, "legacy-empty": []}[intent]
     config, model = _routing_config(backend, [first, second], manual=manual)
     store = MemoryModelHubStore(config)
     adapter = ModelHubScenarioAdapter(refresh_models=("new-discovered-model",))
     service = service_for(tmp_path, store, adapter)
-    original = config.agents[backend].routes[model].to_payload()
+    original = {"hops": [{"source_id": first.id, "model_id": "vendor/unlisted-original"}]} if intent == "manual" else None
     asyncio.run(service.refresh_source(first.id))
     asyncio.run(service.set_agent_sources(backend, {"order": [second.id, first.id]}))
+    reordered = service.agent_chain(backend, model)
+    assert reordered["manual_override"] == original
+    assert [(hop["source_id"], hop["model_id"]) for hop in reordered["chain"]] == (
+        manual if intent == "manual" else [(second.id, model), (first.id, model)]
+    )
     asyncio.run(service.reorder_agent_chains(backend, [first.id, second.id]))
     reloaded = service_for(tmp_path / "reload", MemoryModelHubStore(round_trip(store.load())), adapter)
     chain = reloaded.agent_chain(backend, model)
     assert chain["manual_override"] == original
-    assert chain["route_origin"] == (None if empty else "manual")
-    assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == manual
+    assert chain["route_origin"] == ("manual" if intent == "manual" else "passthrough")
+    assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == (
+        manual if intent == "manual" else [(first.id, model), (second.id, model)]
+    )
+    if intent != "manual":
+        assert model not in round_trip(store.load()).agents[backend].routes
     assert [item.id for item in store.load().sources[0].models] == ["new-discovered-model"]
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_override(tmp_path, backend, monkeypatch):
+@pytest.mark.parametrize("operation", ["delete", "empty-put"])
+def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_override(tmp_path, backend, monkeypatch, operation):
     """MH-ROUTING-004: draft restore is read-only; committed restore removes the override idempotently."""
     first = source("src_restorefirst", [])
     config, model = _routing_config(backend, [first], manual=[(first.id, "vendor/manual-target")])
@@ -142,6 +153,7 @@ def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_o
     monkeypatch.setattr(adapter, "start", forbidden_start)
     before_events = service.events.list()
     preview = service.preview_agent_chain(backend, model, {"manual_override": None})
+    assert service.preview_agent_chain(backend, model, {"manual_override": {"hops": []}}) == preview
     assert preview["manual_override"] is None
     assert preview["route_origin"] == "passthrough"
     assert [(hop["source_id"], hop["model_id"]) for hop in preview["chain"]] == [(first.id, model)]
@@ -153,14 +165,24 @@ def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_o
     assert store.saved_payloads == adapter.synced == adapter.invocations == []
     assert service.events.list() == before_events
 
+    async def restore(payload=None):
+        if operation == "empty-put":
+            return await service.set_agent_chain(backend, model, {"hops": [], **(payload or {})})
+        return await service.delete_agent_chain(backend, model, payload)
+
     with pytest.raises(ModelHubError) as refused:
-        asyncio.run(service.delete_agent_chain(backend, model))
+        asyncio.run(restore())
+    assert refused.value.code == "source_in_route_chain"
+    assert refused.value.data == {"would_remove_hops": [{
+        "backend": backend, "menu_model": model, "source_id": first.id,
+        "model_id": "vendor/manual-target", "position": 1,
+    }], "would_interrupt": []}
     assert store.load().to_payload() == original
-    restored = asyncio.run(service.delete_agent_chain(backend, model, {"force": True, **refused.value.data}))
+    restored = asyncio.run(restore({"force": True, **refused.value.data}))
     assert restored["chain"]["manual_override"] is None
     assert restored["chain"]["route_origin"] == "passthrough"
     assert model not in round_trip(store.load()).agents[backend].routes
-    repeated = asyncio.run(service.delete_agent_chain(backend, model))
+    repeated = asyncio.run(restore())
     assert repeated["chain"]["manual_override"] is None
     assert repeated["removed_hops"] == repeated["interrupted"] == []
 
@@ -443,8 +465,9 @@ def test_mh_menu_add_001_seeds_overlapping_suppliers_in_source_order(
     assert after["agents"]["opencode"] == before["agents"]["opencode"]
 
 
+@pytest.mark.parametrize("last_manual_hop", [False, True], ids=["nonempty-survivors", "inherit-after-last-hop"])
 def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order(
-    tmp_path: Path,
+    tmp_path: Path, last_manual_hop: bool,
 ) -> None:
     """MH-SRC-DELETE-001: source deletion is one transaction across all backend orders and chains."""
 
@@ -459,7 +482,7 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
         [first, doomed, last],
         backend="claude",
         menu_model=claude_model,
-        hops=[
+        hops=[(doomed.id, claude_model)] if last_manual_hop else [
             (first.id, claude_model),
             (doomed.id, claude_model),
             (last.id, claude_model),
@@ -479,7 +502,8 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
                 )
             ]
         agent.routes[menu_model] = ModelHubRouteConfig(
-            hops=tuple(ModelHubRouteHopConfig(item.id, upstream_model) for item in (first, doomed, last))
+            hops=tuple(ModelHubRouteHopConfig(item.id, upstream_model)
+                       for item in ((doomed,) if last_manual_hop else (first, doomed, last)))
         )
     store = MemoryModelHubStore(config)
     adapter = ModelHubScenarioAdapter()
@@ -505,7 +529,15 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
         ("opencode", opencode_model),
     ):
         assert doomed.id not in store.load().agents[backend].sources.order
-        assert [hop.source_id for hop in store.load().agents[backend].routes[menu_model].hops] == [first.id, last.id]
+        chain = service.agent_chain(backend, menu_model)
+        assert [hop["source_id"] for hop in chain["chain"]] == [first.id, last.id]
+        if last_manual_hop:
+            assert menu_model not in store.load().agents[backend].routes
+            assert chain["manual_override"] is None
+            assert chain["route_origin"] == "automatic"
+        else:
+            assert [hop.source_id for hop in store.load().agents[backend].routes[menu_model].hops] == [first.id, last.id]
+            assert chain["route_origin"] == "manual"
     assert round_trip(store.load()).to_payload() == store.load().to_payload()
     assert adapter.revoked == [doomed.credential_ref]
 
@@ -765,7 +797,11 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     assert persisted_sources == response_sources
     assert store.saved_payloads
     assert reloaded.to_payload() == store.load().to_payload()
-    assert set(_route_pairs(reloaded, "claude", menu_model)) == {
+    assert menu_model not in reloaded.agents["claude"].routes
+    inherited = service_for(tmp_path, MemoryModelHubStore(reloaded), adapter).agent_chain("claude", menu_model)
+    assert inherited["manual_override"] is None
+    assert inherited["route_origin"] == "automatic"
+    assert {(hop["source_id"], hop["model_id"]) for hop in inherited["chain"]} == {
         (position["source_id"], position["model_id"])
         for position in result["added_to"]
         if position["backend"] == "claude" and position["menu_model"] == menu_model
