@@ -17,7 +17,7 @@ for (const backend of ['claude', 'codex', 'opencode']) {
         await expect(grip(page, 'Existing model')).toBeVisible();
       });
 
-      test('keeps picker additions until the catalog is saved', async ({ page, isMobile }, testInfo) => {
+      test('MH-MENU-COMPOSE-001: keeps picker additions until the catalog is saved', async ({ page, isMobile }, testInfo) => {
         const activate = (locator: Locator) => isMobile ? locator.tap() : locator.click();
         const initial = await savedState(page);
         await activate(page.getByRole('button', { name: text('catalog.add'), exact: true }));
@@ -42,7 +42,7 @@ for (const backend of ['claude', 'codex', 'opencode']) {
         await expect(grip(page, 'claude-candidate-beta')).toBeVisible();
       });
 
-      test('dismisses only the picker or editor and preserves the unsaved draft', async ({ page, isMobile }) => {
+      test('MH-MENU-COMPOSE-001: dismisses only the picker or editor and preserves the unsaved draft', async ({ page, isMobile }) => {
         const activate = (locator: Locator) => isMobile ? locator.tap() : locator.click();
         const initial = await savedState(page);
         await activate(page.getByRole('button', { name: text('catalog.add'), exact: true }));
@@ -78,7 +78,7 @@ for (const backend of ['claude', 'codex', 'opencode']) {
         expect(await savedState(page)).toEqual(initial);
       });
 
-      test('hands the picker to the custom editor without dismissing the catalog', async ({ page, isMobile }) => {
+      test('MH-MENU-COMPOSE-001: hands the picker to the custom editor without dismissing the catalog', async ({ page, isMobile }) => {
         const activate = (locator: Locator) => isMobile ? locator.tap() : locator.click();
         const initial = await savedState(page);
         await activate(page.getByRole('button', { name: text('catalog.add'), exact: true }));

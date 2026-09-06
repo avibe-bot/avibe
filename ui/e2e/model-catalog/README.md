@@ -17,3 +17,8 @@ React ownership of portalled child dialogs: a delayed touch click must not be
 classified as outside the catalog after the child closes. Mouse-only and JSDOM
 tests do not reproduce that browser event timing. Backend persistence and routing
 contracts remain covered by their existing tests; this is not live acceptance.
+
+The live `playwright.config.ts` excludes this fixture directory. The consuming
+`scripts/modelCatalogDiscovery.test.mjs` checks both real configs with `--list`:
+live discovery excludes the fixture, while isolated discovery retains all 36
+scenario-labelled cases. Collection starts no browser, web server or fixture.
