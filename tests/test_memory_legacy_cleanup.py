@@ -2,11 +2,36 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import pytest
 
 from core import memory_legacy_cleanup as cleanup
+
+
+@pytest.fixture(autouse=True)
+def _forbid_host_process_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    def reject(*_args, **_kwargs):
+        pytest.fail("Released Memory fixtures must not inspect or signal host processes")
+
+    monkeypatch.setattr(cleanup.psutil, "Process", reject)
+    monkeypatch.setattr(cleanup.psutil, "process_iter", reject)
+    monkeypatch.setattr(cleanup.os, "kill", reject)
+
+
+@pytest.fixture
+def process_observations(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mock]:
+    inspect = Mock(return_value=None)
+    group_members = Mock(return_value=[])
+    signal_and_wait = Mock()
+    monkeypatch.setattr(cleanup, "_inspect", inspect)
+    monkeypatch.setattr(cleanup, "_group_members", group_members)
+    monkeypatch.setattr(cleanup, "_signal_and_wait", signal_and_wait)
+    if hasattr(cleanup.os, "getpgrp"):
+        monkeypatch.setattr(cleanup.os, "getpgrp", lambda: 1)
+    return inspect, group_members, signal_and_wait
 
 
 def _sidecar_record(home: Path) -> tuple[Path, dict[str, object]]:
@@ -86,7 +111,10 @@ def _sync_record(home: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_core_reaper_retires_gone_released_sidecar(tmp_path: Path) -> None:
+async def test_core_reaper_retires_gone_released_sidecar(
+    tmp_path: Path,
+    process_observations: tuple[Mock, Mock, Mock],
+) -> None:
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     path, _record = _sidecar_record(home)
@@ -97,11 +125,18 @@ async def test_core_reaper_retires_gone_released_sidecar(tmp_path: Path) -> None
 
     await reaper.reconcile_orphans()
 
+    inspect, group_members, signal_and_wait = process_observations
+    inspect.assert_called_once_with(451)
+    group_members.assert_not_called()
+    signal_and_wait.assert_called_once_with([], reaper._timeout)
     assert not path.exists()
 
 
 @pytest.mark.asyncio
-async def test_core_reaper_retires_gone_released_sync(tmp_path: Path) -> None:
+async def test_core_reaper_retires_gone_released_sync(
+    tmp_path: Path,
+    process_observations: tuple[Mock, Mock, Mock],
+) -> None:
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     path = _sync_record(home)
@@ -112,7 +147,56 @@ async def test_core_reaper_retires_gone_released_sync(tmp_path: Path) -> None:
 
     await reaper.reconcile_orphans()
 
+    inspect, group_members, signal_and_wait = process_observations
+    assert inspect.call_args_list == [call(99999999), call(451)]
+    assert group_members.call_args_list == [call(451), call(451)]
+    signal_and_wait.assert_called_once_with([], reaper._timeout)
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [True, False], ids=["owned-survivor", "foreign-member"])
+async def test_core_reaper_preserves_sync_record_with_surviving_group_member(
+    tmp_path: Path,
+    process_observations: tuple[Mock, Mock, Mock],
+    owned: bool,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    path = _sync_record(home)
+    original = path.read_bytes()
+    member = replace(
+        _identity(home),
+        pid=452,
+        process_group=451,
+        environment={
+            "EVEROS_ROOT": str(home / "memory" / "everos-root"),
+            "AVIBE_MEMORY_CHILD_ROLE": "cascade_sync" if owned else "foreign",
+            "AVIBE_MEMORY_SYNC_NONCE": "a" * 64,
+            "AVIBE_MEMORY_SYNC_PARENT_PID": "99999999",
+            "AVIBE_MEMORY_SYNC_PARENT_CREATE_TIME": float(8.25).hex(),
+            "AVIBE_MEMORY_SYNC_PARENT_UID": str(os.getuid()) if hasattr(os, "getuid") else "",
+        },
+    )
+    inspect, group_members, signal_and_wait = process_observations
+    group_members.return_value = [member]
+    reaper = cleanup.ReleasedEverOSOrphanReconciler(
+        provider_root=home / "memory" / "everos-root",
+        effective_home=home,
+    )
+
+    error = "process group did not exit" if owned else "identity is unavailable"
+    with pytest.raises(RuntimeError, match=error):
+        await reaper.reconcile_orphans()
+
+    assert inspect.call_args_list == [call(99999999), call(451)]
+    if owned:
+        signal_and_wait.assert_called_once_with([member], reaper._timeout)
+        assert group_members.call_args_list == [call(451), call(451)]
+    else:
+        signal_and_wait.assert_not_called()
+        group_members.assert_called_once_with(451)
+    assert path.read_bytes() == original
 
 
 @pytest.mark.asyncio

@@ -509,6 +509,61 @@ tests rather than disabling them. Cleanup compares canonical intent and must not
 restore an obsolete empty-disable state. Existing failed live artifacts stay
 immutable; the required browser flows and safety gates are not waived.
 
+## Post-Merge Guard Acceptance Closure
+
+The first complete v10 browser run passed all four visual flows but exposed an
+old B7 fixture premise: deleting a one-hop manual route's source does not imply
+a supply gap when its now-inherited default route still has eligible sources.
+The actual no-interruption refusal and UI were consistent with the contract.
+
+B7 must continue testing a genuine source-removal gap, refusal, exact confirmation
+and impact report. Arrange the selected backend's default membership so the
+owned source being deleted is its only eligible default, while retaining the
+explicit one-hop manual route. Assert these preconditions through real reads.
+Removing that source then leaves neither a nonempty override nor inherited
+supply. Do not weaken the assertion to accept either gap/no-gap, fake an API
+response, restore empty-disable semantics, or alter production guards.
+
+Snapshot defaults before the arrangement and enter cleanup protection before
+either write. Restore canonical original manual intent and original default
+membership/order independently even after an ambiguous write or failed assertion.
+Only the test-owned deleted source may be omitted from a captured default order;
+an unrelated disappeared source is a cleanup failure, not permission to silently
+filter arbitrary IDs. Preserve the existing case identity and four named baseline
+gaps. Source deletion and its impact remain real browser actions. This is a
+browser-fixture correction, with no product/API/version change.
+
+## Default Drawer Text Containment
+
+Root's complete v10 visual inspection found ordered source text painting over
+the action group and the provider-priority explanation clipped outside the
+mobile drawer. This is a text-column ownership defect, not permission to resize
+the approved 26px controls or change route semantics. The previous action-only
+scope is extended only for these demonstrated default-drawer text boundaries.
+
+The shared source identity column stretches its children to its available width.
+Ordered, held-out and missing-source reconciliation rows display complete source
+identity and protocol/inventory text with normal wrapping and overflow-wrap for
+long tokens. The existing 58px row height becomes its minimum; longer content
+can increase the row height with tokenized padding. Do not rely on title-only
+disclosure, crop strings, hide overflow on the entire row, or overlap controls.
+The action group remains nonshrinking with its existing dimensions, focus,
+disabled boundaries, pointer and keyboard behavior.
+
+Provider-priority explanation reuses the existing held-out section explanation
+owner: a bounded, normally wrapping line below its heading, with the same muted
+type treatment. No new tooltip, unbounded chip or reduced text size is needed.
+The current route dialog shell, global Button and persistence/guard policy are
+outside this correction.
+
+Consumption tests cover shared long-prefix/different-suffix identities and
+ordered/held-out/reconciling states in both languages. Actual desktop/mobile,
+light/dark browser acceptance must measure painted text containment relative to
+the row and action group, not only the outer drawer or button-to-button overlap.
+Screenshots must show the expected settled data before capture. Seven loading
+images from the prior run are not evidence for their named persisted/default/
+automatic states; the original result remains immutable.
+
 ## Delivery Ownership
 
 One feature PR is intentional: executable schema/type/mirror closure needs all

@@ -32,23 +32,23 @@ test.describe('G · supply guards and failure copy', () => {
       `The precondition source ${source.display_name} came back with no models, so no route can reach it.`,
     ).toBeDefined();
 
-    // Arrange the one state a guard exists for: this source is the ONLY hop of a
-    // configured route, so removing it leaves that model with no supply. The
-    // chain is captured first and put back in teardown — the instance's real
-    // routing is not this spec's to keep. Real routing is also all it captures:
-    // the source deleted below may already be a hop here, and restoring a hop
-    // this spec is about to delete is how the whole restore gets refused.
+    // Pruning the last manual hop inherits defaults. Both authorities must
+    // depend solely on this owned source for deletion to create a genuine gap.
+    const originalDefaults = await api.defaultSourceOrder(gateway.backend);
     const original = await captureAgentChain(api, gateway);
+    const failures: unknown[] = [];
     try {
-      // Entered BEFORE the arranged PUT, not after it succeeds: a response
-      // lost to a timeout or disconnect rejects that await with the chain
-      // already replaced server-side, and a finally outside it would leave
-      // the user's route swapped for the arrangement — then the fixture's
-      // source sweep empties it entirely.
-      const arranged = await api.putAgentChain(gateway.backend, gateway.model, [
-        { source_id: source.id, model_id: supplied! },
-      ]);
+      // Protect both writes even when persistence succeeds but its response is lost.
+      await api.setDefaultSourceOrder(gateway.backend, [source.id]);
+      expect(await api.defaultSourceOrder(gateway.backend), 'B7 requires only the owned deletion source in defaults')
+        .toEqual([source.id]);
+      const hops = [{ source_id: source.id, model_id: supplied! }];
+      const arranged = await api.putAgentChain(gateway.backend, gateway.model, hops);
       expect(arranged, 'The instance refused the arranged route, so no guard can be raised.').toBe(true);
+      const readback = await api.agentChain(gateway.backend, gateway.model);
+      expect(readback.manual_override, 'B7 requires the exact saved one-hop manual route').toEqual({ hops });
+      expect(readback.chain.map(({ source_id, model_id }) => ({ source_id, model_id })),
+        'B7 requires the owned source to be the only effective manual hop').toEqual(hops);
 
       await hub.goto();
       await hub.openSource(source.id);
@@ -95,12 +95,29 @@ test.describe('G · supply guards and failure copy', () => {
       await expect
         .poll(async () => (await api.sources()).some((s) => s.id === source.id), { timeout: 15_000 })
         .toBe(false);
+    } catch (error) {
+      failures.push(error);
     } finally {
-      // The delete that just ran means nothing downstream can put this chain
-      // back, so `restoreAgentChain`'s refusal-is-a-failure contract is the
-      // whole guarantee here.
-      await restoreAgentChain(api, gateway, original);
+      try {
+        await restoreAgentChain(api, gateway, original);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        const remaining = new Set((await api.sources()).map((item) => item.id));
+        expect(originalDefaults.filter((id) => id !== source.id && !remaining.has(id)),
+          'B7 cannot restore defaults while unrelated captured sources are missing').toEqual([]);
+        // Only this exact owned deletion may change the captured membership.
+        const expected = originalDefaults.filter((id) => id !== source.id || remaining.has(id));
+        await api.setDefaultSourceOrder(gateway.backend, expected);
+        expect(await api.defaultSourceOrder(gateway.backend), 'B7 must restore exact default membership and order')
+          .toEqual(expected);
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, 'B7 failed with independent restoration errors');
   });
 
   // G1 (fix-first) — "guard echo with a gap missing `agents` → no confirm-loop".
