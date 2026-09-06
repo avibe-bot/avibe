@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,59 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _jobs() -> dict:
     return yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())["jobs"]
+
+
+def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
+    owners = {
+        name: job for name, job in _jobs().items()
+        if any(step.get("run", "").startswith("uv ") for step in job["steps"])
+    }
+    assert set(owners) == {
+        "unit-test-shards", "migration-release-guard", "install-upgrade-shards", "memory-insight-contract",
+    }
+    cache_keys = {}
+    for name, job in owners.items():
+        steps = job["steps"]
+        install, = [step for step in steps if step.get("name") == "Install pinned uv"]
+        version = "0.9.18" if name == "memory-insight-contract" else "0.12.10"
+        assert shlex.split(install["run"]) == [
+            "python", "-m", "pip", "install", "--disable-pip-version-check",
+            "--only-binary=:all:", "--no-deps", f"uv=={version}",
+        ]
+        assert not install.get("if") and not install.get("continue-on-error")
+        assert any(step.get("uses", "").startswith("actions/setup-python@") for step in steps[:steps.index(install)])
+        assert not any(step.get("uses", "").startswith("astral-sh/setup-uv@") for step in steps)
+        cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache")]
+        action = "actions/cache/restore" if name in {"unit-test-shards", "migration-release-guard"} else "actions/cache"
+        assert cache["uses"] == f"{action}@caa296126883cff596d87d8935842f9db880ef25"
+        assert cache["with"]["path"] == "~/.cache/uv"
+        key = cache["with"]["key"]
+        assert "${{ runner.os }}-${{ runner.arch }}" in key and f"uv-{version}-py3.12" in key
+        dependencies = "'scripts/memory_runtime/uv.lock'" if name == "memory-insight-contract" else "'pyproject.toml', 'uv.lock'"
+        assert f"hashFiles({dependencies})" in key
+        cache_keys[name] = key
+        first_consumer = next(step for step in steps if step.get("run", "").startswith("uv "))
+        assert steps.index(install) < steps.index(cache) < steps.index(first_consumer)
+    assert len({cache_keys[name] for name in owners if name != "memory-insight-contract"}) == 1
+    assert cache_keys["memory-insight-contract"] != cache_keys["install-upgrade-shards"]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, 7])
+def test_ci_tool_install_command_propagates_failure(tmp_path, exit_code):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    python = binary / "python"
+    python.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit {exit_code}\n")
+    python.chmod(0o755)
+    for job in _jobs().values():
+        for step in job["steps"]:
+            if step.get("name") == "Install pinned uv":
+                result = subprocess.run(
+                    [shutil.which("bash"), "-e", "-c", step["run"]], cwd=tmp_path,
+                    env={**os.environ, "PATH": str(binary)}, capture_output=True, text=True,
+                )
+                assert result.returncode == exit_code
+                assert "--only-binary=:all:" in result.stdout
 
 
 def _run_isolated_unit_files(tmp_path: Path, sources: dict[str, str], *, timeout: str = "15"):
