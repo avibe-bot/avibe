@@ -1107,7 +1107,7 @@ class SessionTurnManager:
         self,
         context: "MessageContext",
         settled_by: Optional[str],
-    ) -> None:
+    ) -> asyncio.Task[None] | None:
         runtime = getattr(self.controller, "model_hub_runtime", None)
         settle = getattr(runtime, "settle_turn", None)
         turn_id = str(
@@ -1126,7 +1126,7 @@ class SessionTurnManager:
             mode = turn_mode_for_context(context)
             if mode is None and launch is not None:
                 mode = "direct" if launch.channel == "direct" else "hub"
-            settle(
+            return settle(
                 turn_id,
                 settled_by=settled_by,
                 ts=_utc_now_iso(),
@@ -7369,13 +7369,6 @@ class SessionTurnManager:
                     cancel_defers_queue_resume = bool(
                         turn is not None and turn.cancel_defers_queue_resume
                     )
-                    if turn is not None:
-                        self.in_flight.pop(session_id, None)
-                    if turn is not None:
-                        bus.publish(
-                            "turn.end",
-                            _turn_event_payload(session_id, logical_turn_id),
-                        )
                     if cancelled:
                         # Attribute the cancellation to whoever caused it. The Turn
                         # carries the cause when the canceller had a more specific one
@@ -7384,7 +7377,23 @@ class SessionTurnManager:
                         settled_by = (
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
                         ) or SETTLED_BY_NO_TERMINAL_RESULT
-                    self._settle_model_hub_turn(context, settled_by)
+                    completion = self._settle_model_hub_turn(context, settled_by)
+                    if inspect.isawaitable(completion):
+                        from core.handlers.model_hub.async_owner import await_owned_task
+
+                        try:
+                            await await_owned_task(asyncio.ensure_future(completion))
+                        except Exception:
+                            logger.warning("Model Hub turn finalization failed", exc_info=True)
+                    # Durable output may already have marked the old row terminal.
+                    # _start_persisted_turn still fences its successor on this live
+                    # runner, so release the projection only after Hub finalization.
+                    if turn is not None and self.in_flight.get(session_id) is turn:
+                        self.in_flight.pop(session_id, None)
+                        bus.publish(
+                            "turn.end",
+                            _turn_event_payload(session_id, logical_turn_id),
+                        )
                     if logical_turn_id and durable_turn_registered:
                         durable_terminal_result = self._reconcile_durable_runner_release(
                             logical_turn_id,

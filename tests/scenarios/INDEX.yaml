@@ -143,6 +143,7 @@ capabilities:
       - tests/test_model_hub_admission.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_provenance.py
+      - tests/test_model_hub_retention.py
       - tests/test_model_hub_resolution.py
       - tests/test_model_hub_routing_modes.py
       - tests/test_model_hub_transport_leases.py

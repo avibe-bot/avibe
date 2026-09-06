@@ -5297,7 +5297,7 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
     service.note_turn_mode = Mock(side_effect=OSError("mode store unavailable"))
     router = ModelHubRuntimeRouter(
         service=service,
-        turn_gateway=SimpleNamespace(correlation=correlation),
+        turn_gateway=ModelHubTurnGateway(service, correlation=correlation),
     )
 
     with pytest.raises(OSError, match="mode store unavailable"):

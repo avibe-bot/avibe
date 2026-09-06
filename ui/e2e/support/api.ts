@@ -93,6 +93,8 @@ export type Probe = {
   error?: string | null;
 };
 
+export type TurnReceipt = { ok: true; session_id: string; turn_id: string; queued: boolean };
+
 export type RecordedTurn = {
   turn_id: string;
   ts: string;
@@ -372,20 +374,37 @@ export class HubApi {
     return body.id;
   }
 
-  async sendTurn(sessionId: string, text: string): Promise<void> {
+  async sendTurn(sessionId: string, text: string): Promise<TurnReceipt> {
     const result = await this.mutate('post', `/api/sessions/${sessionId}/messages`, { text });
-    if (result.status !== 202) throw new Error(`Send turn failed: ${JSON.stringify(result.body)}`);
+    const body = result.body as Partial<TurnReceipt> | null;
+    // ui_server merges public_delivery_payload with dispatch_async's receipt.
+    if (result.status !== 202 || body?.ok !== true || body.session_id !== sessionId
+      || typeof body.turn_id !== 'string' || !/^trn_[a-f0-9]{32}$/.test(body.turn_id)
+      || typeof body.queued !== 'boolean') {
+      throw new Error(`Send turn did not return the exact accepted FSM receipt: HTTP ${result.status}`);
+    }
+    return { ok: true, session_id: body.session_id, turn_id: body.turn_id, queued: body.queued };
+  }
+
+  /** Archive owns lifecycle cancellation; an already-completed turn needs no Stop. */
+  async archiveTurnSession(sessionId: string): Promise<void> {
+    const path = `/api/sessions/${encodeURIComponent(sessionId)}`;
+    const result = await this.mutate('delete', path);
+    if (!result.ok) throw new Error(`Archive fixture session failed: HTTP ${result.status}`);
+    const archived = result.body as { id?: unknown; status?: unknown } | null;
+    if (archived?.id !== sessionId || archived?.status !== 'archived') {
+      throw new Error(`Archive fixture session response did not confirm archived identity: ${sessionId}`);
+    }
+    const stored = await this.read<{ id?: unknown; status?: unknown } | null>(path);
+    if (stored?.id !== sessionId || stored?.status !== 'archived') {
+      throw new Error(`Archive fixture session readback did not confirm archived identity: ${sessionId}`);
+    }
   }
 
   async removeTurnFixture(agentName: string, sessionId: string | null): Promise<void> {
     const failures: unknown[] = [];
     try {
-      if (sessionId) {
-        const canceled = await this.mutate('post', `/api/sessions/${sessionId}/cancel`, {});
-        if (!canceled.ok) throw new Error(`Cancel fixture turn failed: ${JSON.stringify(canceled.body)}`);
-        const archived = await this.mutate('delete', `/api/sessions/${sessionId}`);
-        if (!archived.ok) throw new Error(`Archive fixture session failed: ${JSON.stringify(archived.body)}`);
-      }
+      if (sessionId) await this.archiveTurnSession(sessionId);
     } catch (error) {
       failures.push(error);
     }

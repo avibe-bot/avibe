@@ -9,7 +9,7 @@ import socket
 import tempfile
 from collections import deque
 from collections.abc import Callable, Mapping
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
@@ -17,6 +17,7 @@ from typing import BinaryIO, Final, Optional
 from aiohttp import web
 
 from config import paths
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from vibe.i18n import t as i18n_t
 
 from .adapter import (
@@ -25,7 +26,7 @@ from .adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
-from .async_owner import run_owned_in_thread
+from .async_owner import await_owned_task, run_owned_in_thread
 from .classification import ResolutionDecision
 from .provenance import (
     BoundedProvenanceStore,
@@ -240,6 +241,14 @@ class _DownstreamDisconnected(ConnectionError):
     pass
 
 
+@dataclass(eq=False)
+class _OwnedGatewayRequest:
+    task: asyncio.Task
+    terminalizer: GatewayTurnTerminalizer
+    execution: _TurnExecution
+    done: asyncio.Future[None]
+
+
 class ModelHubTurnGateway:
     """Expose the controller-owned resolver to backend CLI HTTP clients."""
 
@@ -287,6 +296,101 @@ class ModelHubTurnGateway:
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
         self._base_url: str | None = None
+        self._turn_requests: dict[str, set[_OwnedGatewayRequest]] = {}
+        self._turn_completions: dict[str, asyncio.Task[None]] = {}
+
+    @contextmanager
+    def _own_turn_request(self, terminalizer: GatewayTurnTerminalizer, execution: _TurnExecution):
+        turn_id = terminalizer.turn_id
+        if turn_id is None:
+            yield
+            return
+        task = asyncio.current_task()
+        assert task is not None
+        owned = _OwnedGatewayRequest(task, terminalizer, execution, asyncio.get_running_loop().create_future())
+        self._turn_requests.setdefault(turn_id, set()).add(owned)
+        # Body attribution may release the identity armed from headers. That
+        # request still routes, but the turn no longer owns its transport.
+        terminalizer.on_attribution_released = lambda: self._release_turn_request(turn_id, owned)
+        try:
+            yield
+        finally:
+            terminalizer.on_attribution_released = None
+            self._release_turn_request(turn_id, owned)
+
+    def _release_turn_request(self, turn_id: str, owned: _OwnedGatewayRequest) -> None:
+        requests = self._turn_requests.get(turn_id)
+        if requests is not None:
+            requests.discard(owned)
+            if not requests:
+                self._turn_requests.pop(turn_id, None)
+        if not owned.done.done():
+            owned.done.set_result(None)
+
+    def finalize_turn(
+        self,
+        turn_id: str,
+        *,
+        settled_by: str | None,
+        finish: Callable[[], None],
+    ) -> asyncio.Task[None] | None:
+        """Join the FSM boundary with every already-owned request boundary."""
+
+        existing = self._turn_completions.get(turn_id)
+        if existing is not None:
+            return existing
+        self.correlation.close_turn_admission(turn_id, settled_by=settled_by)
+        if not self._turn_requests.get(turn_id):
+            finish()
+            return None
+
+        async def complete() -> None:
+            try:
+                drain = asyncio.create_task(self._drain_turn_requests(
+                    turn_id, cancel=settled_by != SETTLED_BY_TERMINAL_RESULT
+                ))
+                await await_owned_task(drain)
+            finally:
+                try:
+                    finish()
+                finally:
+                    self._turn_completions.pop(turn_id, None)
+
+        task = asyncio.create_task(complete(), name="model-hub-turn-finalization")
+        self._turn_completions[turn_id] = task
+        return task
+
+    async def _drain_turn_requests(self, turn_id: str, *, cancel: bool = False) -> None:
+        requests = tuple(self._turn_requests.get(turn_id, ()))
+        if not requests:
+            return
+        if cancel:
+            for owned in requests:
+                owned.task.cancel()
+        _, pending = await asyncio.wait(
+            {owned.done for owned in requests}, timeout=self._transport_timeout
+        )
+        if not pending:
+            return
+        # Reuse the request boundary's cancellation/teardown budget. Waiting on
+        # its completion signal includes terminalizer exit, not just attempts.
+        pending = {future for future in pending if not future.done()}
+        if not pending:
+            return
+        for owned in requests:
+            if owned.done in pending:
+                owned.task.cancel()
+        _, pending = await asyncio.wait(pending, timeout=self._transport_timeout)
+        for owned in requests:
+            if owned.done not in pending or owned.done.done():
+                continue
+            self._abandon_owned_task(
+                owned.task, phase="request", terminalizer=owned.terminalizer, execution=owned.execution
+            )
+            # An abandoned worker cannot publish late facts into this or a
+            # subsequent turn after the bounded owner has released its slot.
+            owned.terminalizer.turn_id = None
+            self._release_turn_request(turn_id, owned)
 
     @property
     def resource_leak_records(self) -> tuple[tuple[str, str | None], ...]:
@@ -357,8 +461,17 @@ class ModelHubTurnGateway:
         self._runner = None
         self._site = None
         self._base_url = None
+        if self._turn_requests:
+            await asyncio.gather(*(
+                self._drain_turn_requests(turn_id, cancel=True)
+                for turn_id in tuple(self._turn_requests)
+            ))
         if runner is not None:
             await runner.cleanup()
+        if self._turn_completions:
+            await asyncio.gather(*(
+                await_owned_task(task) for task in tuple(self._turn_completions.values())
+            ))
         # After the runner, so the handlers it cancels have queued their last
         # writes first. Bounded like every other owned drain: a ledger that
         # cannot be reached must not hold shutdown open.
@@ -446,11 +559,12 @@ class ModelHubTurnGateway:
         token = self._authorized_token(request, backend)
         if token is None:
             return self._error_response(status=401, code="authentication_error")
-        with self.correlation.gateway_terminalizer(
+        terminalizer = self.correlation.gateway_terminalizer(
             backend=backend,
             token=token,
-        ) as terminalizer:
-            execution = _TurnExecution()
+        )
+        execution = _TurnExecution()
+        with self._own_turn_request(terminalizer, execution), terminalizer:
             resources = AsyncExitStack()
             await resources.__aenter__()
             request_task = asyncio.create_task(

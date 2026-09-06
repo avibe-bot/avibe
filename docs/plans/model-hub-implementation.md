@@ -35,6 +35,15 @@ mirrors that decision table; the direct backend test
 `tests/test_model_hub_provenance.py::test_terminal_diagnostic_schema_uses_the_production_machine_code_authority`
 compares schema enum minus null with production `UPSTREAM_MACHINE_ERROR_CODES`.
 
+Joined Turn Finalization in `model-hub-routing-modes.md` closes the terminal-frame
+race between native FSM completion and actual gateway settlement. Existing
+correlation/terminalizer owners retain exactly attributed request identities until
+both boundaries finish, with bounded teardown and same-Session admission ordering.
+They preserve cancellation, failure and ambiguous-scope rules; neither Session
+text nor a lookup retry may manufacture a replacement successful record. Real
+loopback early/late completion and reused-process follow-up tests consume this
+boundary, alongside the merged local recorded-turn browser workflow.
+
 Transport registration is separate from inventory: SourceBinding.route_model_ids is a
 default-empty tuple, mirrored in the internal SourceRecord with absent-as-empty loading.
 The deterministic sorted/deduplicated set comes from effective Hub-channel targets across
