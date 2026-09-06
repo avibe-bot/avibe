@@ -776,7 +776,7 @@ export const RouteChainDialog: React.FC<{
         </span>
         <span className="model-hub-route-hop-copy flex min-w-0 flex-1 flex-col">
           <span
-            className="model-hub-route-hop-name truncate font-semibold text-foreground"
+            className="model-hub-route-hop-name font-semibold text-foreground"
             title={displayedSource}
           >
             {missing ? (
@@ -791,7 +791,7 @@ export const RouteChainDialog: React.FC<{
             )}
           </span>
           <span
-            className="model-hub-route-hop-model model-hub-ink-muted-b3 truncate font-mono"
+            className="model-hub-route-hop-model model-hub-ink-muted-b3 font-mono"
             title={hop.model_id}
           >
             {hop.model_id}
@@ -1039,8 +1039,8 @@ export const RouteChainDialog: React.FC<{
               <div key={`${hop.source_id}:${hop.model_id}`} className="model-hub-route-hop model-hub-fill-08 flex items-center border border-border">
                 <span className="model-hub-route-ordinal grid shrink-0 place-items-center font-mono" data-origin={draftOrigin ?? 'unconfigured'}>{index + 1}</span>
                 <span className="model-hub-route-hop-copy flex min-w-0 flex-1 flex-col">
-                  <span className="model-hub-route-hop-name truncate font-semibold" title={sourceName(sources, hop.source_id)}>{sourceName(sources, hop.source_id)}</span>
-                  <span className="model-hub-route-hop-model truncate font-mono text-muted" title={hop.model_id}>{hop.model_id}</span>
+                  <span className="model-hub-route-hop-name font-semibold" title={sourceName(sources, hop.source_id)}>{sourceName(sources, hop.source_id)}</span>
+                  <span className="model-hub-route-hop-model font-mono text-muted" title={hop.model_id}>{hop.model_id}</span>
                 </span>
               </div>
             ))

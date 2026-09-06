@@ -62,9 +62,13 @@ const ModelRow: React.FC<{
   modelId: string;
   sources: Source[];
   read: ModelChainRead | undefined;
+  originHelpOpen: boolean;
+  onOriginHelpChange: (key: string, open: boolean) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
-}> = ({ agent, modelId, sources, read, onOpenRoute }) => {
+}> = ({ agent, modelId, sources, read, originHelpOpen, onOriginHelpChange, onOpenRoute }) => {
   const { t } = useTranslation();
+  const helpKey = modelChainKey(agent.backend, modelId);
+  const onHelpOpenChange = React.useCallback((open: boolean) => onOriginHelpChange(helpKey, open), [helpKey, onOriginHelpChange]);
   const current = currentLink(read);
   const takeover = isTakeoverRead(read);
   const supplyState = modelSupplyState(agent, modelId);
@@ -95,7 +99,7 @@ const ModelRow: React.FC<{
       <span className="pointer-events-none flex min-w-0 flex-1 items-center justify-between gap-2.5">
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
         <span className="flex min-w-0 flex-1 items-center justify-end gap-[7px]">
-          <span className="pointer-events-auto relative shrink-0"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} /></span>
+          <span className="pointer-events-auto relative shrink-0"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
           {hasCurrentMapping ? (
             <span
               className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
@@ -122,13 +126,15 @@ const AgentModelCard: React.FC<{
   pending: boolean;
   connecting: boolean;
   switchFailed: boolean;
+  activeOriginHelp: string | null;
+  onOriginHelpChange: (key: string, open: boolean) => void;
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenModels: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled }) => {
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled }) => {
   const { t } = useTranslation();
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
@@ -255,7 +261,7 @@ const AgentModelCard: React.FC<{
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-2.5 text-[11px] font-semibold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t('settings.models.gateway.switchToGateway')}</Button>}
         </div>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><ManageModelsButton disabled={pending} onClick={() => onOpenModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><ManageModelsButton disabled={pending} onClick={() => onOpenModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
     </section>
   );
 };
@@ -274,4 +280,11 @@ export const AgentCard: React.FC<{
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   connectingBackend: string | null;
-}> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => <div className="flex flex-col gap-2.5">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
+}> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => {
+  const [activeOriginHelp, setActiveOriginHelp] = React.useState<string | null>(null);
+  const onOriginHelpChange = React.useCallback((key: string, open: boolean) => {
+    // Late blur, leave timers and row cleanup can dismiss only their own help.
+    setActiveOriginHelp((current) => open ? key : current === key ? null : current);
+  }, []);
+  return <div className="flex flex-col gap-2.5">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
+};
