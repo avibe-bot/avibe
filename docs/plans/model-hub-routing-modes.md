@@ -243,6 +243,39 @@ Contract and consuming tests must cover old records without optional metadata,
 model/backend isolation, latest-success clearing, bounded/absent history, unsafe
 upstream text exclusion, read-only retrieval, and real model-not-found display.
 
+### Joined Turn Finalization
+
+A backend may finish its native turn as soon as it reads a terminal protocol
+frame, before the gateway has settled the corresponding transport outcome. FSM
+completion alone must not destroy an exactly attributed trace with owned gateway
+requests still settling. Correlation and the existing gateway terminalizer join
+those two lifecycles; only observed service outcomes can establish Hub success.
+
+At FSM completion, close new attribution admission for that turn while allowing
+already-owned request identities to finish. Finalize the retained record once,
+after both boundaries are terminal, preserving the existing stopped, backend
+failure, ambiguity, and native-channel precedence. Prefer a bounded per-turn
+drain integrated with the existing Session completion/admission owner and gateway
+teardown deadline. Do not wait under a service mutation lock or a global lock,
+and do not block unrelated Sessions. The next turn in the same Session must not
+be attributed to the departing trace or have its newer record replaced by a
+late finalization of that trace. Preserve route credential reuse and independent
+request identities across retries and concurrent requests within one turn.
+
+Cancellation, process-scope retirement, gateway close and teardown timeout must
+release owned state without inventing success or silently dropping committed
+terminal facts. A terminal frame is not permission to bypass settlement. No
+second history store, delayed lookup retry, new wire/version field, arbitrary
+sleep, or per-request engine registration is part of this correction. OpenCode's
+existing shared-process untracked boundary remains unchanged.
+
+Consuming regression must exercise real loopback HTTP completion before gateway
+settlement, the opposite ordering, first-error/second-success on a reused process
+credential, multiple requests and retries, stopped/backend-error/retired scopes,
+bounded cancellation and timeout, and independent Session progress. Live
+acceptance must retain the actual second request's source/model capture and
+distinct turn identity before claiming that a later success clears an old error.
+
 ### Atomic Invocation Admission
 
 Transport draining alone does not protect a request that resolved an old target
