@@ -1177,7 +1177,7 @@ def render_skill_catalog_blocks(skills: Sequence[ManagedSkill]) -> list[Rendered
         if any(skill.disable_model_invocation for skill in skills):
             return [render_prompt_block("skills-manual-prompt")]
         return []
-    blocks = [render_prompt_block("skills-prompt")]
+    blocks = [render_prompt_block("skills-prompt"), render_prompt_block("skills-catalog-heading")]
     if next_page is not None:
         blocks.append(render_prompt_block("skills-pagination-prompt"))
     blocks.append(render_prompt_block("skills-catalog", skill_rows=rows))
