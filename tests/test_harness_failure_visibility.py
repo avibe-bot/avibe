@@ -1627,7 +1627,7 @@ def _write_raw_metadata_json(sqlite: SQLiteBackgroundTaskStore, run_id: str, blo
     assert _raw_metadata_json(sqlite, run_id) == blob, "the fixture blob must survive the write"
 
 
-def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path) -> None:
+def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path, sqlite_schema_db_factory) -> None:
     """Subordinate to HFR-084/HFR-072 — malformed metadata is READ-ONLY to the stamp.
 
     ``_merge_owed_failure_notice`` decoded the column with ``_json_loads(..., {})``
@@ -1658,6 +1658,7 @@ def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path) -
             # exercised on one writer; the truncated blob is exercised on all four.
             if blob != "{broken" and writer != "record_run_output":
                 continue
+            sqlite_schema_db_factory(tmp_path / f"{writer}-{blobs.index(blob)}" / "state" / "vibe.sqlite")
             sqlite, requests = _store(tmp_path / f"{writer}-{blobs.index(blob)}")
             if writer == "coalesced":
                 run = requests.enqueue_agent_run(
