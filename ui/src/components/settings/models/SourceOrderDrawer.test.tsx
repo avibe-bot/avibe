@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -69,6 +69,58 @@ beforeEach(() => {
 });
 
 describe('SourceOrderDrawer keyboard ordering', () => {
+  it('uses the same compact action owner for ordered controls and held-out include without losing hints or boundaries', async () => {
+    const available = [...sources, source('src_c', 'Manual only')];
+    const codex: AgentSupply = { ...agent, backend: 'codex', sources: {
+      order: ['src_a', 'src_b'], eligibility: available.map((item) => ({ source_id: item.id, eligible: true })),
+    } };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(codex);
+    vi.mocked(modelsApi.listSources).mockResolvedValue(available);
+    renderDrawer({ agent: codex, sources: available });
+    await screen.findByRole('button', { name: 'Add to order' });
+
+    const rows = [...document.querySelectorAll<HTMLElement>('.model-hub-order-row')];
+    expect(rows).toHaveLength(3);
+    const labels = [['Move source up', 'Move source down', 'Remove from order'], ['Move source up', 'Move source down', 'Remove from order'], ['Add to order']];
+    rows.forEach((row, index) => {
+      const actions = row.querySelector<HTMLElement>('.model-hub-order-row-actions');
+      expect(actions).not.toBeNull();
+      expect(within(actions!).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual(labels[index]);
+      for (const label of labels[index]) {
+        const button = within(actions!).getByRole('button', { name: label });
+        expect(button.classList.contains('model-hub-route-action')).toBe(true);
+        expect(button.classList.contains('model-hub-order-row-action')).toBe(true);
+        expect(button.getAttribute('title')).toBe(label);
+        expect(button.classList.contains('focus-visible:ring-2')).toBe(true);
+        expect([...button.classList].filter((name) => name.startsWith('shadow-'))).toEqual([]);
+        expect(button.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+      }
+      expect(row.querySelector('.model-hub-order-name')?.textContent).toBe(available[index].display_name);
+    });
+    expect(within(rows[0]).getByRole('button', { name: 'Move source up' }).hasAttribute('disabled')).toBe(true);
+    expect(within(rows[0]).getByRole('button', { name: 'Move source down' }).hasAttribute('disabled')).toBe(false);
+    expect(within(rows[1]).getByRole('button', { name: 'Move source up' }).hasAttribute('disabled')).toBe(false);
+    expect(within(rows[1]).getByRole('button', { name: 'Move source down' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('moves with arrow actions, preserves focus after membership changes, and saves the exact draft', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    renderDrawer();
+    await user.click((await screen.findAllByRole('button', { name: 'Move source down' }))[0]);
+    await waitFor(() => expect(document.activeElement?.closest('li')?.textContent).toContain('Primary'));
+    expect(screen.getAllByRole('button', { name: 'Reorder source' })[1].closest('li')?.textContent).toContain('Primary');
+    await user.click(screen.getAllByRole('button', { name: 'Move source up' })[1]);
+    expect(screen.getAllByRole('button', { name: 'Reorder source' })[0].closest('li')?.textContent).toContain('Primary');
+    await user.click(screen.getAllByRole('button', { name: 'Remove from order' })[0]);
+    const include = await screen.findByRole('button', { name: 'Add to order' });
+    await waitFor(() => expect(document.activeElement).toBe(include));
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole('button', { name: 'Reorder source' })[1]));
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
+    await waitFor(() => expect(modelsApi.putAgentSources).toHaveBeenCalledWith('claude', { order: ['src_b', 'src_a'] }));
+  });
+
   it('echoes the exact effective-removal guard before saving default membership', async () => {
     const user = userEvent.setup();
     const hops = [{ backend: 'claude' as const, menu_model: 'model-a', position: 1, source_id: 'src_a', model_id: 'model-a' }];
