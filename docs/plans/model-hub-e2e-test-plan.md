@@ -217,7 +217,8 @@ lane-to-lane.
 
 - `VIBE_E2E_BASE_URL` — target Avibe UI origin (default `http://127.0.0.1:5123`).
 - `VIBE_E2E_MOCK_UPSTREAM_URL` — running mock upstream origin.
-- `VIBE_MODEL_HUB_ENABLED=1` — required for all scenarios.
+- `VIBE_MODEL_HUB_ENABLED` — optional; Model Hub is enabled when absent. Harnesses
+  may explicitly set `1` for isolation or `0` to exercise the disabled surface.
 - `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH` — offline engine manifest override for
   hermetic engine install; engine-dependent pytest scenarios must skip (not
   fail) with a clear reason when neither this nor GitHub egress is available.

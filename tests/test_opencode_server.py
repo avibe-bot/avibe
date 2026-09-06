@@ -152,6 +152,13 @@ class _FakeSession:
 
 
 class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from core.services.settings import default_config
+
+        config_home = self.enterContext(tempfile.TemporaryDirectory(prefix="opencode-server-test-"))
+        self.enterContext(patch.dict(os.environ, {"AVIBE_HOME": config_home}))
+        default_config().save()
+
     def test_managed_runtime_config_accepts_jsonc_and_disables_native_skill(self):
         content = SERVER_MODULE._managed_runtime_config_content(
             b'''\xef\xbb\xbf{
@@ -489,20 +496,12 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_hub_mode_refuses_unconfigured_launch_and_logs_once(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        config = SERVER_MODULE.V2Config.load()
+        config.model_hub.agents["opencode"].mode = "hub"
+        config.save()
 
         with (
-            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
-            patch.object(
-                SERVER_MODULE.V2Config,
-                "load",
-                return_value=types.SimpleNamespace(
-                    model_hub=types.SimpleNamespace(
-                        agents={
-                            "opencode": types.SimpleNamespace(mode="hub"),
-                        }
-                    )
-                ),
-            ),
+            patch.dict(os.environ),
             patch.object(SERVER_MODULE.logger, "error") as log_error,
             patch.object(
                 SERVER_MODULE,
@@ -510,6 +509,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=AssertionError("Hub refusal must precede server setup"),
             ),
         ):
+            os.environ.pop("VIBE_MODEL_HUB_ENABLED", None)
             for _attempt in range(2):
                 with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
                     await manager.ensure_running()

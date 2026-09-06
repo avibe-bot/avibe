@@ -73,8 +73,8 @@ SOURCE_EDIT_VALIDATION_CASES = json.loads(
 
 
 @pytest.fixture(autouse=True)
-def _enable_model_hub_for_existing_contract_tests(monkeypatch):
-    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+def _use_default_model_hub_release_environment(monkeypatch):
+    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
 
 
 def _schema(name: str) -> dict:
@@ -4637,7 +4637,7 @@ def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtim
     def unexpected_remote_access_read():
         raise AssertionError("disabled Model Hub must short-circuit before remote access config")
 
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     monkeypatch.setattr(ui_server, "_load_remote_access_config", unexpected_remote_access_read)
     monkeypatch.setattr(
         "vibe.model_hub_client.ModelHubRemoteService",
@@ -4669,7 +4669,7 @@ def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtim
 
 
 @pytest.mark.parametrize("method", ["get", "post"])
-@pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("0", False), ("1", True)])
+@pytest.mark.parametrize(("env_value", "expected"), [(None, True), ("0", False), ("1", True)])
 def test_config_capability_exactly_projects_backend_model_hub_gate(monkeypatch, tmp_path, method, env_value, expected):
     from config.v2_config import is_model_hub_enabled
 
@@ -5569,7 +5569,7 @@ def test_disabled_gate_preserves_existing_model_hub_config_bytes(monkeypatch):
     from config import paths
     from core.services.settings import default_config
 
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     config = default_config()
     config.save()
     config_path = paths.get_config_path()
