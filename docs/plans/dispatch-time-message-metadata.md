@@ -31,3 +31,14 @@ not freeze the clock, every real input path receives configured metadata, and
 canonical content stays unchanged. Test sender/source restoration, merged input,
 configuration switches, native reconciliation, and released pending deliveries.
 No developer runtime restart is required for these tests.
+
+## Review Decisions
+
+At head `20a7d050b`, the first findings-bearing review identified three independent
+boundary gaps: cached display switches, incomplete released attachment-error
+formats, and steering preparation failures after durable attempt admission.
+Keep the existing model and close each gap at its owner: refresh the controller's
+mtime-guarded config at the shared render boundary, recognize released wire titles
+and empty-body formats without rewriting content, and settle pre-write failures
+as definitive refusals through the existing batch fallback. Only errors after
+entering the backend adapter retain the conservative unknown-outcome policy.

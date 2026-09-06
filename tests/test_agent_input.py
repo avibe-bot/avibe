@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from core.agent_input import AgentInputMetadata, without_legacy_metadata
+from vibe.i18n import get_supported_languages, get_translator
 
 
 def test_clock_and_switches_are_evaluated_for_each_native_input():
@@ -49,3 +50,32 @@ def test_legacy_metadata_never_strips_a_different_body_or_sender():
     decorated = "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n[Alex<U1>]\nhello"
     assert without_legacy_metadata(decorated, original="other", user_id="U1") == decorated
     assert without_legacy_metadata(decorated, original="hello", user_id="U2") == decorated
+
+
+@pytest.mark.parametrize("language", get_supported_languages())
+@pytest.mark.parametrize("original", ["", " \t\n", "hello", "[Attachment Download Errors]\n- user example"])
+@pytest.mark.parametrize("prefix", [
+    "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n",
+    "[Alex<U1>]\n",
+    "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n[Alex<U1>]\n",
+])
+@pytest.mark.parametrize("append_first", [False, True])
+def test_legacy_attachment_blocks_match_the_released_producer(language, original, prefix, append_first):
+    from core.handlers.message_handler import MessageHandler
+
+    handler = object.__new__(MessageHandler)
+    handler._t = get_translator(language)
+    errors = ["report.pdf unavailable", "image.png unavailable"]
+    if append_first:
+        body = handler._append_attachment_errors(original, errors)
+        decorated = prefix + body
+    else:
+        decorated = handler._append_attachment_errors(prefix + original, errors)
+        body = decorated[len(prefix):]
+    assert without_legacy_metadata(decorated, original=original, user_id="U1") == body
+    assert without_legacy_metadata(decorated, original=decorated, user_id="U1") == decorated
+
+
+def test_legacy_attachment_matching_does_not_accept_arbitrary_bracketed_suffixes():
+    decorated = "[Alex<U1>]\nhello\n\n[Another block]\n- not a released error"
+    assert without_legacy_metadata(decorated, original="hello", user_id="U1") == decorated

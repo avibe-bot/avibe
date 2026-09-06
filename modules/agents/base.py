@@ -123,7 +123,12 @@ class BaseAgent(ABC):
 
     def render_input(self, text: str, metadata: AgentInputMetadata | None) -> str:
         """Build a native request copy at the last write boundary."""
-        return metadata.render(text, self.config) if metadata is not None else text
+        if metadata is None:
+            return text
+        refresh = getattr(self.controller, "_refresh_config_from_disk", None)
+        if callable(refresh):
+            refresh()
+        return metadata.render(text, self.config)
 
     def _get_formatter(self, context: MessageContext):
         return getattr(self._get_im_client(context), "formatter", self.im_client.formatter)

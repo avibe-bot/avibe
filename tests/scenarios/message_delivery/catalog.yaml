@@ -296,5 +296,11 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_agent_steering.py::test_codex_start_renders_now_after_runtime_prompt_preparation
+  - id: MESSAGE-DELIVERY-319
+    name: Steering preparation failure preserves a definitively unwritten retryable batch
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_steering_preparation_failure_preserves_a_definitively_unwritten_batch
 next_priority:
-  - MESSAGE-DELIVERY-319
+  - MESSAGE-DELIVERY-320

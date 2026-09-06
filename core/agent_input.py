@@ -8,6 +8,22 @@ import re
 from typing import Any
 
 
+# Released wire titles must remain recognizable even if translations change.
+_LEGACY_ATTACHMENT_ERROR_TITLES = (
+    "Attachment Download Errors",
+    "\u9644\u4ef6\u4e0b\u8f7d\u9519\u8bef",
+)
+
+
+def _matches_original_body(text: str, original: str) -> bool:
+    if text == original:
+        return True
+    blocks = tuple(f"[{title}]\n" for title in _LEGACY_ATTACHMENT_ERROR_TITLES)
+    if text.startswith(original + "\n\n"):
+        return text[len(original) + 2 :].startswith(blocks)
+    return not original.strip() and text.startswith(blocks)
+
+
 def sanitize_identity(value: str) -> str:
     token = (value or "").replace("\n", " ").replace("\r", " ").strip()
     token = token.replace("[", "(").replace("]", ")").replace("<", "(").replace(">", ")")
@@ -16,7 +32,7 @@ def sanitize_identity(value: str) -> str:
 
 def without_legacy_metadata(text: str, *, original: str, user_id: str) -> str:
     """Remove a released IM prefix only when the immutable body proves its extent."""
-    if text == original or text.startswith(original + "\n\n[Attachment Download Errors]"):
+    if _matches_original_body(text, original):
         return text
     time_line = r"\[Current Time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}:\d{2}\]\n"
     identity_line = rf"\[[^\[\]<>\n]{{1,80}}<{re.escape(sanitize_identity(user_id))}>\]\n"
@@ -24,7 +40,7 @@ def without_legacy_metadata(text: str, *, original: str, user_id: str) -> str:
     if match is None or match.end() == 0:
         return text
     body = text[match.end() :]
-    if body == original or body.startswith(original + "\n\n[Attachment Download Errors]"):
+    if _matches_original_body(body, original):
         return body
     return text
 

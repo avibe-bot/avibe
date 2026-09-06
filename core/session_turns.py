@@ -2645,6 +2645,45 @@ class SessionTurnManager:
                 error_type=type(exc).__name__,
             )
 
+    async def _dispatch_steer_batch(
+        self,
+        backend: str,
+        deliveries: list[dict[str, Any]],
+        *,
+        logical_turn_id: str,
+        native_turn_id: str,
+        attempt_id: str,
+        context: "MessageContext",
+    ) -> DeliveryResult:
+        delivery_id = str(deliveries[0]["id"])
+        try:
+            metadata = await self._steer_input_metadata(deliveries)
+            request = SteerRequest(
+                target_session_id=str(deliveries[0]["session_id"]),
+                expected_logical_turn_id=logical_turn_id,
+                expected_native_turn_id=native_turn_id,
+                text=_segment_dispatch_text(deliveries),
+                attempt_id=attempt_id,
+                input_metadata=metadata,
+            )
+        except asyncio.CancelledError:
+            await self._finish_steer(
+                delivery_id,
+                steer_result(SteerOutcome.REFUSED, reason="preparation_cancelled"),
+                context=context,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("steering preparation failed before native write for delivery=%s", delivery_id)
+            receipt = steer_result(
+                SteerOutcome.REFUSED,
+                reason="preparation_failed",
+                error_type=type(exc).__name__,
+            )
+        else:
+            receipt = await self._attempt_steer(backend, request)
+        return await self._finish_steer(delivery_id, receipt, context=context)
+
     async def _reconcile_steer_attempt(
         self,
         backend: str,
@@ -3007,20 +3046,14 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif delivery["state"] == "steering" and turn_id and attempt_id and native_id:
-            steer_text = _delivery_dispatch_text(delivery)
-            input_metadata = await self._steer_input_metadata([delivery])
-            receipt = await self._attempt_steer(
+            return await self._dispatch_steer_batch(
                 steer_backend,
-                SteerRequest(
-                    target_session_id=request.session_id,
-                    expected_logical_turn_id=turn_id,
-                    expected_native_turn_id=native_id,
-                    text=steer_text,
-                    attempt_id=attempt_id,
-                    input_metadata=input_metadata,
-                ),
+                [delivery],
+                logical_turn_id=turn_id,
+                native_turn_id=native_id,
+                attempt_id=attempt_id,
+                context=context,
             )
-            return await self._finish_steer(str(delivery["id"]), receipt, context=context)
         return DeliveryResult(str(delivery["id"]), None, str(delivery["state"]), turn_id)
 
     async def _promote_fifo_head(
@@ -3182,19 +3215,14 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif leader["state"] == "steering" and turn_id and attempt_id and native_id:
-            input_metadata = await self._steer_input_metadata(claimed_rows)
-            receipt = await self._attempt_steer(
+            return await self._dispatch_steer_batch(
                 steer_backend,
-                SteerRequest(
-                    target_session_id=session_id,
-                    expected_logical_turn_id=turn_id,
-                    expected_native_turn_id=native_id,
-                    text=_segment_dispatch_text(claimed_rows),
-                    attempt_id=attempt_id,
-                    input_metadata=input_metadata,
-                ),
+                claimed_rows,
+                logical_turn_id=turn_id,
+                native_turn_id=native_id,
+                attempt_id=attempt_id,
+                context=context,
             )
-            return await self._finish_steer(delivery_id, receipt, context=context)
         return DeliveryResult(delivery_id, None, str(leader["state"]), turn_id)
 
     async def _finish_steer(
@@ -5310,22 +5338,15 @@ class SessionTurnManager:
                 )
                 if not claimed_batch:
                     continue
-                steer_text = _segment_dispatch_text(claimed_batch)
                 backend = str(turn["backend"])
-                delivery_id = str(claimed_batch[0]["id"])
-            input_metadata = await self._steer_input_metadata(claimed_batch)
-            receipt = await self._attempt_steer(
+            result = await self._dispatch_steer_batch(
                 backend,
-                SteerRequest(
-                    target_session_id=session_id,
-                    expected_logical_turn_id=logical_turn_id,
-                    expected_native_turn_id=native_turn_id,
-                    text=steer_text,
-                    attempt_id=attempt_id,
-                    input_metadata=input_metadata,
-                ),
+                claimed_batch,
+                logical_turn_id=logical_turn_id,
+                native_turn_id=native_turn_id,
+                attempt_id=attempt_id,
+                context=context,
             )
-            result = await self._finish_steer(delivery_id, receipt, context=context)
             # Every row of the attempt settles together, so the leader's outcome
             # is the batch's outcome: accepted upgrades 👌 to ✍️, a definitive
             # refusal after the Session went inactive retires it to 🤷, and an

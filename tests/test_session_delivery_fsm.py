@@ -1218,6 +1218,67 @@ def test_legacy_queued_metadata_is_removed_only_from_dispatch_copy(managers, sub
         assert message["content_text"] == display_text
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["immediate", "promote", "pending"])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_steering_preparation_failure_preserves_a_definitively_unwritten_batch(managers, mode, cancelled):
+    """Scenario: MESSAGE-DELIVERY-319."""
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = await _activate(manager, text="active")
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    deliveries = []
+    if mode != "immediate":
+        for text in ("first incoming", "second incoming"):
+            result = await manager.deliver(DeliveryRequest(
+                session_id="ses_fsm", priority="p3", content=text,
+            ), context=_context())
+            deliveries.append(_row(engine, result.delivery_id))
+        if mode == "pending":
+            with engine.begin() as conn:
+                pending = delivery_store.open_pending_steer_batch(
+                    conn, deliveries=deliveries, turn_id=turn_id,
+                    attempt_id=delivery_store.new_attempt_id(),
+                )
+                assert all(row["state"] == "pending_steer" for row in pending)
+    error = asyncio.CancelledError() if cancelled else RuntimeError("context preparation unavailable")
+    manager._steer_input_metadata = AsyncMock(side_effect=error)
+
+    async def dispatch():
+        if mode == "immediate":
+            return await manager.deliver(DeliveryRequest(
+                session_id="ses_fsm", priority="p1", content="first incoming",
+            ), context=_context())
+        if mode == "promote":
+            return await manager.send_now("ses_fsm")
+        return await manager._run_pending_steers("ses_fsm", turn_id, _context())
+
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch()
+    else:
+        await dispatch()
+    manager._steer.assert_not_awaited()
+    queued = [row for row in _rows(engine) if row["state"] == "queued"]
+    assert len(queued) == (1 if mode == "immediate" else 2)
+    for row in queued:
+        assert row["priority"] == "p3"
+        assert row["current_attempt_id"] is None
+        assert row["message_id"] is None
+        events = json.loads(row["delivery_history_json"])["events"]
+        receipts = [event for event in events if event["kind"] == "steer"]
+        assert receipts[-1]["outcome"] == "refused"
+        assert receipts[-1]["receipt"]["reason"] == (
+            "preparation_cancelled" if cancelled else "preparation_failed"
+        )
+
+    manager._steer_input_metadata = AsyncMock(return_value=AgentInputMetadata(user_id="sender"))
+    retry = await manager.send_now("ses_fsm")
+    assert retry["status"] == "accepted"
+    manager._steer.assert_awaited_once()
+    assert manager._steer.await_args.args[1].text == "\n".join(row["dispatch_text"] for row in queued)
+    assert all(_row(engine, row["id"])["state"] == "accepted" for row in queued)
+
+
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     captured: dict[str, object] = {}
