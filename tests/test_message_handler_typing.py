@@ -57,6 +57,7 @@ def _load_message_handler_class():
             vibe_agent_reasoning_effort_explicit: bool = False
             vibe_agent_system_prompt: str | None = None
             files: list | None = None
+            input_metadata: object | None = None
 
         setattr(agents_module, "AgentRequest", _AgentRequest)
         sys.modules["modules.agents"] = agents_module
@@ -327,6 +328,33 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_durable_input_keeps_canonical_text_for_memory_and_user_message(self):
+        """Scenario: MESSAGE-DELIVERY-317."""
+        for platform in ("avibe", "slack"):
+            with self.subTest(platform=platform):
+                controller = _StubController(platform=platform, ack_mode="reaction", typing_result=True)
+                controller.config.include_time_info = True
+                controller.config.include_user_info = True
+                handler = MessageHandler(controller)
+                handler.set_session_handler(_StubSessionHandler())
+                original = "original user text\n[Now: literal example]"
+                context = MessageContext(
+                    user_id="sender", channel_id="session", platform=platform,
+                    message_id="message", is_original_human_text=True,
+                    platform_specific={
+                        "delivery_ids": ["delivery"],
+                        "message_content": {"text": original},
+                        "author_id": "sender", "author_name": "Sender",
+                    },
+                )
+                await handler.handle_user_message(context, "[Recovery context]\n" + original)
+                _, request = controller.agent_service.requests[0]
+                self.assertEqual(request.user_message, original)
+                self.assertEqual(request.message, "[Recovery context]\n" + original)
+                self.assertEqual(request.input_metadata.user_name, "Sender")
+                self.assertEqual([event.text for event in controller.memory_adapter.events], [original])
+                self.assertEqual(context.platform_specific["message_content"]["text"], original)
+
     async def test_im_human_input_enters_delivery_owner_before_backend(self):
         controller = _StubController(
             platform="slack",
@@ -339,9 +367,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler.set_session_handler(_StubSessionHandler())
         handler._admit_human_delivery = AsyncMock(return_value=True)
         handler._is_duplicate_human_delivery = Mock(return_value=False)
-        handler._prepend_message_metadata = AsyncMock(
-            return_value="[metadata]\nhello"
-        )
+        controller.config.include_time_info = True
+        controller.config.include_user_info = True
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -354,7 +381,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler._admit_human_delivery.assert_awaited_once()
         assert (
             handler._admit_human_delivery.await_args.kwargs["dispatch_text"]
-            == "[metadata]\nhello"
+            == "hello"
         )
         controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
         self.assertEqual(controller.agent_service.requests, [])
@@ -390,7 +417,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler.set_session_handler(_StubSessionHandler())
         handler._admit_human_delivery = AsyncMock(return_value=True)
         handler._is_duplicate_human_delivery = Mock(return_value=False)
-        handler._prepend_message_metadata = AsyncMock(return_value="check this")
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -457,7 +483,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         handler._is_duplicate_human_delivery = Mock(return_value=False)
-        handler._prepend_message_metadata = AsyncMock(return_value="review this")
         lease = Mock()
         attachment = FileAttachment(
             name="report.pdf",
@@ -507,7 +532,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         handler._is_duplicate_human_delivery = Mock(return_value=False)
-        handler._prepend_message_metadata = AsyncMock(return_value="review this")
         handler._emit_agent_dispatch_failure = AsyncMock()
         lease = Mock()
         attachment = FileAttachment(
@@ -1427,6 +1451,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_platform_specific_client_is_used_for_user_info(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.config.include_user_info = True
         handler = MessageHandler(controller)
         context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
 
@@ -1437,7 +1462,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         wechat_client = _WechatClient(typing_result=True)
         controller.get_im_client_for_context = lambda _context: wechat_client  # type: ignore[method-assign]
 
-        result = await handler._prepend_user_info(context, "hello")
+        metadata = await handler.prepare_input_metadata(context, human=True)
+        result = metadata.render("hello", controller.config)
 
         self.assertEqual(result, "[WeChat User<wx-user>]\nhello")
 
@@ -1586,7 +1612,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.config.include_user_info = True
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
-        handler._build_current_time_line = lambda: "[Current Time: 2026-07-26 16:00:00 UTC+08:00]"
         attachment_lease = Mock()
         handler._materialize_file_attachments = AsyncMock(
             return_value=types.SimpleNamespace(
@@ -1621,12 +1646,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.handle_user_message(context, "<@U_BOT> Investigate session title fallback")
 
         _, request = controller.agent_service.requests[0]
-        prepended_lines = request.message.splitlines()[:2]
         self.assertIn("<@U_BOT>", request.message)
         self.assertNotIn("<@U_BOT>", request.user_message)
         self.assertIn("[Audio Transcripts]", request.user_message)
         self.assertIn("Keep the user's words", request.user_message)
-        self.assertFalse(set(prepended_lines) & set(request.user_message.splitlines()))
+        self.assertNotIn("[Now:", request.message)
+        self.assertEqual(request.input_metadata.user_id, "U1")
         self.assertNotIn("[Attachment Download Errors]", request.user_message)
         self.assertIn("[Attachment Download Errors]", request.message)
 

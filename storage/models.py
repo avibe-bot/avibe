@@ -807,8 +807,8 @@ message_deliveries = Table(
     Column("state", String, nullable=False),
     Column("snapshot_json", Text, nullable=True),
     Column("snapshot_sha256", String, nullable=False),
-    # The exact backend-facing prompt is independent of Message display content
-    # and remains immutable after materialization for audit/recovery.
+    # Durable dispatch content is independent of Message display content.
+    # Execution metadata is rendered on a request copy at the native write.
     Column("dispatch_text", Text, nullable=True),
     Column("dispatch_sha256", String, nullable=False),
     Column("dedupe_key", Text, nullable=True),

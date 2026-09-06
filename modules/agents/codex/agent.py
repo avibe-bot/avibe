@@ -599,7 +599,7 @@ class CodexAgent(BaseAgent):
                 {
                     "threadId": thread_id,
                     "expectedTurnId": request.expected_native_turn_id,
-                    "input": [{"type": "text", "text": request.text}],
+                    "input": [{"type": "text", "text": self.render_input(request.text, request.input_metadata)}],
                 },
             )
         except RuntimeError as exc:
@@ -3204,7 +3204,6 @@ class CodexAgent(BaseAgent):
     ) -> str:
         """Build input, configure overrides, and send turn/start to Codex."""
         agent_session_id = self._prompt_state_agent_session_id(request)
-        input_items = self._build_input(request)
         _, effective_model, effective_effort, _ = self._resolve_codex_agent_settings(request)
         model_explicit = bool(getattr(request, "vibe_agent_model_explicit", False))
         effort_explicit = bool(
@@ -3219,7 +3218,6 @@ class CodexAgent(BaseAgent):
 
         turn_params: Dict[str, Any] = {
             "threadId": thread_id,
-            "input": input_items,
             "approvalPolicy": "never",
             "sandboxPolicy": {"type": "dangerFullAccess"},
         }
@@ -3343,6 +3341,7 @@ class CodexAgent(BaseAgent):
         )
         if callable(snapshot_generated_images):
             snapshot_generated_images(thread_id, request.base_session_id)
+        turn_params["input"] = self._build_input(request)
         mark_backend_dispatch_attempted(request.context)
         try:
             resp = await transport.send_request("turn/start", turn_params)
@@ -3489,6 +3488,7 @@ class CodexAgent(BaseAgent):
             if len(file_lines) > 2:
                 message = f"{message}\n" + "\n".join(file_lines)
 
+        message = self.render_input(message, getattr(request, "input_metadata", None))
         if message:
             items.insert(0, {"type": "text", "text": message})
 
