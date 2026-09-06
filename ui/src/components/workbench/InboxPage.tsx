@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight, CheckCheck, Filter, Inbox, Loader2, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -11,6 +11,7 @@ import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
 import { Button } from '../ui/button';
 import { WebPushControl } from './WebPushControl';
+import { useInboxScrollRestoration } from './useInboxScrollRestoration';
 import {
   readInboxFilter,
   writeInboxFilter,
@@ -22,6 +23,8 @@ import {
 export const InboxPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
+  const listRef = useRef<HTMLDivElement>(null);
   const {
     capabilities,
   } = useInstanceAuthorization();
@@ -97,7 +100,10 @@ export const InboxPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, inboxSessions, unreadBySession]);
 
+  const capturePosition = useInboxScrollRestoration(listRef, location.key, filter, visible);
+
   const openSession = (s: InboxSession) => {
+    capturePosition();
     navigate(`/chat/${encodeURIComponent(s.session_id)}`);
   };
 
@@ -117,7 +123,7 @@ export const InboxPage: React.FC = () => {
   const showEmpty = visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 py-2">
+    <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 py-2">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
@@ -238,6 +244,7 @@ export const InboxPage: React.FC = () => {
             return (
               <article
                 key={s.session_id}
+                data-inbox-session-id={s.session_id}
                 className={clsx(
                   'flex flex-col gap-3 rounded-xl border p-4 transition',
                   unread > 0

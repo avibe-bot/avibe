@@ -20,7 +20,6 @@ from sqlalchemy import select
 from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES, rewrite_agent_media
 from storage import media_service, settings_service
 from storage.db import create_sqlite_engine
-from storage.migrations import run_migrations
 from storage.models import agent_sessions, media_object_references, media_objects
 
 
@@ -75,9 +74,9 @@ def _seed_scope_and_session(conn) -> str:
     return scope_id
 
 
-def test_register_and_get_by_token(tmp_path):
+def test_register_and_get_by_token(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     shot = tmp_path / "shot.png"
@@ -110,9 +109,9 @@ def test_register_and_get_by_token(tmp_path):
     assert row["session_id"] == "sess_x"
 
 
-def test_rewrite_in_place_image_file_and_external(tmp_path):
+def test_rewrite_in_place_image_file_and_external(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     img = tmp_path / "a.png"
@@ -144,13 +143,15 @@ def test_rewrite_in_place_image_file_and_external(tmp_path):
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["new", "existing"])
 @pytest.mark.parametrize("filename", ["report.pdf", "报告 (最终).docx", "data.v2.tar.gz", "README"])
-def test_agent_download_and_metadata_preserve_real_filename(tmp_path, monkeypatch, filename, legacy):
+def test_agent_download_and_metadata_preserve_real_filename(
+    tmp_path, monkeypatch, filename, legacy, sqlite_schema_db_factory,
+):
     from tests.ui_server_test_helpers import _save_config
     from vibe import ui_server
 
     _save_config(tmp_path)
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
     document = tmp_path / filename
@@ -190,13 +191,13 @@ def test_agent_download_and_metadata_preserve_real_filename(tmp_path, monkeypatc
     engine.dispose()
 
 
-def test_uploaded_download_keeps_original_name_instead_of_storage_basename(tmp_path, monkeypatch):
+def test_uploaded_download_keeps_original_name_instead_of_storage_basename(tmp_path, monkeypatch, sqlite_schema_db_factory):
     from tests.ui_server_test_helpers import _save_config
     from vibe import ui_server
 
     _save_config(tmp_path)
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
     document = tmp_path / "random-upload-id_report.docx"
@@ -218,9 +219,9 @@ def test_uploaded_download_keeps_original_name_instead_of_storage_basename(tmp_p
     engine.dispose()
 
 
-def test_rewrite_angle_wrapped_file_links(tmp_path):
+def test_rewrite_angle_wrapped_file_links(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     image = tmp_path / "图片 文件.png"
@@ -245,9 +246,9 @@ def test_rewrite_angle_wrapped_file_links(tmp_path):
     assert sorted(row["kind"] for row in rows) == ["file", "image"]
 
 
-def test_rewrite_legacy_bare_space_link_and_reject_malformed_authority(tmp_path):
+def test_rewrite_legacy_bare_space_link_and_reject_malformed_authority(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     report = tmp_path / "My Report.md"
     report.write_text("report", encoding="utf-8")
@@ -270,9 +271,9 @@ def test_rewrite_legacy_bare_space_link_and_reject_malformed_authority(tmp_path)
     assert [row["local_path"] for row in rows] == [str(report.resolve())]
 
 
-def test_rewrite_legacy_bare_space_link_after_malformed_prefix(tmp_path):
+def test_rewrite_legacy_bare_space_link_after_malformed_prefix(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     report = tmp_path / "Good Report.md"
     report.write_text("report", encoding="utf-8")
@@ -294,9 +295,9 @@ def test_rewrite_legacy_bare_space_link_after_malformed_prefix(tmp_path):
     assert [row["local_path"] for row in rows] == [str(report.resolve())]
 
 
-def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path):
+def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     image = tmp_path / "code.png"
     image.write_bytes(b"image")
@@ -311,9 +312,9 @@ def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path):
         assert conn.execute(select(media_objects)).first() is None
 
 
-def test_resolve_attachment_specs(tmp_path):
+def test_resolve_attachment_specs(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     doc = tmp_path / "doc.pdf"
     doc.write_bytes(b"%PDF-1.4 hello")
@@ -362,9 +363,9 @@ def test_message_context_accepts_files():
     assert ctx.files and ctx.files[0].local_path == "/tmp/a.png"
 
 
-def test_rewrite_noop_without_file_links(tmp_path):
+def test_rewrite_noop_without_file_links(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     text = "Plain reply with a [link](https://example.com) and no files."
     with engine.begin() as conn:
@@ -394,9 +395,9 @@ def test_process_reply_keep_file_links():
     assert len(kept.files) == 2
 
 
-def test_rewrite_allows_any_absolute_path(tmp_path):
+def test_rewrite_allows_any_absolute_path(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     from core.workbench_media import rewrite_agent_media
@@ -418,9 +419,9 @@ def test_rewrite_allows_any_absolute_path(tmp_path):
     assert rows[0]["local_path"] == str(outside.resolve())
 
 
-def test_register_dedups_same_fingerprint(tmp_path):
+def test_register_dedups_same_fingerprint(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     shot = tmp_path / "shot.png"
@@ -477,9 +478,9 @@ def test_register_dedups_same_fingerprint(tmp_path):
     }
 
 
-def test_register_reads_image_dimensions(tmp_path):
+def test_register_reads_image_dimensions(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     img = tmp_path / "wide.png"
@@ -508,11 +509,11 @@ def test_register_reads_image_dimensions(tmp_path):
     assert doc_row["width_px"] is None and doc_row["height_px"] is None
 
 
-def test_register_image_dimensions_unreadable_is_null(tmp_path):
+def test_register_image_dimensions_unreadable_is_null(tmp_path, sqlite_schema_db_factory):
     # A file flagged as an image but not actually decodable must not break
     # registration — dimensions degrade to NULL (UI measures it in the browser).
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     bogus = tmp_path / "broken.png"
@@ -530,9 +531,9 @@ def test_register_image_dimensions_unreadable_is_null(tmp_path):
     assert row["width_px"] is None and row["height_px"] is None
 
 
-def test_rewrite_appends_image_dimensions(tmp_path):
+def test_rewrite_appends_image_dimensions(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
 
     img = tmp_path / "chart.png"
@@ -552,9 +553,9 @@ def test_rewrite_appends_image_dimensions(tmp_path):
     assert "?w=" not in out.split(" and ")[1]
 
 
-def test_rewrite_angle_file_link_unescapes_path_and_ignores_title(tmp_path):
+def test_rewrite_angle_file_link_unescapes_path_and_ignores_title(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     report = tmp_path / "report (final).md"
     report.write_text("report", encoding="utf-8")
@@ -569,9 +570,9 @@ def test_rewrite_angle_file_link_unescapes_path_and_ignores_title(tmp_path):
     assert out.endswith('> "download")')
 
 
-def test_rewrite_commonmark_owned_destination_preserves_source_syntax(tmp_path):
+def test_rewrite_commonmark_owned_destination_preserves_source_syntax(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     report = tmp_path / "report & (final).md"
     report.write_text("report", encoding="utf-8")
@@ -597,9 +598,9 @@ def test_rewrite_commonmark_owned_destination_preserves_source_syntax(tmp_path):
     assert [row["local_path"] for row in rows] == [str(report.resolve())]
 
 
-def test_rewrite_failure_preserves_original_destination_source(tmp_path):
+def test_rewrite_failure_preserves_original_destination_source(tmp_path, sqlite_schema_db_factory):
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     text = '[report](<f&#105;le:///tmp/a&amp;b.md> "download")'
 

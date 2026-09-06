@@ -150,6 +150,8 @@ def execute_upgrade_plan(
     the existing restart supervisor owns any later activation.
     """
 
+    if plan.preflight_error:
+        raise ValueError(plan.preflight_error)
     preflight = preflight_upgrade_plan(plan, run=run, **run_kwargs)
     if preflight is not None:
         if preflight.returncode != 0:
@@ -1451,24 +1453,15 @@ def build_upgrade_plan(
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
-        atomic = None
         preflight_error = None
-        if version is None:
-            tool_dir, bin_dir, atomic = _staged_uv_environment(vibe_path)
-            if atomic is None:
-                preflight_error = "Cannot atomically upgrade uv installation: stable vibe launcher is unavailable"
-            else:
-                env["UV_TOOL_DIR"] = str(tool_dir)
-                env["UV_TOOL_BIN_DIR"] = str(bin_dir)
+        # Exact repairs can recreate the whole uv environment too. Stage them
+        # just like forward upgrades while the service/UI still use the old one.
+        tool_dir, bin_dir, atomic = _staged_uv_environment(vibe_path)
+        if atomic is None:
+            preflight_error = "Cannot atomically upgrade uv installation: stable vibe launcher is unavailable"
         else:
-            current_tool_dir = get_current_uv_tool_dir(executable)
-            vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
-            if current_tool_dir is None:
-                preflight_error = "Cannot safely repair uv installation: current tool root is unavailable"
-            else:
-                env["UV_TOOL_DIR"] = current_tool_dir
-            if vibe_bin_dir:
-                env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
+            env["UV_TOOL_DIR"] = str(tool_dir)
+            env["UV_TOOL_BIN_DIR"] = str(bin_dir)
         command = [uv_binary, "tool", "install", package_spec]
         if pinned_memory_spec:
             command.extend(["--with", pinned_memory_spec])
