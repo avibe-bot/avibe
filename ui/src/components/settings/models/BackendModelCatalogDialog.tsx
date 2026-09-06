@@ -1101,60 +1101,61 @@ export const BackendModelCatalogDialog: React.FC<{
               </Button>
             </div>
           </DialogFooter>
+          {/* Portals keep their visual layers, but must be descendants of this
+              content so Radix treats their delayed touch clicks as inside. */}
+          {picking && (
+            <BackendModelPickerDialog
+              open
+              backend={backend}
+              listedIds={offerable(takenIds, picking.seed)}
+              seedPicked={picking.seed}
+              // 「Add none of these」 — the same answer as confirming with nothing
+              // picked, and the same call, because a re-ask the user dismisses has
+              // declined every id it seeded. An ordinary add seeds nothing, so this
+              // still just closes.
+              onCancel={() => addCandidates([])}
+              onAdd={addCandidates}
+              // The editor is the other door an id becomes a row through, so leaving
+              // by it answers this picker's two standing questions in the same order
+              // every other exit answers them, through the same call.
+              //
+              // `addCandidates([])` first, for the same reason Cancel makes that
+              // call: walking out through the editor confirms none of a re-ask's
+              // seeded ids, and a seeded projection this dialog keeps is one the
+              // next Save would send as if it had been agreed.
+              //
+              // Then the id, resolved BEFORE the row lookup and through the rule the
+              // editor itself commits under (`backendModelId`, which `draftWithId`
+              // applies there). The lookup is a total function of the id, so the id
+              // it is asked about has to be the one the row would be saved as: asked
+              // about a typed `foo` it finds the user's saved `foo`,
+              // and the editor — resolving the id only on commit — would then write
+              // a blank row onto it, dropping the limits, modalities, capabilities
+              // and name they had described. The resolver is idempotent, so the
+              // editor re-applying it to this seed changes nothing.
+              onCustom={(typed) => {
+                addCandidates([]);
+                const seedId = backendModelId(typed);
+                const existing = heldRowFor(seedId, draftRef.current, baselineRef.current?.models ?? []);
+                setEditing(existing ? { model: existing } : { model: null, seedId });
+              }}
+            />
+          )}
+
+          {editing && (
+            <BackendModelEditorDialog
+              open
+              backend={backend}
+              model={editing.model}
+              seedId={editing.seedId}
+              takenIds={takenIds}
+              effortSuggestions={effortSuggestions}
+              onCancel={() => setEditing(null)}
+              onCommit={commitEdit}
+            />
+          )}
         </DialogContent>
       </Dialog>
-
-      {picking && (
-        <BackendModelPickerDialog
-          open
-          backend={backend}
-          listedIds={offerable(takenIds, picking.seed)}
-          seedPicked={picking.seed}
-          // 「Add none of these」 — the same answer as confirming with nothing
-          // picked, and the same call, because a re-ask the user dismisses has
-          // declined every id it seeded. An ordinary add seeds nothing, so this
-          // still just closes.
-          onCancel={() => addCandidates([])}
-          onAdd={addCandidates}
-          // The editor is the other door an id becomes a row through, so leaving
-          // by it answers this picker's two standing questions in the same order
-          // every other exit answers them, through the same call.
-          //
-          // `addCandidates([])` first, for the same reason Cancel makes that
-          // call: walking out through the editor confirms none of a re-ask's
-          // seeded ids, and a seeded projection this dialog keeps is one the
-          // next Save would send as if it had been agreed.
-          //
-          // Then the id, resolved BEFORE the row lookup and through the rule the
-          // editor itself commits under (`backendModelId`, which `draftWithId`
-          // applies there). The lookup is a total function of the id, so the id
-          // it is asked about has to be the one the row would be saved as: asked
-          // about a typed `foo` it finds the user's saved `foo`,
-          // and the editor — resolving the id only on commit — would then write
-          // a blank row onto it, dropping the limits, modalities, capabilities
-          // and name they had described. The resolver is idempotent, so the
-          // editor re-applying it to this seed changes nothing.
-          onCustom={(typed) => {
-            addCandidates([]);
-            const seedId = backendModelId(typed);
-            const existing = heldRowFor(seedId, draftRef.current, baselineRef.current?.models ?? []);
-            setEditing(existing ? { model: existing } : { model: null, seedId });
-          }}
-        />
-      )}
-
-      {editing && (
-        <BackendModelEditorDialog
-          open
-          backend={backend}
-          model={editing.model}
-          seedId={editing.seedId}
-          takenIds={takenIds}
-          effortSuggestions={effortSuggestions}
-          onCancel={() => setEditing(null)}
-          onCommit={commitEdit}
-        />
-      )}
     </>
   );
 };
