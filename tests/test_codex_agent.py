@@ -1961,7 +1961,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         transport.send_request.assert_not_awaited()
         self.assertIn("## Send files", developer_instructions)
-        self.assertIn("### Codex-generated images", developer_instructions)
+        self.assertIn("## Codex-generated images", developer_instructions)
         self.assertIn("If you generate an image with Codex", developer_instructions)
         self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
         self.assertIn(

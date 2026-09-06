@@ -150,7 +150,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 include_codex_generated_images=True,
             )
 
-        self.assertIn("### Codex-generated images", prompt)
+        self.assertIn("## Codex-generated images", prompt)
         self.assertIn("If you generate an image with Codex", prompt)
         self.assertIn("file:///Users/test/.codex/generated_images/thread-id/image-file.png", prompt)
         self.assertIn("Never emit variables, placeholder paths, or sandbox paths like `/mnt/data/...`", prompt)

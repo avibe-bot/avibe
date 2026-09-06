@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from markdown_it import MarkdownIt
 
 from config import paths
 from core import managed_skills, show_git
@@ -49,6 +50,8 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
     monkeypatch.setattr(show_git, "show_git_checkpointing_active", lambda: history != "off")
     monkeypatch.setattr(show_git, "_workspace_is_self_managed", lambda _: history == "self-managed")
     names = [f"skill-{index:02}" for index in range(26)] + ["use-avibe-vault"]
+    if skill_mode == "single":
+        names = names[:1]
     skills = [
         ManagedSkill(name, f"Description {name}", Path("/fixture") / name, (0,), disable_model_invocation=skill_mode == "manual")
         for name in names
@@ -57,7 +60,7 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
 
 
 @pytest.mark.parametrize("backend,memory,history,skill_mode", itertools.product(
-    ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
+    ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "single", "pages"),
 ))
 def test_export_reconstructs_production_text_with_source_for_every_block(monkeypatch, backend, memory, history, skill_mode):
     _environment(monkeypatch, history, skill_mode)
@@ -82,14 +85,51 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
         assert block["source_path"] == catalog[block["id"]].source_path
     assert result == render_prompt_context(request)
     assert request["options"]["context"]["platform"] == "avibe"
-    if skill_mode == "pages":
+    if skill_mode in {"single", "pages"}:
         assert ids[ids.index("base-capabilities-body") + 1] == "skills-prompt"
         assert production.count(prompt_text("skills-prompt")) == 1
         assert "vibe skill load -- <name>" in production
-        assert "vibe skill list --page 2" in production
+        assert ("vibe skill list --page 2" in production) == (skill_mode == "pages")
         assert "- skill-00: Description skill-00" in production
     assert ("## Personal Memory" in production) == memory
     assert ("preferences.md" in production) != memory
+
+
+@pytest.mark.parametrize("backend,memory,history,skill_mode", itertools.product(
+    ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"),
+    ("empty", "manual", "single", "pages"),
+))
+def test_separated_capabilities_keep_independent_markdown_sections(monkeypatch, backend, memory, history, skill_mode):
+    _environment(monkeypatch, history, skill_mode)
+    rendered = render_prompt_context(_inputs(backend, memory, history, skill_mode))
+    parser = MarkdownIt()
+    tokens = parser.parse(rendered["text"])
+    section = None
+    sections = {}
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open" and token.tag == "h2":
+            section = tokens[index + 1].content
+            sections[section] = []
+        elif token.type == "inline" and tokens[index - 1].type != "heading_open" and section:
+            sections[section].extend(token.content.splitlines())
+    expected_sections = {
+        "skills-prompt": "Skills",
+        "skills-manual-prompt": "Skills",
+        "skills-pagination-prompt": "Available skills",
+        "skills-catalog": "Available skills",
+        "skills-more-notice": "Available skills",
+        "codex-generated-images": "Codex-generated images",
+    }
+    for block in rendered["blocks"]:
+        if block["id"] not in expected_sections:
+            continue
+        members = sections[expected_sections[block["id"]]]
+        block_tokens = parser.parse(block["text"])
+        for index, token in enumerate(block_tokens):
+            if token.type == "inline" and (index == 0 or block_tokens[index - 1].type != "heading_open"):
+                assert all(line in members for line in token.content.splitlines()), block["id"]
+    assert ("Available skills" in sections) == (skill_mode in {"single", "pages"})
+    assert ("Codex-generated images" in sections) == (backend == "codex")
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
@@ -133,6 +173,7 @@ def test_history_and_pagination_keep_their_own_source_provenance(monkeypatch, hi
     assert blocks["show-history-heading"]["text"] == prompt_text("show-history-heading")
     assert "History contract:" not in blocks[f"show-history-{history}"]["text"]
     rows = "\n".join(f"- skill-{index:02}: Description skill-{index:02}" for index in range(25))
+    assert blocks["skills-catalog-heading"]["text"] == "\n\n## Available skills\n"
     assert blocks["skills-catalog"]["text"] == prompt_text("skills-catalog").format(skill_rows=rows)
     assert blocks["skills-more-notice"] == {
         "id": "skills-more-notice",
@@ -339,7 +380,13 @@ def test_working_principles_addition_preserves_all_other_injection_bytes(monkeyp
     ):
         _environment(monkeypatch, history, skill_mode)
         blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
-        # Undo only the intentional Skills Usage move when comparing historical bytes.
+        # Undo the usage move and independent heading boundaries, never prose changes.
+        blocks = [dict(block) for block in blocks if block["id"] != "skills-catalog-heading"]
+        for block in blocks:
+            if block["id"] == "skills-catalog":
+                block["text"] = "### Available skills\n" + block["text"]
+            elif block["id"] == "codex-generated-images":
+                block["text"] = block["text"].replace("\n## Codex-generated images\n", "\n### Codex-generated images\n", 1)
         usage = next((block for block in blocks if block["id"] == "skills-prompt"), None)
         if usage:
             blocks.remove(usage)
@@ -354,5 +401,5 @@ def test_working_principles_addition_preserves_all_other_injection_bytes(monkeyp
         outputs.append(rendered.replace(principles, "", 1))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured from the pre-migration renderer at 928924dd82bb48c7eea67ff06ddd844d442cb2a1.
-    # Only the working-principles addition and Skills Usage placement may differ.
+    # Only working principles, Skills Usage placement, and heading boundaries differ.
     assert digest == "adbf608248e0b0a03d6646f57d31816cdb520c86113225e281b2aa007b100bc5"
