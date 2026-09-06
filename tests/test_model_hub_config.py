@@ -2697,8 +2697,15 @@ def test_model_hub_release_capability_accepts_explicit_truthy_values(value):
     assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is True
 
 
+def test_model_hub_release_capability_is_available_without_an_environment_override(monkeypatch):
+    monkeypatch.delenv(MODEL_HUB_ENABLED_ENV, raising=False)
+
+    assert is_model_hub_enabled({}) is True
+    assert is_model_hub_enabled() is True
+
+
 @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "unexpected"])
-def test_model_hub_release_capability_defaults_and_fails_closed(value):
+def test_model_hub_release_capability_respects_explicit_disable_and_fails_closed(value):
     assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is False
 
 

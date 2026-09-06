@@ -559,7 +559,7 @@ class Controller:
             pending.clear()
 
     def _init_model_hub(self) -> None:
-        """Own the CPA dependency and opt in to the full Model Hub aggregate."""
+        """Own the CPA dependency and the default-on Model Hub aggregate."""
 
         from config.v2_config import V2Config, is_model_hub_enabled
         from vibe.model_hub_runtime import get_model_hub_engine_adapter

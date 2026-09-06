@@ -13,7 +13,7 @@ from core.controller import Controller
 from modules.agents.model_hub import resolve_model_hub_launch, resolve_opencode_overlay_launch
 
 
-def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
+def test_controller_leaves_model_hub_aggregate_absent_when_explicitly_disabled(monkeypatch):
     import core.handlers.model_hub as model_hub
     import vibe.model_hub_runtime as model_hub_runtime
 
@@ -25,7 +25,7 @@ def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
         factory_calls += 1
         return object()
 
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
     monkeypatch.setattr(
         model_hub_runtime,
@@ -43,7 +43,8 @@ def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
     assert factory_calls == 0
 
 
-def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeypatch):
+@pytest.mark.parametrize("env_value", [None, "1"])
+def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable(monkeypatch, env_value):
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
@@ -67,7 +68,10 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
             self.service = service
             self.turn_gateway = turn_gateway
 
-    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    if env_value is None:
+        monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
     adapter = object()
     captured = {}
 

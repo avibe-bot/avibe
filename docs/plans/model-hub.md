@@ -1562,9 +1562,13 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
   `OPENCODE_CONFIG` overlay for OpenCode, gateway-config hash tracked for
   long-lived `opencode serve`). Native user configs are never written.
 - **Availability is default-on.** Absence of `VIBE_MODEL_HUB_ENABLED` cannot disable
-  the controller, `/api/models/` routes, or Models UI. I1 deletes the old default-off
-  gate; an explicitly configured development/emergency override may disable the surface,
-  but no fresh user depends on an environment variable to receive the product default.
+  the controller, `/api/models/` routes, or Models UI. The shared capability resolver
+  defaults to enabled when the variable is absent. Explicit `1`, `true`, `yes`, or
+  `on` enables it (case-insensitive, surrounding whitespace ignored); explicit `0`,
+  `false`, `no`, or `off` disables it for development/emergency use. Explicit empty
+  or unrecognized values remain disabled. No fresh user depends on an environment
+  variable to receive the product default. Availability does not change saved backend
+  modes, model selections, Sources, routes, native configuration, or engine-install consent.
 - **Direct (supported diagnostic/self-managed path)**: current behavior —
   per-backend native config editing (auth tabs, API key + base URL, writes to
   `settings.json` etc.), useful for diagnostics and self-managed setups. On an existing

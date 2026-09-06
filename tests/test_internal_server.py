@@ -2190,8 +2190,12 @@ def test_health_endpoint():
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
 
 
-def test_model_hub_rpc_uses_controller_owned_service(monkeypatch):
-    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+@pytest.mark.parametrize("env_value", [None, "1"])
+def test_model_hub_rpc_uses_controller_owned_service(monkeypatch, env_value):
+    if env_value is None:
+        monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
     controller = _build_controller_double()
     controller.model_hub_service = MagicMock()
     controller.model_hub_service.list_sources.return_value = [{"id": "src_owned"}]
@@ -2213,7 +2217,7 @@ def test_model_hub_rpc_uses_controller_owned_service(monkeypatch):
 
 
 def test_model_hub_rpc_is_stably_disabled_without_touching_service(monkeypatch):
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     controller = _build_controller_double()
     controller.model_hub_service = MagicMock()
     app = internal_server.create_app(controller)
@@ -2244,7 +2248,7 @@ def test_model_hub_dependency_rpc_remains_available_when_feature_is_disabled(mon
         EngineStatus,
     )
 
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     controller = _build_controller_double()
     controller.model_hub_service = None
     controller.model_hub_engine_adapter = SimpleNamespace(

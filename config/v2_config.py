@@ -1491,10 +1491,10 @@ _MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
 
 
 def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
-    """Return the backend-authoritative Model Hub release capability."""
+    """Enable Model Hub by default, honoring an explicit deployment override."""
 
     source = os.environ if environ is None else environ
-    return source.get(MODEL_HUB_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    return source.get(MODEL_HUB_ENABLED_ENV, "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]:
