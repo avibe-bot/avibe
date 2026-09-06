@@ -9750,6 +9750,9 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
 
     reservation: dict | None = None
     current_version: str | None = None
+    plan = None
+    activated = False
+    restart_python = None
     try:
         with atomic_upgrade_lock():
             rejection = _memory_package_repair_rejection(
@@ -9835,11 +9838,12 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                         "output": output or None,
                         "reason": "memory_package_install_failed",
                     }
+                elif plan.activation is not None:
+                    restart_python = _candidate_python(plan.activation.candidate_launcher)
+                    activate_upgrade_candidate(plan.activation)
+                    activated = True
+                    result = {"ok": True}
                 else:
-                    # Keep the current UI process on its live tool environment
-                    # so a service-only restart can immediately observe the
-                    # companion. The shared upgrade lock serializes this exact
-                    # repair with staged forward upgrades.
                     integrity = verify_python_environment(sys.executable)
                     result = (
                         {"ok": True}
@@ -9857,7 +9861,10 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                         delay_seconds=2.0,
                         vibe_path=current_vibe_path,
                         trigger="memory-package-repair",
-                        scope="service",
+                        # The old UI must release its Python environment too.
+                        # Restart-only retries resolve the now-active launcher.
+                        scope="all",
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
@@ -9877,7 +9884,7 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
                         "restarting": True,
                         "restart": restart,
                     }
-    except (OSError, subprocess.TimeoutExpired, ValueError, MigrationLockTimeout) as exc:
+    except (OSError, subprocess.TimeoutExpired, ValueError, RuntimeError, MigrationLockTimeout) as exc:
         logger.warning("Memory package repair failed before completion: %s", exc)
         result = {
             "ok": False,
@@ -9885,6 +9892,9 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
             "output": str(exc),
             "reason": "memory_package_install_failed",
         }
+    finally:
+        if plan is not None and plan.activation is not None and not activated:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
     if reservation is not None and current_version is not None:
         _finish_memory_package_auto_repair_attempt(
             current_version,

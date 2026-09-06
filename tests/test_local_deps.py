@@ -3349,7 +3349,7 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
         "delay_seconds": 2.0,
         "vibe_path": "/bin/vibe",
         "trigger": "memory-package-repair",
-        "scope": "service",
+        "scope": "all",
     }
     assert result["restarting"] is True
     assert result["restart"] == {"job_id": "restart"}
@@ -3482,6 +3482,83 @@ def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_sched
     assert execute_plan.call_count == 1
     assert schedule.call_count == 2
     assert api._memory_package_restart_retry_required("3.0.14") is False
+
+
+@pytest.mark.parametrize("outcome", ("success", "install", "timeout", "integrity", "activation", "restart"))
+def test_memory_repair_stages_activation_without_mutating_the_running_environment(
+    monkeypatch, tmp_path, outcome,
+) -> None:
+    from core.install_integrity import IntegrityResult
+    from vibe import upgrade
+
+    root = tmp_path / "generations"
+    live = tmp_path / "uv" / "tools" / "avibe-os"
+    live.mkdir(parents=True)
+    original = {"vibe": b"old launcher", "python": b"old interpreter", "api.py": b"old code"}
+    for name, content in original.items():
+        (live / name).write_bytes(content)
+    launcher = tmp_path / "bin" / "vibe"
+    launcher.parent.mkdir()
+    launcher.symlink_to(live / "vibe")
+    candidate = root / "new" / "bin" / "vibe"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"new launcher")
+    candidate.chmod(0o755)
+    candidate_python = candidate.with_name("python")
+    candidate_python.write_bytes(b"new interpreter")
+    candidate_python.chmod(0o755)
+    activation = upgrade.AtomicActivation(launcher, candidate)
+    plan = upgrade.UpgradePlan(["repair"], {}, "uv", activation=activation)
+
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(api, "release_asset_specs", lambda _: None)
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: tmp_path / "repair.json")
+    build = Mock(return_value=plan)
+    monkeypatch.setattr(api, "build_upgrade_plan", build)
+    execute = Mock(return_value=subprocess.CompletedProcess(["repair"], outcome == "install", "installed", ""))
+    if outcome == "timeout":
+        execute.side_effect = subprocess.TimeoutExpired(["repair"], 1)
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute)
+    verify = Mock(return_value=IntegrityResult(outcome != "integrity", failures=("incomplete",) if outcome == "integrity" else ()))
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", verify)
+    monkeypatch.setattr(api, "verify_python_environment", Mock(side_effect=AssertionError("must verify candidate, not live interpreter")))
+    if outcome == "activation":
+        monkeypatch.setattr(upgrade, "_prepare_launcher_replacement", Mock(side_effect=PermissionError("launcher locked")))
+    restart = Mock(return_value={"job_id": "new-generation"})
+    if outcome == "restart":
+        restart.side_effect = RuntimeError("cannot spawn")
+    monkeypatch.setattr(api, "schedule_restart", restart)
+
+    result = api._prepare_memory_package_job()
+
+    assert {name: (live / name).read_bytes() for name in original} == original
+    assert result["ok"] is (outcome == "success")
+    activated = outcome in {"success", "restart"}
+    assert launcher.resolve() == (candidate if activated else live / "vibe")
+    assert candidate.exists() is activated
+    assert restart.call_count == int(activated)
+    if activated:
+        restart.assert_called_once_with(
+            delay_seconds=2.0, vibe_path=str(launcher), trigger="memory-package-repair",
+            scope="all", python_executable=str(candidate_python),
+        )
+    if outcome == "restart":
+        assert api._memory_package_restart_retry_required("3.0.14") is True
+        restart.side_effect = None
+        retried = api._prepare_memory_package_job()
+        assert retried["ok"] is True
+        assert build.call_count == execute.call_count == 1
+        assert restart.call_args.kwargs == {
+            "delay_seconds": 2.0, "vibe_path": str(launcher),
+            "trigger": "memory-package-repair", "scope": "all",
+        }
+        assert launcher.resolve() == candidate
 
 
 def test_memory_indep_026_auto_repair_persists_a_per_version_attempt_budget(
