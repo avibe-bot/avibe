@@ -931,7 +931,10 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         "--force",
     ]
     assert "--upgrade" not in uv_plan.command
-    assert uv_plan.env["UV_TOOL_DIR"] == "/tmp/.local/share/uv/tools"
+    assert uv_plan.env["UV_TOOL_DIR"] != "/tmp/.local/share/uv/tools"
+    assert uv_plan.activation is not None
+    assert uv_plan.activation.launcher == Path("/custom/bin/vibe")
+    assert Path(uv_plan.env["UV_TOOL_DIR"]).is_relative_to(vibe_upgrade.atomic_uv_install_root())
 
     pip_plan = build_upgrade_plan(
         python_executable="/usr/bin/python3",
@@ -990,6 +993,9 @@ def test_an_exact_memory_plan_names_both_index_pins_when_no_source_is_given(monk
         "avibe-os==3.0.10",
         "avibe-memory==3.0.10",
     ]
+    assert uv_plan.activation is not None
+    assert uv_plan.env["UV_TOOL_DIR"] != "/tmp/.local/share/uv/tools"
+    assert uv_plan.env["UV_TOOL_BIN_DIR"] != "/custom/bin"
 
     pip_plan = build_upgrade_plan(
         python_executable="/usr/bin/python3",
@@ -2665,6 +2671,22 @@ def test_explicit_memory_install_keeps_exact_package_version(monkeypatch):
     assert "avibe-memory==3.0.14" in plan.command
     assert plan.preflight_command is not None
     assert "avibe-memory==3.0.14" in plan.preflight_command
+
+
+@pytest.mark.parametrize("launcher", (None, "/tmp/uv/tools/avibe-os/bin/vibe"))
+def test_exact_uv_repair_without_a_stable_launcher_fails_before_mutation(monkeypatch, launcher):
+    monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv")
+    plan = build_upgrade_plan(
+        python_executable="/tmp/uv/tools/avibe-os/bin/python",
+        vibe_path=launcher, version="3.0.14", memory_package=True,
+        memory_version="3.0.14", base_env={"PATH": "/usr/bin"},
+    )
+    assert plan.activation is None
+    assert plan.preflight_error
+    run = Mock()
+    with pytest.raises(ValueError, match="stable vibe launcher"):
+        execute_upgrade_plan(plan, run=run)
+    run.assert_not_called()
 
 
 def test_with_memory_extra_preserves_vcs_url_and_local_specs(tmp_path, monkeypatch):

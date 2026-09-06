@@ -389,6 +389,10 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 '"$current_python" -c "from config.v2_config import V2Config; '
                 f"from importlib.metadata import version; assert V2Config.load().memory.enabled; assert version('avibe-os') == '{TEST_RELEASE_VERSION}'; "
                 f"assert version('avibe-memory') == '{TEST_RELEASE_VERSION}'\"",
+                'test "$current_python" != "$upgraded_python"',
+                '"$upgraded_python" -c "import certifi, importlib.util; from pathlib import Path; '
+                "assert Path(certifi.where()).is_file(); assert importlib.util.find_spec('vibe.api') is not None; "
+                "assert importlib.util.find_spec('avibe_memory') is None\"",
                 'wait_until 120 1 "vibe service to report running=true" vibe_service_running',
                 "printf '%s\\n' \"$status_output\"",
             ]
