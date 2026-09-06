@@ -199,7 +199,9 @@ export const RouteChainDialog: React.FC<{
   const valid = agent
     ? validateRouteDraft(agent, sources, origin, draft)
     : { invalidIndexes: [], valid: false };
-  const dirty = manualDraft ? savedOverride === null || !sameRouteDraft(savedOverride.hops, draft) : savedOverride !== null;
+  const restoring = restoreUndo.current !== null;
+  const unresolvedPreview = restoring && preview === null;
+  const dirty = manualDraft ? savedOverride === null || !sameRouteDraft(savedOverride.hops, draft) : restoring;
   const draftOrigin = manualDraft ? (draft.length ? 'manual' : null) : (preview ?? chain)?.route_origin ?? null;
   const announce = (key: string, params?: Record<string, unknown>) =>
     setAnnouncement({ key, params });
@@ -210,6 +212,11 @@ export const RouteChainDialog: React.FC<{
   const readChain = React.useCallback(async () => {
     if (!selectionBackend) return;
     const token = ++generation.current;
+    previewGeneration.current += 1;
+    restoreUndo.current = null;
+    setPreview(null);
+    setPreviewPending(false);
+    setPreviewFailed(false);
     setPhase("loading");
     try {
       const next = await modelsApi.getAgentChain(selectionBackend, modelId);
@@ -274,6 +281,7 @@ export const RouteChainDialog: React.FC<{
       return;
     }
     generation.current += 1;
+    previewGeneration.current += 1;
     onClose();
   }, [onClose, phase, selection]);
 
@@ -319,6 +327,11 @@ export const RouteChainDialog: React.FC<{
   const remove = (index: number) => {
     if (phase === "saving" || phase === "impact" || phase === "refreshing")
       return;
+    if (draft.length === 1) {
+      void restoreAutomatic();
+      focusAfterRender(reseedButtonRef);
+      return;
+    }
     const next = advanceInteraction({ type: "remove", index });
     const nextDraft = next.draft;
     const focusedIndex = next.focusIndex;
@@ -422,10 +435,13 @@ export const RouteChainDialog: React.FC<{
     committedHops: RouteHop[],
   ) => {
     generation.current += 1;
+    previewGeneration.current += 1;
     setChain(nextReport.chain);
     setSavedOverride(nextReport.chain.manual_override);
     setManualDraft(nextReport.chain.manual_override !== null);
     setPreview(null);
+    setPreviewPending(false);
+    setPreviewFailed(false);
     restoreUndo.current = null;
     setReport(nextReport);
     setOrigin(committedHops);
@@ -442,7 +458,7 @@ export const RouteChainDialog: React.FC<{
   };
 
   const submit = async (confirmation?: GuardState) => {
-    if (!selection || !agent || phase === "saving" || previewPending || (!manualDraft && previewFailed) || (manualDraft && !valid.valid) || !dirty)
+    if (!selection || !agent || phase === "saving" || covered || previewPending || unresolvedPreview || (!manualDraft && previewFailed) || (manualDraft && !valid.valid) || !dirty)
       return;
     const hops = (confirmation ? (submitted ?? draft) : draft).map((hop) => ({
       ...hop,
@@ -665,15 +681,18 @@ export const RouteChainDialog: React.FC<{
   const restoreAutomatic = React.useCallback(async () => {
     if (!agent || previewPending || phase !== 'ready') return;
     const token = ++previewGeneration.current;
-    const previousDraft = draft.map((hop) => ({ ...hop }));
+    // Record intent before reading: failure must not leave a saveable empty Manual draft.
+    if (manualDraft) restoreUndo.current = draft.map((hop) => ({ ...hop }));
+    setManualDraft(false);
+    setPreview(null);
     setPreviewPending(true);
     setPreviewFailed(false);
+    advanceInteraction({ type: 'drop-grab' });
+    setSelectorEpoch((current) => current + 1);
     try {
       const next = await modelsApi.previewAgentChain(agent.backend, modelId, { manual_override: null });
       if (token !== previewGeneration.current) return;
-      if (manualDraft) restoreUndo.current = previousDraft;
       setPreview(next);
-      setManualDraft(false);
       advanceInteraction({ type: 'reset', draft: next.chain.map(({ source_id, model_id }) => ({ source_id, model_id })) });
       setAnnouncement({ key: 'settings.models.routing.restorePending' });
     } catch {
@@ -684,8 +703,15 @@ export const RouteChainDialog: React.FC<{
   }, [advanceInteraction, agent, draft, manualDraft, modelId, phase, previewPending]);
   const wasCovered = React.useRef(covered);
   React.useEffect(() => {
+    const leaving = !wasCovered.current && covered;
     const returning = wasCovered.current && !covered;
     wasCovered.current = covered;
+    if (leaving && restoreUndo.current !== null) {
+      previewGeneration.current += 1;
+      setPreview(null);
+      setPreviewPending(false);
+      setPreviewFailed(false);
+    }
     if (!returning || manualDraft) return;
     // Defaults can change while this dialog is hidden; explicit drafts remain local.
     if (restoreUndo.current) void restoreAutomatic();
@@ -694,6 +720,7 @@ export const RouteChainDialog: React.FC<{
   const undoRestore = () => {
     previewGeneration.current += 1;
     setPreview(null);
+    setPreviewPending(false);
     setPreviewFailed(false);
     setManualDraft(true);
     advanceInteraction({ type: 'reset', draft: restoreUndo.current ?? origin });
@@ -938,7 +965,7 @@ export const RouteChainDialog: React.FC<{
         <Button
           ref={retryButtonRef}
           type="button"
-          disabled={!valid.valid}
+          disabled={manualDraft && !valid.valid}
           onClick={() => {
             generation.current += 1;
             void submit();
@@ -1022,15 +1049,19 @@ export const RouteChainDialog: React.FC<{
       </div>
     ) : (
       <div className="model-hub-route-body flex flex-col">
-        <div className="model-hub-route-origin-line">
+        {!unresolvedPreview && !(manualDraft && draft.length === 0) && <div className="model-hub-route-origin-line">
           <RouteOriginBadge origin={draftOrigin} backend={agent!.backend} interactive={false} />
           <span>{t(manualDraft ? 'settings.models.routing.frozen' : 'settings.models.routing.follows', { backend })}</span>
-        </div>
+        </div>}
+        {unresolvedPreview && <div className="model-hub-route-preview" role="status">
+          {previewPending && <strong>{t('settings.models.routing.previewLoading')}</strong>}
+          <span>{t('settings.models.routing.restorePending')}</span>
+        </div>}
         {preview && <div className="model-hub-route-preview" data-origin={preview.route_origin ?? 'unconfigured'} role="status">
           <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`)}</strong>
           <span>{t('settings.models.routing.restorePending')}</span>
         </div>}
-        <h3 className="model-hub-route-label font-bold">
+        {!unresolvedPreview && <><h3 className="model-hub-route-label font-bold">
           {t(preview ? 'settings.models.routing.afterSave' : "settings.models.routeDialog.section")}
         </h3>
         <div inert={previewPending} className="model-hub-route-list flex flex-col border border-border bg-background">
@@ -1046,7 +1077,7 @@ export const RouteChainDialog: React.FC<{
             ))
           ) : (
             <div className="model-hub-route-empty text-xs text-muted">
-              <p>{t(manualDraft ? 'settings.models.routing.manualEmpty' : 'settings.models.routing.noDefaults')}</p>
+              <p>{t(manualDraft ? 'settings.models.routing.draftEmpty' : 'settings.models.routing.noDefaults')}</p>
               {!manualDraft && onOpenDefaults && <Button variant="outline" onClick={onOpenDefaults}><ListOrdered aria-hidden />{t('settings.models.routing.configureDefaults')}</Button>}
             </div>
           )}
@@ -1076,8 +1107,8 @@ export const RouteChainDialog: React.FC<{
               </button>
             }
           />}
-        </div>
-        {onOpenDefaults && <button type="button" disabled={previewPending} onClick={onOpenDefaults} className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan-ink">
+        </div></>}
+        {onOpenDefaults && <button type="button" onClick={onOpenDefaults} className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan-ink">
           <ListOrdered aria-hidden="true" />
           {t('settings.models.routing.defaultRouting')}
           <span className="text-muted">{(agent?.sources?.order ?? []).map((id) => sourceName(sources, id)).join(' → ')}</span>
@@ -1094,7 +1125,7 @@ export const RouteChainDialog: React.FC<{
           </span>
         </p>
         {previewFailed && <div role="alert" className="text-destructive-ink text-xs"><p>{t('settings.models.routing.previewFailed')}</p><Button variant="ghost" size="sm" disabled={previewPending} onClick={() => void restoreAutomatic()}><RefreshCw aria-hidden />{t('settings.models.routeDialog.retry')}</Button></div>}
-        {valid.invalidIndexes.length > 0 && (
+        {manualDraft && valid.invalidIndexes.length > 0 && (
           <p
             id="model-hub-route-invalid-summary"
             className="model-hub-route-invalid-summary"
@@ -1115,6 +1146,7 @@ export const RouteChainDialog: React.FC<{
         <DialogPrimitive.Content
           aria-busy={
             phase === "saving" ||
+            previewPending ||
             phase === "refreshing" ||
             phase === "reconciling"
           }
@@ -1204,7 +1236,7 @@ export const RouteChainDialog: React.FC<{
               </span>
             ) : (
               <>
-                {(manualDraft || restoreUndo.current) && <Button ref={reseedButtonRef} variant="outline" className="model-hub-dialog-action mr-auto" disabled={phase !== 'ready' || previewPending} onClick={() => restoreUndo.current ? undoRestore() : void restoreAutomatic()}>
+                {(manualDraft || restoring) && <Button ref={reseedButtonRef} variant="outline" className="model-hub-dialog-action mr-auto" disabled={phase !== 'ready'} onClick={() => restoring ? undoRestore() : void restoreAutomatic()}>
                   {previewPending ? <LoaderCircle className="animate-spin" aria-hidden /> : restoreUndo.current ? <Undo2 aria-hidden /> : <RotateCcw aria-hidden />}
                   {t(restoreUndo.current ? 'settings.models.routing.undoRestore' : 'settings.models.routing.restoreAutomatic')}
                 </Button>}
@@ -1215,14 +1247,14 @@ export const RouteChainDialog: React.FC<{
                   className="model-hub-dialog-action"
                   onClick={close}
                 >
-                  {t(manualDraft || preview ? "settings.models.routeDialog.cancel" : 'settings.models.routing.close')}
+                  {t(manualDraft || restoring ? "settings.models.routeDialog.cancel" : 'settings.models.routing.close')}
                 </Button>
-                {!manualDraft && !preview ? (canEditRoute && <Button variant="outline" className="model-hub-dialog-action" disabled={phase !== 'ready'} onClick={() => setManualDraft(true)}><Pencil aria-hidden />{t('settings.models.routing.editRoute')}</Button>) : <Button
+                {!manualDraft && !restoring ? (canEditRoute && <Button variant="outline" className="model-hub-dialog-action" disabled={phase !== 'ready'} onClick={() => setManualDraft(true)}><Pencil aria-hidden />{t('settings.models.routing.editRoute')}</Button>) : <Button
                   ref={saveButtonRef}
                   type="button"
                   className="model-hub-dialog-action"
                   aria-describedby={
-                    valid.invalidIndexes.length > 0
+                    manualDraft && valid.invalidIndexes.length > 0
                       ? [
                           "model-hub-route-invalid-summary",
                           ...valid.invalidIndexes.map(
@@ -1231,7 +1263,7 @@ export const RouteChainDialog: React.FC<{
                         ].join(" ")
                       : undefined
                   }
-                  disabled={phase !== "ready" || previewPending || (!manualDraft && previewFailed) || !dirty || (manualDraft && !valid.valid)}
+                  disabled={phase !== "ready" || covered || previewPending || unresolvedPreview || (!manualDraft && previewFailed) || !dirty || (manualDraft && !valid.valid)}
                   onClick={() => void submit()}
                 >
                   {t("settings.models.routeDialog.save")}

@@ -2,16 +2,16 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "Read projection of the shared effective route plan. A sparse manual override wins verbatim; otherwise the planner selects matching evidence or exact-id passthrough on Hub API-key sources in backend default order. Live inspection adds health, runnability, blocker, retry annotations, and current position without changing plan membership or origin.",
+  "description": "Canonical output of the shared effective route plan. A nonempty sparse manual override wins verbatim; absent or valid empty values inherit matching evidence or exact-id passthrough on Hub API-key sources in backend default order. Live inspection adds health, runnability, blocker, retry annotations, and current position without changing plan membership or origin. Output-only minimum hop counts do not restrict accepted empty PUT/preview input or supported configuration before normalization.",
   "type": "object",
   "required": ["contract_version", "backend", "model_id", "manual_override", "route_origin", "chain", "current", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 9 },
+    "contract_version": { "const": 10 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "model_id": { "type": "string" },
     "manual_override": {
-      "description": "Actual persisted override, or the draft override on preview. Null means absent and automatic; an object with empty hops is an explicit empty override. Equality with generated hops never determines intent.",
+      "description": "Normalized nonempty manual override, or null for inherited routing. Valid empty saved values and preview inputs normalize to null without a read-time write. Preview reports normalized draft intent. Nonempty equality with generated hops never determines intent; there is no empty-disable state.",
       "anyOf": [
         { "type": "null" },
         {
@@ -21,6 +21,7 @@
           "properties": {
             "hops": {
               "type": "array",
+              "minItems": 1,
               "items": {
                 "type": "object",
                 "required": ["source_id", "model_id"],
@@ -37,7 +38,7 @@
     },
     "route_origin": {
       "enum": ["automatic", "manual", "passthrough", null],
-      "description": "Origin of the nonempty effective plan, independent of health and native process readiness. Passthrough is restricted to Hub API-key Sources; unmatched subscription-only defaults yield an empty plan. Null exactly when chain is empty, including an explicit empty manual override."
+      "description": "Origin of the nonempty effective plan, independent of health and native process readiness. Passthrough is restricted to Hub API-key Sources; unmatched subscription-only defaults yield an empty plan. Null exactly when the inherited effective chain is empty. Empty input inherits and does not force null origin."
     },
     "current": {
       "anyOf": [
@@ -140,15 +141,11 @@
   "allOf": [
     {
       "if": { "properties": { "manual_override": { "type": "object" } }, "required": ["manual_override"] },
-      "then": {
-        "if": { "properties": { "manual_override": { "properties": { "hops": { "maxItems": 0 } }, "required": ["hops"] } } },
-        "then": { "properties": { "chain": { "maxItems": 0 } } },
-        "else": { "properties": { "chain": { "minItems": 1 } } }
-      }
+      "then": { "properties": { "chain": { "minItems": 1 }, "route_origin": { "const": "manual" } } }
     },
     {
       "if": { "properties": { "chain": { "maxItems": 0 } }, "required": ["chain"] },
-      "then": { "properties": { "route_origin": { "type": "null" }, "current": { "type": "null" } } },
+      "then": { "properties": { "manual_override": { "type": "null" }, "route_origin": { "type": "null" }, "current": { "type": "null" } } },
       "else": {
         "properties": { "route_origin": { "enum": ["automatic", "manual", "passthrough"] } },
         "if": { "properties": { "manual_override": { "type": "object" } }, "required": ["manual_override"] },
@@ -208,7 +205,7 @@
   ],
   "examples": [
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "codex",
       "model_id": "unlisted-model",
       "manual_override": null,
@@ -218,17 +215,17 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "codex",
       "model_id": "gpt-5.6",
-      "manual_override": { "hops": [] },
-      "route_origin": null,
-      "chain": [],
-      "current": null,
-      "supply_state": "interrupted"
+      "manual_override": null,
+      "route_origin": "automatic",
+      "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "healthy", "runnable": true, "reason": null, "retry_at": null }],
+      "current": { "source_id": "src_chatgptplus", "model_id": "gpt-5.6" },
+      "supply_state": "ok"
     },
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "manual_override": null,
@@ -238,7 +235,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "opencode",
       "model_id": "glm-5.2",
       "manual_override": { "hops": [{ "source_id": "src_relay9c1x", "model_id": "glm-5.2" }] },
@@ -248,7 +245,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -258,7 +255,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -268,7 +265,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 9,
+      "contract_version": 10,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "manual_override": null,

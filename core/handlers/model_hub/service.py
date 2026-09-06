@@ -34,6 +34,7 @@ from config.v2_config import (
     normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
+    normalized_model_hub_override,
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
@@ -132,7 +133,7 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
-CONTRACT_VERSION = 9
+CONTRACT_VERSION = 10
 
 
 def _storable_backend_model_metadata(
@@ -155,8 +156,8 @@ def _storable_backend_model_metadata(
     return proposed_display_name, proposed_efforts
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 9
-PROBE_RESULT_CONTRACT_VERSION = 9
+AGENT_CHAIN_CONTRACT_VERSION = 10
+PROBE_RESULT_CONTRACT_VERSION = 10
 _REORDER_ORDER_UNSET = object()
 _REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
@@ -719,7 +720,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 9,
+        "contract_version": 10,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -900,7 +901,8 @@ class ModelHubService:
         )
         seen: set[str] = set()
         model_ids: list[str] = []
-        for model_id in [*primary, requested_model, *agent.routes]:
+        overrides = [model_id for model_id, route in agent.routes.items() if normalized_model_hub_override(route) is not None]
+        for model_id in [*primary, requested_model, *overrides]:
             if model_id and model_id not in seen:
                 seen.add(model_id)
                 model_ids.append(model_id)
@@ -3195,8 +3197,9 @@ class ModelHubService:
                 add(pinned_model, name)
         for model in agent.models:
             add(model.id)
-        for model_id in agent.routes:
-            add(model_id)
+        for model_id, route in agent.routes.items():
+            if normalized_model_hub_override(route) is not None:
+                add(model_id)
         return protected
 
     def _would_interrupt(
@@ -3336,13 +3339,16 @@ class ModelHubService:
             for item in invalidated_hops
         }
         for backend in MODEL_HUB_BACKENDS:
-            for menu_model, route in config.agents[backend].routes.items():
+            agent = config.agents[backend]
+            for menu_model, route in list(agent.routes.items()):
                 route.hops = tuple(
                     hop
                     for hop in route.hops
                     if (backend, menu_model, hop.source_id, hop.model_id)
                     not in identities
                 )
+                if normalized_model_hub_override(route) is None:
+                    agent.routes.pop(menu_model)
 
     def _guard_inventory_mutation(
         self,
@@ -3355,6 +3361,7 @@ class ModelHubService:
         confirmed_interruptions: object,
     ) -> tuple[list[dict], list[dict]]:
         invalidated = self._invalidated_route_hops(updated, source_id)
+        self._prune_invalidated_route_hops(updated, invalidated)
         would_remove_hops = self._removed_effective_hops(previous, updated)
         would_remove_hops.extend(item for item in invalidated if item not in would_remove_hops)
         would_interrupt = self._introduced_interruptions(previous, updated)
@@ -3370,8 +3377,6 @@ class ModelHubService:
                 else "source_last_supplier"
             ),
         )
-        if invalidated:
-            self._prune_invalidated_route_hops(updated, invalidated)
         return would_remove_hops, would_interrupt
 
     @staticmethod
@@ -3419,7 +3424,8 @@ class ModelHubService:
                 agent.sources.order = [item for item in agent.sources.order if item != source_id]
                 for model_id, route in list(agent.routes.items()):
                     route.hops = tuple(hop for hop in route.hops if hop.source_id != source_id)
-                    agent.routes[model_id] = route
+                    if normalized_model_hub_override(route) is None:
+                        agent.routes.pop(model_id)
             would_interrupt = self._introduced_interruptions(
                 previous,
                 config,
@@ -3689,6 +3695,7 @@ class ModelHubService:
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         config = self._clone_config(self.store.load())
         agent = self._validate_route_override(config, backend, model_id, route)
+        route = normalized_model_hub_override(route)
         if route is None:
             agent.routes.pop(model_id, None)
         else:
@@ -3716,6 +3723,7 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._validate_route_override(config, backend, model_id, route)
+            route = normalized_model_hub_override(route)
             if route is None:
                 agent.routes.pop(model_id, None)
             else:
@@ -4866,13 +4874,14 @@ class ModelHubService:
                     for item in source.models
                     if item.id != model_id
                 ]
-            removed_hops = self._removed_effective_hops(previous, config)
-            removed_hops.extend(item for item in retired_hops if item not in removed_hops)
             invalidated = (
                 self._invalidated_route_hops(config, source.id)
                 if not source_supports_passthrough(source)
                 else []
             )
+            self._prune_invalidated_route_hops(config, [*retired_hops, *invalidated])
+            removed_hops = self._removed_effective_hops(previous, config)
+            removed_hops.extend(item for item in retired_hops if item not in removed_hops)
             removed_hops.extend(item for item in invalidated if item not in removed_hops)
             would_interrupt = self._introduced_interruptions(previous, config)
             self._require_guard_plan(
@@ -4887,16 +4896,6 @@ class ModelHubService:
                     else "source_last_supplier"
                 ),
             )
-            if force and retired_hops:
-                for agent in config.agents.values():
-                    for route in agent.routes.values():
-                        route.hops = tuple(
-                            hop
-                            for hop in route.hops
-                            if not (hop.source_id == source.id and hop.model_id == model_id)
-                        )
-            if invalidated:
-                self._prune_invalidated_route_hops(config, invalidated)
             await self._commit_synced(previous, config)
             return {
                 "source": self._source_payload(source),

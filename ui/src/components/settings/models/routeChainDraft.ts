@@ -83,7 +83,7 @@ export function validateRouteDraft(
   });
   return {
     invalidIndexes: allInvalidIndexes,
-    valid: allInvalidIndexes.length === 0,
+    valid: draft.length > 0 && allInvalidIndexes.length === 0,
   };
 }
 
@@ -113,7 +113,7 @@ export const sameRouteDraft = (left: RouteHop[], right: RouteHop[]): boolean =>
   left.every((hop, index) => identity(hop) === identity(right[index]));
 
 export const sameManualOverride = (left: ManualRouteOverride | null, right: ManualRouteOverride | null): boolean =>
-  left === null || right === null ? left === right : sameRouteDraft(left.hops, right.hops);
+  sameRouteDraft(left?.hops ?? [], right?.hops ?? []);
 
 export const routeChainMatchesAttempt = (
   chain: AgentChain,

@@ -31,6 +31,12 @@ import { expect, runtimeIsRunning } from './fixtures';
 
 export type AgentChainSnapshot = Pick<AgentChain, 'manual_override'>;
 
+/** Legacy empty input carries the same intent as absence; nonempty hops stay exact. */
+export const canonicalManualOverride = (override: AgentChain['manual_override']): AgentChain['manual_override'] =>
+  override === null || override.hops.length === 0 ? null : {
+    hops: override.hops.map((hop) => ({ source_id: hop.source_id, model_id: hop.model_id })),
+  };
+
 /** Capture persisted intent, not an effective chain that includes fixture sources. */
 export const captureAgentChain = async (
   api: HubApi,
@@ -39,21 +45,20 @@ export const captureAgentChain = async (
   const chain = await api.agentChain(route.backend, route.model);
   expect(chain).toHaveProperty('manual_override');
   return {
-    manual_override: chain.manual_override === null ? null : {
-      hops: chain.manual_override.hops.map((hop) => ({ source_id: hop.source_id, model_id: hop.model_id })),
-    },
+    manual_override: canonicalManualOverride(chain.manual_override),
   };
 };
 
-/** Automatic absence and a persisted empty manual route are different states. */
+/** Restore canonical intent without recreating the obsolete empty-disable value. */
 export const restoreAgentChain = async (
   api: HubApi,
   route: { backend: string; model: string },
   original: AgentChainSnapshot,
 ): Promise<void> => {
-  const restored = original.manual_override === null
+  const expected = canonicalManualOverride(original.manual_override);
+  const restored = expected === null
     ? await api.deleteAgentChain(route.backend, route.model)
-    : await api.putAgentChain(route.backend, route.model, original.manual_override.hops);
+    : await api.putAgentChain(route.backend, route.model, expected.hops);
   expect(
     restored,
     `Teardown failed to restore the original route chain for ${route.backend}/${route.model} — `
@@ -61,7 +66,7 @@ export const restoreAgentChain = async (
   ).toBe(true);
   const actual = await api.agentChain(route.backend, route.model);
   expect(actual.manual_override, 'Teardown must restore route intent, not only effective hops')
-    .toEqual(original.manual_override);
+    .toEqual(expected);
 };
 
 /**

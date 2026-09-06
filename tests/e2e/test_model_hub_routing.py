@@ -265,6 +265,117 @@ def test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
+@pytest.mark.parametrize("legacy_empty", [False, True], ids=["absent", "legacy-empty"])
+def test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa(
+    tmp_path, monkeypatch, protocol, legacy_empty,
+):
+    """MH-ROUTING-013: empty and absent loaded routes share matching, passthrough and stable registration."""
+    async def exercise(adapter, mocks):
+        backend = {"openai_responses": "codex", "openai_chat": "opencode", "anthropic": "claude"}[protocol]
+        arranged, _, _, sources = _real_route_service(tmp_path, adapter, mocks, protocol, [], backend=backend)
+        config = arranged.store.load()
+        agent = config.agents[backend]
+        if backend == "opencode":
+            agent.models = [ModelHubBackendModelConfig(id=model, origin="manual", native_protocol="openai_responses")
+                            for model in ("vendor/inherited-known", "vendor/inherited-unknown", "vendor/manual-control")]
+            agent.menu.checked = [item.id for item in agent.models]
+        known, unknown, manual_menu = [item.id for item in agent.models][:3]
+        manual_target = "vendor/unlisted-manual-control"
+        inventories = [["unrelated-inventory-model"], [known], []]
+        for item, upstream, inventory in zip(sources, mocks, inventories, strict=True):
+            item.models = [source_model(model) for model in inventory]
+            upstream.configure(protocol=protocol, models=[{"id": model} for model in inventory])
+        agent.sources.order = [sources[0].id, sources[1].id]
+        agent.routes = {manual_menu: ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(sources[2].id, manual_target),))}
+        payload = config.to_payload()
+        if legacy_empty:
+            payload["agents"][backend]["routes"].update({known: {"hops": []}, unknown: {"hops": []}})
+        persisted = tmp_path / "persisted-inheritance.json"
+        persisted.write_text(json.dumps(payload), encoding="utf-8")
+        original_bytes = persisted.read_bytes()
+        loaded = ModelHubConfig.from_payload(json.loads(original_bytes))
+        absent_payload = json.loads(original_bytes)
+        for model in (known, unknown):
+            absent_payload["agents"][backend]["routes"].pop(model, None)
+        assert loaded.to_payload() == ModelHubConfig.from_payload(absent_payload).to_payload()
+        assert known not in loaded.agents[backend].routes and unknown not in loaded.agents[backend].routes
+        manual = {"hops": [{"source_id": sources[2].id, "model_id": manual_target}]}
+        service = service_for(tmp_path, MemoryModelHubStore(loaded), adapter)
+        await service.runtime_start()
+        connection = adapter.supervisor.client_if_running().connection
+        config_path = next(adapter.state_store.root.glob("instances/*/config.yaml"))
+        engine_before = (config_path.read_bytes(), config_path.stat().st_mtime_ns)
+        registration = [adapter.state_store.get_source(item.id) for item in sources]
+        source_before = [item.to_payload() for item in service.store.load().sources]
+        catalog_before = service.store.load().agents[backend].to_payload()
+        gateway = ModelHubTurnGateway(service)
+        path = {"anthropic": "messages", "openai_responses": "responses", "openai_chat": "chat/completions"}[protocol]
+        evidence = []
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                for order in ([0, 1], [1, 0]):
+                    ordered_ids = [sources[index].id for index in order]
+                    if service.store.load().agents[backend].sources.order != ordered_ids:
+                        await service.set_agent_sources(backend, {"order": ordered_ids})
+                    for model, selected, target, origin in (
+                        (known, 1, known, "automatic"),
+                        (unknown, order[0], unknown, "passthrough"),
+                        (manual_menu, 2, manual_target, "manual"),
+                    ):
+                        chain = service.agent_chain(backend, model)
+                        assert chain["manual_override"] == (manual if origin == "manual" else None)
+                        assert chain["route_origin"] == origin
+                        expected_chain = ([(sources[index].id, unknown) for index in order] if origin == "passthrough"
+                                          else [(sources[selected].id, target)])
+                        assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == expected_chain
+                        base_url, token = await gateway.endpoint(
+                            backend, process_scope=f"{tmp_path}/{len(evidence)}", turn_id=f"turn_inherited_{len(evidence)}",
+                            requested_model_id=model, resolved_model_id=target, source_id=sources[selected].id,
+                        )
+                        # Prepared Claude/Codex launches send the resolved target;
+                        # OpenCode requests its menu id through the native overlay.
+                        request = {"model": model if backend == "opencode" else target, "stream": False}
+                        prompt = "Inherited exact route: \u4e2d\u6587"
+                        if protocol == "openai_responses":
+                            request["input"] = prompt
+                        else:
+                            request.update(max_tokens=32, messages=[{"role": "user", "content": prompt}])
+                        for upstream in mocks:
+                            upstream.reset_requests()
+                        async with client.post(f"{base_url}/v1/{path}", json=request,
+                                               headers={"Authorization": f"Bearer {token}"}) as response:
+                            raw = await asyncio.wait_for(response.read(), timeout=15)
+                            assert response.status == 200, raw
+                            assert b"mock response" in raw
+                        received = [row for row in mocks[selected].requests() if row["path"] == f"/v1/{path}"]
+                        assert len(received) == 1
+                        assert received[0]["body"]["model"] == target
+                        assert _request_credential(received[0]) == f"sk-synthetic-gateway-{selected}"
+                        assert prompt in json.dumps(received[0]["body"], ensure_ascii=False)
+                        assert not [row for index, upstream in enumerate(mocks) if index != selected
+                                    for row in upstream.requests() if row["method"] == "POST"]
+                        assert [item.to_payload() for item in service.store.load().sources] == source_before
+                        assert [adapter.state_store.get_source(item.id) for item in sources] == registration
+                        assert [adapter.state_store.get_source(item.id).model_ids for item in sources] == [tuple(value) for value in inventories]
+                        assert (config_path.read_bytes(), config_path.stat().st_mtime_ns) == engine_before
+                        assert adapter.supervisor.client_if_running().connection == connection
+                        actual_agent = service.store.load().agents[backend].to_payload()
+                        assert actual_agent == {**catalog_before, "sources": {"order": ordered_ids}}
+                        assert persisted.read_bytes() == original_bytes
+                        evidence.append({"requested_model": model, "gateway_model": request["model"], "source_id": sources[selected].id,
+                                         "route_origin": origin, "default_order": ordered_ids,
+                                         "received": {"path": received[0]["path"], "model": received[0]["body"]["model"],
+                                                      "synthetic_key": _request_credential(received[0])}})
+        finally:
+            await gateway.close()
+            (tmp_path / "received-inherited-routes.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+
+    with MockLLMUpstream() as first, MockLLMUpstream() as second, MockLLMUpstream() as outside, \
+            _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+        asyncio.run(exercise(adapter, [first, second, outside]))
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
 def test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gateway_cpa(tmp_path, monkeypatch, protocol):
     """MH-ROUTING-010: an unlisted-model error does not poison source health or retry another source."""
     async def exercise(adapter, first, second):

@@ -1,7 +1,8 @@
 # Model Hub E2E Test Plan
 
-Status: routing-mode acceptance revision, 2026-09-06. Contract: `model-hub-routing-modes.md`
-(original `2db273891`, owner scope/synchronization decision `c1d398d5f`). The older survey
+Status: routing-mode acceptance revision, contract_version 10, 2026-09-06.
+Contract: `model-hub-routing-modes.md` (original `2db273891`, owner scope/synchronization
+decision `c1d398d5f`, Empty Route Inheritance `352486374`). The older survey
 below remains background for unrelated capabilities; routing expectations follow this revision.
 Companion inventories (kept in session, summarized here): capability list C1–C81 and issue list B1–B17 produced during the 2026-09-01 survey.
 
@@ -42,7 +43,7 @@ Out of scope (documented, not dropped silently):
 ### B. API-key sources (C16–C29)
 | ID | Steps | Expect | Status |
 |---|---|---|---|
-| B1 | observe against mock for each protocol, `protocol:'auto'` | correct protocol chosen by response shape; observation payload contract_version 9 | assert |
+| B1 | observe against mock for each protocol, `protocol:'auto'` | correct protocol chosen by response shape; observation payload contract_version 10 | assert |
 | B2 | custom user-declared protocol differs from response shape, authentication succeeds | declaration badge and runtime-risk warning stay visible; explicit confirmation persists exactly the chosen protocol, not an inferred one. Authentication remains required. Auto still needs matching shape evidence (2026-09-04 declaration rule; adapter consumer rejects authenticated but unshaped Auto responses). | assert |
 | B3 | pull models (mock returns `display_name`, `context_length`, `pricing`, `supported_parameters`) | unrelated metadata is dropped; `supported_parameters` is retained in observation and the provenance ladder applies protocol-default tiers | assert |
 | B4 | discovery fails | 422 `inventory_unavailable` unless `accept_unavailable_inventory:true`; then source commits with `state.status=error` | assert |
@@ -111,23 +112,36 @@ Out of scope (documented, not dropped silently):
 
 | ID | Property | Evidence |
 | --- | --- | --- |
-| RM-1 | Manual intent survives every unrelated config/catalog/health/process transition; equal-to-automatic saves remain manual and explicit empty overrides remain empty | Seed every supported saved shape, mutate defaults/inventory/catalog, reload and compare exact arrays and unrelated config |
+| RM-1 | Nonempty manual intent survives unrelated config/catalog/health/process transitions; equal-to-automatic nonempty saves remain manual, while absent and valid empty values inherit across all backends | Seed every supported saved shape, mutate defaults/inventory/catalog, reload and compare exact nonempty/stale/dormant arrays, catalog identities and unrelated config; canonical output maps omit empty values and manual_override is nonempty or null |
 | RM-2 | Automatic matching precedes passthrough, and live health/transport restrictions never choose another tier | All backends with API-key unknown passthrough only, unmatched subscription-only defaults Unconfigured, known-model subscription admission and stale-hop retention, native Claude aliases/date/version rules, complete non-retired evidence, literal API matching, native-only matching with Hub-only invocation, tombstones and empty inventories |
 | RM-3 | One planning input produces identical effective hops/origin in preview, read/list, summaries, adoption, guards, probe, launch and execution | Real API/controller boundaries, assert canonical model ids and Source ids; unknown inventory carries no invented reasoning tiers |
-| RM-4 | Restore/Undo/Cancel/Save preserve draft and persistence truth | Browser GET -> edit -> preview null -> Undo or Cancel -> reload; Save DELETE vs manual PUT; equal arrays, explicit empty, failed saves, stale preview and duplicate submission |
-| RM-5 | Effective removal confirmation is exact and atomic for defaults/Restore/inventory/catalog/Source writes | Refuse, alter state, retry stale plan, confirm current plan; no partial writes; pure reorders preserve manual arrays and need no confirmation |
+| RM-4 | Restore/Undo/Cancel/Save preserve normalized draft and persistence truth, including final-hop removal | Browser GET -> edit -> remove final hop or Restore -> preview null -> Undo to prior unsaved draft or Cancel -> reload; inherited Save uses DELETE, nonempty manual Save uses PUT even when equal to automatic. Cover actual inherited origin/targets or Unconfigured, no empty Manual save, failed saves, stale preview, confirmation, Done and duplicate submission |
+| RM-5 | Effective removal confirmation is exact and atomic for defaults/Restore/inventory/catalog/Source writes | Refuse, alter state, retry stale plan, confirm current plan; no partial writes. Empty PUT and DELETE have identical effective-removal/supply guards, idempotency, admission/lease and rollback behavior; only nonempty manual PUT retains the visible-edit interruption-only guard. A cascade removing the final hop drops its override before recomputing inherited impact; pure reorders preserve nonempty manual arrays and need no confirmation |
 | RM-6 | Pinned CPA reaches the selected upstream with the exact canonical unknown model, without fake inventory or cross-Source fallback | Real backend launch -> correlation/gateway -> adapter -> pinned CPA -> local upstream; Hub API-key credentials on all API protocols and admitted non-ASCII ids/payloads; no subscription expansion |
 | RM-7 | Transport registration remains separate from inventory and capabilities | Compare truthful SourceBinding.model_ids/Source.models with deterministic route_model_ids and compiler union; load absent field as empty; unchanged target sets do not restart; registration changes drain active transport leases before supervised restart, block new invocations behind the barrier and release leases on completion/close/cancellation independently of service settlement; prove sync cancellation/rollback and concurrent Save without deadlock; Hub OAuth registration remains unchanged |
 | RM-8 | Request-only unknown-model errors preserve Source health and existing failure/stream boundaries | Typed upstream model_not_found, exact Source/model attribution, no fallback or global health transition |
-| RM-9 | Released config and turn records remain readable | Seed every supported historical shape, empty/populated/stale/dormant OpenCode arrays and unrelated sections; read TurnProvenance versions 5 through 9 without required route-origin fields |
+| RM-9 | Released config and turn records remain readable; normalization is not a validation bypass | Seed supported valid empty/populated/stale/dormant routes on every backend and direct-constructed config: validate original shapes first, normalize valid empty values without losing nonempty routes, catalog identities or unrelated sections, and persist the normalized map only on normal save. Reject malformed wrappers/hops/identifiers and dangling references before normalization. Output manual arrays require minItems 1, but accepted empty PUT/preview and legacy configuration do not. Read TurnProvenance versions 5 through 10 without requiring new optional metadata on old records |
 | RM-10 | Approved help, labels and layout work on desktop/mobile in both themes | Screenshots against approved routing frames; hover/focus/touch help, Escape/outside dismissal, no row-open from badge, no overlapping labels/buttons |
-| RM-11 | Preview is an operationally read-only request | With runtime stopped assert unchanged config/events/engine lifecycle, no credential access or upstream egress, for manual, empty and restored drafts |
+| RM-11 | Read and preview are operationally pure, including normalization of valid legacy empties | With runtime stopped assert unchanged config bytes/events/engine lifecycle, no credential access or upstream egress, for nonempty manual, accepted empty and null restored drafts. Empty and null previews return the same inherited chain/origin and manual_override null without changing stored intent |
 | RM-12 | Recorded error detail uses the latest retained exactly attributed turn, never a synthetic last-request history | Exercise backend/model provenance GET against the existing bounded store: exact backend/model isolation, latest persisted ordering independent of outcome, later success/cancel clearing, empty/evicted/ambiguous history, old records without optional metadata and deleted historical Sources. Capture real model_not_found with observed HTTP status; reject unsafe upstream text and invented codes. Prove retrieval never starts/syncs the engine or writes config/history/events. Browser evidence covers the Latest recorded turn label, same-record structured details, generic old-record copy, retry, pending-read invalidation on close/model change, unchanged route origin and no history writes from Cancel/Restore/Save |
 | RM-13 | Every actual invocation atomically admits a current effective candidate before transport, without holding the global mutation lock during network | Deterministically pause resolution across target removal/change and Source configuration changes; exercise ordinary/fallback, bounded credential-refresh retry and probe through the same admission path. Preserve failed-Source exclusions, reject stale exact refresh pairs without fabricated attempts or synthetic upstream errors, and verify service-mutation then adapter-routing lock order. Pre-admission failure/cancellation releases exclusion; callback failure releases the lease before network; post-admission completion/cancel releases it. Concurrent independent HTTP requests progress during buffered/first-token/stream waits, with no per-request registration or persistent generation store |
 
 All fixtures use test-owned HOME/XDG/config/credentials and local upstreams. Never use
 personal state. Development acceptance uses coordinated local Incus only, preserving
 master state. Mocked peer suites do not replace the pinned-engine boundary proof.
+
+Implemented unit/contract evidence for the empty-inheritance boundary supplements
+the end-to-end properties above; these are actual consuming tests, not proposed cases:
+
+| Property | Existing consuming test |
+| --- | --- |
+| RM-1/RM-3/RM-11: absent/empty parity across consumers | `tests/test_model_hub_routing_modes.py::test_empty_override_equals_absence_at_all_route_consumers` |
+| RM-4/RM-5: empty PUT equals guarded Restore; final-hop deletion inherits | `tests/test_model_hub_routing_modes.py::test_empty_put_has_exact_restore_guard_and_final_hop_deletion_inherits` |
+| RM-9: original invalid input never becomes automatic | `tests/test_model_hub_routing_modes.py::test_invalid_empty_intent_is_validated_before_normalization` |
+| RM-5: inventory final-hop changes use inherited effective impact | `tests/test_model_hub_routing_modes.py::test_final_inventory_hop_removal_uses_inherited_guard_plan` |
+| RM-5/RM-7: failed sync rolls back canonical intent and permits retry | `tests/test_model_hub_routing_modes.py::test_failed_route_sync_rolls_back_canonical_intent_and_retry` |
+| RM-1/RM-9: dormant/direct empty keys do not fabricate routes or guards | `tests/test_model_hub_routing_modes.py::test_direct_dormant_empty_is_absent_from_route_and_guard_enumeration` |
+| RM-9/RM-11: load is read-only; normal save persists normalization | `tests/test_model_hub_config.py::test_v2_empty_route_normalizes_on_load_without_writing_until_save` |
 
 The Python `MH-ROUTING` scenarios in
 `tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py` remain

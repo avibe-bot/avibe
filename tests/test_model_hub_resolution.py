@@ -303,7 +303,7 @@ def _config(sources: list[ModelHubSourceConfig], *, model: str = "claude-opus-4-
         for backend in ("claude", "codex", "opencode")
     }
     for backend, agent in agents.items():
-        # Existing persisted routes remain explicit, including old empty seeds.
+        # Historical empty seeds now inherit the backend defaults.
         agent.routes = {entry.id: ModelHubRouteConfig() for entry in agent.models}
         eligible = [source.id for source in sources if ModelHubConfig.source_eligible_for_backend(source, backend)]
         agent.sources.order = eligible
@@ -1139,12 +1139,13 @@ def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
     assert adapter.invocation_requests[0]["reasoning"] == {"summary": "auto"}
 
 
-def test_runtime_does_not_alias_unpersisted_claude_request():
+def test_runtime_inherits_exact_passthrough_without_aliasing_api_inventory():
     source = _source("src_route003", ("claude-opus-4-6-20260115",))
     config = _config([source], model="claude-opus-4-6-20260115")
     resolution = resolve_model_hub_turn(config, "claude", "claude-opus-4-6")
-    assert resolution.source is None
-    assert resolution.supply_status == "interrupted"
+    assert resolution.source is source
+    assert resolution.target_model == "claude-opus-4-6"
+    assert resolution.route_origin == "passthrough"
 
 
 def test_resolution_preserves_unlisted_manual_target():
@@ -1422,7 +1423,10 @@ def test_set_agent_chain_reports_removed_hops_and_syncs_transport_targets(tmp_pa
         }
     ]
     assert len(adapter.synced) == 1
-    assert adapter.synced[0][1].route_model_ids == ()
+    assert menu_model not in adapter.synced[0][1].route_model_ids
+    assert set(adapter.synced[0][1].route_model_ids) == {
+        model.id for agent in config.agents.values() for model in agent.models if model.id != menu_model
+    }
 
 
 def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
@@ -1460,7 +1464,10 @@ def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
 
     assert result["interrupted"] == []
     assert len(adapter.synced) == 1
-    assert adapter.synced[0][-1].route_model_ids == ("other",)
+    assert set(adapter.synced[0][-1].route_model_ids) == {
+        "other", *(model.id for agent in config.agents.values() for model in agent.models
+                   if model.id not in {menu_model, "claude-sonnet-4-6"})
+    }
     assert [hop.source_id for hop in store.load().agents["claude"].routes[menu_model].hops] == [second.id, first.id]
 
 
@@ -1769,7 +1776,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 9,
+        "contract_version": 10,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1800,7 +1807,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 9,
+        "contract_version": 10,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",
@@ -2151,7 +2158,7 @@ def test_delete_source_reports_and_then_prunes_exact_hops(tmp_path):
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(service.delete_source(source.id))
     assert exc.value.code == "source_in_route_chain"
-    assert exc.value.data["would_remove_hops"][0]["model_id"] == menu_model
+    assert menu_model in {hop["model_id"] for hop in exc.value.data["would_remove_hops"]}
     with pytest.raises(ModelHubError) as unconfirmed:
         asyncio.run(service.delete_source(source.id, force=True))
     assert unconfirmed.value.code == exc.value.code
@@ -2166,7 +2173,7 @@ def test_delete_source_reports_and_then_prunes_exact_hops(tmp_path):
     )
     assert result["removed_hops"]
     assert store.load().sources == []
-    assert store.load().agents["claude"].routes[menu_model].hops == ()
+    assert store.load().agents["claude"].routes == {}
 
 
 def test_refresh_source_uses_guarded_success_shape(tmp_path):
@@ -2243,7 +2250,10 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
     assert [model["retired"] for model in response_source["models"]] == [
         False
     ] * len(discovered)
-    assert response_source["adopted_by"] == [{"backend": "claude", "menu_model": "claude-opus-4-6"}]
+    assert response_source["adopted_by"] == sorted(
+        [{"backend": backend, "menu_model": model.id} for backend, agent in config.agents.items() for model in agent.models],
+        key=lambda item: (item["backend"], item["menu_model"]),
+    )
     persisted_projection = {
         key: value
         for key, value in response_source.items()

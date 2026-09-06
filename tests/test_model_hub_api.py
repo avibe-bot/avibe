@@ -917,7 +917,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 9
+    assert runtime["contract_version"] == 10
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1137,7 +1137,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 9, "status": {"health": "ok"}}
+        return {"contract_version": 10, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1154,7 +1154,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 9, "status": {"health": "not_started"}}
+        return {"contract_version": 10, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1171,7 +1171,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 9, "status": {"health": "installing"}}
+        return {"contract_version": 10, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1189,7 +1189,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 9,
+            "contract_version": 10,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -1223,7 +1223,8 @@ def test_reorder_client_preserves_explicit_null_order(monkeypatch):
     assert calls == [("reorder_agent_chains", {"backend": "claude", "order": None})]
 
 
-def test_preview_and_restore_cross_client_and_controller_without_preview_sync(monkeypatch, tmp_path):
+@pytest.mark.parametrize("empty_input", [False, True])
+def test_preview_and_restore_cross_client_and_controller_without_preview_sync(monkeypatch, tmp_path, empty_input):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
     from vibe import model_hub_client
 
@@ -1241,22 +1242,29 @@ def test_preview_and_restore_cross_client_and_controller_without_preview_sync(mo
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
     monkeypatch.setattr(model_hub_client, "_rpc_sync", lambda operation, payload=None: asyncio.run(rpc(operation, payload)))
     remote = ModelHubRemoteService()
-    draft = remote.preview_agent_chain("claude", model_id, {"manual_override": None})
+    override = {"hops": []} if empty_input else None
+    draft = remote.preview_agent_chain("claude", model_id, {"manual_override": override})
     assert draft["route_origin"] == "automatic"
     assert draft["manual_override"] is None
     assert store.config.to_payload() == before
     assert adapter.synced == []
 
-    restored = asyncio.run(remote.delete_agent_chain("claude", model_id))
+    restored = asyncio.run(
+        remote.set_agent_chain("claude", model_id, {"hops": []})
+        if empty_input else remote.delete_agent_chain("claude", model_id)
+    )
     assert restored["chain"] == draft
     assert model_id not in store.config.agents["claude"].routes
     assert calls == [
-        ("preview_agent_chain", {"backend": "claude", "model_id": model_id, "chain": {"manual_override": None}}),
-        ("delete_agent_chain", {"backend": "claude", "model_id": model_id, "chain": None}),
+        ("preview_agent_chain", {"backend": "claude", "model_id": model_id, "chain": {"manual_override": override}}),
+        ("set_agent_chain" if empty_input else "delete_agent_chain", {
+            "backend": "claude", "model_id": model_id, "chain": override,
+        }),
     ]
 
 
-def test_chain_preview_is_read_only_and_restore_accepts_no_http_body(monkeypatch, tmp_path):
+@pytest.mark.parametrize("empty_input", [False, True])
+def test_chain_preview_is_read_only_and_restore_accepts_no_http_body(monkeypatch, tmp_path, empty_input):
     service, store, adapter = _service(tmp_path)
     model_id = "claude-opus-4-6"
     _set_claude_route_fixture(store, ("src_http0001",), model_id)
@@ -1268,7 +1276,7 @@ def test_chain_preview_is_read_only_and_restore_accepts_no_http_body(monkeypatch
     headers = csrf_headers(client, origin)
     response = client.post(
         f"/api/models/agents/claude/chain/preview?model={model_id}",
-        json={"manual_override": None}, headers=headers, base_url=origin,
+        json={"manual_override": {"hops": []} if empty_input else None}, headers=headers, base_url=origin,
     )
     assert response.status_code == 200
     draft = response.get_json()["chain"]
@@ -1276,8 +1284,10 @@ def test_chain_preview_is_read_only_and_restore_accepts_no_http_body(monkeypatch
     assert draft["route_origin"] == "automatic"
     assert store.config.to_payload() == before
     assert adapter.synced == []
-    restored = client.delete(
-        f"/api/models/agents/claude/chain?model={model_id}", headers=headers, base_url=origin,
+    endpoint = f"/api/models/agents/claude/chain?model={model_id}"
+    restored = (
+        client.put(endpoint, json={"hops": []}, headers=headers, base_url=origin)
+        if empty_input else client.delete(endpoint, headers=headers, base_url=origin)
     )
     assert restored.status_code == 200
     assert restored.get_json()["chain"] == draft
@@ -3148,7 +3158,7 @@ def test_backend_catalog_mutations_leave_every_unrelated_model_shape_byte_identi
                 "models": [
                     model.to_payload() for model in store.config.agents["codex"].models if model.id.startswith("shape-")
                 ],
-                "routes": {model.id: store.config.agents["codex"].routes[model.id].to_payload() for model in seeded},
+                "routes": store.config.agents["codex"].to_payload()["routes"],
                 "sources": [source.to_payload() for source in store.config.sources],
                 "source_order": store.config.agents["codex"].sources.to_payload(),
                 "other_agents": {
@@ -3726,14 +3736,15 @@ def test_agent_chains_returns_the_complete_overview_from_one_snapshot(tmp_path):
     agent = store.config.agents["claude"]
     routed_extra = "claude-route-only"
     selected_extra = "claude-selected-only"
-    agent.routes[routed_extra] = ModelHubRouteConfig()
+    agent.routes[routed_extra] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig("src_snapshot01", "exact"),))
+    agent.routes["empty-route-only"] = ModelHubRouteConfig()
     store.requested_models["claude"] = selected_extra
     expected_model_ids = list(
         dict.fromkeys(
             [
                 *service.get_agent_sources("claude")["builtin_models"],
                 selected_extra,
-                *agent.routes,
+                routed_extra,
             ]
         )
     )
@@ -3754,6 +3765,7 @@ def test_agent_chains_returns_the_complete_overview_from_one_snapshot(tmp_path):
     assert model_ids == expected_model_ids
     assert selected_extra in model_ids
     assert routed_extra in model_ids
+    assert "empty-route-only" not in model_ids
     assert len(model_ids) == len(set(model_ids))
     for chain in chains:
         _assert_valid("agent-chain.schema.json", chain)
@@ -3982,7 +3994,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 9,
+        "contract_version": 10,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -5385,6 +5397,7 @@ def test_chain_route_guard_requires_and_replays_the_exact_current_plan(monkeypat
         (first_id, second_id),
         model_id,
     )
+    store.config.agents["claude"].sources.order = []
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -5462,7 +5475,7 @@ def test_chain_route_guard_requires_and_replays_the_exact_current_plan(monkeypat
         refusal["would_interrupt"], separators=(",", ":")
     )
     assert success["chain"]["chain"] == []
-    assert store.config.agents["claude"].routes[model_id].hops == ()
+    assert model_id not in store.config.agents["claude"].routes
 
 
 def test_chain_route_noninterrupting_success_is_force_invariant(monkeypatch, tmp_path):
@@ -5510,7 +5523,7 @@ def test_chain_route_noninterrupting_success_is_force_invariant(monkeypatch, tmp
     ]
 
 
-def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):
+def test_delete_guard_includes_all_newly_unsupplied_inherited_routes(tmp_path):
     service, store, _ = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_guard0001",
@@ -5545,9 +5558,10 @@ def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):
     assert exc_info.value.data["would_interrupt"] == [
         {
             "backend": "claude",
-            "model_id": "claude-opus-4-6",
+            "model_id": model.id,
             "agents": [],
         }
+        for model in claude.models
     ]
 
 
@@ -8155,7 +8169,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 9
+    assert runtime["contract_version"] == 10
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

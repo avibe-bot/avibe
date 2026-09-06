@@ -7,7 +7,7 @@ import { buildSupplyRelations as buildRelations } from './supplyRelations';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
 const runtime: RuntimeDependency = {
-  contract_version: 9,
+  contract_version: 10,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
 };
@@ -47,7 +47,7 @@ const agent: AgentSupply = {
 };
 
 const chain = (current: string, headHealth: AgentChain['chain'][number]['health'] = 'healthy', headRunnable = true, reason: AgentChain['chain'][number]['reason'] = null): AgentChain => ({ manual_override: {hops:[{source_id:'native',model_id:'model-a'},{source_id:'relay',model_id:'model-a'},{source_id:'unused',model_id:'model-a'}]}, route_origin: "manual" as const,
-  contract_version: 9,
+  contract_version: 10,
   backend: 'claude',
   model_id: 'model-a',
   current: { source_id: current, model_id: 'model-a' },

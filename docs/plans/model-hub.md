@@ -1,8 +1,9 @@
 # Model Hub — Product Spec
 
-Status: **Routing modes, contract_version 9** (2026-09-06).
+Status: **Routing modes, contract_version 10** (2026-09-06).
 Owner-approved implementation contract: `model-hub-routing-modes.md`, frozen before
-implementation at `2db273891`, amended by owner scope/synchronization decision `c1d398d5f`. It replaces one-time matching with sparse manual
+implementation at `2db273891`, with API-key scope/synchronization decision `c1d398d5f`
+and Empty Route Inheritance correction `352486374`. It replaces one-time matching with sparse manual
 intent and a shared effective planner. The complete schema, runtime, UI and consumer
 closure lands on one tested feature head. Supported persisted shapes and historical
 TurnProvenance remain readable under the repository persisted-shape rule.
@@ -22,10 +23,10 @@ Its end-to-end product model is:
 
 Every `(backend, menu model)` has one effective ordered route. A sparse persisted
 `routes` map stores only manual overrides; every hop names the exact
-`(source_id, model_id)` to call. Absence inherits automatic defaults, while a present
-empty override intentionally supplies nothing. Saving a route establishes manual
-intent even when its array equals the generated result; restoring automatic deletes
-the key.
+`(source_id, model_id)` to call. Absence and a valid empty hop array both inherit
+defaults. Only a nonempty route establishes manual intent, even when its array equals
+the generated result. Restoring automatic or submitting empty hops deletes the key
+through the same exact guarded operation; canonical output never retains an empty value.
 
 For API-key defaults [A, B], model M uses B alone when only B lists M. When neither lists M,
 the route is [A/M, B/M], forwarding M unchanged. A saved manual route replaces the
@@ -34,8 +35,10 @@ their existing known-model admission, matching and stale-hop retention rules. Un
 passthrough is restricted to eligible Hub API-key Sources; unmatched subscription-only
 defaults are Unconfigured.
 §4.2 owns effective planning and §4.3 owns execution of that plan. There is no separate
-mapping structure or second persisted policy flag. Existing populated, empty, stale
-and dormant overrides remain exact; historical arrays do not prove human authorship.
+mapping structure or second persisted policy flag. Nonempty overrides remain exact,
+including stale and dormant entries. Supported legacy empties normalize to absence
+after validation without dropping catalog identities or other configuration; historical
+arrays do not prove human authorship. Reads and previews never persist normalization.
 
 **Subscription ruling (owner 2026-08-07, amended later the same day).** Recommended
 custody is vendor-specific. Claude subscriptions stay in Claude Code's local login by
@@ -98,7 +101,7 @@ base URLs, protocol conversion, account pools or routers.
    native attempt ahead of a user-owned configured chain.
 3. **Every route exposes its intent and effective result.** Backend defaults generate
    automatic matches or unchanged-id API-key passthrough. A manual override replaces that result
-   exactly, including an empty array; Restore automatic removes the override.
+   exactly only when nonempty; Restore automatic or empty input removes the override.
 4. **The user owns every configured order and mapping.** No health score, learned
    ranking or vendor label rewrites manual intent. Automatic routes follow current
    defaults and evidence; live availability only annotates the chosen plan.
@@ -437,10 +440,10 @@ evaluated in this order, before transient health or invocation-channel filtering
 
 | Decision | Condition | Effective hops | Origin |
 | --- | --- | --- | --- |
-| `route_plan.manual` | a manual key exists | exact saved array and order, including empty | manual when nonempty, otherwise null |
-| `route_plan.automatic` | no manual key; eligible defaults provide matching evidence | all accepted matching pairs in default order | automatic |
-| `route_plan.passthrough` | no manual key and no matching pairs; eligible non-retired Hub API-key defaults remain | exact requested id on each such API-key Source; no subscription speculation | passthrough |
-| `route_plan.empty` | no manual key and neither tier has any eligible pair | empty | null |
+| `route_plan.manual` | a nonempty manual value exists | exact saved nonempty array and order | manual |
+| `route_plan.automatic` | absent or valid empty manual value; eligible defaults provide matching evidence | all accepted matching pairs in default order | automatic |
+| `route_plan.passthrough` | absent or valid empty manual value and no matching pairs; eligible non-retired Hub API-key defaults remain | exact requested id on each such API-key Source; no subscription speculation | passthrough |
+| `route_plan.empty` | absent or valid empty manual value and neither inherited tier has any eligible pair | empty | null |
 
 Matching uses complete non-retired inventory, independent of health and CLI readiness:
 
@@ -462,7 +465,8 @@ removes its references under §4.5 guards.
 The planner never writes configuration. Manual intent survives Source additions,
 default edits, discovery, catalog changes, health changes and reload. Automatic routes
 follow current defaults and evidence. Equal-to-automatic manual saves remain manual;
-there is no historical-authorship inference or global reinterpretation of empty arrays.
+nonempty arrays never imply historical authorship. Valid empty values inherit under the
+explicit owner compatibility correction, including directly constructed configuration.
 Source health, quota, latency, cost, usage and timestamps never choose a tier or reorder
 it. Live inspection only annotates runnability, current position and recovery state.
 
@@ -1123,7 +1127,8 @@ source_id, model_id)` reference. `force=true` with that refusal's exact
 `would_remove_hops` and `would_interrupt` arrays is an explicit cascade confirmation:
 the same transaction deletes the Source and every exact hop that names it across every
 backend route, while the identity and relative order of all surviving hops remain
-unchanged. An emptied route remains an explicit empty configuration.
+unchanged. If pruning removes the final manual hop, remove that key and recompute the
+inherited plan before calculating effective removals, supply gaps and transport targets.
 Any resulting protected-model gap is reported through the existing
 `would_interrupt` projection alongside `would_remove_hops`. Each `RouteHopRef` also
 carries one-based `position` in that named Route before the attempted mutation;
@@ -1139,15 +1144,19 @@ model-membership admission remains unchanged. Explicit retirement
 excludes the exact pair, while manual inventory deletion removes matching evidence
 without deleting explicit API-key hops; subscription admission remains unchanged. Refusals report complete effective removals and protected
 supply loss in the existing arrays. Forced success must match both echoed arrays and
-preserves surviving manual intent; Source deletion removes its actual references.
-Automatic recomputation never persists a generated route or rewrites manual intent.
+preserves surviving nonempty manual intent; Source deletion removes its actual references.
+Every final-hop removal, including catalog reconciliation, uses the same normalized
+planner. Normal saves persist the canonical sparse map; pure reads/preview never write.
+Automatic recomputation never persists a generated route or rewrites nonempty intent.
 
 **Guard confirmation totality matrix (authoritative and exhaustive; owner subtraction
 ruling 2026-08-11 20:35, with direct-Route scope corrected at 21:14).** The shared layer
 recomputes under the atomic commit boundary. For Source, inventory, default-membership and Restore mutations, a
 guarded-impact plan is nonempty when the staged mutation has at least one
 `would_remove_hops` or `would_interrupt` item. For `mutation.route_replace`, only a
-nonempty `would_interrupt` activates the plan: the refusal also reports its submitted
+nonempty `would_interrupt` activates the plan for nonempty manual replacement; empty PUT
+instead uses `mutation.route_restore` and its exact effective-removal/supply guards.
+For nonempty replacement the refusal also reports its submitted
 removals, but a visible noninterrupting removal is ordinary success and reports those
 items only as `removed_hops`. Confirmation is only the client's unchanged echo of the
 two refusal arrays; no token, digest, version receipt, or server-side confirmation state
@@ -1155,7 +1164,7 @@ exists.
 
 | Decision | `force` | Recomputed plan | Echoed refusal plan | HTTP/API result |
 | --- | --- | --- | --- | --- |
-| `guard_decision.unforced_no_impact` | false | empty, including visible noninterrupting `route_replace` removals | absent or supplied; echo is inert | ordinary mutation success |
+| `guard_decision.unforced_no_impact` | false | empty, including visible noninterrupting nonempty-manual `route_replace` removals | absent or supplied; echo is inert | ordinary mutation success |
 | `guard_decision.unforced_confirmation` | false | nonempty | absent or supplied; echo is inert | HTTP 409 `GuardRefusal` with the current plan |
 | `guard_decision.forced_no_impact` | true | empty | absent, exact, or stale | ordinary mutation success; `force` and any echo are inert because no guarded impact remains |
 | `guard_decision.forced_confirmed` | true | nonempty | both arrays exactly equal the recomputed plan | commit once and return the matrix row's success envelope |
@@ -1192,8 +1201,8 @@ present even when empty.
 | `mutation.model_efforts` | replace one model entry's capability list | `PATCH /api/models/sources/<source_id>/models/<model_id>` with `{reasoning_efforts}` | not guarded: it changes no `id`, `origin`, or Route | `{source: Source}` |
 | `mutation.model_delete` | retire a discovered pair or remove manual matching evidence | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | same guarded `409`; recompute effective impact after retirement or evidence removal; manual deletion preserves explicit hops | same Source success envelope; discovered success preserves the row with `retired: true`, manual success removes it |
 | `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>` with body `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | same guarded `409`; a nonempty recomputed plan commits only when both arrays exactly match | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
-| `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | only when `would_interrupt` is nonempty: `source_last_supplier` in the same guarded `409`, including all submitted removals; noninterrupting removal is ordinary success because it is the user's visible direct edit | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; noninterrupting removal needs no wire confirmation, and survivor order is the submitted order |
-| `mutation.route_restore` | restore automatic for one model | `DELETE /api/models/agents/<backend>/chain?model=<id>` with optional `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | same guarded `409` for actual effective removal or protected-supply loss | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; absent key is idempotent |
+| `mutation.route_replace` | save one model's nonempty manual override | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` and nonempty `hops`; accepted empty input instead uses `mutation.route_restore` | only for this nonempty manual write, when `would_interrupt` is nonempty: `source_last_supplier` in the same guarded `409`, including all submitted removals; noninterrupting removal is ordinary success because it is the user's visible direct edit | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; noninterrupting removal needs no wire confirmation, and survivor order is the submitted nonempty order |
+| `mutation.route_restore` | restore inherited routing for one model | `DELETE /api/models/agents/<backend>/chain?model=<id>` with optional `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}`; an accepted empty-hop PUT on that same route is equivalent | same guarded `409` for actual effective removal or protected-supply loss, identically for DELETE and empty PUT | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; normalized absent key is idempotent; admission, leases and rollback are shared |
 | `mutation.default_sources` | replace backend default membership/order | `PUT /api/models/agents/<backend>/sources` with `{order: string[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}`; compatibility `POST .../chains/reorder` accepts optional order and the same guards | same guarded `409` for effective removal or protected-supply loss; pure reorder needs none | `{agent: AgentSupply}`; preserve manual arrays; omitted reorder order returns current projection |
 
 The request carrier shown in each row is the only one. The final `api.md`, server/client
@@ -1227,7 +1236,7 @@ still surfaces as 需处理 on the Models page, not as an appended turn message.
 This promise needs an interface, not just a paragraph, so the frozen contract carries one:
 `turn-provenance.schema.json`, existing GET `/api/models/turns/<turn_id>/provenance`,
 and on-demand GET `/api/models/agents/<backend>/provenance?model=<id>`.
-The latter uses the standard v9 envelope and returns the latest persisted retained
+The latter uses the standard v10 envelope and returns the latest persisted retained
 record matching backend/requested model, regardless of outcome, or null. It never
 starts/syncs the engine or adds history to AgentChain. The existing
 `BoundedProvenanceStore` remains the sole owner, with atomic writes and 500-record
@@ -1328,34 +1337,42 @@ write down, instead of invariants prose asks every implementer to respect.
 
 ### 4.6 Route intent storage and mutation
 
-The sparse `routes` map stores only manual overrides:
+The canonical sparse `routes` map stores only nonempty manual overrides:
 
 ```json
 {
   "sources": {"order": ["src_default01", "src_default02"]},
   "routes": {
-    "explicit-model": {"hops": [{"source_id": "src_default02", "model_id": "upstream-id"}]},
-    "deliberately-empty": {"hops": []}
+    "explicit-model": {"hops": [{"source_id": "src_default02", "model_id": "upstream-id"}]}
   }
 }
 ```
 
 Other model ids have no key and follow §4.2. Manual sources may be eligible Sources
-outside the default subset. Preserve every existing override and exact array, including
-empty, stale and dormant OpenCode entries; older supported config shapes use the safe
-loader and explicit historical intent where available, never inference from Source
-order. Unrelated config remains unchanged across compatibility loading and reload.
+outside the default subset. Preserve every nonempty override and exact array, including
+stale and dormant OpenCode entries. A legacy input such as `{"hops": []}` remains valid
+but normalizes to key absence, never a disabled model. Validate the original supported
+shape and identifiers before normalization; malformed values must not become automatic.
+Older shapes use the safe loader and explicit historical intent where available, never
+inference from Source order. Preserve catalog identities and unrelated config on load/save.
+The same pure planner treats valid empty values as absent even in directly built config.
 
 GET chain and chains return effective hops with `manual_override` and `route_origin`.
-PUT chain always persists the submitted override. DELETE chain removes the key,
-recomputes defaults and is idempotent when absent. POST chain/preview requires
+PUT chain persists only a nonempty submitted override; an accepted empty array uses
+the same operation as DELETE, including exact guards, idempotency, admission, leases
+and synchronization rollback. DELETE removes the key and recomputes defaults.
+POST chain/preview requires
 `{manual_override: null | {hops: RouteHop[]}}` and returns the same AgentChain read
 envelope without persistence, events, engine startup/sync, credentials or upstream
-egress, even with runtime stopped. Empty effective chains have null origin; a present
-empty override is distinguished by `manual_override: {hops: []}`.
+egress, even with runtime stopped. Empty draft input is accepted and normalized to null.
+Output `manual_override` is nonempty or null; output `AgentSupply.routes` omits empty
+values. An actually empty inherited plan alone has null origin. Output-only `minItems: 1`
+must not reject empty PUT/preview inputs or supported old config before normalization.
+Reads are pure; the next ordinary save writes the normalized sparse map.
 
-Restore automatic changes the editor draft only. Undo restores the manual draft;
-Cancel writes nothing. Save sends DELETE for restored automatic or PUT for manual,
+Restore automatic or removing the final manual hop changes the draft to inherited and
+previews its actual target/origin. Undo restores the previous unsaved manual draft;
+Cancel writes nothing. Save sends DELETE for inherited intent or PUT for nonempty manual,
 consumes the authoritative mutation envelope, retains failed drafts and follows the
 existing exact-plan guard/reconciliation protocol. Sources PUT and compatibility
 chains/reorder update defaults only, preserving manual arrays and using effective
@@ -1398,7 +1415,7 @@ A manual hop's differing model id is the mapping itself. Automatic native alias
 matching is confined to §4.2's existing parser; API-key passthrough preserves the requested id.
 All read and write wrappers expose the same GET/PUT/DELETE/preview operations and
 server-authored fields. Historical TurnProvenance keeps its exact attempts and remains
-readable for released versions through 9 without requiring new route fields.
+readable for released versions through 10 without requiring new route fields.
 
 ### 4.7 Downstream — Agents
 
@@ -1774,7 +1791,8 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] §4.3 executes the shared effective plan without changing its tier or membership;
       live annotations and the non-persisted takeover view remain independent of origin.
 - [ ] Sparse manual intent distinguishes key absence, equal-to-automatic explicit saves,
-      and explicit empty overrides. Restore/Preview/Undo/Cancel/Save follow the frozen API.
+      and valid empty input normalized to inherited intent. Final-hop removal uses the
+      existing Restore/Preview/Undo/Cancel/Save/guard/Done flow and never saves empty Manual.
 - [ ] §4.5 keeps state source-global, status live-derived, and every successful
       takeover silent; `supply_status` is the sole backend-health line, and a no-runnable-
       hop exhaustion never borrows takeover semantics; terminal in-turn errors plus

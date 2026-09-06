@@ -354,8 +354,8 @@ export class HubApi {
     const payload = await this.read<{ ok: boolean; contract_version: number; provenance: RecordedTurn | null }>(
       `/api/models/agents/${backend}/provenance?model=${encodeURIComponent(model)}`,
     );
-    if (payload.ok !== true || payload.contract_version !== 9 || !('provenance' in payload)) {
-      throw new Error('Latest recorded turn did not use the v9 provenance envelope');
+    if (payload.ok !== true || payload.contract_version !== 10 || !('provenance' in payload)) {
+      throw new Error('Latest recorded turn did not use the v10 provenance envelope');
     }
     return payload.provenance;
   }
