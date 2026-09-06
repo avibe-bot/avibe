@@ -9588,7 +9588,7 @@ def test_buffered_adapter_facts_survive_cancellation_before_body_consumption(
             ],
         )
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
-        gateway = ModelHubTurnGateway(service, transport_timeout=0.2)
+        gateway = ModelHubTurnGateway(service)
         request = _prepared_gateway_request(
             gateway,
             turn_id="turn_meter_projection_cancel",
