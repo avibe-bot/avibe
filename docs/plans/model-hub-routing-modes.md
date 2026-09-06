@@ -394,6 +394,46 @@ without reverting unrelated edits. Deploy through the LOCAL Incus runner without
 resetting master state; coordinate the shared regression instance before update.
 Final success requires merged-head end-to-end acceptance, not mocked peer suites.
 
+## Post-Merge Visual Closure
+
+Real local acceptance exposed a persistent mobile footer clipping defect. Route
+dialog actions must remain entirely inside the footer, dialog and viewport when
+they wrap. The route footer has a minimum height, not a fixed mobile height; its
+content determines its height and the existing scrollable body yields space.
+Do not hide Restore, shrink action text, remove the dialog's clipping boundary,
+or change the global Button component to make this pass.
+
+Route details expose the complete source identity and exact model id as visible
+text, including stale/missing source fallback identities. These detail fields
+wrap at constrained widths, with long unbroken identifiers allowed to break;
+hop rows retain their existing minimum height and grow with their content.
+This applies to editable, inherited read-only and restore-preview rows, including
+manual sources outside defaults. It does not replace the approved compact
+ellipsis behavior in overview/provider cards. Two values sharing a long prefix
+must remain distinguishable without requiring hover, title text, or editing.
+
+The existing AgentCard collection owns one active route-origin help across all
+its backend/model rows. A new mouse hover, focus or tap activation replaces the
+previous help, including a focused or pinned help. The prior close timer may
+close only its own help; it cannot close a newly activated one. Preserve the
+existing pointer bridge delay, focus behavior, pin/unpin, Escape and outside
+dismissal. Do not use a module-global event bus or a second page-level overlay
+owner. Noninteractive route-dialog badges do not participate in this state.
+
+Capture helpers must remove their own incidental pointer/focus state and await
+the absence of prior help before a new scenario. The target badge's aria-controls
+identifies its help, while a retryable global count confirms no second help.
+Do not use first-match selection, forced DOM removal, or repeated Escape to hide
+a stuck overlay. Separately exercise focus-A/hover-B, pin-A/hover-B, quick A-to-B
+movement and movement across the trigger/content gap at the real common owner.
+
+Visual acceptance checks each actionable control against clipping ancestors,
+the viewport and actual hit testing, not just the dialog's outer rectangle or
+text width. At narrow and short viewports, all footer controls remain reachable
+after long-body scrolling and Save performs the intended mutation. Verify EN/ZH,
+light/dark and manual/restore-preview states. Existing required case identities,
+baseline gaps and screenshot stages do not change; add assertions within them.
+
 ## Delivery Ownership
 
 One feature PR is intentional: executable schema/type/mirror closure needs all
