@@ -509,6 +509,30 @@ tests rather than disabling them. Cleanup compares canonical intent and must not
 restore an obsolete empty-disable state. Existing failed live artifacts stay
 immutable; the required browser flows and safety gates are not waived.
 
+## Post-Merge Guard Acceptance Closure
+
+The first complete v10 browser run passed all four visual flows but exposed an
+old B7 fixture premise: deleting a one-hop manual route's source does not imply
+a supply gap when its now-inherited default route still has eligible sources.
+The actual no-interruption refusal and UI were consistent with the contract.
+
+B7 must continue testing a genuine source-removal gap, refusal, exact confirmation
+and impact report. Arrange the selected backend's default membership so the
+owned source being deleted is its only eligible default, while retaining the
+explicit one-hop manual route. Assert these preconditions through real reads.
+Removing that source then leaves neither a nonempty override nor inherited
+supply. Do not weaken the assertion to accept either gap/no-gap, fake an API
+response, restore empty-disable semantics, or alter production guards.
+
+Snapshot defaults before the arrangement and enter cleanup protection before
+either write. Restore canonical original manual intent and original default
+membership/order independently even after an ambiguous write or failed assertion.
+Only the test-owned deleted source may be omitted from a captured default order;
+an unrelated disappeared source is a cleanup failure, not permission to silently
+filter arbitrary IDs. Preserve the existing case identity and four named baseline
+gaps. Source deletion and its impact remain real browser actions. This is a
+browser-fixture correction, with no product/API/version change.
+
 ## Delivery Ownership
 
 One feature PR is intentional: executable schema/type/mirror closure needs all
