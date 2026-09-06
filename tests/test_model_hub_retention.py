@@ -230,7 +230,8 @@ def test_out_of_window_request_releases_finalization_ownership(tmp_path, exact_r
         agent = service.store.load().agents["codex"]
         new_model = next(model for model in agent.routes if model != old_model)
         agent.routes[new_model] = agent.routes[old_model]
-        gateway = ModelHubTurnGateway(service, transport_timeout=0.02)
+        # This checks ownership, not deadline expiry; normal cleanup must finish.
+        gateway = ModelHubTurnGateway(service)
         runtime = ModelHubRuntimeRouter(service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json")
         old_request = _prepared_gateway_request(
             gateway, turn_id="old-route", requested_model=old_model, source_id=source.id, stream=True
@@ -294,7 +295,7 @@ def test_body_claim_releases_request_already_snapshotted_by_finalization(tmp_pat
         old_model = _canonicalize_fixed_test_routes(service)["codex"]
         agent = service.store.load().agents["codex"]
         new_model = next(model for model in agent.routes if model != old_model)
-        gateway = ModelHubTurnGateway(service, transport_timeout=0.05)
+        gateway = ModelHubTurnGateway(service)
         runtime = ModelHubRuntimeRouter(service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json")
         request = _prepared_gateway_request(
             gateway, turn_id="old-route", requested_model=old_model, source_id=source.id, stream=True

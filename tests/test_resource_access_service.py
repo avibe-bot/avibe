@@ -67,9 +67,9 @@ def _seed_policies(connection) -> None:
     )
 
 
-def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_path) -> None:
+def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.begin() as connection:
@@ -95,9 +95,9 @@ def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_
         engine.dispose()
 
 
-def test_personal_editor_uses_all_agents_without_organization_acl(tmp_path) -> None:
+def test_personal_editor_uses_all_agents_without_organization_acl(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.begin() as connection:
@@ -144,7 +144,7 @@ def test_personal_editor_uses_all_agents_without_organization_acl(tmp_path) -> N
         engine.dispose()
 
 
-def test_show_page_is_no_longer_a_resource_kind(monkeypatch, tmp_path) -> None:
+def test_show_page_is_no_longer_a_resource_kind(monkeypatch, tmp_path, sqlite_schema_db_factory) -> None:
     """§3.2 retired show_page from the Resource ACL: every entry point fails
     closed with ``invalid_resource_kind`` and nothing reads or writes a
     ``resource_access_policies`` row for it.
@@ -152,7 +152,7 @@ def test_show_page_is_no_longer_a_resource_kind(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     owner = _context("owner-1", instance_role="owner", access_source="owner")
     try:
@@ -215,14 +215,14 @@ def _insert_legacy_show_page_policy(connection, *, organization_id: str | None, 
     )
 
 
-def test_retired_show_page_rows_stay_inert_in_unscoped_queries(tmp_path) -> None:
+def test_retired_show_page_rows_stay_inert_in_unscoped_queries(tmp_path, sqlite_schema_db_factory) -> None:
     """§3.2 kept legacy ``show_page`` policy rows in place for load safety, but
     unscoped queries must not resurrect them: neither the sync organization
     enumeration nor an unscoped policy listing may surface a retired kind.
     """
 
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.begin() as connection:
@@ -319,9 +319,9 @@ def test_resource_policy_narrowing_matrix(
     )
 
 
-def test_active_org_members_can_use_legacy_resources_without_forging_local_identity(tmp_path) -> None:
+def test_active_org_members_can_use_legacy_resources_without_forging_local_identity(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.connect() as connection:
@@ -350,9 +350,9 @@ def test_active_org_members_can_use_legacy_resources_without_forging_local_ident
         engine.dispose()
 
 
-def test_non_member_role_rank_does_not_bypass_organization_resource_acl(tmp_path) -> None:
+def test_non_member_role_rank_does_not_bypass_organization_resource_acl(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.begin() as connection:
@@ -702,7 +702,7 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
     tmp_path,
     paired_kind: str,
     access_source: str,
-    organization_claims: bool,
+    organization_claims: bool, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
@@ -729,7 +729,7 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
         )
     legacy_metadata = {resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: legacy_context}
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -872,7 +872,7 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
         engine.dispose()
 
 
-def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch, tmp_path) -> None:
+def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch, tmp_path, sqlite_schema_db_factory) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
     config.remote_access.vibe_cloud.enabled = True
@@ -891,7 +891,7 @@ def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch,
         }
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -929,7 +929,7 @@ def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch,
         engine.dispose()
 
 
-def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_path) -> None:
+def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_path, sqlite_schema_db_factory) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
     config.remote_access.vibe_cloud.enabled = False
@@ -943,7 +943,7 @@ def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_pat
         }
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1001,7 +1001,7 @@ def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_pat
 
 def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
@@ -1019,7 +1019,7 @@ def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
         }
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1070,7 +1070,7 @@ def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
 
 def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
@@ -1088,7 +1088,7 @@ def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
         }
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1149,7 +1149,7 @@ def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
 
 def test_typed_binding_reader_preserves_partial_identity_and_does_not_latch_read_failure(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
@@ -1166,7 +1166,7 @@ def test_typed_binding_reader_preserves_partial_identity_and_does_not_latch_read
     assert partial.instance_kind == "personal"
 
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     marker = {
         "schema_version": 2,
@@ -1301,7 +1301,7 @@ def _stored_migration_marker(connection) -> str | None:
 
 def test_partial_pairing_marker_records_configured_instance_without_claiming_a_kind(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     """A deferred opportunity keeps its identity but never a guessed kind."""
 
@@ -1309,7 +1309,7 @@ def test_partial_pairing_marker_records_configured_instance_without_claiming_a_k
     _paired_cloud_config(tmp_path, instance_secret="")
 
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         from storage.importer import _run_sqlite_data_migrations
@@ -1331,7 +1331,7 @@ def test_partial_pairing_marker_records_configured_instance_without_claiming_a_k
 
 def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = _paired_cloud_config(tmp_path, instance_secret="")
@@ -1342,7 +1342,7 @@ def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1397,7 +1397,7 @@ def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
 
 def test_transient_configuration_failure_leaves_the_migration_retryable(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     _paired_cloud_config(tmp_path)
@@ -1408,7 +1408,7 @@ def test_transient_configuration_failure_leaves_the_migration_retryable(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1458,7 +1458,7 @@ def test_transient_configuration_failure_leaves_the_migration_retryable(
 
 def test_unpaired_first_opportunity_cannot_be_adopted_by_a_later_pairing(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = _paired_cloud_config(
@@ -1475,7 +1475,7 @@ def test_unpaired_first_opportunity_cannot_be_adopted_by_a_later_pairing(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1510,7 +1510,7 @@ def test_unpaired_first_opportunity_cannot_be_adopted_by_a_later_pairing(
 
 def test_pending_marker_for_one_instance_cannot_be_adopted_by_another_instance(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = _paired_cloud_config(tmp_path, instance_id="instance-a", instance_secret="")
@@ -1521,7 +1521,7 @@ def test_pending_marker_for_one_instance_cannot_be_adopted_by_another_instance(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1567,7 +1567,7 @@ def test_shared_access_source_snapshots_migrate_for_either_pairing_kind(
     monkeypatch,
     tmp_path,
     paired_kind: str,
-    access_source: str,
+    access_source: str, sqlite_schema_db_factory,
 ) -> None:
     """``email``/``email_domain``/``public_instance`` are kind-agnostic.
 
@@ -1584,7 +1584,7 @@ def test_shared_access_source_snapshots_migrate_for_either_pairing_kind(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1686,7 +1686,7 @@ def test_released_migration_marker_shapes_stay_idempotent_and_fail_closed(
     tmp_path,
     marker_json: str,
     expected_state: str | None,
-    expect_marker_preserved: bool,
+    expect_marker_preserved: bool, sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     _paired_cloud_config(tmp_path)
@@ -1697,7 +1697,7 @@ def test_released_migration_marker_shapes_stay_idempotent_and_fail_closed(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1770,9 +1770,9 @@ def test_pre_member_resource_user_context_snapshot_keeps_editor_role() -> None:
     assert not restored.can_manage_instance
 
 
-def test_organization_member_remains_subject_to_resource_acl_for_use(tmp_path) -> None:
+def test_organization_member_remains_subject_to_resource_acl_for_use(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.begin() as connection:
@@ -1796,9 +1796,9 @@ def test_organization_member_remains_subject_to_resource_acl_for_use(tmp_path) -
         engine.dispose()
 
 
-def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
+def test_personal_resources_cannot_use_organization_access_levels(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         with engine.begin() as connection:
@@ -1817,7 +1817,7 @@ def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> N
 
 def test_migration_defers_to_a_disagreeing_durable_binding_row(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     """A binding row from a peer's reclassification outranks the config read.
 
@@ -1835,7 +1835,7 @@ def test_migration_defers_to_a_disagreeing_durable_binding_row(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1878,7 +1878,7 @@ def test_migration_defers_to_a_disagreeing_durable_binding_row(
 
 def test_recovered_config_is_unavailable_and_does_not_seal_legacy_snapshots(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     """Regression PR #1606 r3: a recovered/defaulted V2Config.load() (broken
     JSON, load_warnings set) is UNAVAILABLE, never authoritative UNPAIRED.
@@ -1894,7 +1894,7 @@ def test_recovered_config_is_unavailable_and_does_not_seal_legacy_snapshots(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:
@@ -1942,7 +1942,7 @@ def test_recovered_config_is_unavailable_and_does_not_seal_legacy_snapshots(
 
 def test_gate_under_writer_lock_does_not_open_a_second_write_connection(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     """Regression PR #1606 r3: resource_user_context_from_metadata is called
     while a queued-delivery transaction already holds reserve_write_lock.
@@ -1953,7 +1953,7 @@ def test_gate_under_writer_lock_does_not_open_a_second_write_connection(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     _paired_cloud_config(tmp_path)
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         from storage.agent_session_rows import reserve_write_lock
@@ -2015,7 +2015,7 @@ def test_typed_reader_from_sqlite_migration_does_not_persist_config(
 
 def test_terminal_delivery_snapshots_are_left_byte_identical(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     """Regression PR #1606 r4: accepted/retired delivery snapshots are the
     immutable submitted Message candidate and must not be rewritten.
@@ -2024,7 +2024,7 @@ def test_terminal_delivery_snapshots_are_left_byte_identical(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     _paired_cloud_config(tmp_path)
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
     try:
         from storage.importer import _run_sqlite_data_migrations
@@ -2135,7 +2135,7 @@ def test_absent_binding_fails_closed_for_deferred_personal_context(
 
 def test_migration_stays_pending_without_a_validated_binding_row(
     monkeypatch,
-    tmp_path,
+    tmp_path, sqlite_schema_db_factory,
 ) -> None:
     """Regression PR #1606 r5: known-kind config + absent binding row must
     not complete the deferred-context migration or relabel snapshots.
@@ -2156,7 +2156,7 @@ def test_migration_stays_pending_without_a_validated_binding_row(
         "claims_issued_at": 1_700_000_000,
     }
     db = tmp_path / "vibe.sqlite"
-    run_migrations(db)
+    sqlite_schema_db_factory(db)
     store = SQLiteBackgroundTaskStore(db)
     engine = create_sqlite_engine(db)
     try:

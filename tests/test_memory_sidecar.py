@@ -420,6 +420,79 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
+@pytest.mark.parametrize("sender_name", ["用户", "User", "小王 Élodie 🌱", "名" * 128])
+@pytest.mark.parametrize("owner_suffix", ["", "-agent"])
+@pytest.mark.parametrize("structured_content", [False, True])
+def test_sidecar_guard_accepts_sender_name_capture_contract(
+    sender_name: str, owner_suffix: str, structured_content: bool
+) -> None:
+    payload = {
+        "session_id": SESSION_ID,
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "messages": [
+            {
+                "sender_id": f"u-{'1' * 32}{owner_suffix}",
+                "sender_name": sender_name,
+                "role": "user",
+                "timestamp": 1_725_000_001_234,
+                "content": [{"type": "text", "text": "测试"}] if structured_content else "测试",
+            }
+        ],
+    }
+    assert _request_rejection(
+        "POST", "/api/v2/memory/add", json.dumps(payload).encode()
+    ) is None
+
+
+@pytest.mark.parametrize("sender_name", [None, False, 12, [], {}, "", "  ", "名" * 129])
+def test_sidecar_guard_rejects_invalid_sender_name(sender_name: object) -> None:
+    payload = {
+        "session_id": SESSION_ID,
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "messages": [
+            {
+                "sender_id": f"u-{'1' * 32}",
+                "sender_name": sender_name,
+                "role": "user",
+                "timestamp": 1_725_000_001_234,
+                "content": "text",
+            }
+        ],
+    }
+    assert _request_rejection(
+        "POST", "/api/v2/memory/add", json.dumps(payload).encode()
+    ) == "add"
+
+
+@pytest.mark.parametrize("change", [
+    {"unexpected": "field"},
+    {"sender_id": "owner-1"},
+    {"role": "assistant"},
+    {"timestamp": True},
+])
+def test_sidecar_sender_name_does_not_relax_capture_scope(change: dict) -> None:
+    payload = {
+        "session_id": SESSION_ID,
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "messages": [
+            {
+                "sender_id": f"u-{'1' * 32}",
+                "sender_name": "用户",
+                "role": "user",
+                "timestamp": 1_725_000_001_234,
+                "content": "text",
+                **change,
+            }
+        ],
+    }
+    assert _request_rejection(
+        "POST", "/api/v2/memory/add", json.dumps(payload).encode()
+    ) == "add"
+
+
 def test_sidecar_guard_accepts_large_everos_request_body() -> None:
     payload = {
         "session_id": SESSION_ID,

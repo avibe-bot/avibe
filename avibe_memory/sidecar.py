@@ -341,7 +341,17 @@ def _validate_add(
     if not _valid_session(payload.get("session_id")) or not isinstance(messages, list) or len(messages) != 1:
         return "add"
     message = messages[0]
-    if not isinstance(message, dict) or set(message) != {"sender_id", "role", "timestamp", "content"}:
+    required_fields = {"sender_id", "role", "timestamp", "content"}
+    if (
+        not isinstance(message, dict)
+        or not required_fields <= set(message) <= required_fields | {"sender_name"}
+    ):
+        return "add"
+    if "sender_name" in message and (
+        not isinstance(message["sender_name"], str)
+        or not message["sender_name"].strip()
+        or len(message["sender_name"]) > 128
+    ):
         return "add"
     if (
         not _valid_principal(message.get("sender_id"))
