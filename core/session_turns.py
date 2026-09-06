@@ -31,8 +31,8 @@ from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.delivery_target import normalize_message_kind
+from core.agent_input import AgentInputMetadata
 from core.message_context import (
-    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
 from core.native_dispatch_phase import (
@@ -432,10 +432,33 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return segment
 
 
+def _delivery_dispatch_text(delivery: dict[str, Any]) -> str:
+    text = str(delivery.get("dispatch_text") or "")
+    admission = delivery_store.delivery_admission_context(delivery)
+    route = admission.get("message_handler_route")
+    if not isinstance(route, dict):
+        return text
+    payload = delivery_store.delivery_payload(delivery)
+    if payload.get("source") != "user" or payload.get("platform") == "avibe":
+        return text
+    from core.agent_input import without_legacy_metadata
+    from modules.agents.subagent_router import parse_subagent_prefix
+
+    original = str(payload.get("text") or "")
+    if route.get("subagent_key"):
+        parsed = parse_subagent_prefix(original)
+        if parsed is not None:
+            original = parsed.message
+    return without_legacy_metadata(text, original=original, user_id=str(payload.get("author_id") or ""))
+
+
 def _segment_dispatch_text(segment: list[dict[str, Any]]) -> str:
-    texts = [str(row.get("dispatch_text") or "") for row in segment]
+    texts = [_delivery_dispatch_text(row) for row in segment]
     texts = [text for text in texts if text.strip()]
-    scheduled = bool(segment and _scheduled_merge_key(segment[0]) is not None)
+    leader = segment[0] if segment else {}
+    if "snapshot_json" in leader:
+        leader = delivery_store.delivery_payload(leader)
+    scheduled = _scheduled_merge_key(leader) is not None
     return ("\n\n---\n\n" if scheduled else "\n").join(texts)
 
 
@@ -1219,27 +1242,18 @@ class SessionTurnManager:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
 
-    async def prepare_scheduled_dispatch(
-        self,
-        context: "MessageContext",
-        text: str,
-        *,
-        delivery: Optional[dict[str, Any]] = None,
-        decorate: bool = True,
-    ) -> str:
-        """Restore scheduled provenance and optionally decorate backend text."""
-        if delivery is not None:
-            self._restore_scheduled_dispatch_context(context, delivery)
-        if not decorate:
-            return text
-        spec = dict(getattr(context, "platform_specific", None) or {})
-        if spec.get(SCHEDULED_DISPATCH_METADATA_APPLIED_KEY):
-            return text
+    async def _steer_input_metadata(self, deliveries: list[dict[str, Any]]) -> AgentInputMetadata | None:
+        """Attribute the inserted input to its sender, independently of the active Turn."""
         handler = getattr(self.controller, "message_handler", None)
-        decorator = getattr(handler, "_prepend_message_metadata", None)
-        if not callable(decorator) or not inspect.iscoroutinefunction(decorator):
-            return text
-        return await decorator(context, text, include_user_info=False)
+        prepare = getattr(handler, "prepare_input_metadata", None)
+        if not callable(prepare) or not inspect.iscoroutinefunction(prepare):
+            return None
+        context = self._delivery_context(str(deliveries[0]["session_id"]))
+        payload = self._hydrate_delivery_batch_context(context, deliveries)
+        scheduled = payload.get("source") == "harness"
+        if scheduled:
+            self._restore_scheduled_dispatch_context(context, deliveries[0])
+        return await prepare(context, human=not scheduled)
 
     @staticmethod
     def _restore_scheduled_dispatch_context(
@@ -2993,15 +3007,8 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif delivery["state"] == "steering" and turn_id and attempt_id and native_id:
-            raw_steer_text = str(delivery.get("dispatch_text") or "")
-            if request.source == "harness" or _scheduled_provenance(delivery) is not None:
-                steer_text = await self.prepare_scheduled_dispatch(
-                    context,
-                    raw_steer_text,
-                    delivery=delivery,
-                )
-            else:
-                steer_text = raw_steer_text
+            steer_text = _delivery_dispatch_text(delivery)
+            input_metadata = await self._steer_input_metadata([delivery])
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
@@ -3010,6 +3017,7 @@ class SessionTurnManager:
                     expected_native_turn_id=native_id,
                     text=steer_text,
                     attempt_id=attempt_id,
+                    input_metadata=input_metadata,
                 ),
             )
             return await self._finish_steer(str(delivery["id"]), receipt, context=context)
@@ -3174,19 +3182,16 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif leader["state"] == "steering" and turn_id and attempt_id and native_id:
-            steer_text = await self.prepare_scheduled_dispatch(
-                context,
-                dispatch_text,
-                delivery=leader,
-            ) if _scheduled_provenance(leader) is not None else dispatch_text
+            input_metadata = await self._steer_input_metadata(claimed_rows)
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=steer_text,
+                    text=_segment_dispatch_text(claimed_rows),
                     attempt_id=attempt_id,
+                    input_metadata=input_metadata,
                 ),
             )
             return await self._finish_steer(delivery_id, receipt, context=context)
@@ -4293,17 +4298,15 @@ class SessionTurnManager:
                     else str(delivery["id"])
                 )
             text = str(turn.get("dispatch_text") or "")
+            if source == SOURCE_HUMAN:
+                stored = "\n".join(str(row.get("dispatch_text") or "") for row in deliveries if row.get("dispatch_text"))
+                if stored and text.endswith(stored):
+                    text = text[: -len(stored)] + _segment_dispatch_text(deliveries)
             if source == SOURCE_SCHEDULED:
                 # Keep the raw prompt until MessageHandler parses an explicit
-                # ``subagent: prompt`` prefix. The handler adds metadata to the
-                # final backend request after routing; decorating here would make
-                # the metadata line hide that prefix from the parser.
-                await self.prepare_scheduled_dispatch(
-                    resolved,
-                    text,
-                    delivery=delivery,
-                    decorate=False,
-                )
+                # ``subagent: prompt`` prefix. The handler prepares structured
+                # metadata; only the native write renders it as text.
+                self._restore_scheduled_dispatch_context(resolved, delivery)
         except Exception:
             logger.exception(
                 "durable native start failed during pre-dispatch preparation for Turn=%s",
@@ -5307,18 +5310,10 @@ class SessionTurnManager:
                 )
                 if not claimed_batch:
                     continue
-                steer_text = "\n".join(
-                    str(row.get("dispatch_text") or "")
-                    for row in claimed_batch
-                    if str(row.get("dispatch_text") or "")
-                )
+                steer_text = _segment_dispatch_text(claimed_batch)
                 backend = str(turn["backend"])
                 delivery_id = str(claimed_batch[0]["id"])
-            steer_text = await self.prepare_scheduled_dispatch(
-                context,
-                steer_text,
-                delivery=claimed_batch[0],
-            ) if _scheduled_provenance(claimed_batch[0]) is not None else steer_text
+            input_metadata = await self._steer_input_metadata(claimed_batch)
             receipt = await self._attempt_steer(
                 backend,
                 SteerRequest(
@@ -5327,6 +5322,7 @@ class SessionTurnManager:
                     expected_native_turn_id=native_turn_id,
                     text=steer_text,
                     attempt_id=attempt_id,
+                    input_metadata=input_metadata,
                 ),
             )
             result = await self._finish_steer(delivery_id, receipt, context=context)

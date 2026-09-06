@@ -46,8 +46,9 @@ from core.session_turns import (
     Turn,
     _collect_delivery_segment,
     _scheduled_merge_key,
+    _segment_dispatch_text,
 )
-from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
+from core.agent_input import AgentInputMetadata
 from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -1031,6 +1032,26 @@ def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
     assert _scheduled_merge_key(agent_row) != _scheduled_merge_key(other_agent_row)
 
 
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_segment_dispatch_format_is_independent_of_delivery_projection(managers, scheduled):
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    deliveries = []
+    for text in ("first", "second"):
+        request = DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content=text,
+            source="harness" if scheduled else "user",
+            metadata={SCHEDULED_PROVENANCE_KEY: {"platform_specific": {
+                "task_trigger_kind": "agent_run", "source_session_id": "source-session",
+            }}} if scheduled else {},
+        )
+        result = asyncio.run(manager.deliver(request, context=_context()))
+        deliveries.append(_row(engine, result.delivery_id))
+    expected = "first\n\n---\n\nsecond" if scheduled else "first\nsecond"
+    assert _segment_dispatch_text(deliveries) == expected
+    assert _segment_dispatch_text([delivery_store.delivery_payload(row) for row in deliveries]) == expected
+
+
 def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
@@ -1068,11 +1089,12 @@ def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(manager
 
 
 @pytest.mark.anyio
-async def test_scheduled_submit_decorates_before_native_steering(managers) -> None:
+async def test_scheduled_submit_passes_metadata_separately_to_native_steering(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
-    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    metadata = AgentInputMetadata(source_session_id="source-session")
+    prepare = AsyncMock(return_value=metadata)
     manager.controller.message_handler = SimpleNamespace(
-        _prepend_message_metadata=decorator,
+        prepare_input_metadata=prepare,
     )
     await _activate(manager, text="active")
     manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
@@ -1105,9 +1127,95 @@ async def test_scheduled_submit_decorates_before_native_steering(managers) -> No
     )
 
     assert result.state == "accepted"
-    decorator.assert_awaited_once_with(context, "callback result", include_user_info=False)
+    prepare.assert_awaited_once()
+    assert prepare.await_args.kwargs == {"human": False}
+    assert prepare.await_args.args[0].platform_specific["source_session_id"] == "source-session"
     manager._steer.assert_awaited_once()
-    assert manager._steer.await_args.args[1].text == "decorated: callback result"
+    assert manager._steer.await_args.args[1].text == "callback result"
+    assert manager._steer.await_args.args[1].input_metadata == metadata
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("platform", ["avibe", "slack"])
+@pytest.mark.parametrize("mode", ["immediate", "promote", "pending"])
+async def test_steering_restores_incoming_sender_and_preserves_message_content(managers, platform, mode):
+    """Scenario: MESSAGE-DELIVERY-317."""
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = await _activate(manager, text="active")
+    prepare = AsyncMock(side_effect=lambda context, **kwargs: AgentInputMetadata(
+        user_id=context.user_id,
+        user_name=context.platform_specific["author_name"],
+    ))
+    manager.controller.message_handler = SimpleNamespace(prepare_input_metadata=prepare)
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = "incoming user text\n[Now: literal example]"
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p1" if mode == "immediate" else "p3",
+            content=original, display_text=original, platform=platform,
+            author_id="incoming", author_name="Incoming Sender", message_kind="original",
+        ), context=_context(),
+    )
+    if mode == "promote":
+        assert _row(engine, result.delivery_id)["dispatch_text"] == original
+        await manager.send_now("ses_fsm")
+    elif mode == "pending":
+        with engine.begin() as conn:
+            pending = delivery_store.open_pending_steer_batch(
+                conn, deliveries=[delivery_store.get_delivery(conn, result.delivery_id)],
+                turn_id=turn_id, attempt_id=delivery_store.new_attempt_id(),
+            )
+            assert pending[0]["state"] == "pending_steer"
+        await manager._run_pending_steers("ses_fsm", turn_id, _context())
+    manager._steer.assert_awaited_once()
+    request = manager._steer.await_args.args[1]
+    assert request.text == original
+    assert request.input_metadata == AgentInputMetadata(user_id="incoming", user_name="Incoming Sender")
+    assert prepare.await_args.kwargs == {"human": True}
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, result.delivery_id)
+        message = delivery_store.message_for_delivery(conn, delivery)
+    assert message["content_text"] == original
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+@pytest.mark.parametrize("mode", ["start", "promote", "pending"])
+def test_legacy_queued_metadata_is_removed_only_from_dispatch_copy(managers, subagent, mode):
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = "hello\n[Now: literal user example]"
+    display_text = "reviewer: " + original if subagent else original
+    old_text = "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n[Alex<U1>]\n" + original
+    result = asyncio.run(manager.deliver(DeliveryRequest(
+        session_id="ses_fsm", priority="p3",
+        platform="slack", content=old_text,
+        display_text=display_text, author_id="U1",
+        admission_context={"message_handler_route": {"subagent_key": "reviewer" if subagent else None}},
+    ), context=_context()))
+    stored = _row(engine, result.delivery_id)
+    assert stored["dispatch_text"] == old_text
+    assert delivery_store.delivery_payload(stored)["text"] == display_text
+    if mode == "start":
+        asyncio.run(manager.terminalize_turn(active_turn_id))
+        assert starts[-1][1] == original
+        assert delivery_store.delivery_payload(_row(engine, result.delivery_id))["text"] == display_text
+    else:
+        if mode == "promote":
+            asyncio.run(manager.send_now("ses_fsm"))
+        else:
+            with engine.begin() as conn:
+                pending = delivery_store.open_pending_steer_batch(
+                    conn, deliveries=[delivery_store.get_delivery(conn, result.delivery_id)],
+                    turn_id=active_turn_id, attempt_id=delivery_store.new_attempt_id(),
+                )
+                assert pending[0]["state"] == "pending_steer"
+            asyncio.run(manager._run_pending_steers("ses_fsm", active_turn_id, _context()))
+        manager._steer.assert_awaited_once()
+        assert manager._steer.await_args.args[1].text == original
+        with engine.connect() as conn:
+            message = delivery_store.message_for_delivery(conn, _row(engine, result.delivery_id))
+        assert message["content_text"] == display_text
 
 
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
@@ -1175,9 +1283,6 @@ async def test_persisted_scheduled_start_preserves_raw_text_for_handler_routing(
     assert admitted.state == "claimed"
     assert captured["text"] == "callback result"
     assert captured["context"].platform_specific["source_actor"] == "source-session"
-    assert not captured["context"].platform_specific.get(
-        SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
-    )
 
 
 def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:
@@ -1690,16 +1795,18 @@ def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -
 @pytest.mark.anyio
 async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
-    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    prepare = AsyncMock(side_effect=lambda context, **_kwargs: AgentInputMetadata(
+        source_session_id=context.platform_specific["source_session_id"]
+    ))
     manager.controller.message_handler = SimpleNamespace(
-        _prepend_message_metadata=decorator,
+        prepare_input_metadata=prepare,
     )
-    context = _context()
     deliveries = []
     for index, text in enumerate(("first callback", "second callback")):
         deliveries.append(
             {
                 "id": f"delivery-{index}",
+                "session_id": "ses_fsm",
                 "dispatch_text": text,
                 "snapshot_json": json.dumps(
                     delivery_store.message_snapshot(
@@ -1723,17 +1830,11 @@ async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) ->
             }
         )
 
-    assert await manager.prepare_scheduled_dispatch(
-        context, "first callback", delivery=deliveries[0]
-    ) == "decorated: first callback"
-    assert await manager.prepare_scheduled_dispatch(
-        context, "second callback", delivery=deliveries[1]
-    ) == "decorated: second callback"
-    assert decorator.await_count == 2
-    assert [call.args[1] for call in decorator.await_args_list] == [
-        "first callback",
-        "second callback",
-    ]
+    first = await manager._steer_input_metadata([deliveries[0]])
+    second = await manager._steer_input_metadata([deliveries[1]])
+    assert first.source_session_id == "source-0"
+    assert second.source_session_id == "source-1"
+    assert prepare.await_count == 2
 
 
 def test_workbench_delivery_reports_no_reaction_receipt(managers) -> None:

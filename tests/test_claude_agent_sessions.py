@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
@@ -8,6 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
+from core.agent_input import AgentInputMetadata
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     backend_dispatch_attempted,
@@ -1895,6 +1897,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(
             context=request_context,
             message="hello",
+            input_metadata=AgentInputMetadata(user_id="U1", user_name="Sender"),
             working_path="/tmp/work",
             base_session_id="wechat_o9",
             composite_session_id="wechat_o9:/tmp/work",
@@ -1908,12 +1911,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             files=None,
         )
 
-        await agent.handle_message(request)
+        with patch("core.agent_input.datetime") as clock:
+            clock.now.return_value.astimezone.return_value = datetime(2026, 9, 6, 11, tzinfo=timezone.utc)
+
+            async def prepare_session(*_args, **_kwargs):
+                clock.now.return_value.astimezone.return_value = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
+                return client
+
+            controller.session_handler.get_or_create_claude_session.side_effect = prepare_session
+            await agent.handle_message(request)
         await asyncio.sleep(0)
 
         controller.session_handler.get_or_create_claude_session.assert_awaited_once()
         self.assertEqual(mark_active_calls, [runtime_key])
-        client.query.assert_awaited_once_with("hello", session_id=runtime_key)
+        client.query.assert_awaited_once_with(
+            "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<U1>]\nhello", session_id=runtime_key,
+        )
+        self.assertEqual(request.message, "hello")
         self.assertIn(runtime_key, agent._pending_requests)
         self.assertIn(runtime_key, agent._pending_reactions)
         self.assertNotIn(request.composite_session_id, agent._pending_requests)

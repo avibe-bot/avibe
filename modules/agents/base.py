@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
+from core.agent_input import AgentInputMetadata
 from core.agent_session_context import resolve_context_agent_session_target
 from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
@@ -79,6 +80,7 @@ class AgentRequest:
     # Result; the latest supplies ``output`` provenance and the whole batch is
     # settled after delivery. The shared dispatcher sees only ``output``.
     output_activities: List[Any] = field(default_factory=list)
+    input_metadata: AgentInputMetadata | None = None
 
 
 @dataclass
@@ -118,6 +120,10 @@ class BaseAgent(ABC):
         if callable(getter):
             return getter(context)
         return self.im_client
+
+    def render_input(self, text: str, metadata: AgentInputMetadata | None) -> str:
+        """Build a native request copy at the last write boundary."""
+        return metadata.render(text, self.config) if metadata is not None else text
 
     def _get_formatter(self, context: MessageContext):
         return getattr(self._get_im_client(context), "formatter", self.im_client.formatter)
