@@ -18,7 +18,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core import memory_legacy_cleanup
 from core.controller import Controller
-from avibe_memory import CaptureRequest, CaptureSkipped
+from avibe_memory import CaptureAccepted, CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter
 from vibe.memory_contract import (
     MemoryImplementationIncompatibleError,
@@ -1300,6 +1300,28 @@ async def test_implementation_failure_rechecked_after_blocked_capture_lock() -> 
 
     with pytest.raises(MemoryImplementationUnavailableError):
         await capture
+
+
+@pytest.mark.asyncio
+async def test_explicit_agent_capture_snapshots_semantic_name_before_waiting() -> None:
+    controller = _controller_with_memory(replace(_disabled_app_config().memory, enabled=True))
+    captures = []
+
+    async def capture(request):
+        captures.append(request)
+        return CaptureAccepted()
+
+    controller.memory_runtime = types.SimpleNamespace(
+        available=True, module=types.SimpleNamespace(capture=capture)
+    )
+    request = replace(_capture_request(), sender_name="Not the human")
+    gate = controller._memory_replacement_lock()
+    await gate.acquire()
+    pending = asyncio.create_task(controller.capture_memory(request))
+    await asyncio.sleep(0)
+    gate.release()
+    await pending
+    assert captures == [replace(request, sender_name="Agent")]
 
 
 @pytest.mark.asyncio

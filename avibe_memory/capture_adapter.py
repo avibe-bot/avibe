@@ -296,6 +296,7 @@ class EnabledMemoryAdapter:
             attachment_capture_status="unavailable",
             attachment_config_generation=None,
             attachment_selection=None,
+            sender_name=event.sender_name,
         )
         if event.platform != "avibe" and event.files:
             authorized = await run_blocking(

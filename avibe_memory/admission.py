@@ -72,6 +72,7 @@ class InboundTurnFacts:
     attachment_capture_status: object = None
     attachment_config_generation: object = None
     attachment_selection: object = None
+    sender_name: str | None = None
 
 
 class CaptureAdmission:
@@ -217,6 +218,7 @@ class CaptureAdmission:
             occurred_at_ms=int(time.time() * 1000),
             attachments=attachments,
             attachment_config_generation=config_generation,
+            sender_name=facts.sender_name,
         )
 
 
