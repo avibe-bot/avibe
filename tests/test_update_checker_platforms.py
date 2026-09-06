@@ -61,8 +61,9 @@ class _FakeIMClient:
         return self.message_id
 
 
-def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path):
+def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
@@ -76,8 +77,9 @@ def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path):
     assert set(admin_ids) == {"slack::U1", "discord::D1"}
 
 
-def test_update_notification_admin_dms_include_buttons_except_wechat(monkeypatch, tmp_path):
+def test_update_notification_admin_dms_include_buttons_except_wechat(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
@@ -150,8 +152,9 @@ def test_fetch_update_notification_policy_reads_github_release_body():
     assert info == {"version": "1.0.1", "policy": "none", "error": None}
 
 
-def test_update_notification_returns_false_when_all_admin_dms_fail(monkeypatch, tmp_path):
+def test_update_notification_returns_false_when_all_admin_dms_fail(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("discord", {"123456789012345678": UserSettings(display_name="Discord", is_admin=True)})
@@ -170,8 +173,9 @@ def test_update_notification_returns_false_when_all_admin_dms_fail(monkeypatch, 
     assert delivered is False
 
 
-def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch, tmp_path):
+def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("discord", {"123456789012345678": UserSettings(display_name="Discord", is_admin=True)})
@@ -209,8 +213,9 @@ def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch,
     assert performed == [("1.0.1", {})]
 
 
-def test_partial_admin_transport_readiness_defers_all_notifications_and_auto_update(monkeypatch, tmp_path):
+def test_partial_admin_transport_readiness_defers_all_notifications_and_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
@@ -269,8 +274,9 @@ def test_partial_admin_transport_readiness_defers_all_notifications_and_auto_upd
     assert performed == []
 
 
-def test_stale_admin_transport_does_not_block_auto_update(monkeypatch, tmp_path):
+def test_stale_admin_transport_does_not_block_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
@@ -316,8 +322,9 @@ def test_stale_admin_transport_does_not_block_auto_update(monkeypatch, tmp_path)
     assert performed == [("1.0.1", {})]
 
 
-def test_no_admin_discord_without_fallback_does_not_block_auto_update(monkeypatch, tmp_path):
+def test_no_admin_discord_without_fallback_does_not_block_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     controller.config.platform = "discord"
@@ -355,8 +362,9 @@ def test_no_admin_discord_without_fallback_does_not_block_auto_update(monkeypatc
     assert performed == [("1.0.1", {})]
 
 
-def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monkeypatch, tmp_path):
+def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
@@ -402,8 +410,9 @@ def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monke
     assert performed == [("1.0.1", {"suppress_post_update_notification": True})]
 
 
-def test_update_check_reconciles_askill_even_when_product_auto_update_disabled(monkeypatch, tmp_path):
+def test_update_check_reconciles_askill_even_when_product_auto_update_disabled(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(
         _StubController(SettingsStore.get_instance()),
@@ -433,8 +442,9 @@ def test_update_check_reconciles_askill_even_when_product_auto_update_disabled(m
     assert performed == []
 
 
-def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkeypatch, tmp_path):
+def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig(check_interval_minutes=0))
     reconciled = []
@@ -449,8 +459,9 @@ def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkey
     assert reconciled == [True]
 
 
-def test_update_check_loop_catches_python_310_asyncio_timeout(monkeypatch, tmp_path):
+def test_update_check_loop_catches_python_310_asyncio_timeout(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(
         _StubController(SettingsStore.get_instance()),
@@ -486,8 +497,9 @@ def test_update_check_loop_catches_python_310_asyncio_timeout(monkeypatch, tmp_p
     assert checks == [True, True]
 
 
-def test_suppressed_post_update_notification_writes_verification_marker(monkeypatch, tmp_path):
+def test_suppressed_post_update_notification_writes_verification_marker(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
 
@@ -505,8 +517,9 @@ def test_suppressed_post_update_notification_writes_verification_marker(monkeypa
     assert data["suppress_success_notification"] is True
 
 
-def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path):
+def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
 
@@ -519,8 +532,9 @@ def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp
     assert data["message_id"] == "42"
 
 
-def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, tmp_path):
+def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     controller = _StubController(store)
@@ -538,8 +552,9 @@ def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, 
     assert ":white_check_mark:" not in text
 
 
-def test_post_update_marker_waits_for_its_transport(monkeypatch, tmp_path):
+def test_post_update_marker_waits_for_its_transport(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     telegram_client = _FakeIMClient()
@@ -562,8 +577,9 @@ def test_post_update_marker_waits_for_its_transport(monkeypatch, tmp_path):
     assert not marker.exists()
 
 
-def test_post_update_marker_is_retained_when_delivery_returns_none(monkeypatch, tmp_path):
+def test_post_update_marker_is_retained_when_delivery_returns_none(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     telegram_client = _FakeIMClient(edit_result=None)
@@ -580,8 +596,9 @@ def test_post_update_marker_is_retained_when_delivery_returns_none(monkeypatch, 
     assert marker.exists()
 
 
-def test_no_channel_post_update_marker_tracks_completed_admin_platforms(monkeypatch, tmp_path):
+def test_no_channel_post_update_marker_tracks_completed_admin_platforms(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
@@ -626,8 +643,9 @@ def test_no_channel_post_update_marker_tracks_completed_admin_platforms(monkeypa
     assert not marker.exists()
 
 
-def test_no_channel_post_update_marker_skips_disabled_admin_platforms(monkeypatch, tmp_path):
+def test_no_channel_post_update_marker_skips_disabled_admin_platforms(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
@@ -651,8 +669,9 @@ def test_no_channel_post_update_marker_skips_disabled_admin_platforms(monkeypatc
     assert not marker.exists()
 
 
-def test_no_admin_discord_post_update_marker_uses_default_channel(monkeypatch, tmp_path):
+def test_no_admin_discord_post_update_marker_uses_default_channel(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.update_channel("123456789012345678", ChannelSettings(enabled=True), platform="discord")
@@ -681,8 +700,9 @@ def test_no_admin_discord_post_update_marker_uses_default_channel(monkeypatch, t
     assert not marker.exists()
 
 
-def test_no_admin_discord_post_update_marker_clears_without_default_channel(monkeypatch, tmp_path):
+def test_no_admin_discord_post_update_marker_clears_without_default_channel(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     controller.config.platform = "discord"
@@ -700,8 +720,9 @@ def test_no_admin_discord_post_update_marker_clears_without_default_channel(monk
     assert not marker.exists()
 
 
-def test_no_admin_discord_version_mismatch_uses_default_channel(monkeypatch, tmp_path):
+def test_no_admin_discord_version_mismatch_uses_default_channel(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.update_channel("123456789012345678", ChannelSettings(enabled=True), platform="discord")
@@ -724,8 +745,9 @@ def test_no_admin_discord_version_mismatch_uses_default_channel(monkeypatch, tmp
     assert not marker.exists()
 
 
-def test_suppressed_post_update_marker_verifies_without_success_message(monkeypatch, tmp_path):
+def test_suppressed_post_update_marker_verifies_without_success_message(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     telegram_client = _FakeIMClient()
@@ -747,8 +769,9 @@ def test_suppressed_post_update_marker_verifies_without_success_message(monkeypa
     assert not marker.exists()
 
 
-def test_auto_update_skips_unattended_source_checkout_install(monkeypatch, tmp_path):
+def test_auto_update_skips_unattended_source_checkout_install(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(
         _StubController(SettingsStore.get_instance()),
@@ -782,8 +805,9 @@ def test_auto_update_skips_unattended_source_checkout_install(monkeypatch, tmp_p
     assert checker.state.blocked_auto_update_version is None
 
 
-def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypatch, tmp_path):
+def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("telegram", {"123456": UserSettings(display_name="Telegram", is_admin=True)})
@@ -830,8 +854,9 @@ def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypa
     assert checker.state.blocked_auto_update_reason == "restart_not_scheduled"
 
 
-def test_install_failure_auto_update_remains_retryable(monkeypatch, tmp_path):
+def test_install_failure_auto_update_remains_retryable(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(
         _StubController(SettingsStore.get_instance()),
@@ -867,8 +892,9 @@ def test_install_failure_auto_update_remains_retryable(monkeypatch, tmp_path):
     assert checker.state.blocked_auto_update_reason is None
 
 
-def test_update_check_error_preserves_blocked_auto_update(monkeypatch, tmp_path):
+def test_update_check_error_preserves_blocked_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(
         _StubController(SettingsStore.get_instance()),
@@ -888,8 +914,9 @@ def test_update_check_error_preserves_blocked_auto_update(monkeypatch, tmp_path)
     assert checker.state.blocked_auto_update_current_version == "3.0.3"
 
 
-def test_post_update_notification_accepts_newer_running_version(monkeypatch, tmp_path):
+def test_post_update_notification_accepts_newer_running_version(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     telegram_client = _FakeIMClient()
@@ -908,8 +935,9 @@ def test_post_update_notification_accepts_newer_running_version(monkeypatch, tmp
     assert not marker.exists()
 
 
-def test_post_update_notification_skips_success_when_running_version_mismatches(monkeypatch, tmp_path):
+def test_post_update_notification_skips_success_when_running_version_mismatches(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     telegram_client = _FakeIMClient()
@@ -932,7 +960,7 @@ def test_post_update_notification_skips_success_when_running_version_mismatches(
     assert not marker.exists()
 
 
-def test_a_version_that_did_not_take_effect_is_blocked_even_with_no_one_to_tell(monkeypatch, tmp_path):
+def test_a_version_that_did_not_take_effect_is_blocked_even_with_no_one_to_tell(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """Blocking is decided by the version, not by whether anyone can be told.
 
     An instance whose upgrade failed and was rolled back is running the old
@@ -946,6 +974,7 @@ def test_a_version_that_did_not_take_effect_is_blocked_even_with_no_one_to_tell(
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
     controller.im_clients = {}
@@ -961,8 +990,9 @@ def test_a_version_that_did_not_take_effect_is_blocked_even_with_no_one_to_tell(
     assert not (tmp_path / "state" / "pending_update_notification.json").exists()
 
 
-def test_stop_returns_cancellable_task(monkeypatch, tmp_path):
+def test_stop_returns_cancellable_task(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
 
     async def run_test():
@@ -977,8 +1007,9 @@ def test_stop_returns_cancellable_task(monkeypatch, tmp_path):
     asyncio.run(run_test())
 
 
-def test_start_keeps_running_for_managed_dependencies_when_product_checks_disabled(monkeypatch, tmp_path):
+def test_start_keeps_running_for_managed_dependencies_when_product_checks_disabled(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
 
     async def run_test():
