@@ -49,7 +49,7 @@ import shutil
 import sqlite3
 import sys
 import warnings
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from functools import wraps
 from pathlib import Path
 
@@ -156,6 +156,35 @@ def sqlite_db_factory(tmp_path, _sqlite_state_template_factory):
         with source_path.open("rb") as source, db_path.open("xb") as target:
             shutil.copyfileobj(source, target)
         return db_path
+
+    return create
+
+
+@pytest.fixture(scope="session")
+def _sqlite_schema_template_factory(tmp_path_factory):
+    """Lazily build raw schema only, without running the JSON/data importer."""
+    template_path: Path | None = None
+
+    def get_template() -> Path:
+        nonlocal template_path
+        if template_path is None:
+            from storage.migrations import run_migrations
+
+            path = tmp_path_factory.mktemp("sqlite-schema-template") / "empty.sqlite"
+            run_migrations(path)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            template_path = path
+        return template_path
+
+    return get_template
+
+
+@pytest.fixture
+def sqlite_schema_db_factory(sqlite_db_factory, _sqlite_schema_template_factory):
+    """Opt ordinary setup into private raw schemas; constructors/imports stay real."""
+    def create(db_path: Path) -> Path:
+        return sqlite_db_factory(db_path, template=_sqlite_schema_template_factory())
 
     return create
 

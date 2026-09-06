@@ -74,6 +74,40 @@ def test_migration_tests_still_begin_without_seeded_state():
     assert not paths.get_sqlite_state_path().exists()
 
 
+def test_raw_schema_copies_match_fresh_migrations_and_preserve_isolation(
+    tmp_path, sqlite_schema_db_factory, _sqlite_schema_template_factory,
+):
+    from storage.migrations import run_migrations
+    from tests.test_sqlite_state_migration import _schema_fingerprint
+
+    fresh_path = tmp_path / "fresh.sqlite"
+    run_migrations(fresh_path)
+    first = sqlite_schema_db_factory(tmp_path / "first.sqlite")
+    template = _sqlite_schema_template_factory()
+    original = template.read_bytes()
+    with closing(sqlite3.connect(fresh_path)) as fresh, closing(sqlite3.connect(first)) as clone:
+        assert _schema_fingerprint(fresh) == _schema_fingerprint(clone)
+        assert sorted(row for row in fresh.iterdump() if row.startswith("INSERT INTO")) == sorted(
+            row for row in clone.iterdump() if row.startswith("INSERT INTO")
+        )
+        for pragma in ("journal_mode", "user_version", "application_id"):
+            assert fresh.execute(f"PRAGMA {pragma}").fetchall() == clone.execute(f"PRAGMA {pragma}").fetchall()
+        assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    with closing(sqlite3.connect(first)) as connection, connection:
+        connection.execute("CREATE TABLE fixture_mutation (value TEXT)")
+        connection.execute("INSERT INTO fixture_mutation VALUES ('private')")
+    second = sqlite_schema_db_factory(tmp_path / "second.sqlite")
+    assert second.read_bytes() == template.read_bytes() == original
+    changed = first.read_bytes()
+    with pytest.raises(FileExistsError):
+        sqlite_schema_db_factory(first)
+    assert first.read_bytes() == changed
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    with pytest.raises(ValueError):
+        sqlite_schema_db_factory(outside / "vibe.sqlite")
+    assert not outside.exists()
+
+
 @pytest.mark.parametrize("fixture", [_reset_cached_sqlite_engines, _reset_oauth_runtime_state])
 def test_cache_cleanup_does_not_import_unused_runtime_modules(monkeypatch, fixture):
     names = ("storage.db", "storage.importer", "vibe.remote_access", "vibe.ui_server")
