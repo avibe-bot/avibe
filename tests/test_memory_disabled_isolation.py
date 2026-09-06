@@ -92,7 +92,54 @@ def _memory_state_entries(home: Path) -> list[Path]:
             "memory" in part.casefold() or "everos" in part.casefold()
             for part in path.relative_to(home).parts
         )
+        # Every config writer uses this legacy-named lock, not just Memory.
+        and not (
+            path.relative_to(home) == Path("config/memory-config.tx.lock")
+            and path.is_file()
+            and not path.is_symlink()
+        )
     ]
+
+
+def test_memory_state_inventory_excludes_only_the_shared_config_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.default()
+    config.memory = replace(config.memory, enabled=False)
+    config.save()
+
+    assert (tmp_path / "config" / "memory-config.tx.lock").is_file()
+    assert _memory_state_entries(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "relative_path,kind",
+    [
+        ("memory", "directory"),
+        ("everos", "directory"),
+        ("config/memory-status.json", "file"),
+        ("config/memory-config.tx.lock.extra", "file"),
+        ("other/memory-config.tx.lock", "file"),
+        ("config/memory-config.tx.lock", "directory"),
+        ("config/memory-config.tx.lock", "symlink"),
+    ],
+)
+def test_memory_state_inventory_keeps_runtime_assets_and_lock_lookalikes(
+    tmp_path: Path, relative_path: str, kind: str,
+) -> None:
+    candidate = tmp_path / relative_path
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        candidate.mkdir()
+    elif kind == "symlink":
+        target = tmp_path / "target"
+        target.touch()
+        candidate.symlink_to(target)
+    else:
+        candidate.touch()
+
+    assert Path(relative_path) in _memory_state_entries(tmp_path)
 
 
 def test_memory_cli_session_keeps_authenticated_boundary_when_implementation_is_unavailable() -> None:
@@ -157,8 +204,9 @@ async def _start_disabled_cleanup(
     return controller, cleanup_task, record_path
 
 
+@pytest.mark.parametrize("model_hub_env", [None, "0"])
 def test_memory_indep_013_disabled_fresh_startup_has_no_runtime_side_effects(
-    tmp_path: Path,
+    tmp_path: Path, model_hub_env: str | None,
 ) -> None:
     script = r'''
 import asyncio
@@ -167,7 +215,7 @@ from pathlib import Path
 
 from config import paths
 from config.v2_compat import to_app_config
-from config.v2_config import V2Config
+from config.v2_config import V2Config, is_model_hub_enabled
 from core.controller import Controller
 from core.memory_adapter import DisabledMemoryAdapter, TurnAccepted
 from modules.im import MessageContext
@@ -188,6 +236,7 @@ config = to_app_config(V2Config.from_payload({
 controller = Controller(config)
 home = paths.get_vibe_remote_dir()
 
+assert (controller.model_hub_service is not None) == is_model_hub_enabled()
 assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 assert controller.memory_runtime is None
 assert controller.memory_module is None
@@ -197,6 +246,11 @@ assert not [
     path for path in home.rglob("*")
     if any("memory" in part.casefold() or "everos" in part.casefold()
            for part in path.relative_to(home).parts)
+    and not (
+        path.relative_to(home) == Path("config/memory-config.tx.lock")
+        and path.is_file()
+        and not path.is_symlink()
+    )
 ]
 asyncio.run(controller._schedule_disabled_memory_cleanup())
 assert controller._memory_disabled_cleanup_task is None
@@ -244,6 +298,9 @@ asyncio.run(offer_capture())
     environment["AVIBE_HOME"] = str(home)
     environment["HOME"] = str(tmp_path)
     environment["PYTHONPATH"] = str(ROOT)
+    environment.pop("VIBE_MODEL_HUB_ENABLED", None)
+    if model_hub_env is not None:
+        environment["VIBE_MODEL_HUB_ENABLED"] = model_hub_env
 
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -259,8 +316,9 @@ asyncio.run(offer_capture())
     assert _memory_state_entries(home) == []
 
 
+@pytest.mark.parametrize("model_hub_env", [None, "0"])
 def test_memory_indep_014_disabled_controller_starts_with_runtime_imports_blocked(
-    tmp_path: Path,
+    tmp_path: Path, model_hub_env: str | None,
 ) -> None:
     script = r'''
 import asyncio
@@ -287,7 +345,7 @@ class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockMemoryImplementation())
 
 from config.v2_compat import to_app_config
-from config.v2_config import V2Config
+from config.v2_config import V2Config, is_model_hub_enabled
 from core import internal_server
 from core.controller import Controller
 from core.memory_adapter import DisabledMemoryAdapter
@@ -308,6 +366,7 @@ config = to_app_config(V2Config.from_payload({
 controller = Controller(config)
 internal_server.create_app(controller, memory_ui_secret="test-secret")
 status = asyncio.run(controller.memory_status_payload())
+assert (controller.model_hub_service is not None) == is_model_hub_enabled()
 assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 assert controller.memory_runtime is None
 assert status == {
@@ -324,6 +383,9 @@ assert not BLOCKED.intersection(sys.modules)
     environment["AVIBE_HOME"] = str(tmp_path / "home")
     environment["HOME"] = str(tmp_path)
     environment["PYTHONPATH"] = str(ROOT)
+    environment.pop("VIBE_MODEL_HUB_ENABLED", None)
+    if model_hub_env is not None:
+        environment["VIBE_MODEL_HUB_ENABLED"] = model_hub_env
 
     completed = subprocess.run(
         [sys.executable, "-c", script],
