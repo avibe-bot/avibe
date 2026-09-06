@@ -73,13 +73,15 @@ def _sidecar_transport(handler):
     return patch("avibe_memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
 
 
-def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_path) -> None:
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_path, language) -> None:
     """MEMORY-SEARCH-019: accepted source identity survives named provider capture."""
     from types import SimpleNamespace
 
     from avibe_memory.capture_adapter import EnabledMemoryAdapter
     from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
     from avibe_memory.types import CaptureRequest
+    from avibe_memory.sidecar import _request_rejection
     from core.controller import Controller
     from core.handlers.message_handler import memory_turn_event
     from modules.im.base import MessageContext
@@ -90,6 +92,7 @@ def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_pa
     def handler(request):
         payload = json.loads(request.content)
         if request.url.path.endswith("/add"):
+            assert _request_rejection(request.method, request.url.path, request.content) is None
             requests.append(payload)
         return httpx.Response(200, json={"request_id": "synthetic", "data": {"status": "accumulated"}})
 
@@ -103,7 +106,7 @@ def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_pa
             disk_free_bytes=lambda: MIN_FREE_DISK_BYTES, effective_home=tmp_path,
         )
         controller = Controller.__new__(Controller)
-        controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True), language="en")
+        controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True), language=language)
         controller.memory_runtime = SimpleNamespace(available=True, module=module)
         bound_users = SimpleNamespace(
             maybe_reload=lambda: None,
@@ -144,7 +147,8 @@ def test_sender_name_crosses_automatic_and_explicit_capture_http_boundary(tmp_pa
             ))
             await module.wait_writer_idle_for_tests()
             messages = [payload["messages"][0] for payload in requests]
-            names = ["User", "User", "User", "小王 Élodie 🌱", "小王 Élodie 🌱", "Agent"]
+            web_name = "用户" if language == "zh" else "User"
+            names = [web_name, web_name, web_name, "小王 Élodie 🌱", "小王 Élodie 🌱", "Agent"]
             assert {message["sender_id"]: message["sender_name"] for message in messages} == dict(
                 zip([*expected_owners, principal + "-agent"], names)
             )
