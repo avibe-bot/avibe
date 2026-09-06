@@ -2589,6 +2589,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         encoding="utf-8",
     )
     commands = []
+    listings = []
 
     class RecordingRunner:
         def __init__(self, *, dry_run=False):
@@ -2597,6 +2598,13 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         def run(self, command, *, check=True, **kwargs):
             commands.append(command)
             return subprocess.CompletedProcess(command, 0)
+
+        def records(self, command, *, what):
+            listings.append((command, what))
+            return []
+
+        def names(self, command, *, what):
+            return [item["name"] for item in self.records(command, what=what)]
 
     monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
     monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
@@ -2625,8 +2633,95 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         ["incus", "--project", project, "delete", instance, "--force"],
         ["incus", "project", "delete", project],
     ]
+    assert listings == [
+        (["incus", "project", "list", "--format", "json"], "Incus projects"),
+        (["incus", "list", "--all-projects", "--format", "json"], "Incus instances"),
+    ]
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == {}
+
+
+@pytest.mark.parametrize(
+    "delete_codes", [(0, 0), (1, 0), (0, 1), (1, 1)],
+    ids=["deleted", "instance-delete-fails", "project-delete-fails", "both-deletes-fail"],
+)
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        "absent", "project", "instance", "project-and-instance",
+        "project-list-fails", "instance-list-fails",
+        "unreadable-project-list", "unreadable-instance-list",
+    ],
+)
+def test_delete_keeps_worktree_metadata_until_absence_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    delete_codes: tuple[int, int], inventory: str,
+) -> None:
+    repo = tmp_path / "repo"
+    runtime = repo / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    slug = "delete-failed"
+    row = {"path": str(repo), "project": f"avr-wt-{slug}", "instance": f"avibe-wt-{slug}", "host_port": 15206}
+    other_row = {"host_port": 15207, "claim": "unrelated-reservation"}
+    rows = {slug: row, "another-worktree": other_row}
+    mapping_path = runtime / "worktrees.json"
+    mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": rows}), encoding="utf-8")
+    delete_commands = [
+        ["incus", "--project", row["project"], "delete", row["instance"], "--force"],
+        ["incus", "project", "delete", row["project"]],
+    ]
+    listing_commands = [
+        ["incus", "project", "list", "--format", "json"],
+        ["incus", "list", "--all-projects", "--format", "json"],
+    ]
+    commands = []
+
+    def run(command, **kwargs):
+        assert incus_regression.target_run_in_flight(repo, None, row["project"])
+        commands.append(command)
+        if command in delete_commands:
+            assert kwargs["check"] is False
+            return subprocess.CompletedProcess(command, delete_codes[delete_commands.index(command)])
+        assert command in listing_commands
+        kind = "project" if command == listing_commands[0] else "instance"
+        if inventory == f"{kind}-list-fails":
+            return subprocess.CompletedProcess(command, 1, stderr="daemon unavailable")
+        if inventory == f"unreadable-{kind}-list":
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([{"unexpected": "schema"}]))
+        objects = []
+        if inventory in {kind, "project-and-instance"}:
+            objects.append(
+                {"name": row["project"]} if kind == "project"
+                else {"name": row["instance"], "project": row["project"], "status": "Running"}
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(objects))
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda _repo_root, _env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setenv("INCUS_CMD", "incus")
+    monkeypatch.setattr(incus_regression.subprocess, "run", run)
+
+    if "list" in inventory:
+        with pytest.raises(incus_regression.RegressionError):
+            incus_regression.cmd_delete(_delete_args(slug))
+    else:
+        assert incus_regression.cmd_delete(_delete_args(slug)) == int(any(delete_codes) or inventory != "absent")
+
+    expected_listings = (
+        listing_commands[:1] if inventory in {"project-list-fails", "unreadable-project-list"}
+        else listing_commands
+    )
+    assert commands == delete_commands + expected_listings
+    assert not incus_regression.target_run_in_flight(repo, None, row["project"])
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == ({"another-worktree": other_row} if inventory == "absent" else rows)
+    err = capsys.readouterr().err
+    if any(delete_codes):
+        assert "exited" in err
+    if inventory == "absent":
+        assert "kept its metadata" not in err
 
 
 def test_delete_against_a_remote_keeps_the_local_metadata(
@@ -2776,6 +2871,12 @@ def test_delete_holds_the_slug_lock_across_the_objects_and_the_row(
         def run(self, command, *, check=True, **kwargs):
             observed.append(("objects", held()))
             return subprocess.CompletedProcess(command, 0)
+
+        def records(self, command, *, what):
+            return []
+
+        def names(self, command, *, what):
+            return []
 
     forget = incus_regression.WorktreeMetadata.forget
 
