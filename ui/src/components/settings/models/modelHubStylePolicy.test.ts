@@ -37,6 +37,42 @@ describe('Model Hub theme token policy', () => {
 });
 
 describe('Model Hub visual token policy', () => {
+  it('contains full Default Routing text in stretched columns and growing rows', () => {
+    const root = postcss.parse(surfaceCss);
+    const declarations = (selector: string) => {
+      const result: Record<string, string> = {};
+      root.walkRules((rule) => {
+        if (rule.parent?.type === 'root' && rule.selectors.includes(selector)) {
+          rule.walkDecls((decl) => { result[decl.prop] = decl.value; });
+        }
+      });
+      return result;
+    };
+    // Source-order checks of the actual shared owners, not JSDOM geometry.
+    expect(declarations('.model-hub-order-identity')).toMatchObject({
+      display: 'flex', flex: '1', 'min-width': '0', 'flex-direction': 'column', 'align-items': 'stretch',
+    });
+    for (const selector of ['.model-hub-order-name', '.model-hub-order-meta']) {
+      expect(declarations(selector)).toMatchObject({ 'white-space': 'normal', 'overflow-wrap': 'anywhere' });
+    }
+    const row = declarations('.model-hub-order-row');
+    expect(row).toMatchObject({
+      height: 'auto', 'min-height': 'var(--model-hub-order-row-height)',
+      '--model-hub-order-row-padding-y': '8px', 'padding-block': 'var(--model-hub-order-row-padding-y)',
+      'padding-inline': 'var(--model-hub-order-row-padding-x)',
+    });
+    expect(row.overflow ?? '').not.toMatch(/hidden|clip/);
+    expect(surfaceCss).toContain('--model-hub-order-row-height: 58px;');
+    expect(declarations('.model-hub-order-section-head')).toMatchObject({ 'flex-wrap': 'wrap', 'row-gap': '4px' });
+    expect(declarations('.model-hub-order-section-head > .model-hub-order-section-explanation')).toMatchObject({
+      display: 'block', flex: '1 1 100%', 'min-width': '0', padding: '0', border: '0',
+      'border-radius': '0', background: 'transparent', color: 'var(--muted)',
+      'font-size': 'var(--model-hub-order-meta-size)', 'font-weight': '400',
+      'line-height': '15px', 'white-space': 'normal', 'overflow-wrap': 'anywhere',
+    });
+    expect(declarations('.model-hub-order-section-head > span')).toEqual({});
+  });
+
   it('keeps Default Routing actions at the shared compact size after drawer styles apply', () => {
     const root = postcss.parse(surfaceCss);
     const declarations = (...selectors: string[]) => {

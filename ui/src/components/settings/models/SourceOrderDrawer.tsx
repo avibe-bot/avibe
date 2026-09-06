@@ -33,8 +33,8 @@ const SourceIdentity: React.FC<{ source: Source }> = ({ source }) => {
   return (
     <>
       <span className="model-hub-order-identity">
-        <span className="model-hub-order-name truncate" title={source.display_name}>{source.display_name}</span>
-        {detail && <span className="model-hub-order-meta truncate" title={detail}>{detail}</span>}
+        <span className="model-hub-order-name" title={source.display_name}>{source.display_name}</span>
+        {detail && <span className="model-hub-order-meta" title={detail}>{detail}</span>}
       </span>
     </>
   );
@@ -341,7 +341,7 @@ export const SourceOrderDrawer: React.FC<{
                       {orderedSource
                         ? <SourceIdentity source={orderedSource} />
                         : <span className="model-hub-order-identity">
-                            <span className="model-hub-order-name truncate font-mono" title={id}>{id}</span>
+                            <span className="model-hub-order-name font-mono" title={id}>{id}</span>
                           </span>}
                     </div>
                   ))}
@@ -359,7 +359,7 @@ export const SourceOrderDrawer: React.FC<{
                 <section className="model-hub-order-section">
                   <div className="model-hub-order-section-head">
                     <h3>{t('settings.models.order.section.ordered')}</h3>
-                    <span>{t('settings.models.order.section.ordered.note')}</span>
+                    <span className="model-hub-order-section-explanation">{t('settings.models.order.section.ordered.note')}</span>
                   </div>
                   {ordered.length === 0
                     ? <div className="model-hub-order-empty">{t('settings.models.order.empty.ordered')}</div>
@@ -388,7 +388,7 @@ export const SourceOrderDrawer: React.FC<{
                     </Reorder.Group>}
                 </section>
                 <section className="model-hub-order-section">
-                  <div className="model-hub-order-section-head model-hub-order-section-head--held-out">
+                  <div className="model-hub-order-section-head">
                     <h3>{t('settings.models.order.section.heldOut')}</h3>
                     <span className="model-hub-order-section-explanation">{t('settings.models.order.section.heldOut.note')}</span>
                   </div>

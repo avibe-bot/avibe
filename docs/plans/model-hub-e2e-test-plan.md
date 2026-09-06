@@ -49,7 +49,7 @@ Out of scope (documented, not dropped silently):
 | B4 | discovery fails | 422 `inventory_unavailable` unless `accept_unavailable_inventory:true`; then source commits with `state.status=error` | assert |
 | B5 | replay create with same `client_nonce` | idempotent, no duplicate source | assert |
 | B6 | replace key happy + rollback; rename; patch base URL | C22/C23 contracts | assert |
-| B7 | delete source in a chain → guard 409 → echo plan → force | hop removed, impact report lists interrupted agents; malformed echo rejected | assert |
+| B7 | sole owned default source + exact one-hop manual route, verified by reads → delete source → guard 409 → echo plan → force | actual inherited supply gap; impact report lists interrupted agents; malformed echo rejected; canonical route and exact captured default order restored independently (only the owned deleted ID may be omitted) | assert |
 | B8 | force transport asymmetry (`?force=` vs body) | document current split (B6 issue); decide normalization | baseline |
 | B9 | refetch after upstream inventory change | added/removed diff; **`discovered_at` preserved for pre-existing models** (currently overwritten — fix-first, see B-list) | fix-first |
 | B10 | inspect catalog-managed tiers; edit user/null tiers; reload a v6 row and refresh | catalog edits return 409 `source_model_tiers_managed` with exact provenance; user tiers remain editable; refresh restores catalog truth and emits one redacted override event | assert |

@@ -1,9 +1,187 @@
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import ts from 'typescript';
 
 import type { AgentChain, HubApi } from './support/api';
 import { HubApi as HubApiClient } from './support/api';
 import { ModelHubPage } from './support/hub';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
+
+const b7Title = 'B7 · removing the only source of a route is refused, explained, then reported';
+const guardSource = ts.createSourceFile('g-guards-copy.spec.ts',
+  readFileSync(new URL('./g-guards-copy.spec.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+const b7Callbacks: ts.Expression[] = [];
+function collectB7(node: ts.Node): void {
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'test'
+    && node.arguments[0] && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === b7Title) {
+    b7Callbacks.push(node.arguments[1]);
+  }
+  ts.forEachChild(node, collectB7);
+}
+collectB7(guardSource);
+
+type B7Options = {
+  defaultWrite?: 'rejected' | 'ambiguous' | 'false-success';
+  routeWrite?: 'rejected' | 'ambiguous' | 'false-success';
+  effectiveMismatch?: boolean;
+  original?: AgentChain['manual_override'];
+  deleted?: boolean;
+  missingOther?: boolean;
+  restoreDefaultsFails?: boolean;
+  restoreRouteFails?: boolean;
+};
+
+// Consume the actual B7 callback without registering its live fixtures. The
+// deliberate page-entry failure exercises its real finally block, not a copy.
+function b7Fixture(options: B7Options = {}) {
+  expect(b7Callbacks).toHaveLength(1);
+  const owned = 'src_owned_delete';
+  const originalDefaults = ['src_operator_b', owned, 'src_operator_a', 'src_other_owned'];
+  const original = options.original === undefined
+    ? { hops: [{ source_id: 'src_operator_a', model_id: 'operator/retained' }] }
+    : options.original;
+  const arrangedHops = [{ source_id: owned, model_id: 'e2e-supplied' }];
+  let defaults = [...originalDefaults];
+  let manual = structuredClone(original);
+  const remaining = new Set(originalDefaults);
+  const calls: string[] = [];
+  const defaultWrites: string[][] = [];
+  const browserBoundary = new Error('B7 synthetic browser boundary');
+  let browserEntries = 0;
+  const api = {
+    sources: async () => [...remaining].map((id) => ({ id })),
+    defaultSourceOrder: async () => { calls.push('read defaults'); return [...defaults]; },
+    setDefaultSourceOrder: async (_backend: string, order: string[]) => {
+      defaultWrites.push([...order]);
+      const arranging = defaultWrites.length === 1;
+      calls.push(arranging ? 'arrange defaults' : 'restore defaults');
+      if (arranging && options.defaultWrite === 'rejected') throw new Error('initial default write rejected');
+      if (!arranging && options.restoreDefaultsFails) throw new Error('default restoration refused');
+      if (!(arranging && options.defaultWrite === 'false-success')) defaults = [...order];
+      if (arranging && options.defaultWrite === 'ambiguous') throw new Error('default response lost after persistence');
+    },
+    agentChain: async () => {
+      calls.push('read route');
+      return {
+        manual_override: structuredClone(manual),
+        chain: options.effectiveMismatch && manual?.hops[0]?.source_id === owned
+          ? [{ source_id: 'src_operator_b', model_id: 'unexpected-fallback' }]
+          : structuredClone(manual?.hops ?? []),
+      };
+    },
+    putAgentChain: async (_backend: string, _model: string, hops: NonNullable<AgentChain['manual_override']>['hops']) => {
+      const arranging = JSON.stringify(hops) === JSON.stringify(arrangedHops);
+      calls.push(arranging ? 'arrange route' : 'restore route');
+      if (arranging && options.routeWrite === 'rejected') return false;
+      if (!arranging && options.restoreRouteFails) throw new Error('route restoration refused');
+      if (!(arranging && options.routeWrite === 'false-success')) manual = { hops: structuredClone(hops) };
+      if (arranging && options.routeWrite === 'ambiguous') throw new Error('route response lost after persistence');
+      return true;
+    },
+    deleteAgentChain: async () => {
+      calls.push('restore route');
+      if (options.restoreRouteFails) throw new Error('route restoration refused');
+      manual = null;
+      return true;
+    },
+  } as unknown as HubApi;
+  const callback = new vm.Script(ts.transpileModule(`(${b7Callbacks[0].getText(guardSource)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText).runInNewContext({ expect, captureAgentChain, restoreAgentChain, AggregateError }) as
+    (fixtures: unknown) => Promise<void>;
+  return {
+    calls, defaultWrites, originalDefaults, original, browserBoundary,
+    state: () => ({ defaults, manual, browserEntries }),
+    run: async () => {
+      try {
+        await callback({
+          api,
+          gateway: { backend: 'claude', model: 'menu-model', sources: [
+            { id: owned, display_name: 'e2e-owned-delete', models: [{ id: 'e2e-supplied' }] },
+          ] },
+          hub: { goto: async () => {
+            browserEntries += 1;
+            expect(defaults, 'Browser must start with an actual inherited supply gap').toEqual([owned]);
+            expect(manual).toEqual({ hops: arrangedHops });
+            if (options.deleted) remaining.delete(owned);
+            if (options.missingOther) remaining.delete('src_operator_b');
+            throw browserBoundary;
+          } },
+        });
+      } catch (error) { return error; }
+      throw new Error('The synthetic browser boundary must not complete');
+    },
+  };
+}
+
+test('B7 arranges a genuine inherited gap and restores exact independent authorities', async () => {
+  const fixture = b7Fixture();
+  expect(await fixture.run()).toBe(fixture.browserBoundary);
+  expect(fixture.state()).toEqual({ defaults: fixture.originalDefaults, manual: fixture.original, browserEntries: 1 });
+  expect(fixture.defaultWrites).toEqual([['src_owned_delete'], fixture.originalDefaults]);
+  expect(fixture.calls.indexOf('read defaults')).toBeLessThan(fixture.calls.indexOf('arrange defaults'));
+  expect(fixture.calls.indexOf('read route')).toBeLessThan(fixture.calls.indexOf('arrange defaults'));
+});
+
+for (const authority of ['default', 'route'] as const) {
+  for (const response of ['rejected', 'ambiguous', 'false-success'] as const) {
+    test(`B7 restores both snapshots after ${authority} ${response} arrangement`, async () => {
+      const fixture = b7Fixture(authority === 'default' ? { defaultWrite: response } : { routeWrite: response });
+      const failure = await fixture.run();
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBe(fixture.browserBoundary);
+      expect(fixture.state()).toEqual({ defaults: fixture.originalDefaults, manual: fixture.original, browserEntries: 0 });
+      expect(fixture.calls).toContain('restore defaults');
+      expect(fixture.calls).toContain('restore route');
+    });
+  }
+}
+
+test('B7 rejects a no-gap effective readback before entering the browser', async () => {
+  const fixture = b7Fixture({ effectiveMismatch: true });
+  expect(await fixture.run()).not.toBe(fixture.browserBoundary);
+  expect(fixture.state()).toEqual({ defaults: fixture.originalDefaults, manual: fixture.original, browserEntries: 0 });
+});
+
+for (const original of [null, { hops: [] }, { hops: [{ source_id: 'src_operator_a', model_id: 'dormant/retained' }] }]) {
+  test(`B7 preserves canonical ${original === null ? 'absent' : original.hops.length ? 'nonempty dormant' : 'legacy empty'} intent after owned deletion`, async () => {
+    const fixture = b7Fixture({ original, deleted: true });
+    expect(await fixture.run()).toBe(fixture.browserBoundary);
+    const expectedDefaults = ['src_operator_b', 'src_operator_a', 'src_other_owned'];
+    expect(fixture.state()).toEqual({
+      defaults: expectedDefaults, manual: original?.hops.length ? original : null, browserEntries: 1,
+    });
+    expect(fixture.defaultWrites).toEqual([['src_owned_delete'], expectedDefaults]);
+  });
+}
+
+test('B7 refuses to filter an unrelated missing source and still restores the route', async () => {
+  const fixture = b7Fixture({ deleted: true, missingOther: true });
+  const failure = await fixture.run();
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect((failure as AggregateError).errors[0]).toBe(fixture.browserBoundary);
+  expect(String((failure as AggregateError).errors[1])).toContain('src_operator_b');
+  expect(fixture.defaultWrites).toEqual([['src_owned_delete']]);
+  expect(fixture.state().manual).toEqual(fixture.original);
+  expect(fixture.calls).toContain('restore route');
+});
+
+for (const authority of ['route', 'defaults', 'both'] as const) {
+  test(`B7 attempts independent restoration and retains primary failure when ${authority} cleanup fails`, async () => {
+    const fixture = b7Fixture({
+      restoreRouteFails: authority !== 'defaults', restoreDefaultsFails: authority !== 'route',
+    });
+    const failure = await fixture.run();
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors[0]).toBe(fixture.browserBoundary);
+    expect((failure as AggregateError).errors).toHaveLength(authority === 'both' ? 3 : 2);
+    expect(fixture.calls).toContain('restore route');
+    expect(fixture.calls).toContain('restore defaults');
+    if (authority === 'route') expect(fixture.state().defaults).toEqual(fixture.originalDefaults);
+    if (authority === 'defaults') expect(fixture.state().manual).toEqual(fixture.original);
+  });
+}
 
 type CleanupReply = { status: number; body: unknown };
 const ownedSession = 'sess_owned';

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
+import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
@@ -41,8 +42,8 @@ const agent: AgentSupply = {
   },
 };
 
-const renderDrawer = (overrides: Partial<React.ComponentProps<typeof SourceOrderDrawer>> = {}) => render(
-  <I18nextProvider i18n={i18n}>
+const renderDrawer = (overrides: Partial<React.ComponentProps<typeof SourceOrderDrawer>> = {}, locale = i18n) => render(
+  <I18nextProvider i18n={locale}>
     <ToastProvider>
       <SourceOrderDrawer
         open
@@ -69,6 +70,72 @@ beforeEach(() => {
 });
 
 describe('SourceOrderDrawer keyboard ordering', () => {
+  const longSources = ['alpha', 'omega', 'held-out'].map((suffix, index) => ({
+    ...source(`same-long-exact-source-identity-prefix-${suffix}`, `same-long-display-name-with-distinct-suffix-${suffix}`),
+    protocol: 'openai_responses' as const,
+    models: index === 0 ? [{ id: 'exact-model', origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }] : [],
+  }));
+  const longAgent: AgentSupply = { ...agent, backend: 'codex', sources: {
+    order: longSources.slice(0, 2).map((item) => item.id),
+    eligibility: longSources.map((item) => ({ source_id: item.id, eligible: true })),
+  } };
+  const expectFullIdentity = (row: Element, name: string, detail?: string) => {
+    const identity = row.querySelector('.model-hub-order-identity');
+    expect(identity).not.toBeNull();
+    expect(identity?.querySelector('.model-hub-order-name')?.textContent).toBe(name);
+    if (detail) expect(identity?.querySelector('.model-hub-order-meta')?.textContent).toBe(detail);
+    // Real drawer markup must use the shared wrapping owner, not title-only truncation.
+    expect(identity?.querySelectorAll('.truncate, .line-clamp-1, .overflow-hidden')).toHaveLength(0);
+    expect(identity?.querySelectorAll('[hidden], [aria-hidden="true"]')).toHaveLength(0);
+  };
+
+  it.each(['en', 'zh'] as const)('keeps full ordered and held-out identities with a shared next-line explanation in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(longAgent);
+    vi.mocked(modelsApi.listSources).mockResolvedValue(longSources);
+    renderDrawer({ agent: longAgent, sources: longSources }, locale);
+    await screen.findByRole('button', { name: locale.t('settings.models.order.action.include') });
+    const rows = [...document.querySelectorAll('.model-hub-order-row')];
+    expect(rows).toHaveLength(3);
+    longSources.forEach((item, index) => {
+      const inventory = item.models.length ? locale.t('settings.models.sources.modelCount', { count: item.models.length }) : locale.t('settings.models.routing.inventoryNotProvided');
+      expectFullIdentity(rows[index], item.display_name, `${locale.t(PROTOCOL_COPY_KEYS[item.protocol])} · ${inventory}`);
+      expect(rows[index].classList.contains(index < 2 ? 'model-hub-order-row--ordered' : 'model-hub-order-row--held')).toBe(true);
+      expect(rows[index].querySelector('.model-hub-order-row-actions')).not.toBeNull();
+    });
+    for (const kind of ['ordered', 'heldOut']) {
+      const note = screen.getByText(locale.t(`settings.models.order.section.${kind}.note`));
+      expect(note.classList.contains('model-hub-order-section-explanation')).toBe(true);
+      expect(note.parentElement?.classList.contains('model-hub-order-section-head')).toBe(true);
+      expect(note.previousElementSibling?.tagName).toBe('H3');
+      expect(note.hasAttribute('hidden')).toBe(false);
+    }
+  });
+
+  it.each(['en', 'zh'] as const)('keeps known and missing source identities complete during reconciliation in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    const regroupedAgent = deferred<AgentSupply>();
+    const regroupedSources = deferred<Source[]>();
+    const reads = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValueOnce(longAgent).mockReturnValueOnce(regroupedAgent.promise);
+    vi.mocked(modelsApi.listSources).mockResolvedValueOnce([longSources[0]]).mockReturnValueOnce(regroupedSources.promise);
+    renderDrawer({ agent: longAgent, sources: [longSources[0]] }, locale);
+    await screen.findByText(longSources[1].id);
+    const rows = [...document.querySelectorAll('.model-hub-order-row')];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].closest('section')?.getAttribute('aria-busy')).toBe('true');
+    expectFullIdentity(rows[0], longSources[0].display_name,
+      `${locale.t(PROTOCOL_COPY_KEYS.openai_responses)} · ${locale.t('settings.models.sources.modelCount', { count: 1 })}`);
+    expectFullIdentity(rows[1], longSources[1].id);
+    expect(rows[1].querySelector('.model-hub-order-meta')).toBeNull();
+    await act(async () => {
+      regroupedAgent.resolve(longAgent);
+      regroupedSources.resolve(longSources);
+    });
+    await screen.findByRole('button', { name: locale.t('settings.models.order.action.include') });
+    expect(reads).toHaveBeenCalledTimes(2);
+    expectFullIdentity(document.querySelectorAll('.model-hub-order-row')[1], longSources[1].display_name);
+  });
+
   it('uses the same compact action owner for ordered controls and held-out include without losing hints or boundaries', async () => {
     const available = [...sources, source('src_c', 'Manual only')];
     const codex: AgentSupply = { ...agent, backend: 'codex', sources: {
