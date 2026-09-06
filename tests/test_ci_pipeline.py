@@ -221,6 +221,13 @@ def test_file_metrics_observe_real_phases_and_waited_child_cpu(tmp_path: Path) -
     assert all(value >= 0.02 for value in record["phase_seconds"].values())
     assert record["outside_phases_seconds"] >= 0
     assert record["wall_seconds"] >= sum(record["phase_seconds"].values())
+    observation = record["wait_observation"]
+    assert observation["interval"] == "metrics_initialization_to_pytest_return"
+    assert 0.02 <= observation["launcher_thread_cpu_seconds"] <= observation["wall_seconds"]
+    assert observation["wall_seconds"] <= record["wall_seconds"]
+    assert observation["linux_scheduler"]["scope"] == "launcher_thread"
+    assert observation["linux_host_pressure"]["scope"] == "host"
+    assert "full_seconds" not in observation["linux_host_pressure"]["cpu"]
     if sys.platform != "win32":
         usage = record["process_usage"]
         for scope in ("self", "waited_children"):
@@ -287,6 +294,104 @@ def test_file_metrics_mark_unavailable_platform_counters_explicitly(monkeypatch)
     metrics.emit(stream, 0)
     payload = json.loads(stream.getvalue().removeprefix("CI_TEST_METRICS "))
     assert payload["cpu_affinity_count"] is None
+    observation = payload["wait_observation"]
+    assert observation["linux_scheduler"]["enabled_at_start"] is None
+    assert observation["linux_scheduler"]["runqueue_seconds"] is None
+    assert observation["linux_host_pressure"]["io"] == {"some_seconds": None, "full_seconds": None}
+
+
+@pytest.mark.parametrize("enabled,contents,expected", [
+    ("1", "3000000000 7000000000 12", {"enabled": True, "run_ns": 3000000000, "runqueue_ns": 7000000000}),
+    ("0", "3 0 12", {"enabled": False, "run_ns": 3, "runqueue_ns": 0}),
+    ("unknown", "3 4 12", None),
+    ("1", "3 4", None),
+    ("1", "3 bad 12", None),
+    ("1", "3 -4 12", None),
+])
+def test_wait_scheduler_parses_only_known_nonnegative_counters(monkeypatch, enabled, contents, expected):
+    from scripts import ci_pytest_metrics as metrics
+
+    paths = {
+        "/proc/sys/kernel/sched_schedstats": enabled,
+        "/proc/thread-self/schedstat": contents,
+    }
+    monkeypatch.setattr(metrics.Path, "read_text", lambda path: paths[str(path)])
+    assert metrics.linux_scheduler() == expected
+
+
+@pytest.mark.parametrize("resource_name,contents,expected", [
+    ("cpu", "some avg10=1.00 avg60=0.00 avg300=0.00 total=123\nfull total=0", {"some": 123}),
+    ("io", "some total=123\nfull total=100", {"some": 123, "full": 100}),
+    ("memory", "some total=2\nfull total=1", {"some": 2, "full": 1}),
+    ("cpu", "some total=0", {"some": 0}),
+    ("io", "some total=123", None),
+    ("io", "some total=-1\nfull total=0", None),
+    ("cpu", "some total=123\nsome total=124", None),
+    ("cpu", "some avg10=1.00", None),
+    ("cpu", "some total=invalid", None),
+    ("cpu", "", None),
+])
+def test_wait_pressure_has_explicit_host_scope_and_units(monkeypatch, resource_name, contents, expected):
+    from scripts import ci_pytest_metrics as metrics
+
+    def read(path):
+        assert str(path) == f"/proc/pressure/{resource_name}"
+        return contents
+
+    monkeypatch.setattr(metrics.Path, "read_text", read)
+    assert metrics.linux_pressure(resource_name) == expected
+
+
+def _wait_counter_snapshot(*, multiplier=1, thread=7, enabled=True):
+    return {
+        "wall": 20 * multiplier, "cpu": 2 * multiplier, "thread": thread,
+        "scheduler": {"enabled": enabled, "run_ns": 2_000_000_000 * multiplier,
+                      "runqueue_ns": 3_000_000_000 * multiplier},
+        "pressure": {name: {"some": 9_000_000 * multiplier, "full": 5_000_000 * multiplier}
+                     for name in ("cpu", "io", "memory")},
+    }
+
+
+def test_wait_interval_deltas_do_not_mix_thread_and_host_counters():
+    from scripts.ci_pytest_metrics import wait_observation
+
+    result = wait_observation(_wait_counter_snapshot(), _wait_counter_snapshot(multiplier=2))
+    assert result["wall_seconds"] == 20
+    assert result["launcher_thread_cpu_seconds"] == 2
+    assert result["linux_scheduler"] == {
+        "scope": "launcher_thread", "enabled_at_start": True, "enabled_at_end": True,
+        "run_seconds": 2, "runqueue_seconds": 3,
+    }
+    assert result["linux_host_pressure"] == {
+        "scope": "host", "cpu": {"some_seconds": 9},
+        "io": {"some_seconds": 9, "full_seconds": 5},
+        "memory": {"some_seconds": 9, "full_seconds": 5},
+    }
+
+
+@pytest.mark.parametrize("first_enabled,last_enabled", [(False, False), (False, True), (True, False), (None, True)])
+def test_wait_interval_never_treats_disabled_accounting_as_no_wait(first_enabled, last_enabled):
+    from scripts.ci_pytest_metrics import wait_observation
+
+    result = wait_observation(_wait_counter_snapshot(enabled=first_enabled),
+                              _wait_counter_snapshot(multiplier=2, enabled=last_enabled))
+    assert result["linux_scheduler"]["enabled_at_start"] is first_enabled
+    assert result["linux_scheduler"]["enabled_at_end"] is last_enabled
+    assert result["linux_scheduler"]["runqueue_seconds"] is None
+    assert result["linux_scheduler"]["run_seconds"] is None
+    assert result["launcher_thread_cpu_seconds"] == 2
+
+
+def test_wait_interval_rejects_reset_counters_and_changed_thread_identity():
+    from scripts.ci_pytest_metrics import wait_observation
+
+    reset = wait_observation(_wait_counter_snapshot(multiplier=2), _wait_counter_snapshot())
+    assert reset["linux_scheduler"]["runqueue_seconds"] is None
+    assert reset["linux_host_pressure"]["io"]["some_seconds"] is None
+    changed = wait_observation(_wait_counter_snapshot(), _wait_counter_snapshot(multiplier=2, thread=8))
+    assert changed["launcher_thread_cpu_seconds"] is None
+    assert changed["linux_scheduler"]["runqueue_seconds"] is None
+    assert changed["linux_host_pressure"]["io"]["some_seconds"] == 9
 
 
 @pytest.mark.parametrize("timeout", ["0", "00", "-1", "invalid"])
