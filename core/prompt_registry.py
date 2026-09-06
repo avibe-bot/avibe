@@ -69,37 +69,40 @@ class PromptModule:
         return {**stable, "order": order, "revision": revision}
 
 
-# Tuple order is the public catalog order. It changes only when the authored
-# prompt structure changes, never because filesystem enumeration changed.
+# One composition order for production, debug export, and Studio. Optional
+# branches occupy their real insertion point; omitted blocks leave no placeholder.
+# Change this only to deliberately change prompt order, never for a UI-only sort.
 PROMPT_MODULES: tuple[PromptModule, ...] = (
+    PromptModule("runtime-snapshot-open", "Codex Runtime Snapshot Start", "runtime-snapshot-open.md", trailing_newlines=2),
+    PromptModule("agent-instructions", "Agent Custom Instructions", "agent-instructions.md", trailing_newlines=2, placeholders=("agent_instructions",)),
     PromptModule("base-capabilities-intro", "Base Capabilities Intro", "base-capabilities-intro.md", trailing_newlines=2),
     PromptModule("agent-working-principles", "Agent Working Principles", "agent-working-principles.md", trailing_newlines=2),
+    PromptModule("session-start-prompt", "Session Start Prompt", "session-start.md", trailing_newlines=2, placeholders=("default_session_id",)),
+    PromptModule("forked-session-prompt", "Forked Session Prompt", "forked-session.md", trailing_newlines=2, placeholders=("source_session_id", "default_session_id")),
     PromptModule("base-capabilities-body", "Base Capabilities Body", "base-capabilities.md", trailing_newlines=1),
+    PromptModule("skills-prompt", "Skills Usage", "skills.md", leading_newlines=2, trailing_newlines=2),
     PromptModule("codex-generated-images", "Codex-generated images", "codex-generated-images.md", leading_newlines=1, trailing_newlines=1, placeholders=("example_uri",)),
     PromptModule("show-pages-prompt", "Show Pages Prompt", "show-pages.md", leading_newlines=1, trailing_newlines=1),
+    PromptModule("show-history-heading", "Show History Heading", "show-history-heading.md", leading_newlines=1, trailing_newlines=1),
+    PromptModule("show-history-managed", "Show History: Managed Workspace", "show-history-managed.md"),
+    PromptModule("show-history-self-managed", "Show History: User Repository", "show-history-self-managed.md"),
+    PromptModule("quick-replies-prompt", "Quick Replies Prompt", "quick-replies.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("vault-routing-prompt", "Vault Routing Prompt", "vault.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-routing-prompt", "Harness Routing Prompt", "harness.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("enabled_agents_rows",)),
-    PromptModule("session-start-prompt", "Session Start Prompt", "session-start.md", trailing_newlines=2, placeholders=("default_session_id",)),
-    PromptModule("forked-session-prompt", "Forked Session Prompt", "forked-session.md", trailing_newlines=2, placeholders=("source_session_id", "default_session_id")),
-    PromptModule("quick-replies-prompt", "Quick Replies Prompt", "quick-replies.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("preferences-context-prompt", "Preferences and Project Context Prompt", "preferences-context.md", leading_newlines=1, trailing_newlines=1, placeholders=("preferences_path", "platform")),
     PromptModule("memory-context-prompt", "Memory and Project Context Prompt", "memory-context.md", leading_newlines=1, trailing_newlines=1),
-    PromptModule("session-title-prompt", "Session Title Prompt", "session-title.md", leading_newlines=1, trailing_newlines=1),
-    PromptModule("skills-prompt", "Skills Usage", "skills.md", leading_newlines=2, trailing_newlines=2),
     PromptModule("skills-manual-prompt", "Explicit Skill Requests", "skills-manual.md", leading_newlines=2),
+    PromptModule("skills-catalog-heading", "Available Skills Heading", "skills-catalog-heading.md", leading_newlines=2, trailing_newlines=1),
     PromptModule("skills-pagination-prompt", "Skills Discovery Pagination", "skills-pagination.md", trailing_newlines=1),
-    PromptModule("skills-more-notice", "Skills Next Page", "skills-more.md", placeholders=("next_page",)),
     PromptModule("skills-catalog", "Available Skills", "skills-catalog.md", placeholders=("skill_rows",)),
-    PromptModule("show-history-managed", "Show History: Managed Workspace", "show-history-managed.md"),
-    PromptModule("show-history-self-managed", "Show History: User Repository", "show-history-self-managed.md"),
-    PromptModule("runtime-snapshot-open", "Codex Runtime Snapshot Start", "runtime-snapshot-open.md", trailing_newlines=2),
+    PromptModule("skills-more-notice", "Skills Next Page", "skills-more.md", placeholders=("next_page",)),
+    PromptModule("session-title-prompt", "Session Title Prompt", "session-title.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("runtime-snapshot-close", "Codex Runtime Snapshot End", "runtime-snapshot-close.md", leading_newlines=1),
-    PromptModule("agent-instructions", "Agent Custom Instructions", "agent-instructions.md", trailing_newlines=2, placeholders=("agent_instructions",)),
-    PromptModule("show-history-heading", "Show History Heading", "show-history-heading.md", leading_newlines=1, trailing_newlines=1),
 )
 
 _MODULES_BY_ID = {module.id: module for module in PROMPT_MODULES}
+_MODULE_ORDER = {module.id: index for index, module in enumerate(PROMPT_MODULES)}
 if len(_MODULES_BY_ID) != len(PROMPT_MODULES):  # pragma: no cover - import-time invariant
     raise RuntimeError("Avibe prompt module ids must be unique")
 if len({module.filename for module in PROMPT_MODULES}) != len(PROMPT_MODULES):  # pragma: no cover
@@ -150,6 +153,11 @@ def render_prompt_block(module_id: str, **values: object) -> RenderedPromptBlock
 
 def join_prompt_blocks(blocks: list[RenderedPromptBlock]) -> str:
     return "".join(block.text for block in blocks)
+
+
+def order_prompt_blocks(blocks: list[RenderedPromptBlock]) -> list[RenderedPromptBlock]:
+    """Compose selected production blocks in the source catalog's single order."""
+    return sorted(blocks, key=lambda block: _MODULE_ORDER[block.module_id])
 
 
 def runtime_snapshot_blocks(blocks: list[RenderedPromptBlock]) -> list[RenderedPromptBlock]:

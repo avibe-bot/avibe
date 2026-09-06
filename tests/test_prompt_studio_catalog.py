@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from core.prompt_registry import PROMPT_MODULES, export_prompt_catalog, prompt_module, render_prompt
+from core.prompt_registry import (
+    PROMPT_MODULES,
+    RenderedPromptBlock,
+    export_prompt_catalog,
+    order_prompt_blocks,
+    prompt_module,
+    render_prompt,
+)
 from core.prompt_studio_catalog import (
     PROMPT_STUDIO_CATALOG_SCHEMA,
     _markdown_blocks,
@@ -21,12 +28,10 @@ def test_every_prompt_markdown_file_has_one_stably_ordered_registry_entry() -> N
 
     assert len(registered) == len(set(registered))
     assert sorted(registered) == present
-    assert [module.id for module in PROMPT_MODULES[:4]] == [
-        "base-capabilities-intro",
-        "agent-working-principles",
-        "base-capabilities-body",
-        "codex-generated-images",
-    ]
+    ids = [module.id for module in PROMPT_MODULES]
+    assert ids[ids.index("base-capabilities-body") + 1] == "skills-prompt"
+    assert ids.index("skills-catalog") > ids.index("memory-context-prompt")
+    assert ids.index("skills-catalog-heading") < ids.index("skills-pagination-prompt") < ids.index("skills-catalog")
 
 
 def test_prompt_rendering_replaces_only_declared_placeholders() -> None:
@@ -53,6 +58,15 @@ def test_prompt_catalog_export_is_deterministic_and_source_addressable() -> None
     }
     for module in first["modules"]:
         assert (ROOT / module["source_path"]).read_text(encoding="utf-8") == module["source"] + "\n"
+
+
+def test_production_order_follows_the_catalog_without_changing_block_bytes() -> None:
+    blocks = [RenderedPromptBlock(module.id, f"\n{module.id} exact bytes\n") for module in PROMPT_MODULES]
+    unordered = list(reversed(blocks))
+    ordered = order_prompt_blocks(unordered)
+    assert unordered == list(reversed(blocks))
+    assert ordered == blocks
+    assert all(actual is expected for actual, expected in zip(ordered, blocks))
 
 
 def test_studio_catalog_contains_runtime_modules_and_builtin_skills() -> None:

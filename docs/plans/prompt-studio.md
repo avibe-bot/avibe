@@ -23,6 +23,18 @@ Git or choose a branch. A contributor reviews the branch they have checked out.
 Catalog order and revisions are content-derived and deterministic; the export
 contains no generation timestamp.
 
+The registry defines production composition order, and Studio preserves that
+order without a display-only sort. Each rendered prompt is an ordered subset of
+the complete source catalog, including backend wrappers and optional branches.
+Static Skills Usage follows Base Capabilities Body; dynamic Skill rows remain
+near the end so catalog edits preserve the earlier static prefix.
+Separated capabilities have independent level-two Markdown headings: Codex image
+guidance is no longer a subsection of Send files, and the Available skills heading
+precedes both discovery pagination guidance and rows. The heading has its own
+source module so pagination remains source-addressable without attaching to Memory
+or Preferences. These heading boundaries change with the deliberate usage move;
+all other prose and relative positions remain unchanged.
+
 Completeness is defined by the production injection, not by a manually selected
 set of files. All authored prose, including Skill invocation/pagination rules,
 Show history contracts, and Codex snapshot boundaries, belongs in the registry.
