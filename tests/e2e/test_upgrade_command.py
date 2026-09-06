@@ -26,6 +26,29 @@ INITIAL_RELEASE_WHEEL_SHA256 = "994adbfd23228ea387f0479db8a4efe0ef121847bd04efa5
 TEST_RELEASE_VERSION = "9999.0.0"
 
 _UPGRADE_WAIT_HELPERS = r"""
+report_upgrade_failure() {
+    local exit_code="$1"
+    local relative_path
+    if [ "$exit_code" -eq 0 ]; then
+        return 0
+    fi
+
+    printf 'Upgrade fixture failed (exit %s); isolated runtime diagnostics:\n' "$exit_code" >&2
+    for relative_path in \
+        state/memory-package-auto-repair.json \
+        runtime/ui_stderr.log runtime/ui_stdout.log \
+        runtime/service_stderr.log runtime/service_stdout.log \
+        logs/vibe_remote.log; do
+        printf '\n--- %s ---\n' "$relative_path" >&2
+        if [ -f "$AVIBE_HOME/$relative_path" ]; then
+            tail -c 32768 "$AVIBE_HOME/$relative_path" >&2 || true
+        else
+            printf 'not created\n' >&2
+        fi
+    done
+    return "$exit_code"
+}
+
 resolve_vibe_runtime() {
     local launcher_var="$1"
     local resolved_var="$2"
@@ -257,6 +280,34 @@ def test_upgrade_wait_reports_the_last_observation_on_exhaustion(
     assert last_observation in result.stderr
 
 
+@pytest.mark.parametrize("exit_code", [0, 1, 7])
+def test_upgrade_failure_trap_preserves_exit_and_bounded_runtime_evidence(tmp_path, exit_code):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "memory-package-auto-repair.json").write_text('{"reason":"memory_package_install_failed"}')
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "ui_stderr.log").write_text("discarded-prefix" + "x" * 32768 + "startup-failure")
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "config.json").write_text("do-not-print-config")
+    result = _run_upgrade_wait_helper(
+        f"export AVIBE_HOME={shlex.quote(str(tmp_path))}\n"
+        "trap 'report_upgrade_failure $?' EXIT\n"
+        f"(exit {exit_code}) && echo fixture-success"
+    )
+    assert result.returncode == exit_code
+    if exit_code:
+        assert "memory_package_install_failed" in result.stderr
+        assert "startup-failure" in result.stderr
+        assert "not created" in result.stderr
+        assert "discarded-prefix" not in result.stderr
+        assert "do-not-print-config" not in result.stderr
+        assert len(result.stderr) < 34000
+    else:
+        assert result.stderr == ""
+
+
 @pytest.mark.integration
 def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
     """The released bundled-Memory upgrader converges onto the split package pair."""
@@ -307,6 +358,7 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",
                 'export PATH="$HOME/.local/bin:$PATH"',
                 'export AVIBE_HOME="$HOME/.avibe-upgrade-test"',
+                "trap 'report_upgrade_failure $?' EXIT",
                 "VIBE_INSTALL_SKIP_NODE=1 VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 "
                 f"AVIBE_INSTALL_PACKAGE_SPEC=/fixtures/{initial_wheel_path.name} bash /work/install.sh",
                 'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"',

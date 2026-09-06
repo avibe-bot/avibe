@@ -122,3 +122,15 @@ scenarios:
     kind: boundary
     layer: contract
     test: tests/test_memory_module.py::test_capture_and_search_delegate_payload_size_to_everos
+  - id: MEMORY-SEARCH-019
+    name: Automatic and explicit capture preserve source identity and text while carrying sender names
+    status: covered
+    kind: boundary
+    layer: scenario
+    test: tests/test_memory_everos.py::test_sender_name_crosses_automatic_and_explicit_capture_http_boundary
+  - id: MEMORY-SEARCH-020
+    name: Accepted sender-name snapshots remain unchanged by asynchronous processing or later renames
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_adapter.py::test_sender_name_snapshot_survives_rename_before_async_admission

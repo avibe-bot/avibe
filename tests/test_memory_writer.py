@@ -11,6 +11,7 @@ import pytest
 
 from avibe_memory.everos import (
     AddAck,
+    AddRejected,
     FakeMemoryProvider,
     FlushRetryable,
     FlushSucceeded,
@@ -18,7 +19,7 @@ from avibe_memory.everos import (
 )
 from avibe_memory.attachments import AttachmentBundleInvalidError
 from avibe_memory.store import MemoryStore, VolatileAdmission
-from avibe_memory.types import ProviderSessionRef
+from avibe_memory.types import CaptureAttachment, ProviderSessionRef
 from avibe_memory.writer import (
     IDLE_FLUSH_SECONDS,
     MAX_ATTEMPTS,
@@ -252,6 +253,41 @@ async def test_only_proven_pre_execution_failures_retry_three_times(tmp_path: Pa
     _reserve_and_offer(writer, 0)
     await writer.wait_idle_for_tests()
     assert calls == MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("downgrade_attachment", [False, True])
+async def test_sender_name_survives_provider_retry_and_attachment_downgrade(tmp_path, downgrade_attachment) -> None:
+    provider = FakeMemoryProvider()
+    attempts = []
+
+    async def add(capture):
+        attempts.append(capture)
+        if len(attempts) == 1:
+            if downgrade_attachment:
+                return AddRejected(request_id=None, error_code="UNSUPPORTED_FORMAT", server_fault=False)
+            raise MemoryProviderFailure("memory_sidecar_unavailable")
+        return AddAck(request_id="synthetic", status="accumulated")
+
+    provider.add = add
+    writer = _writer(tmp_path, provider)
+    reservation = writer.reserve("named-capture")
+    assert not isinstance(reservation, str)
+    attachments = (CaptureAttachment("pdf", "原件.pdf", "file:///synthetic.pdf", "pdf"),) if downgrade_attachment else ()
+    assert writer.offer_capture(
+        reservation, _admission(0), text="原文\nunchanged", attachments=attachments,
+        bundle=None, sender_name="小王 🌱",
+    ) == "queued"
+    await writer.wait_idle_for_tests()
+    assert len(attempts) == 2
+    assert all(capture.sender_name == "小王 🌱" for capture in attempts)
+    assert all(capture.text == "原文\nunchanged" for capture in attempts)
+    assert all(capture.session_ref == _ref(0) for capture in attempts)
+    assert all(capture.provider_timestamp_ms == 1 for capture in attempts)
+    if downgrade_attachment:
+        assert attempts[0].attachments == attachments
+        assert attempts[1].attachments == ()
+    await writer.close()
 
 
 @pytest.mark.asyncio

@@ -80,6 +80,17 @@ def _facts(**overrides) -> InboundTurnFacts:
     return InboundTurnFacts(**{**defaults, **overrides})
 
 
+@pytest.mark.parametrize("name", [None, "", "小王 Élodie 🌱"])
+def test_sender_name_is_optional_metadata_not_principal_input(name) -> None:
+    principals = _Principals()
+    admission = _admission(principals=principals)
+    captured = admission.decide(_facts(sender_name=name))
+    assert captured.sender_name == name
+    assert captured.principal_id == PRINCIPAL
+    assert captured.text == "ordinary text"
+    assert principals.keys == ["slack:user-1"]
+
+
 class _PdfDownloader:
     async def download_file_to_path(
         self,

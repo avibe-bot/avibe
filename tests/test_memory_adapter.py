@@ -22,6 +22,7 @@ from core.memory_adapter import (
     SessionArchived,
     SessionReset,
     TurnAccepted,
+    normalize_memory_sender_name,
 )
 from core.handlers.message_handler import memory_turn_event
 from modules.im.base import FileAttachment, MessageContext
@@ -275,12 +276,13 @@ def test_host_event_is_closed_and_uses_authenticated_workbench_author() -> None:
         is_original_human_attachment=True,
     )
 
-    event = memory_turn_event(context, "记住原件", "session-1", (3, 4))
+    event = memory_turn_event(context, "记住原件", "session-1", (3, 4), sender_name="用户")
     file.name = "mutated.pdf"
     context.user_id = "mutated-user"
     context.files.clear()
 
     assert event.user_id == "authenticated-author"
+    assert event.sender_name == "用户"
     assert event.text == "记住原件"
     assert event.files == (
         MemoryFile(
@@ -289,6 +291,137 @@ def test_host_event_is_closed_and_uses_authenticated_workbench_author() -> None:
             local_path="/private/original.pdf",
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        (123, None),
+        (" \n\x00\ud800\u202e ", None),
+        ("  小王 Élodie 🌱\n\u202e ", "小王 Élodie 🌱"),
+        ("👩\u200d💻", "👩\u200d💻"),
+        ("名" * 140, "名" * 128),
+    ],
+)
+def test_sender_name_normalization_preserves_bounded_unicode(raw, expected) -> None:
+    assert normalize_memory_sender_name(raw) == expected
+
+
+def _sender_name_controller(*, enabled=True, language="en", user=None):
+    from core.controller import Controller
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=enabled), language=language)
+    store = Mock()
+    store.get_user.return_value = user
+    manager = Mock()
+    manager.get_store.return_value = store
+    controller.platform_settings_managers = {"slack": manager}
+    return controller, store, manager
+
+
+@pytest.mark.parametrize("platform", ["slack", "avibe"])
+@pytest.mark.asyncio
+async def test_sender_name_uses_only_bound_records_not_browser_claims(platform) -> None:
+    user = SimpleNamespace(display_name="  小王\n ", enabled=True)
+    controller, store, manager = _sender_name_controller(user=user)
+    context = MessageContext(
+        user_id="native-1", channel_id="channel-1", platform=platform,
+        platform_specific={"author_id": "remote:subject", "author_name": "Untrusted"},
+    )
+    assert await controller.memory_sender_name_for_context(context) == ("小王" if platform == "slack" else "User")
+    if platform == "slack":
+        store.get_user.assert_called_once_with("native-1", platform="slack")
+    else:
+        manager.get_store.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sender_name_lookup_failure_and_disabled_capture_are_best_effort() -> None:
+    controller, store, manager = _sender_name_controller(language="zh")
+    context = MessageContext(user_id="raw-id", channel_id="channel", platform="slack")
+    store.maybe_reload.side_effect = OSError("settings unavailable")
+    assert await controller.memory_sender_name_for_context(context) == "用户"
+    manager.reset_mock()
+    controller.config.memory.enabled = False
+    assert await controller.memory_sender_name_for_context(context) is None
+    manager.get_store.assert_not_called()
+
+
+@pytest.mark.parametrize("name", [None, "", " \x00 "])
+@pytest.mark.asyncio
+async def test_missing_bound_name_falls_back_without_using_native_id(name) -> None:
+    controller, _store, _manager = _sender_name_controller(
+        user=SimpleNamespace(display_name=name, enabled=True)
+    )
+    context = MessageContext(user_id="raw-id", channel_id="channel", platform="slack")
+    assert await controller.memory_sender_name_for_context(context) == "User"
+
+
+@pytest.mark.asyncio
+async def test_sender_name_lookup_wait_does_not_block_event_loop() -> None:
+    import threading
+
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started = asyncio.Event()
+    release = threading.Event()
+    lookup_threads = []
+    controller, store, _manager = _sender_name_controller(
+        user=SimpleNamespace(display_name="小王", enabled=True)
+    )
+
+    def blocked_reload():
+        lookup_threads.append(threading.get_ident())
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=3), "event loop could not release the lookup"
+
+    store.maybe_reload.side_effect = blocked_reload
+    context = MessageContext(user_id="user-1", channel_id="channel", platform="slack")
+    task = asyncio.create_task(controller.memory_sender_name_for_context(context))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert lookup_threads and lookup_threads[0] != loop_thread
+        assert not task.done()
+        # A separate loop callback must progress while the settings read waits.
+        heartbeat = asyncio.Event()
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=1)
+    finally:
+        release.set()
+        name = await task
+    assert name == "小王"
+    store.maybe_reload.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_sender_name_snapshot_survives_rename_before_async_admission() -> None:
+    """MEMORY-SEARCH-020: a queued capture keeps its accepted name snapshot."""
+    user = SimpleNamespace(display_name="  小王 Élodie 🌱 ", enabled=True)
+    controller, _store, _manager = _sender_name_controller(user=user)
+    context = MessageContext(
+        user_id="user-1", channel_id="channel", platform="slack", message_id="message-1",
+        platform_specific={"is_dm": True}, is_original_human_text=True,
+    )
+    text = "原文\n`u-synthetic` https://example.invalid/u-synthetic"
+    name = await controller.memory_sender_name_for_context(context)
+    event = memory_turn_event(context, text, "session-1", 1, sender_name=name)
+    module = _Module()
+    adapter, _lifecycle = _adapter(module)
+    try:
+        adapter.offer(event)
+        user.display_name = "Renamed"
+        await _settle(adapter)
+        assert len(module.captures) == 1
+        captured = module.captures[0]
+        assert captured.sender_name == "小王 Élodie 🌱"
+        assert captured.text == text
+        assert captured.principal_id == PRINCIPAL
+        assert captured.provenance == "user_input"
+        assert event.user_id == "user-1"
+    finally:
+        await adapter.cancel_memory_capture_tasks()
 
 
 @pytest.mark.asyncio
