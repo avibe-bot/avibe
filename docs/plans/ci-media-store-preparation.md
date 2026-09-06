@@ -77,9 +77,11 @@ editable dependency bootstrap began before the ignored UI placeholder existed;
 after creating that existing workflow prerequisite, installation succeeded.
 No production UI or environment was changed.
 
-Before the first PR push, inspect and integrate latest master #1911 (073d277fe),
-whose Model Hub route normalization and consuming config tests do not overlap
-this scope. Repeat consumers after integration. Require current-head bot PASS,
+Before the first PR push, latest master #1911 (073d277fe) was inspected and
+integrated. Its Model Hub route normalization and config consumers do not overlap
+this scope. All 420 post-integration cases passed in separate file processes:
+media 28, Harness 225, Model Hub config 155, and private-fixture contracts 12.
+Require current-head bot PASS,
 complete review/thread inventory, every exact-head lint run successful, and
 post-merge source CI. Compare complete first-attempt green file metrics; failed
 runs and local profile values are not CI performance samples.
