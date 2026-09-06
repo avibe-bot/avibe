@@ -187,6 +187,60 @@ afterEach(() => {
 });
 
 describe("RouteChainDialog", () => {
+  it.each(['manual', 'inherited', 'preview', 'missing', 'stale'] as const)(
+    'exposes complete same-prefix source/model identities as wrapping detail text in %s state', async (state) => {
+      const user = userEvent.setup();
+      const prefix = 'exact-identity-with-a-very-long-shared-prefix-';
+      const identities = ['alpha', 'omega'].map((suffix) => ({
+        source_id: `${prefix}source-${suffix}`, model_id: `${prefix}model-${suffix}`,
+      }));
+      const detailedSources = identities.map((hop) => ({ ...sources[0], id: hop.source_id, display_name: hop.source_id }));
+      const detailedAgent: AgentSupply = { ...agent, sources: {
+        order: [], eligibility: identities.map((hop) => ({ source_id: hop.source_id, eligible: true })),
+      } };
+      const projection: AgentChain = {
+        ...chain,
+        route_origin: state === 'inherited' ? 'automatic' : 'manual',
+        manual_override: state === 'inherited' ? null : { hops: identities },
+        current: identities[0],
+        chain: identities.map((hop) => ({
+          ...chain.chain[1], ...hop,
+          reason: state === 'missing' ? 'source_missing' : null,
+          runnable: state !== 'missing',
+        })),
+      };
+      const inherited: AgentChain = { ...projection, manual_override: null, route_origin: 'automatic' };
+      vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(projection);
+      vi.spyOn(modelsApi, 'previewAgentChain').mockResolvedValue(inherited);
+      render(<I18nextProvider i18n={i18n}><RouteChainDialog
+        selection={{ agent: detailedAgent, modelId: 'opus-5', read: readyRegion(projection) }}
+        sources={state === 'missing' || state === 'stale' ? [] : detailedSources}
+        onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
+      /></I18nextProvider>);
+      await waitFor(() => expect(document.querySelectorAll('.model-hub-route-hop-name')).toHaveLength(2));
+      if (state === 'preview') {
+        await user.click(screen.getByRole('button', { name: 'Restore automatic' }));
+        await screen.findByRole('button', { name: 'Undo restore' });
+      }
+      const names = [...document.querySelectorAll('.model-hub-route-hop-name')];
+      const models = [...document.querySelectorAll('.model-hub-route-hop-model')];
+      identities.forEach((hop, index) => {
+        expect(names[index].textContent).toContain(hop.source_id);
+        expect(models[index].textContent).toBe(hop.model_id);
+        for (const field of [names[index], models[index]]) {
+          expect(field.classList.contains('truncate')).toBe(false);
+          expect(field.closest('.model-hub-route-hop-copy')?.classList.contains('min-w-0')).toBe(true);
+        }
+      });
+      const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
+      const labels = state === 'inherited' ? ['Close', 'Edit route']
+        : [state === 'preview' ? 'Undo restore' : 'Restore automatic', 'Cancel', 'Save'];
+      expect(footer.getAllByRole('button').map((button) => button.textContent)).toEqual(labels);
+      for (const label of labels) expect(footer.getByRole('button', { name: label }).hasAttribute('hidden')).toBe(false);
+      expect(screen.getByRole('dialog').classList.contains('overflow-hidden')).toBe(true);
+    },
+  );
+
   it('closes inherited inspection with visible Close, not the icon-only Cancel command', async () => {
     const user = userEvent.setup();
     const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import type { ComponentProps } from 'react';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -69,6 +69,154 @@ const openCodeAgent: AgentSupply = {
 };
 
 afterEach(cleanup);
+
+describe('AgentCard origin help ownership', () => {
+  const agents: AgentSupply[] = ['claude', 'codex'].map((backend) => ({
+    ...hubAgent,
+    backend: backend as AgentSupply['backend'],
+    catalog_models: ['shared-model', 'second-model'].map((id) => ({
+      id, display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+      input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: false,
+      reasoning_efforts: [], locked: false, routeable: true,
+    })),
+    model_supply: ['shared-model', 'second-model'].map((model_id) => ({
+      model_id, route_origin: 'automatic', chain_length: 1, has_runnable_hop: true,
+    })),
+  }));
+  const setup = () => {
+    const onOpenRoute = vi.fn();
+    const collection = (nextAgents = agents) => <I18nextProvider i18n={i18n}><AgentCard
+      agents={nextAgents} sources={[]} chains={{}} pendingBackends={new Set()}
+      switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()}
+      onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={onOpenRoute} onProbeSettled={vi.fn()}
+    /></I18nextProvider>;
+    const view = render(collection());
+    const badge = (backend: string, model = 'shared-model') => within(
+      document.querySelector<HTMLElement>(`[data-route-backend="${backend}"][data-route-model="${model}"]`)!,
+    ).getByRole('button', { name: 'Automatic' });
+    return { ...view, collection, badge, onOpenRoute };
+  };
+  const onlyHelpFor = (trigger: HTMLElement) => {
+    const help = document.getElementById(trigger.getAttribute('aria-controls')!);
+    expect(help).not.toBeNull();
+    expect([...document.querySelectorAll('.model-hub-origin-help')]).toEqual([help]);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    return help!;
+  };
+  const mouse = (target: HTMLElement, type: 'pointerover' | 'pointerout') => {
+    const event = new MouseEvent(type, { bubbles: true });
+    Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+    fireEvent(target, event);
+  };
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each(['focus', 'pin'] as const)('a new backend hover replaces the old %s even while its trigger stays focused', async (activation) => {
+    const user = userEvent.setup();
+    const { badge, onOpenRoute } = setup();
+    const first = badge('claude');
+    const second = badge('codex');
+    if (activation === 'pin') await user.click(first);
+    else act(() => first.focus());
+    onlyHelpFor(first);
+    await user.hover(second);
+    expect(document.activeElement).toBe(first);
+    await waitFor(() => onlyHelpFor(second));
+    expect(first.getAttribute('aria-expanded')).toBe('false');
+    // A late blur from the replaced trigger must not dismiss the new help.
+    act(() => first.blur());
+    onlyHelpFor(second);
+    expect(onOpenRoute).not.toHaveBeenCalled();
+  });
+
+  it('focus and touch replace pinned help across rows, then unpin, Escape and outside dismiss normally', async () => {
+    const user = userEvent.setup();
+    const { badge, onOpenRoute } = setup();
+    const first = badge('claude');
+    const second = badge('claude', 'second-model');
+    const third = badge('codex');
+    await user.click(first);
+    act(() => second.focus());
+    await waitFor(() => onlyHelpFor(second));
+    await user.pointer([{ keys: '[TouchA>]', target: third }, { keys: '[/TouchA]' }]);
+    await waitFor(() => onlyHelpFor(third));
+    await user.pointer([{ keys: '[TouchA>]', target: third }, { keys: '[/TouchA]' }]);
+    await waitFor(() => expect(document.querySelector('.model-hub-origin-help')).toBeNull());
+    act(() => first.focus());
+    onlyHelpFor(first);
+    await user.keyboard('{Escape}');
+    expect(document.querySelector('.model-hub-origin-help')).toBeNull();
+    await user.click(second);
+    onlyHelpFor(second);
+    await user.click(document.body);
+    expect(document.querySelector('.model-hub-origin-help')).toBeNull();
+    expect(onOpenRoute).not.toHaveBeenCalled();
+  });
+
+  it('old leave timers cannot close the newly active backend help', () => {
+    vi.useFakeTimers();
+    const { badge } = setup();
+    const first = badge('claude');
+    const second = badge('codex');
+    mouse(first, 'pointerover');
+    mouse(first, 'pointerout');
+    mouse(second, 'pointerover');
+    onlyHelpFor(second);
+    // Even a queued leave event delivered after replacement is key-scoped.
+    mouse(first, 'pointerout');
+    act(() => vi.advanceTimersByTime(121));
+    onlyHelpFor(second);
+  });
+
+  it('keeps the 120ms pointer bridge and content hover, then closes after leaving both', () => {
+    vi.useFakeTimers();
+    const { badge } = setup();
+    const trigger = badge('claude');
+    mouse(trigger, 'pointerover');
+    const help = onlyHelpFor(trigger);
+    mouse(trigger, 'pointerout');
+    act(() => vi.advanceTimersByTime(119));
+    onlyHelpFor(trigger);
+    mouse(help, 'pointerover');
+    act(() => vi.advanceTimersByTime(121));
+    onlyHelpFor(trigger);
+    mouse(help, 'pointerout');
+    act(() => vi.advanceTimersByTime(120));
+    expect(document.querySelector('.model-hub-origin-help')).toBeNull();
+  });
+
+  it('clears a removed active row without reviving its pin when it returns', async () => {
+    const user = userEvent.setup();
+    const { badge, rerender, collection } = setup();
+    await user.click(badge('claude'));
+    rerender(collection([{ ...agents[0], catalog_models: agents[0].catalog_models!.slice(1) }, agents[1]]));
+    expect(document.querySelector('.model-hub-origin-help')).toBeNull();
+    rerender(collection());
+    expect(document.querySelector('.model-hub-origin-help')).toBeNull();
+    await user.hover(badge('claude'));
+    onlyHelpFor(badge('claude'));
+    await user.hover(badge('codex'));
+    await waitFor(() => onlyHelpFor(badge('codex')));
+    rerender(collection([agents[1]]));
+    onlyHelpFor(badge('codex'));
+  });
+
+  it('cancels pending help on collection unmount and keeps row opening independent', () => {
+    vi.useFakeTimers();
+    const { badge, unmount, onOpenRoute } = setup();
+    const trigger = badge('claude');
+    fireEvent.click(trigger);
+    expect(onOpenRoute).not.toHaveBeenCalled();
+    const row = trigger.closest<HTMLElement>('.model-hub-model-row')!;
+    fireEvent.click(within(row).getByRole('button', { name: /route chain/ }));
+    expect(onOpenRoute).toHaveBeenCalledWith(agents[0], 'shared-model', row.querySelector('.model-hub-model-open'));
+    fireEvent.click(trigger);
+    mouse(badge('codex'), 'pointerover');
+    mouse(badge('codex'), 'pointerout');
+    unmount();
+    act(() => vi.advanceTimersByTime(121));
+    expect(document.querySelector('.model-hub-origin-help')).toBeNull();
+  });
+});
 
 describe('AgentCard', () => {
   it('renders an empty OpenCode selection as configurable rather than as missing backend supply', async () => {

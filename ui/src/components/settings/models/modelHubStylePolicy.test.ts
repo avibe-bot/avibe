@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import postcss from 'postcss';
 
 import { describe, expect, it } from 'vitest';
 
@@ -36,6 +37,45 @@ describe('Model Hub theme token policy', () => {
 });
 
 describe('Model Hub visual token policy', () => {
+  it('lets the actual narrow footer grow after the complete surface cascade while preserving body scroll', () => {
+    // This checks CSS ownership and source order, not browser geometry.
+    const root = postcss.parse(surfaceCss);
+    const footer: Record<string, string> = {};
+    root.walkRules('.model-hub-route-foot', (rule) => {
+      expect(rule.parent?.type === 'root' || (rule.parent?.type === 'atrule'
+        && rule.parent.name === 'media' && rule.parent.params === '(max-width: 640px)')).toBe(true);
+      rule.walkDecls((decl) => { footer[decl.prop] = decl.value; });
+    });
+    expect(footer).toMatchObject({
+      height: 'auto', 'min-height': 'var(--model-hub-dialog-foot-height)',
+      'flex-wrap': 'wrap', 'flex-shrink': '0',
+    });
+    root.walkRules('.model-hub-route-body', (rule) => {
+      const body: Record<string, string> = {};
+      rule.walkDecls((decl) => { body[decl.prop] = decl.value; });
+      expect(body).toMatchObject({ 'min-height': '0', flex: '0 1 auto', 'overflow-y': 'auto' });
+    });
+  });
+
+  it('grows detail rows from their approved minimum and wraps exact unbroken identities', () => {
+    const root = postcss.parse(surfaceCss);
+    const declarations = (selector: string) => {
+      const values: Record<string, string> = {};
+      root.walkRules((rule) => {
+        if (rule.parent?.type === 'root' && rule.selectors.includes(selector)) {
+          rule.walkDecls((decl) => { values[decl.prop] = decl.value; });
+        }
+      });
+      return values;
+    };
+    expect(declarations('.model-hub-route-hop')).toMatchObject({
+      'min-height': 'var(--model-hub-route-hop-height)', height: 'auto', padding: '6px 10px',
+    });
+    for (const selector of ['.model-hub-route-hop-name', '.model-hub-route-hop-model']) {
+      expect(declarations(selector)).toMatchObject({ 'overflow-wrap': 'anywhere', 'white-space': 'normal' });
+    }
+  });
+
   it('lets the settings route pane own overview scrolling', () => {
     const overviewGrid = surfaceCss.match(/\.model-hub-overview-grid\s*\{([^}]*)\}/)?.[1] ?? '';
     const overviewBody = surfaceCss.match(/\.model-hub-overview-body\s*\{([^}]*)\}/)?.[1] ?? '';
