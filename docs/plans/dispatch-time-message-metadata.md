@@ -42,3 +42,16 @@ mtime-guarded config at the shared render boundary, recognize released wire titl
 and empty-body formats without rewriting content, and settle pre-write failures
 as definitive refusals through the existing batch fallback. Only errors after
 entering the backend adapter retain the conservative unknown-outcome policy.
+
+The second findings-bearing head, `d7635351c`, repeated the legacy-parser class:
+one finding showed that a greedy optional identity match could consume the start
+of the immutable user body when only a timestamp had actually been added. The
+two-head circuit breaker was evaluated before another patch. Full inventory:
+`20a7d050b` had three findings (config reload, legacy body formats, pre-write
+steering settlement); `d7635351c` had one (legacy prefix-boundary selection).
+The first and third classes remain resolved. The orchestrator decision is to retain the
+data model and close the parser's finite protocol: test every released time/user
+switch combination against bodies beginning with those same prefix shapes, and
+accept a prefix candidate only when its remainder matches the immutable body.
+This replaces greedy boundary selection; it does not weaken body validation or
+expand historical rewriting. Native dispatch and persistence owners stay unchanged.

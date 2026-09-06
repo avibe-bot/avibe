@@ -8,6 +8,15 @@ from core.agent_input import AgentInputMetadata, without_legacy_metadata
 from vibe.i18n import get_supported_languages, get_translator
 
 
+_TIME_PREFIX = "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n"
+_IDENTITY_PREFIX = "[Alex<U1>]\n"
+_RELEASED_PREFIXES = tuple(
+    time_prefix + identity_prefix
+    for time_prefix in ("", _TIME_PREFIX)
+    for identity_prefix in ("", _IDENTITY_PREFIX)
+)
+
+
 def test_clock_and_switches_are_evaluated_for_each_native_input():
     metadata = AgentInputMetadata(user_id="U1", user_name="Alex")
     config = SimpleNamespace(include_time_info=True, include_user_info=True)
@@ -36,12 +45,12 @@ def test_switches_do_not_hide_harness_source(include_time, include_user):
     assert "<" not in rendered
 
 
-@pytest.mark.parametrize("time_prefix", ["", "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n"])
-@pytest.mark.parametrize("identity_prefix", ["", "[Alex<U1>]\n"])
+@pytest.mark.parametrize("prefix", _RELEASED_PREFIXES)
+@pytest.mark.parametrize("user_prefix", _RELEASED_PREFIXES)
 @pytest.mark.parametrize("suffix", ["", "\n\n[Attachment Download Errors]\nreport.pdf unavailable"])
-def test_legacy_prefix_removal_requires_the_original_body(time_prefix, identity_prefix, suffix):
-    original = "hello\n[Current Time: this is the user's own example]"
-    decorated = time_prefix + identity_prefix + original + suffix
+def test_legacy_prefix_removal_requires_the_original_body(prefix, user_prefix, suffix):
+    original = user_prefix + "hello\n[Current Time: this is the user's own example]"
+    decorated = prefix + original + suffix
     assert without_legacy_metadata(decorated, original=original, user_id="U1") == original + suffix
     assert without_legacy_metadata(decorated, original=decorated, user_id="U1") == decorated
 
@@ -53,12 +62,11 @@ def test_legacy_metadata_never_strips_a_different_body_or_sender():
 
 
 @pytest.mark.parametrize("language", get_supported_languages())
-@pytest.mark.parametrize("original", ["", " \t\n", "hello", "[Attachment Download Errors]\n- user example"])
-@pytest.mark.parametrize("prefix", [
-    "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n",
-    "[Alex<U1>]\n",
-    "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n[Alex<U1>]\n",
+@pytest.mark.parametrize("original", [
+    "", " \t\n", "[Attachment Download Errors]\n- user example",
+    *(prefix + "hello" for prefix in _RELEASED_PREFIXES),
 ])
+@pytest.mark.parametrize("prefix", _RELEASED_PREFIXES[1:])
 @pytest.mark.parametrize("append_first", [False, True])
 def test_legacy_attachment_blocks_match_the_released_producer(language, original, prefix, append_first):
     from core.handlers.message_handler import MessageHandler

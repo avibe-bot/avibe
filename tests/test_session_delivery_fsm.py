@@ -1180,13 +1180,15 @@ async def test_steering_restores_incoming_sender_and_preserves_message_content(m
 
 @pytest.mark.parametrize("subagent", [False, True])
 @pytest.mark.parametrize("mode", ["start", "promote", "pending"])
-def test_legacy_queued_metadata_is_removed_only_from_dispatch_copy(managers, subagent, mode):
+@pytest.mark.parametrize("legacy_identity", [False, True])
+def test_legacy_queued_metadata_is_removed_only_from_dispatch_copy(managers, subagent, mode, legacy_identity):
     manager, _other, engine, _engine_b, starts = managers
     active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
     manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
-    original = "hello\n[Now: literal user example]"
+    original = "[Alex<U1>]\nhello\n[Now: literal user example]"
     display_text = "reviewer: " + original if subagent else original
-    old_text = "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n[Alex<U1>]\n" + original
+    identity = "[Alex<U1>]\n" if legacy_identity else ""
+    old_text = "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n" + identity + original
     result = asyncio.run(manager.deliver(DeliveryRequest(
         session_id="ses_fsm", priority="p3",
         platform="slack", content=old_text,

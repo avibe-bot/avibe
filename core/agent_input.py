@@ -36,12 +36,14 @@ def without_legacy_metadata(text: str, *, original: str, user_id: str) -> str:
         return text
     time_line = r"\[Current Time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}:\d{2}\]\n"
     identity_line = rf"\[[^\[\]<>\n]{{1,80}}<{re.escape(sanitize_identity(user_id))}>\]\n"
-    match = re.match(rf"(?:{time_line})?(?:{identity_line})?", text)
-    if match is None or match.end() == 0:
-        return text
-    body = text[match.end() :]
-    if _matches_original_body(body, original):
-        return body
+    # A user-authored first line may look like metadata. The immutable body,
+    # not a greedy match, decides which released prefix was actually added.
+    for prefix in (time_line + identity_line, time_line, identity_line):
+        match = re.match(prefix, text)
+        if match is not None:
+            body = text[match.end() :]
+            if _matches_original_body(body, original):
+                return body
     return text
 
 
