@@ -200,6 +200,7 @@ class ClaudeAgent(BaseAgent):
 
             # Prepare message with file attachment info if present
             message = self._prepare_message_with_files(request)
+            message = self.render_input(message, getattr(request, "input_metadata", None))
             input_receipt = self._register_native_input(
                 runtime_session_key,
                 message,
@@ -1112,14 +1113,15 @@ class ClaudeAgent(BaseAgent):
                 )
             writers = self._steering_writer_keys()
             writers.add(composite_key)
+            message = self.render_input(request.text, request.input_metadata)
             input_receipt = self._register_native_input(
                 composite_key,
-                request.text,
+                message,
                 kind="steer",
             )
             try:
                 try:
-                    await client.query(request.text, session_id=composite_key)
+                    await client.query(message, session_id=composite_key)
                 except (asyncio.TimeoutError, TimeoutError) as exc:
                     input_receipt.state = "unknown"
                     self._advance_steering_generation(composite_key)

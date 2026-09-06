@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import inspect
-from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
@@ -13,11 +12,11 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
+from core.agent_input import AgentInputMetadata
 from core.backend_failure import emit_backend_failure
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.memory_adapter import TurnAccepted, snapshot_memory_files
 from core.message_context import (
-    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
 )
 from core.native_dispatch_phase import (
@@ -705,14 +704,6 @@ class MessageHandler(BaseHandler):
                 spec["backend_composite_session_id"] = composite_key
                 context.platform_specific = spec
 
-            durable_dispatch_text = None
-            if durable_ingress_enabled and not durable_delivery_owned:
-                durable_dispatch_text = await self._prepend_message_metadata(
-                    context,
-                    message,
-                    include_user_info=True,
-                )
-
             # Resolve remote attachments before admission so a queued Delivery
             # owns stable local media references and can survive a restart.
             processed_files = None
@@ -772,12 +763,11 @@ class MessageHandler(BaseHandler):
                 capture_lifecycle_snapshot = None
 
             if durable_ingress_enabled and not durable_delivery_owned:
-                assert durable_dispatch_text is not None
                 admitted = await self._admit_human_delivery(
                     manager=delivery_manager,
                     context=context,
                     dispatch_text=self._append_attachment_errors(
-                        durable_dispatch_text,
+                        message,
                         attachment_errors,
                     ),
                     display_text=control_message,
@@ -865,20 +855,8 @@ class MessageHandler(BaseHandler):
                 user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
-            scheduled_metadata_applied = bool(
-                source == self.TURN_SOURCE_SCHEDULED
-                and (context.platform_specific or {}).get(
-                    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
-                )
-            )
-            if not (is_human and durable_delivery_owned) and not scheduled_metadata_applied:
-                message = await self._prepend_message_metadata(
-                    context,
-                    message,
-                    include_user_info=is_human,
-                )
-
             message = self._append_attachment_errors(message, attachment_errors)
+            input_metadata = await self.prepare_input_metadata(context, human=is_human)
 
             if vibe_agent:
                 spec = dict(context.platform_specific or {})
@@ -893,6 +871,7 @@ class MessageHandler(BaseHandler):
                 context=context,
                 message=message,
                 user_message=user_message,
+                input_metadata=input_metadata,
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -1046,6 +1025,7 @@ class MessageHandler(BaseHandler):
         from storage.db import get_cached_sqlite_engine
 
         priority = priority_for_delivery_intent(delivery_intent)
+        author_name = await self._input_user_name(context)
         scope_id = None
         request = None
         duplicate_delivery_id = None
@@ -1127,6 +1107,7 @@ class MessageHandler(BaseHandler):
                         author="user",
                         message_type="user",
                         author_id=str(context.user_id or "").strip() or None,
+                        author_name=author_name,
                         display_text=display_text,
                         content_json=content,
                         admission_context=admission_context,
@@ -1412,38 +1393,15 @@ class MessageHandler(BaseHandler):
         spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
         context.platform_specific = spec
 
-    @staticmethod
-    def _sanitize_identity(value: str) -> str:
-        """Strip control chars and delimiters that could break the [name<id>] format."""
-        token = (value or "").replace("\n", " ").replace("\r", " ").strip()
-        token = token.replace("[", "(").replace("]", ")").replace("<", "(").replace(">", ")")
-        return token[:80] or "unknown"
-
-    async def _prepend_user_info(self, context: MessageContext, message: str) -> str:
-        """Prepend user identity as [username<user_id>] to the message."""
-        user_info_line = await self._build_user_info_line(context)
-        return f"{user_info_line}\n{message}"
-
-    async def _prepend_message_metadata(
-        self,
-        context: MessageContext,
-        message: str,
-        *,
-        include_user_info: bool,
-    ) -> str:
-        """Prepend configured per-turn metadata lines to the agent message."""
-        metadata_lines: list[str] = []
-        if getattr(self.config, "include_time_info", True):
-            metadata_lines.append(self._build_current_time_line())
-        source_session_id = self._source_session_id(context)
-        if source_session_id:
-            metadata_lines.append(f"From: #{self._sanitize_identity(source_session_id)}")
-        if include_user_info and getattr(self.config, "include_user_info", True):
-            metadata_lines.append(await self._build_user_info_line(context))
-
-        if not metadata_lines:
-            return message
-        return "\n".join([*metadata_lines, message])
+    async def prepare_input_metadata(
+        self, context: MessageContext, *, human: bool
+    ) -> AgentInputMetadata:
+        """Resolve stable sender facts without rendering execution context."""
+        return AgentInputMetadata(
+            user_id=context.user_id if human else None,
+            user_name=await self._input_user_name(context) if human else None,
+            source_session_id=self._source_session_id(context) or None,
+        )
 
     @staticmethod
     def _source_session_id(context: MessageContext) -> str:
@@ -1456,31 +1414,32 @@ class MessageHandler(BaseHandler):
             return str(payload.get("source_actor") or "").strip()
         return ""
 
-    @staticmethod
-    def _build_current_time_line(now: datetime | None = None) -> str:
-        """Return the current local time with seconds and UTC offset."""
-        current = now or datetime.now().astimezone()
-        if current.tzinfo is None:
-            current = current.astimezone()
-        offset = current.strftime("%z")
-        if len(offset) == 5:
-            offset = f"{offset[:3]}:{offset[3:]}"
-        return f"[Current Time: {current.strftime('%Y-%m-%d %H:%M:%S')} UTC{offset}]"
-
-    async def _build_user_info_line(self, context: MessageContext) -> str:
-        """Return user identity as [username<user_id>]."""
+    async def _input_user_name(self, context: MessageContext) -> str:
+        payload = context.platform_specific or {}
+        if payload.get("author_name") and payload.get("author_id") == context.user_id:
+            return str(payload["author_name"])
         try:
             user_info = await self._get_im_client(context).get_user_info(context.user_id)
-            raw_name = self._resolve_user_display_name(user_info, context.user_id)
+            return self._resolve_user_display_name(user_info, context.user_id)
         except Exception as e:
             logger.debug(f"Failed to fetch user info for {context.user_id}: {e}")
-            raw_name = context.user_id
-        name = self._sanitize_identity(raw_name)
-        uid = self._sanitize_identity(context.user_id)
-        return f"[{name}<{uid}>]"
+            return context.user_id
+
+    @staticmethod
+    def _delivery_user_text(context: MessageContext) -> str | None:
+        payload = context.platform_specific or {}
+        content = payload.get("message_content")
+        if payload.get("delivery_ids") and isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+        return None
 
     @staticmethod
     def _get_control_message(context: MessageContext, message: str) -> str:
+        original = MessageHandler._delivery_user_text(context)
+        if original is not None:
+            return original
         payload = context.platform_specific or {}
         control_text = payload.get("control_text")
         if isinstance(control_text, str):
@@ -1489,6 +1448,9 @@ class MessageHandler(BaseHandler):
 
     @staticmethod
     def _get_user_message(context: MessageContext, message: str) -> str:
+        original = MessageHandler._delivery_user_text(context)
+        if original is not None:
+            return original
         payload = context.platform_specific or {}
         normalized_user_text = payload.get("normalized_user_text")
         if isinstance(normalized_user_text, str):

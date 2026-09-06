@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
+from core.agent_input import AgentInputMetadata
 
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -33,6 +35,19 @@ from modules.im import MessageContext
 
 STEER_TEXT = "补充：**不要改写**\n```python\nprint('λ')\n```"
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
+
+
+@pytest.fixture(params=["plain", "human", "harness"])
+def native_input(request, monkeypatch):
+    now = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
+    monkeypatch.setattr("core.agent_input.datetime", SimpleNamespace(
+        now=lambda: SimpleNamespace(astimezone=lambda: now)
+    ))
+    if request.param == "plain":
+        return None, ""
+    if request.param == "human":
+        return AgentInputMetadata(user_id="incoming", user_name="Sender"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
+    return AgentInputMetadata(source_session_id="source-session"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\nFrom: #source-session\n"
 
 
 def test_steer_outcomes_are_exhaustive() -> None:
@@ -237,12 +252,13 @@ def _controller_with_active_gate(agent, primary: AgentRequest, gate_task: asynci
     return controller
 
 
-def _steer_request(native_turn_id: str, *, logical_turn_id: str = "logical-turn") -> SteerRequest:
+def _steer_request(native_turn_id: str, *, logical_turn_id: str = "logical-turn", input_metadata=None) -> SteerRequest:
     return SteerRequest(
         target_session_id="avibe-session",
         expected_logical_turn_id=logical_turn_id,
         expected_native_turn_id=native_turn_id,
         text=STEER_TEXT,
+        input_metadata=input_metadata,
     )
 
 
@@ -258,11 +274,13 @@ async def _cancel_tasks(*tasks: asyncio.Task) -> None:
 
 
 @pytest.mark.anyio
-async def test_codex_steers_expected_active_turn_without_starting_another_turn() -> None:
+async def test_codex_steers_expected_active_turn_without_starting_another_turn(native_input) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     transport = _CodexTransport()
     agent = object.__new__(CodexAgent)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
     agent._transports = {primary.working_path: transport}
@@ -271,7 +289,10 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
         identity = active_steer_identity(controller, "codex", "avibe-session")
         assert identity == ("logical-turn", "codex-turn")
 
-        receipt = await steer_active_turn(controller, "codex", _steer_request(identity[1]))
+        request = _steer_request(identity[1], input_metadata=metadata)
+        receipt = await steer_active_turn(controller, "codex", request)
+        assert request.text == STEER_TEXT
+        assert primary.message == "primary"
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         assert transport.calls == [
@@ -280,7 +301,7 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
                 {
                     "threadId": "codex-thread",
                     "expectedTurnId": "codex-turn",
-                    "input": [{"type": "text", "text": STEER_TEXT}],
+                    "input": [{"type": "text", "text": prefix + STEER_TEXT}],
                 },
             )
         ]
@@ -289,6 +310,41 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
         assert not gate_task.done()
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_codex_start_renders_now_after_runtime_prompt_preparation(monkeypatch):
+    """Scenario: MESSAGE-DELIVERY-318."""
+    current = datetime(2026, 9, 6, 11, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("core.agent_input.datetime", SimpleNamespace(
+        now=lambda: SimpleNamespace(astimezone=lambda: current)
+    ))
+    request = _primary_request(backend="codex")
+    request.input_metadata = AgentInputMetadata(user_id="sender", user_name="Sender")
+    agent = object.__new__(CodexAgent)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
+    agent.controller = SimpleNamespace()
+    agent._prompt_state_agent_session_id = lambda _request: None
+    agent._resolve_codex_agent_settings = lambda _request: (None, None, None, None)
+    agent._read_persisted_prompt_strategy_marker = Mock(return_value=None)
+    agent._write_caller_env_script = Mock()
+    agent._turn_registry = SimpleNamespace(
+        begin_turn_start=Mock(),
+        finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+    )
+
+    async def prepare_runtime(*_args, **_kwargs):
+        nonlocal current
+        await asyncio.sleep(0)
+        current = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
+
+    agent._inject_thread_developer_instructions = AsyncMock(side_effect=prepare_runtime)
+    transport = SimpleNamespace(send_request=AsyncMock(return_value={"turn": {"id": "native-turn"}}))
+    await agent._start_turn(transport, request, "native-thread", developer_instructions="runtime instructions")
+    agent._inject_thread_developer_instructions.assert_awaited_once()
+    params = transport.send_request.await_args.args[1]
+    assert params["input"] == [{"type": "text", "text": "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<sender>]\nprimary"}]
+    assert request.message == request.user_message == "primary"
 
 
 @pytest.mark.anyio
@@ -367,12 +423,14 @@ async def test_codex_rejects_stale_native_turn_and_unavailable_runtime() -> None
 
 
 @pytest.mark.anyio
-async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> None:
+async def test_claude_uses_one_client_receiver_and_primary_result_owner(native_input) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
     receiver_task = await _held_task()
     client = _ClaudeClient()
     agent = object.__new__(ClaudeAgent)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent.claude_sessions = {"runtime-key": client}
     agent.receiver_tasks = {"runtime-key": receiver_task}
     agent.session_handler = _ClaudeSessionHandler("runtime-key")
@@ -384,10 +442,12 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
         assert identity is not None
         receiver_generation = identity[1]
 
-        receipt = await steer_active_turn(controller, "claude", _steer_request(receiver_generation))
+        request = _steer_request(receiver_generation, input_metadata=metadata)
+        receipt = await steer_active_turn(controller, "claude", request)
+        assert request.text == STEER_TEXT
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
-        assert client.queries == [("primary", "runtime-key"), (STEER_TEXT, "runtime-key")]
+        assert client.queries == [("primary", "runtime-key"), (prefix + STEER_TEXT, "runtime-key")]
         assert agent.receiver_tasks == {"runtime-key": receiver_task}
         assert agent._pending_requests["runtime-key"] is primary_requests
         assert agent._pending_requests["runtime-key"] == [primary]
@@ -632,21 +692,25 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
 
 
 @pytest.mark.anyio
-async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> None:
+async def test_opencode_steers_existing_runner_without_abort_or_new_turn(native_input) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
     server = _OpenCodeServer()
     agent = _opencode_agent(primary, gate_task, server)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         identity = active_steer_identity(controller, "opencode", "avibe-session")
         assert identity is not None
 
-        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        request = _steer_request(identity[1], input_metadata=metadata)
+        receipt = await steer_active_turn(controller, "opencode", request)
+        assert request.text == STEER_TEXT
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         state = agent._steering_states[primary.base_session_id]
-        assert state.awaiting_user_text == STEER_TEXT
+        assert state.awaiting_user_text == prefix + STEER_TEXT
         assert state.awaiting_prompt_accepted is True
         assert state.awaiting_prompt_activity_deadline is not None
         assert state.awaiting_prompt_activity_deadline > time.monotonic()
@@ -655,7 +719,7 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
             {
                 "session_id": "opencode-session",
                 "directory": primary.working_path,
-                "text": STEER_TEXT,
+                "text": prefix + STEER_TEXT,
                 "agent": "build",
                 "model": {"providerID": "openai", "modelID": "gpt-5"},
                 "reasoning_effort": "high",
@@ -894,9 +958,11 @@ async def test_opencode_replacement_waits_for_in_flight_steering_write() -> None
 
 @pytest.mark.anyio
 async def test_opencode_coordinator_error_aborts_through_steering_owner(
-    monkeypatch,
+    monkeypatch, native_input,
 ) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="opencode")
+    primary.input_metadata = metadata
     poll_started = asyncio.Event()
     fail_poll = asyncio.Event()
     steer_started = asyncio.Event()
@@ -921,6 +987,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         async def prompt_async(self, **kwargs):
             self.prompt_count += 1
             if self.prompt_count == 1:
+                assert kwargs["text"] == prefix + primary.message
                 events.append("primary")
                 return
             steer_started.set()
@@ -1046,7 +1113,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     agent._active_requests[primary.base_session_id] = process_task
     await poll_started.wait()
     state = agent._steering_states[primary.base_session_id]
-    assert state.awaiting_user_text == primary.message
+    assert state.awaiting_user_text == prefix + primary.message
     assert state.awaiting_prompt_accepted is True
     assert state.awaiting_prompt_activity_deadline is not None
     assert state.awaiting_prompt_activity_deadline > time.monotonic()

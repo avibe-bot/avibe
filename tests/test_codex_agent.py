@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.runtime_activation import RuntimeActivationRegistry
+from modules.agents.base import BaseAgent as RealBaseAgent
 from modules.agents.codex.transport import CodexRPCError
 
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
@@ -29,6 +30,8 @@ setattr(_base_module, "AgentRequest", object)
 
 
 class _BaseAgent:
+    render_input = RealBaseAgent.render_input
+
     def __init__(self, controller):
         self.controller = controller
 

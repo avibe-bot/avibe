@@ -1646,6 +1646,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_key=request.session_key,
             )
             active_poll_persisted = True
+            prompt_text = self.render_input(prompt_text, getattr(request, "input_metadata", None))
             mark_backend_dispatch_attempted(request.context)
             native_start_phase = "may_have_written"
             await server.prompt_async(
@@ -2063,11 +2064,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         backend=self.name,
                     )
                 before_insert = _SteeringAwareOpenCodeServer._message_ids(messages)
+                prompt_text = self.render_input(request.text, request.input_metadata)
                 try:
                     prompt_kwargs = {
                         "session_id": native_session_id,
                         "directory": directory,
-                        "text": request.text,
+                        "text": prompt_text,
                         "agent": state.agent,
                         "model": state.model,
                         "reasoning_effort": state.reasoning_effort,
@@ -2083,13 +2085,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     raise
                 except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError):
                     state.awaiting_after_message_ids = before_insert
-                    state.awaiting_user_text = request.text
+                    state.awaiting_user_text = prompt_text
                     state.awaiting_prompt_accepted = False
                     state.awaiting_prompt_activity_deadline = None
                     state.awaiting_active_status_observed = False
                     raise
                 state.awaiting_after_message_ids = before_insert
-                state.awaiting_user_text = request.text
+                state.awaiting_user_text = prompt_text
                 state.awaiting_prompt_accepted = True
                 state.awaiting_prompt_activity_deadline = (
                     time.monotonic()

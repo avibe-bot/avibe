@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
+import pytest
+
 from config.v2_config import DiscordConfig, TelegramConfig, V2Config
+from core.agent_input import AgentInputMetadata
 from core.controller import Controller
+from modules.agents.base import BaseAgent
 
 
 def _config_payload(discord_payload: dict | None = None, telegram_payload: dict | None = None) -> dict:
@@ -164,3 +168,36 @@ def test_progress_style_getter_self_refreshes_from_disk(tmp_path, monkeypatch) -
     # No prior _refresh_config_from_disk call; the getter itself must pick it up.
     assert controller.get_progress_style_for_context(None) == "concise"
     assert controller.get_heartbeat_interval_ms_for_context(None) == 8000
+
+
+@pytest.mark.parametrize("include_time", [False, True])
+@pytest.mark.parametrize("include_user", [False, True])
+def test_native_metadata_boundary_self_refreshes_switches_from_disk(
+    tmp_path, monkeypatch, include_time, include_user,
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-318."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.from_payload({
+        **_config_payload(),
+        "include_time_info": not include_time,
+        "include_user_info": not include_user,
+    })
+    controller.im_clients = {}
+    controller._config_mtime = None
+    agent = SimpleNamespace(controller=controller, config=controller.config)
+    metadata = AgentInputMetadata(user_id="U1", user_name="Sender")
+    original = "queued original text"
+    latest_config = V2Config.from_payload({
+        **_config_payload(),
+        "include_time_info": include_time,
+        "include_user_info": include_user,
+    })
+    latest_config.save()
+
+    rendered = BaseAgent.render_input(agent, original, metadata)
+
+    assert ("[Now:" in rendered) is include_time
+    assert ("[Sender<U1>]" in rendered) is include_user
+    assert rendered.endswith(original)
+    assert controller._config_mtime is not None
