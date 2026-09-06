@@ -11,7 +11,7 @@ from typing import Any, Iterable, Optional
 
 from config import paths
 from core.message_context import resolve_context_platform
-from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, render_prompt, render_prompt_block
+from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, order_prompt_blocks, render_prompt, render_prompt_block
 from core.show_git import agent_contract_block
 from modules.im import MessageContext
 
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 #   capability details; never gate them on a backend, Skill, or Turn.
 # - Author all injected prose in the registry. Production text and debug JSON
 #   must consume the same ordered rendered blocks; Studio never assembles prose.
+# - The registry owns composition order. Keep static Skill usage guidance after
+#   the base capabilities and dynamic Skill rows near the end to protect caches.
 
 
 @dataclass(frozen=True)
@@ -260,7 +262,7 @@ def build_system_prompt_blocks(
         platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
         if _is_web_platform(platform):
             blocks.append(render_prompt_block("session-title-prompt"))
-    return blocks
+    return order_prompt_blocks(blocks)
 
 
 def build_system_prompt_injection(**kwargs: Any) -> str:

@@ -5,6 +5,7 @@ import itertools
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -75,11 +76,15 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     assert production.index(principles) < production.index(prompt_text("base-capabilities-body"))
     assert [block["text"] for block in result["blocks"] if block["id"] == "agent-working-principles"] == [principles]
     catalog = {module.id: module for module in PROMPT_MODULES}
+    ids = [block["id"] for block in result["blocks"]]
+    assert ids == [module_id for module_id in catalog if module_id in ids]
     for block in result["blocks"]:
         assert block["source_path"] == catalog[block["id"]].source_path
     assert result == render_prompt_context(request)
     assert request["options"]["context"]["platform"] == "avibe"
     if skill_mode == "pages":
+        assert ids[ids.index("base-capabilities-body") + 1] == "skills-prompt"
+        assert production.count(prompt_text("skills-prompt")) == 1
         assert "vibe skill load -- <name>" in production
         assert "vibe skill list --page 2" in production
         assert "- skill-00: Description skill-00" in production
@@ -147,6 +152,23 @@ def test_rendered_revision_changes_only_when_rendered_bytes_change(monkeypatch):
     assert render_prompt_context(request) == before
     request["agent_instructions"] = "Revised instructions"
     assert render_prompt_context(request)["revision"] != before["revision"]
+
+
+def test_live_skill_changes_preserve_the_static_usage_prefix(monkeypatch):
+    _environment(monkeypatch)
+    request = _inputs()
+    before = render_prompt_context(request)
+    skills = managed_skills.resolve_skills("/fixture/project")
+    updated = [replace(skill, description="Updated description") for skill in reversed(skills)]
+    monkeypatch.setattr(managed_skills, "resolve_skills", lambda *_args, **_kwargs: updated)
+    after = render_prompt_context(request)
+    before_blocks = before["blocks"]
+    after_blocks = after["blocks"]
+    row_index = next(index for index, block in enumerate(before_blocks) if block["id"] == "skills-catalog")
+    assert after_blocks[:row_index] == before_blocks[:row_index]
+    assert after_blocks[row_index + 1:] == before_blocks[row_index + 1:]
+    assert after_blocks[row_index]["text"] != before_blocks[row_index]["text"]
+    assert after == render_prompt_context(request)
 
 
 def test_debug_cli_exports_both_sources_and_production_blocks(monkeypatch, tmp_path, capsys):
@@ -316,11 +338,21 @@ def test_working_principles_addition_preserves_all_other_injection_bytes(monkeyp
         ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
-        rendered = render_prompt_context(_inputs(backend, memory, history, skill_mode))["text"]
+        blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
+        # Undo only the intentional Skills Usage move when comparing historical bytes.
+        usage = next((block for block in blocks if block["id"] == "skills-prompt"), None)
+        if usage:
+            blocks.remove(usage)
+            catalog_start = next(
+                index for index, block in enumerate(blocks)
+                if block["id"] in {"skills-pagination-prompt", "skills-catalog"}
+            )
+            blocks.insert(catalog_start, usage)
+        rendered = "".join(block["text"] for block in blocks)
         principles = prompt_text("agent-working-principles")
         assert rendered.count(principles) == 1
         outputs.append(rendered.replace(principles, "", 1))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured from the pre-migration renderer at 928924dd82bb48c7eea67ff06ddd844d442cb2a1.
-    # Only the approved working-principles block may differ from that baseline.
+    # Only the working-principles addition and Skills Usage placement may differ.
     assert digest == "adbf608248e0b0a03d6646f57d31816cdb520c86113225e281b2aa007b100bc5"
