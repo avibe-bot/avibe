@@ -815,17 +815,23 @@ class ModelHubRuntimeRouter:
         settled_by: Optional[str],
         ts: str,
         mode: Optional[Literal["direct", "hub"]] = None,
-    ) -> None:
-        try:
-            if mode is not None:
-                self.service.note_turn_mode(turn_id, mode)
-        finally:
-            if self.turn_gateway is not None:
-                self.turn_gateway.correlation.settle(
-                    turn_id,
-                    settled_by=settled_by,
-                    ts=ts,
-                )
+    ) -> asyncio.Task[None] | None:
+        def finish() -> None:
+            try:
+                if mode is not None:
+                    self.service.note_turn_mode(turn_id, mode)
+            finally:
+                if self.turn_gateway is not None:
+                    self.turn_gateway.correlation.settle(
+                        turn_id,
+                        settled_by=settled_by,
+                        ts=ts,
+                    )
+
+        if self.turn_gateway is not None:
+            return self.turn_gateway.finalize_turn(turn_id, settled_by=settled_by, finish=finish)
+        finish()
+        return None
 
     def retire_process_scope(
         self,

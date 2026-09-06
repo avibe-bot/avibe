@@ -2727,6 +2727,112 @@ def test_terminal_output_persistence_failure_does_not_emit_empty_fallback(
     assert status == "running"
 
 
+def test_model_hub_finalization_fences_native_start_after_durable_terminal(managers, monkeypatch, tmp_path):
+    from core.handlers.model_hub.adapter import RawOutcomeKind
+    from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+    from modules.agents.model_hub import ModelHubRuntimeRouter, bind_turn_mode
+    from tests.test_model_hub_l3 import (
+        FakeStreamResponse, LiveInvokeHandle, _canonicalize_fixed_test_routes,
+        _outcome, _prepared_gateway_request, _service, _source,
+    )
+    from tests.test_model_hub_retention import HeldTerminalHandle, TERMINAL
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    _seed_session(engine, "ses_independent")
+    source = _source("src_fencedturn", "Fenced finalization")
+    held = HeldTerminalHandle(source.id)
+    service = _service(tmp_path, sources=[source])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    gateway = ModelHubTurnGateway(service)
+    runtime = ModelHubRuntimeRouter(service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json")
+    manager.controller.model_hub_runtime = runtime
+    monkeypatch.setattr("core.handlers.model_hub.service.get_cached_sqlite_engine", lambda: engine)
+    dispatched = []
+    requests = []
+    runners = []
+    finalization_started = asyncio.Event()
+    independent_done = asyncio.Event()
+    original_settle = runtime.settle_turn
+
+    def settle(*args, **kwargs):
+        result = original_settle(*args, **kwargs)
+        if result is not None:
+            finalization_started.set()
+        return result
+
+    runtime.settle_turn = settle
+
+    async def dispatch(_controller, context, text, **_kwargs):
+        session_id = context.platform_specific["workbench_session_id"]
+        turn_id = context.platform_specific["turn_token"]
+        dispatched.append((text, turn_id))
+        set_dispatch_phase(context, DISPATCH_PHASE_ATTEMPTING)
+        context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+        manager.on_native_start(context, backend="codex", runtime_key=f"key-{session_id}", runtime_turn_id=f"runtime-{turn_id}")
+        if text == "first":
+            bind_turn_mode(context, "hub")
+            service.adapter.live_handles.append(held)
+            request = _prepared_gateway_request(gateway, turn_id=turn_id, requested_model=model, source_id=source.id, stream=True)
+            requests.append(asyncio.create_task(gateway._handle_request(request)))
+            await held.at_end.wait()
+        elif text == "second":
+            assert service.provenance.latest_for_model("codex", model)["turn_id"] == dispatched[0][1]
+            bind_turn_mode(context, "hub")
+            service.adapter.live_handles.append(LiveInvokeHandle(
+                _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id), (TERMINAL,)
+            ))
+            request = _prepared_gateway_request(gateway, turn_id=turn_id, requested_model=model, source_id=source.id, stream=True)
+            await gateway._handle_request(request)
+        manager.on_terminal_result(context, is_error=False)
+        manager.on_terminal_delivery_complete(context)
+        if text == "independent":
+            independent_done.set()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT, backend_dispatch_attempted=True)
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", dispatch)
+
+    async def exercise():
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.web.StreamResponse", side_effect=lambda **_kwargs: FakeStreamResponse()):
+                first = await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="first"), context=_context())
+                old_runner = manager.in_flight["ses_fsm"].task
+                runners.append(old_runner)
+                await asyncio.wait_for(finalization_started.wait(), 5)
+                with engine.connect() as conn:
+                    assert delivery_store.get_turn(conn, first.turn_id)["state"] == "terminal"
+                second = await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="second"), context=_context())
+                assert second.turn_id != first.turn_id
+                assert manager.in_flight["ses_fsm"].task is old_runner
+                assert [text for text, _ in dispatched] == ["first"]
+                # A durable successor can be claimed, but cannot launch while
+                # the departing Session runner still owns its Hub finalizer.
+                assert not await manager._start_persisted_turn(second.turn_id)
+                await manager.deliver(DeliveryRequest(session_id="ses_independent", priority="p3", content="independent"), context=_context("ses_independent"))
+                independent = manager.in_flight["ses_independent"].task
+                runners.append(independent)
+                await asyncio.wait_for(independent_done.wait(), 5)
+                await independent
+                assert not old_runner.done()
+                held.release.set()
+                await asyncio.wait_for(old_runner, 5)
+                successor = manager.in_flight.get("ses_fsm")
+                if successor is not None:
+                    runners.append(successor.task)
+                    await asyncio.wait_for(successor.task, 5)
+            assert [text for text, _ in dispatched] == ["first", "independent", "second"]
+            assert service.provenance.latest_for_model("codex", model)["turn_id"] == second.turn_id
+        finally:
+            held.release.set()
+            for runner in runners:
+                if not runner.done():
+                    runner.cancel()
+            await asyncio.gather(*requests, *runners, return_exceptions=True)
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_turn_state_repairs_only_an_exact_ownerless_running_projection(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     with engine.begin() as conn:

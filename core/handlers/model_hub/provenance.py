@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Optional
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 from config.v2_config import ModelHubConfig
 
@@ -530,6 +530,8 @@ class TurnTrace:
     gateway_model_id: Optional[str] = None
     ambiguous: bool = False
     terminal_outcome: TurnOutcomeProjectionInput | None = None
+    admission_closed: bool = False
+    outcome_frozen: bool = False
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -613,6 +615,7 @@ class GatewayTurnTerminalizer:
         self._stream_started = False
         self._attempt_started = False
         self._downstream_canceled = False
+        self.on_attribution_released: Callable[[], None] | None = None
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
         return self
@@ -637,6 +640,9 @@ class GatewayTurnTerminalizer:
             gateway_model_id=gateway_model_id,
         )
         self.turn_id = routing.owner_turn_id
+        if self.turn_id is None and self.on_attribution_released is not None:
+            release, self.on_attribution_released = self.on_attribution_released, None
+            release()
         return routing.caller_model_id
 
     def fail(
@@ -950,13 +956,13 @@ class TurnCorrelationRegistry:
             for turn_id in scope.active_turns:
                 trace = self._traces.get(turn_id)
                 terminal_is_exact = (
-                    turn_id == normalized_terminal_turn_id
-                    and trace is not None
+                    trace is not None
+                    and (turn_id == normalized_terminal_turn_id or trace.admission_closed)
                     and not trace.ambiguous
                     and not scope.untracked_use
                     and scope.active_turns == {turn_id}
                     and turn_id not in scope.ambiguous_turns
-                    and bool(trace.failed_attempts or trace.terminal_error)
+                    and bool(trace.failed_attempts or trace.terminal_error or (trace.admission_closed and trace.served))
                 )
                 if terminal_is_exact:
                     turn_scopes = self._turn_scopes.get(turn_id)
@@ -981,7 +987,7 @@ class TurnCorrelationRegistry:
         if turn_id in scope.ambiguous_turns:
             return None
         trace = self._traces.get(turn_id)
-        if trace is not None and trace.ambiguous:
+        if trace is not None and (trace.ambiguous or trace.admission_closed):
             return None
         return turn_id, key
 
@@ -1142,6 +1148,17 @@ class TurnCorrelationRegistry:
             if prepared_turn_id is None:
                 return GatewayRouting(caller_model_id, None)
             if claimed:
+                trace = self._traces.get(prepared_turn_id)
+                if (
+                    trace is not None
+                    and trace.admission_closed
+                    and not trace.ambiguous
+                    and request_id in trace.pending_attempts
+                    and gateway_model_id in {trace.gateway_request_model_id, trace.gateway_model_id}
+                ):
+                    # This request acquired its identity before the FSM closed
+                    # admission; completing its body parse is not a new claim.
+                    return GatewayRouting(caller_model_id, prepared_turn_id)
                 owner = self.begin_gateway_request(
                     backend=backend,
                     token=token,
@@ -1282,7 +1299,7 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None:
+            if trace is None or trace.outcome_frozen:
                 return
             identity = trace.pending_attempts.get(request_id)
             if identity is not None and identity.channel == "hub":
@@ -1305,7 +1322,7 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None or trace.ambiguous:
+            if trace is None or trace.ambiguous or trace.outcome_frozen:
                 return
             if not force and (
                 trace.served is not None
@@ -1428,7 +1445,7 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is not None:
+            if trace is not None and not trace.outcome_frozen:
                 # Only this request found nothing to call; a peer still
                 # awaiting an upstream result keeps its identity.
                 trace.pending_attempts.pop(request_id, None)
@@ -1446,7 +1463,7 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is not None:
+            if trace is not None and not trace.outcome_frozen:
                 trace.terminal_outcome = turn_outcome
 
     def begin_attempt(
@@ -1465,7 +1482,7 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None:
+            if trace is None or trace.outcome_frozen:
                 return
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=source_id,
@@ -1493,7 +1510,7 @@ class TurnCorrelationRegistry:
                 if trace is not None
                 else None
             )
-            if trace is None or identity is None or identity.channel != "native_cli":
+            if trace is None or trace.outcome_frozen or identity is None or identity.channel != "native_cli":
                 return
             trace.pending_attempts.pop(TURN_REQUEST, None)
             trace.served = None
@@ -1510,8 +1527,9 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(normalized)
-            if trace is None:
+            if trace is None or trace.outcome_frozen:
                 return
+            trace.outcome_frozen = True
             identity = trace.pending_attempt
             payload = (
                 identity.payload()
@@ -1553,7 +1571,7 @@ class TurnCorrelationRegistry:
             identity = (
                 trace.pending_attempts.get(request_id) if trace is not None else None
             )
-            if trace is None or identity is None:
+            if trace is None or trace.outcome_frozen or identity is None:
                 return
             trace.pending_attempts.pop(request_id, None)
             if decision.action == "return":
@@ -1583,6 +1601,19 @@ class TurnCorrelationRegistry:
                     ),
                     "upstream_error_code": diagnostic_code,
                 }
+
+    def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:
+        """Latch the FSM boundary without discarding already-owned requests."""
+
+        with self._lock:
+            trace = self._traces.get(str(turn_id or "").strip())
+            if trace is None or trace.admission_closed:
+                return
+            trace.admission_closed = True
+            if settled_by == SETTLED_BY_STOPPED:
+                # Preserve the exact facts present at Stop. Teardown may expose
+                # a later producer success, but cannot change who ended the turn.
+                trace.outcome_frozen = True
 
     def settle(self, turn_id: str, *, settled_by: Optional[str], ts: Optional[str] = None) -> None:
         normalized_turn_id = str(turn_id or "").strip()

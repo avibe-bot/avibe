@@ -1237,6 +1237,16 @@ this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
 
+Turn resolution joins FSM completion with settlement of its already-attributed
+gateway requests. Receiving a terminal protocol frame is not proof that the
+gateway has finished recording the transport result. Closing a turn therefore
+closes new attribution admission but retains owned request identities until
+their terminalizers finish. Finalization is exactly once, bounded by existing
+teardown policy, and preserves cancellation/failure precedence and subsequent
+turn ordering without blocking unrelated Sessions. The existing service outcome
+remains the only Hub success authority; see `model-hub-routing-modes.md`,
+Joined Turn Finalization. No Session-text inference or new history store is used.
+
 **Recorded-error diagnostic selection (authoritative and exhaustive).**
 New terminal-error records may retain observed `http_status` (100-599 or null) and
 `upstream_error_code` (recognized upstream code or null). Historical records may omit
