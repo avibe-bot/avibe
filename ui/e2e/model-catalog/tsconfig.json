@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.app.json",
+  "compilerOptions": { "types": ["vite/client", "node"] },
+  "include": ["*.ts", "*.tsx", "../../playwright.model-catalog.config.ts", "../../agentation.d.ts"],
+  "exclude": []
+}

@@ -51,6 +51,12 @@ jobs:
           npm run typecheck:tests
           npm test
 
+      - name: Test model catalog browser interactions
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:model-catalog
+
   build-linux-artifacts:
     runs-on: ubuntu-latest
     steps:
