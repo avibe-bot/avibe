@@ -89,7 +89,8 @@ jobs:
           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS: 3.0.99rc1
           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY: 3.0.99rc1
         run: |
-          pip install -e . build hatchling hatch-vcs
+          # Build backends are installed by each isolated PEP 517 build.
+          python -m pip install --disable-pip-version-check build
           python scripts/prepare_local_show_runtime_manifest.py
           python -m build --outdir memory-dist packaging/avibe-memory
           python -m build

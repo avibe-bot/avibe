@@ -4,7 +4,9 @@ import ast
 import copy
 import json
 import re
+import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import fields
 from pathlib import Path
 
@@ -100,8 +102,63 @@ def _full_config_payload() -> dict:
     }
 
 
-def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
+@pytest.mark.parametrize("prepared", [False, True])
+def test_config_save_initializes_real_state_with_or_without_schema_preparation(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, prepared,
+):
+    from storage import importer
+    from tests.conftest import _is_default_sqlite_call
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    assert not any(_is_default_sqlite_call(node) for node in ast.walk(tree) if isinstance(node, ast.Call))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    assert not db_path.exists()
+    if prepared:
+        sqlite_schema_db_factory(db_path)
+        with closing(sqlite3.connect(db_path)) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM agents").fetchone() == (0,)
+            markers = {row[0] for row in connection.execute("SELECT key FROM state_meta")}
+            assert importer.JSON_IMPORT_MARKER not in markers
+            assert importer.BACKGROUND_IMPORT_MARKER not in markers
+
+    imported_paths = []
+    original_write = importer._write_parsed_state
+
+    def observe_import(target_db, parsed):
+        imported_paths.append(target_db)
+        return original_write(target_db, parsed)
+
+    monkeypatch.setattr(importer, "_write_parsed_state", observe_import)
+    created = api.save_config(_full_config_payload())
+    updated = api.save_config({"show_duration": False})
+    assert created.show_duration is True
+    assert updated.show_duration is False
+    assert imported_paths == [db_path.resolve()]
+    with closing(sqlite3.connect(db_path)) as connection:
+        markers = {row[0] for row in connection.execute("SELECT key FROM state_meta")}
+        assert {importer.JSON_IMPORT_MARKER, importer.BACKGROUND_IMPORT_MARKER} <= markers
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    store = api.VibeAgentStore()
+    try:
+        enabled = {
+            backend for backend, options in _full_config_payload()["agents"].items()
+            if isinstance(options, dict) and options.get("enabled")
+        }
+        assert {agent.backend for agent in store.list_agents() if agent.enabled} == enabled
+        assert store.get_default_agent_name() in {agent.name for agent in store.list_agents()}
+    finally:
+        store.close()
+    settings = api.SettingsStore.get_instance()
+    assert settings.has_guild_scope_for_platform("discord")
+    assert set(settings.get_guilds_for_platform("discord")) == set(
+        _full_config_payload()["discord"]["guild_allowlist"]
+    )
+
+
+def test_save_config_merges_partial_payload(monkeypatch, tmp_path, sqlite_schema_db_factory):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     original = api.save_config(_full_config_payload())
     assert original.show_duration is True
@@ -196,8 +253,9 @@ def test_save_config_defaults_include_time_info_to_true_for_new_config(monkeypat
     assert created.include_time_info is True
 
 
-def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path):
+def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     updated = api.save_config({**_full_config_payload(), "ack_mode": "typing"})
 
@@ -251,8 +309,10 @@ def test_remote_access_legacy_config_keeps_cloudflared_ipv4_default() -> None:
 def test_save_config_rejects_unassigned_remote_access_bind_address(
     monkeypatch,
     tmp_path,
+    sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
     monkeypatch.setattr(
         remote_access,
@@ -288,8 +348,10 @@ def test_save_config_rejects_unassigned_remote_access_bind_address(
 def test_save_config_rejects_remote_access_bind_family_mismatch(
     monkeypatch,
     tmp_path,
+    sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
     monkeypatch.setattr(
         remote_access,
@@ -327,8 +389,10 @@ def test_save_config_rejects_remote_access_bind_family_mismatch(
 def test_generic_config_save_rejects_connector_control_changes(
     monkeypatch,
     tmp_path,
+    sqlite_schema_db_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
 
     with pytest.raises(ValueError, match="/api/remote-access/settings"):
@@ -408,8 +472,9 @@ def test_generic_policy_save_does_not_validate_an_unchanged_stale_bind_address(
     assert updated.remote_access.vibe_cloud.auto_recovery is False
 
 
-def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
+def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     created = api.save_config(_full_config_payload())
     assert created.audio_asr.enabled is True
@@ -428,8 +493,9 @@ def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
     assert payload["audio_asr"]["echo_transcript"] is False
 
 
-def test_save_config_marks_explicit_audio_asr_disable_patch(monkeypatch, tmp_path):
+def test_save_config_marks_explicit_audio_asr_disable_patch(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     api.save_config(_full_config_payload())
 
@@ -495,8 +561,9 @@ def test_config_payload_default_instance_name_ignores_malformed_remote_url(monke
     assert payload["ui"]["default_instance_name"] == "macbook"
 
 
-def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path):
+def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     created = api.save_config(_full_config_payload())
     assert created.show_pages_prompt is True
@@ -508,12 +575,13 @@ def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path):
     assert payload["show_pages_prompt"] is False
 
 
-def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatch, tmp_path):
+def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """An unrelated partial save must NOT reset agent_progress_style / intervals.
 
     Regression for the config_to_payload omission that wiped these on any UI save.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     full = _full_config_payload()
     full["agent_progress_style"] = "verbose"
@@ -532,7 +600,7 @@ def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatc
     assert payload["agent_status_heartbeat_ms"] == 12000
 
 
-def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch, tmp_path):
+def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """The config-only Harness knobs must survive an unrelated UI save (Codex P1).
 
     ``config_to_payload`` is the deep-merge base for every ``/api/config`` save, so a
@@ -542,6 +610,7 @@ def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch
     status-bubble regression above.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     full = _full_config_payload()
     full["runtime"]["harness_prompt_echo"] = False
@@ -562,8 +631,10 @@ def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch
 def test_show_page_api_timeout_defaults_round_trips_and_survives_partial_save(
     monkeypatch,
     tmp_path,
+    sqlite_schema_db_factory,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     defaulted = V2Config.from_payload(_full_config_payload())
     assert defaulted.runtime.show_page_api_timeout_seconds == 90.0
@@ -610,8 +681,9 @@ def test_config_load_preserves_pre_upgrade_audio_asr_false_as_opt_out():
     assert created.audio_asr.enabled_configured is True
 
 
-def test_save_config_preserves_explicit_audio_asr_opt_out(monkeypatch, tmp_path):
+def test_save_config_preserves_explicit_audio_asr_opt_out(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     payload = _full_config_payload()
     payload["audio_asr"] = {
@@ -626,8 +698,9 @@ def test_save_config_preserves_explicit_audio_asr_opt_out(monkeypatch, tmp_path)
     assert created.audio_asr.enabled_configured is True
 
 
-def test_config_to_payload_redacts_remote_access_secrets_and_save_preserves_them(monkeypatch, tmp_path):
+def test_config_to_payload_redacts_remote_access_secrets_and_save_preserves_them(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     payload = _full_config_payload()
     payload["remote_access"] = {
         "provider": "vibe_cloud",
@@ -661,8 +734,9 @@ def test_config_to_payload_redacts_remote_access_secrets_and_save_preserves_them
     assert updated.remote_access.vibe_cloud.session_secret == "session-secret"
 
 
-def test_config_to_payload_redacts_platform_and_gateway_secrets_and_save_preserves_them(monkeypatch, tmp_path):
+def test_config_to_payload_redacts_platform_and_gateway_secrets_and_save_preserves_them(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     payload = _full_config_payload()
     payload["slack"] = {
         **payload["slack"],
@@ -742,8 +816,9 @@ def test_config_to_payload_redacts_platform_and_gateway_secrets_and_save_preserv
     assert updated.gateway.client_secret == "client-secret"
 
 
-def test_save_config_accepts_slack_disable_link_unfurl(monkeypatch, tmp_path):
+def test_save_config_accepts_slack_disable_link_unfurl(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     payload = _full_config_payload()
     payload["slack"]["disable_link_unfurl"] = True
@@ -753,8 +828,9 @@ def test_save_config_accepts_slack_disable_link_unfurl(monkeypatch, tmp_path):
     assert updated.slack.disable_link_unfurl is True
 
 
-def test_save_config_preserves_platforms_metadata(monkeypatch, tmp_path):
+def test_save_config_preserves_platforms_metadata(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     payload = _full_config_payload()
     payload["slack"]["bot_token"] = "xoxb-valid-token"
@@ -789,8 +865,9 @@ def test_save_config_migrates_legacy_single_platform(monkeypatch, tmp_path):
     assert payload["platforms"] == {"enabled": ["discord"], "primary": "discord"}
 
 
-def test_save_config_rejects_enabled_platform_without_config(monkeypatch, tmp_path):
+def test_save_config_rejects_enabled_platform_without_config(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     import pytest
 
@@ -931,8 +1008,9 @@ def test_save_config_allows_redacted_lark_round_trip_for_legacy_missing_secret(m
         )
 
 
-def test_save_config_preserves_disabled_platform_credentials(monkeypatch, tmp_path):
+def test_save_config_preserves_disabled_platform_credentials(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     payload = _full_config_payload()
     payload["platform"] = "avibe"
@@ -1095,11 +1173,12 @@ def test_config_to_payload_includes_avault_agent():
     assert payload["agents"]["avault"]["cli_path"] == "/opt/managed/avault"
 
 
-def test_save_config_preserves_avault_cli_path_on_unrelated_partial_save(monkeypatch, tmp_path):
+def test_save_config_preserves_avault_cli_path_on_unrelated_partial_save(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """A partial UI save (e.g. toggling ``show_duration``) must NOT reset a
     previously-persisted ``agents.avault.cli_path`` (set by ``vibe runtime
     prepare`` -> ``_persist_avault_cli_path``)."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     full = _full_config_payload()
     full["agents"]["avault"] = {"cli_path": "/opt/managed/avault"}
@@ -1112,11 +1191,12 @@ def test_save_config_preserves_avault_cli_path_on_unrelated_partial_save(monkeyp
     assert api.config_to_payload(updated)["agents"]["avault"]["cli_path"] == "/opt/managed/avault"
 
 
-def test_save_config_preserves_ui_fields_on_unrelated_partial_save(monkeypatch, tmp_path):
+def test_save_config_preserves_ui_fields_on_unrelated_partial_save(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """The owner-facing scenario: after enabling ``show_agent_activity`` (and a
     custom font size / instance name), an unrelated partial save must keep them.
     Guards the ``ui`` sub-block of the deep-merge base."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     full = _full_config_payload()
     full["ui"] = {
@@ -1135,13 +1215,14 @@ def test_save_config_preserves_ui_fields_on_unrelated_partial_save(monkeypatch, 
     assert updated.ui.instance_name == "OwnerBox"
 
 
-def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path):
+def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """Mechanism guard for the whole class: both full-config serializers
     (``V2Config.save`` on disk and ``config_to_payload``, the save merge base)
     must emit every persisted field — top-level, every ``UiConfig`` sub-field,
     and every agent backend. A newly-added field hand-listed into only one
     serializer (or neither) fails here, so it cannot silently drop on save."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     config = api.save_config(_full_config_payload())
 
@@ -1170,12 +1251,13 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
     _assert_complete("V2Config.save", json.loads(paths.get_config_path().read_text(encoding="utf-8")))
 
 
-def test_save_config_strips_codex_relay_marker_from_generic_patch(monkeypatch, tmp_path):
+def test_save_config_strips_codex_relay_marker_from_generic_patch(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """The relay marker is auth-owned state like ``api_key``: a generic
     Settings save that round-trips a stale full-config snapshot (loaded
     before an OAuth transition captured the marker) must not null the
     fresh marker."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
     original = api.save_config(_full_config_payload())
     original.agents.codex.oauth_relay_marker = {
@@ -1375,7 +1457,7 @@ def _walk(root: object, path: tuple[str, ...], *, attr: bool) -> object:
 
 
 def test_wrong_typed_settings_writes_are_refused_instead_of_silently_defaulted(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, sqlite_schema_db_factory,
 ):
     """``/api/config`` stores what the caller sent, or it refuses the write.
 
@@ -1392,6 +1474,7 @@ def test_wrong_typed_settings_writes_are_refused_instead_of_silently_defaulted(
     answers alike.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
 
     def _stored() -> dict:
@@ -1822,11 +1905,12 @@ def test_save_config_list_ops_merge_against_lock_fresh_base(monkeypatch, tmp_pat
     assert "lark" in updated.platforms.enabled
 
 
-def test_list_ops_enable_requires_credentials(monkeypatch, tmp_path):
+def test_list_ops_enable_requires_credentials(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """List-op additions are validated like explicit list saves: enabling
     a platform without credentials through the verb is rejected (#1458
     stage ③ list semantics)."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
 
     import pytest
@@ -1835,11 +1919,12 @@ def test_list_ops_enable_requires_credentials(monkeypatch, tmp_path):
         api.save_config({"__avibe_list_ops": {"platforms.enabled": {"add": ["lark"]}}})
 
 
-def test_list_ops_reject_unwhitelisted_paths(monkeypatch, tmp_path):
+def test_list_ops_reject_unwhitelisted_paths(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """Only whitelisted list paths accept operations — arbitrary dotted
     paths (e.g. model_hub.sources, which must go through ModelHubService)
     are rejected instead of silently mutating the persisted base."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
 
     import pytest
@@ -1860,9 +1945,10 @@ def test_list_ops_reject_unwhitelisted_paths(monkeypatch, tmp_path):
         {"add": ["discord"], "replace": ["slack"]},
     ],
 )
-def test_list_ops_reject_malformed_operands(monkeypatch, tmp_path, operations):
+def test_list_ops_reject_malformed_operands(monkeypatch, tmp_path, operations, sqlite_schema_db_factory):
     """Malformed list operations are client errors, never a server 500."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     api.save_config(_full_config_payload())
 
     with pytest.raises(ValueError, match="Config list operation"):
