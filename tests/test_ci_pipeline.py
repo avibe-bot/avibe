@@ -21,6 +21,53 @@ def _jobs() -> dict:
     return yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())["jobs"]
 
 
+def _artifact_build_commands() -> list[list[str]]:
+    step, = [step for step in _jobs()["build-linux-artifacts"]["steps"]
+             if step.get("name") == "Build package artifact"]
+    assert not step.get("if") and not step.get("continue-on-error")
+    return [shlex.split(line, comments=True) for line in step["run"].splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+
+
+def test_artifact_producer_only_installs_the_frontend_and_builds_both_isolated_distributions():
+    assert _artifact_build_commands() == [
+        ["python", "-m", "pip", "install", "--disable-pip-version-check", "build"],
+        ["python", "scripts/prepare_local_show_runtime_manifest.py"],
+        ["python", "-m", "build", "--outdir", "memory-dist", "packaging/avibe-memory"],
+        ["python", "-m", "build"],
+    ]
+
+
+@pytest.mark.parametrize("failed_stage", [None, 0, 1, 2, 3])
+def test_artifact_build_stops_at_each_failed_boundary(tmp_path, failed_stage):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    python = binary / "python"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "path = pathlib.Path('commands.json')\n"
+        "commands = json.loads(path.read_text()) if path.exists() else []\n"
+        "commands.append(sys.argv)\n"
+        "path.write_text(json.dumps(commands))\n"
+        "sys.exit(7 if str(len(commands) - 1) == os.environ['FAIL_STAGE'] else 0)\n"
+    )
+    python.chmod(0o755)
+    step, = [step for step in _jobs()["build-linux-artifacts"]["steps"]
+             if step.get("name") == "Build package artifact"]
+    result = subprocess.run(
+        [shutil.which("bash"), "-e", "-c", step["run"]], cwd=tmp_path,
+        env={**os.environ, "PATH": str(binary), "FAIL_STAGE": str(failed_stage)},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == (0 if failed_stage is None else 7), result.stderr
+    commands = json.loads((tmp_path / "commands.json").read_text())
+    expected = _artifact_build_commands()
+    assert [["python", *command[1:]] for command in commands] == expected[:
+        len(expected) if failed_stage is None else failed_stage + 1
+    ]
+
+
 def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
     owners = {
         name: job for name, job in _jobs().items()
