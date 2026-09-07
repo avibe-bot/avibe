@@ -515,6 +515,9 @@ class EngineAdapter(Protocol):
         401/403 reject, while 2xx and request-error 400/404/422 accept even
         if the response shape itself stays generic. `custom` Auto detect still
         requires response-backed proof; order alone never proves a protocol.
+        OpenAI/Codex Hub OAuth can combine its bound, fixed Responses endpoint
+        with an authenticated structured request error; neither OAuth success
+        alone nor an unknown/rejected authentication response establishes it.
         """
         ...
 

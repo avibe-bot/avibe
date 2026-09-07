@@ -164,6 +164,18 @@ repeats the same model-free check before persisting the Source.
 local HTTP relay with model scheduling unavailable. It covers every catalog
 preset and every concrete custom interface without using real user state.
 
+OpenAI/Codex Hub OAuth has a fixed, allowlisted Responses endpoint and an
+engine-bound credential. A structured request error accepted by the existing
+authentication parser can therefore confirm that protocol even when it names
+only the missing `model`. This ownership applies inside the OAuth transport,
+not the API-key catalog ladder or generic response parser. Rejected or unknown
+authentication and unstructured responses remain insufficient.
+
+`AUTH-SETUP-113` exercises consent completion through the real OAuth observation
+and discovery path to Source creation, including idempotent terminal polling.
+Missing-model validation succeeds; credential rejection, rate limiting, upstream
+errors, and unstructured success responses create no Source.
+
 ## Acceptance
 
 - DeepSeek official URL + valid key, vendor `deepseek`, adds as

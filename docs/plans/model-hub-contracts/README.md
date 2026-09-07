@@ -71,6 +71,9 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    non-persisting API-key observation surface; API-key `POST /api/models/sources`
    performs the same observation before its independent committed credential
    provisioning, while subscription OAuth uses its vendor-specific observation flow.
+   OpenAI/Codex Hub OAuth may combine its bound official Responses endpoint with
+   an authenticated structured request error, as defined in the protocol-observation
+   ruling in `docs/plans/model-hub.md`; login success alone is insufficient.
    A typed Base URL never creates a saved protocol value. Catalog pin and declaration
    still require reachability and authentication; they never bypass those failures.
 3. Every Source/model reference is canonical and referentially valid at write time.

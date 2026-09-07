@@ -120,6 +120,13 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_api_key_setup_does_not_schedule_a_model
+  - id: AUTH-SETUP-113
+    name: Hub OAuth creates a Source after model-free validation but rejects unproven authentication
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: codex
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_model_free_observation_closed_loop
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

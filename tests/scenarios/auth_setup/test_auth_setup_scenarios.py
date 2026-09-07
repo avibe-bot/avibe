@@ -7,6 +7,7 @@ import time
 import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -2798,6 +2799,99 @@ def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, 
             await web_runner.cleanup()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "creates_source"),
+    [
+        (400, {"error": {"type": "invalid_request_error", "param": "model"}}, True),
+        (401, {"error": {"code": "invalid_api_key"}}, False),
+        (429, {"error": {"type": "rate_limit_error"}}, False),
+        (502, {"error": {"type": "upstream_error"}}, False),
+        (200, {"ok": True}, False),
+    ],
+)
+def test_hub_oauth_model_free_observation_closed_loop(monkeypatch, tmp_path, status, body, creates_source):
+    """Scenario: AUTH-SETUP-113"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    api_calls = []
+    inventory_calls = []
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": [{
+                "id": "codex-test", "auth_index": "auth-index-test",
+                "name": "codex-test.json", "provider": "codex",
+                "id_token": {"chatgpt_account_id": "account-test"},
+            }]}
+        if path == "/api-call":
+            assert method == "POST"
+            assert payload["auth_index"] == "auth-index-test"
+            assert payload["url"] == "https://chatgpt.com/backend-api/codex/responses"
+            assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
+            assert "model" not in json.loads(payload["data"])
+            api_calls.append(payload)
+            return {"status_code": status, "body": json.dumps(body)}
+        if path == "/auth-files/models":
+            assert creates_source
+            assert query == {"name": "codex-test.json"}
+            inventory_calls.append(query)
+            return {"models": [{"id": "gpt-5.6"}]}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Simulate consent and engine lifecycle, but run the actual bound-credential
+    # probe, evidence parser, discovery, and terminal Source materialization.
+    monkeypatch.setattr(adapter, "observe_source", transport.observe_source)
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        assert not store.config.sources
+
+    async def complete_consent(h):
+        flow = adapter.flows[h.flow_id]
+        h.credential_ref = state_store.bind_oauth_credential(flow.source_id, "openai", "codex-test.json")
+        adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
+
+    async def materialize_source(h):
+        if creates_source:
+            terminal = await service.oauth_status(h.flow_id)
+            source = terminal["source"]
+            assert terminal["flow"]["state"] == "success"
+            assert source["protocol"] == "openai_responses"
+            assert source["supply_channel"] == "hub"
+            assert source["credential_ref"] == h.credential_ref
+            assert [model["id"] for model in source["models"]] == ["gpt-5.6"]
+            assert service.list_sources() == [source]
+            assert (await service.oauth_status(h.flow_id))["source"] == source
+            assert adapter.revoked == []
+        else:
+            with pytest.raises(ModelHubError):
+                await service.oauth_status(h.flow_id)
+            assert not store.config.sources
+            assert adapter.revoked == [h.credential_ref]
+        assert len(api_calls) == 1
+        assert len(inventory_calls) == int(creates_source)
+
+    asyncio.run(runner.run(
+        ScenarioStep("start_login", start_login),
+        ScenarioStep("complete_consent", complete_consent),
+        ScenarioStep("materialize_source", materialize_source),
+    ))
+    ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
 
 
 if __name__ == "__main__":

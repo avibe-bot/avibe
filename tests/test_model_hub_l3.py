@@ -7173,13 +7173,17 @@ def test_custom_declared_observation_uses_owner_status_before_parser_verdict(
         inventory_probe.assert_not_awaited()
 
 
+@pytest.mark.parametrize("vendor", ["openai", "codex"])
+@pytest.mark.parametrize("error_param", ["input", "model", None])
 def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof(
     tmp_path: Path,
+    vendor: str,
+    error_param: str | None,
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state")
     credential_ref = state_store.bind_oauth_credential(
         "src_oauthproof",
-        "openai",
+        vendor,
         "codex-test.json",
     )
     client = Mock()
@@ -7207,7 +7211,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
                     {
                         "error": {
                             "type": "invalid_request_error",
-                            "param": "input",
+                            "param": error_param,
                         }
                     }
                 ),
@@ -7227,7 +7231,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
 
     observed = asyncio.run(
         adapter.observe_source(
-            "openai",
+            vendor,
             None,
             credential_ref,
             SOURCE_PROTOCOLS,
@@ -7255,7 +7259,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
     client.management_request.side_effect = ambiguous_management_request
     ambiguous = asyncio.run(
         adapter.observe_source(
-            "openai",
+            vendor,
             None,
             credential_ref,
             SOURCE_PROTOCOLS,

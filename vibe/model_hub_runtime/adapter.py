@@ -858,12 +858,23 @@ def _probe_oauth_protocol_response(
             error_type="invalid_json",
         )
     body = payload.get("body")
-    return _parse_protocol_authenticated_evidence(
+    evidence = _parse_protocol_authenticated_evidence(
         protocol,
         status,
         body if isinstance(body, str) else "",
         vendor=vendor,
     )
+    if (
+        protocol == "openai_responses"
+        and evidence.protocol is _ProtocolProof.UNPROVEN
+        and evidence.authentication is _AuthenticationEvidence.ACCEPTED
+        and evidence.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+    ):
+        # The bound OAuth credential reaches only the fixed Codex Responses
+        # endpoint above. Its authenticated missing-model error need not name
+        # a Responses-specific field; custom API-key URLs have no such proof.
+        return replace(evidence, protocol=_ProtocolProof.PROVEN)
+    return evidence
 
 
 @dataclass

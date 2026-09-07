@@ -355,6 +355,14 @@ rungs, documented in `docs/plans/model-hub-vendor-preset-protocol.md`:
    prove reachability and authentication on that protocol's path. Shape proof
    is not required. A wrong declaration fails on a later real call.
 
+For OpenAI/Codex Hub subscriptions, the bound OAuth transport owns the fixed
+official Responses endpoint. Model-free observation may combine that endpoint
+with a structured request error classified as authenticated, including a
+missing-model error, to establish `openai_responses` (2026-09-07). Login success
+alone, unknown authentication, and credential rejection do not establish it.
+This does not grant endpoint ownership to user-supplied API-key URLs or relax
+`custom` Auto detection.
+
 The form exposes a vendor select first (V4 06r / 模型网关 05). Auto detect plus
 the three supported protocols remain on `custom`. A failed observation still
 stores nothing rather than guessing. Unreachable, rejected, timeout, and
