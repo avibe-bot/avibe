@@ -39,7 +39,11 @@ from config.v2_config import (
 )
 from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
-from core.handlers.model_hub.service import ModelHubError, _NATIVE_VENDOR_BACKENDS
+from core.handlers.model_hub.service import (
+    ModelHubError,
+    _NATIVE_VENDOR_BACKENDS,
+    seeded_source_name,
+)
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
@@ -1652,6 +1656,11 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                     source["protocol"],
                     hub_subscription_serving_protocol(vendor),
                 )
+                # A name the user can read, not the routing key. Taken from the
+                # same seed the api-key path uses, so this reads `xAI` and not
+                # `xai` — asserted through the seed rather than a literal, for
+                # the same reason as the protocol above.
+                self.assertEqual(source["display_name"], seeded_source_name(vendor))
                 self.assertEqual(source["credential_ref"], "cred_consent01")
                 self.assertEqual(
                     [model["id"] for model in source["models"]],

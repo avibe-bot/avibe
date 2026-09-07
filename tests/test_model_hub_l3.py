@@ -74,6 +74,7 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     ResolvedInvocation,
     project_opencode_public_model,
+    seeded_source_name,
 )
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
@@ -104,6 +105,7 @@ from vibe.model_hub_runtime.adapter import (
     CLIProxyEngineAdapter,
     hub_subscription_serving_protocol,
     _HUB_SUBSCRIPTION_PROTOCOLS,
+    _OAUTH_ENDPOINTS,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
@@ -111,7 +113,11 @@ from vibe.model_hub_runtime.adapter import (
     _ProtocolObservationShape,
     _ProtocolProof,
 )
-from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, pinned_api_key_protocol
+from vibe.model_hub_runtime.api_key_vendors import (
+    api_key_vendor_catalog,
+    catalog_api_key_vendor_label,
+    pinned_api_key_protocol,
+)
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore
 
@@ -7471,6 +7477,21 @@ def test_hub_subscription_pin_agrees_with_the_same_vendors_api_key_pin(vendor: s
     """
 
     assert hub_subscription_serving_protocol(vendor) == pinned_api_key_protocol(vendor)
+
+
+@pytest.mark.parametrize("vendor", sorted(_OAUTH_ENDPOINTS))
+def test_oauth_source_is_seeded_with_its_vendors_catalog_label(vendor: str) -> None:
+    """A vendor id is a routing key, so no Source may be named by one we can name.
+
+    Seeded over the whole start table rather than the vendors this change adds:
+    an OAuth vendor the catalog already lists cannot be admitted and then ship
+    named `xai` beside an api-key Source of the same vendor reading `xAI`. The
+    id survives as the seed only for a vendor the catalog does not list, which
+    is the only name that channel has for it.
+    """
+
+    label = catalog_api_key_vendor_label(vendor)
+    assert seeded_source_name(vendor) == (label if label is not None else vendor)
 
 
 DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD = {

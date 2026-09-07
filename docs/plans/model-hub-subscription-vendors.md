@@ -151,7 +151,12 @@ change, no new API field.
 - Each new vendor's 去登录 obtains a flow through the engine endpoint above;
   the generic §1.4 states drive it to a bound hub Source; models supplied by
   that subscription appear as Gateway upstream supply.
-- Claude/ChatGPT flows byte-equivalent (existing scenario cases stay green).
+- Claude/ChatGPT flows byte-equivalent (existing scenario cases stay green),
+  with one recorded exception: **the seeded Source name** (amended 2026-09-07,
+  below). Their flows, states, refusals, and persisted shape are untouched;
+  only the name a *newly* created Source starts with changes, from `anthropic`
+  / `openai` to the catalog's `Anthropic` / `OpenAI`. Existing Sources keep the
+  name they hold, and the field stays user-editable.
 - `tests/scenarios/auth_setup/catalog.yaml` gains rows for the three new
   vendors with closed-loop harness cases in
   `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` (repo rule for
@@ -159,6 +164,31 @@ change, no new API field.
   tests.
 - No live vendor OAuth is exercised in CI; harness cases run against stubbed
   engine management endpoints, matching the existing two vendors' pattern.
+
+## Amendment 2026-09-07 — a Source is seeded with a name, not a routing key
+
+A completed grant seeded the new Source's `display_name` from the vendor id, so
+these subscriptions would have shipped as `gemini`, `kimi`, and `xai` — the last
+of which contradicts the label ruling above in the very place the user reads it.
+
+The fix is a deletion, not an addition: the api-key create path in the same file
+already seeded from the shipped catalog's `label`, so the two sibling paths
+disagreed and the subscription one was the outlier. Both now call one
+`seeded_source_name(vendor)`, which is the catalog label where the catalog lists
+the vendor and the id where it does not.
+
+This reaches the two shipped vendors as well, and deliberately so: seeding only
+the new three would leave `Gemini` beside `anthropic` in one list, and an
+Anthropic api-key Source already reads `Anthropic` beside a Claude subscription
+reading `anthropic`. Closing the whole class is smaller than three special
+cases. `codex` has no catalog row and keeps its id, so the ChatGPT flow is
+unchanged either way. Nothing renames an existing Source, and the field remains
+user-owned — this is the seed, not a display rule, so no i18n row is involved
+(a brand name is not localized copy).
+
+Guarded as an invariant over the start table rather than per vendor: every
+`_OAUTH_ENDPOINTS` vendor the catalog names must seed with that name, so a
+vendor admitted later cannot ship named by its id.
 
 ## Out of scope
 
