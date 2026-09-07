@@ -96,8 +96,11 @@ from modules.agents.model_hub import (
 from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
+    _authenticate_protected_inventory,
     _AuthenticationEvidence,
     CLIProxyEngineAdapter,
+    _control_api_key,
+    _owner_authentication_candidate,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
@@ -7182,6 +7185,57 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
         inventory_probe.assert_not_awaited()
 
 
+@pytest.mark.parametrize("secret", [chr(code) * 3 for code in range(33, 127)] + ["", "\u00e9\u00e9", "\u4e2d\u6587", "sk-proj-!A!"])
+def test_api_key_control_is_distinct_for_the_complete_opaque_input_domain(secret: str) -> None:
+    control = _control_api_key(secret)
+    assert control != secret
+    assert control
+    if secret:
+        assert len(control) == len(secret)
+        changes = [(before, after) for before, after in zip(secret, control) if before != after]
+        assert len(changes) == 1
+        before, after = changes[0]
+        for first, last in (("0", "9"), ("a", "z"), ("A", "Z")):
+            if first <= before <= last:
+                assert first <= after <= last
+
+
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("owner_scoped", [False, True])
+@pytest.mark.parametrize("is_control", [False, True])
+@pytest.mark.parametrize("body", ['{"message":"Regional policy"}', '{"error":{"code":"invalid_api_key"}}'])
+def test_authentication_status_interpretation_preserves_evidence_role(
+    protocol, status, owner_scoped, is_control, body,
+) -> None:
+    parsed = _parse_protocol_authenticated_evidence(protocol, status, body)
+    evidence = _owner_authentication_candidate(parsed, owner_scoped=owner_scoped, is_control=is_control)
+    expected = (
+        _AuthenticationEvidence.REJECTED
+        if owner_scoped or is_control or "invalid_api_key" in body
+        else _AuthenticationEvidence.UNKNOWN
+    )
+    assert evidence.authentication is expected
+
+
+@pytest.mark.parametrize("owner_scoped", [False, True])
+@pytest.mark.parametrize("status", [401, 403])
+def test_inventory_primary_status_requires_a_protocol_owner(owner_scoped, status) -> None:
+    with patch(
+        "vibe.model_hub_runtime.adapter.probe_models",
+        new=AsyncMock(side_effect=[
+            EngineClientError("Control rejected", status_code=401),
+            EngineClientError("Unknown primary response", status_code=status),
+        ]),
+    ) as inventory:
+        evidence = asyncio.run(_authenticate_protected_inventory(
+            vendor="custom", protocol="openai_responses", base_url="https://relay.example",
+            secret="test-key", control_secret="test-control", owner_scoped=owner_scoped,
+        ))
+    assert evidence is (_AuthenticationEvidence.REJECTED if owner_scoped else _AuthenticationEvidence.UNKNOWN)
+    assert [call.kwargs["secret"] for call in inventory.await_args_list] == ["test-control", "test-key"]
+
+
 @pytest.mark.parametrize("vendor", ["openai", "codex"])
 @pytest.mark.parametrize("error_param", ["input", "model", None])
 def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof(
@@ -7264,22 +7318,27 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         if path == "/auth-files":
             return management_request(method, path, query=query, payload=payload)
         if path == "/api-call":
-            return {"status_code": 200, "header": {}, "body": '{"ok":true}'}
+            return {"status_code": unknown_status, "header": {}, "body": unknown_body}
         raise AssertionError((method, path))
 
     client.management_request.side_effect = ambiguous_management_request
-    ambiguous = asyncio.run(
-        adapter.observe_source(
-            vendor,
-            None,
-            credential_ref,
-            SOURCE_PROTOCOLS,
+    for unknown_status, unknown_body in (
+        (200, '{"ok":true}'),
+        (401, "<html>Request blocked</html>"),
+        (403, '{"message":"Regional policy"}'),
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                vendor,
+                None,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
         )
-    )
 
-    assert ambiguous.outcome.value == "ambiguous"
-    assert ambiguous.protocol is None
-    assert ambiguous.authenticated is None
+        assert ambiguous.outcome.value == "ambiguous"
+        assert ambiguous.protocol is None
+        assert ambiguous.authenticated is None
 
 
 def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof(

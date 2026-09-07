@@ -607,8 +607,10 @@ def _parse_protocol_authenticated_evidence(
     )
 
 
-def _owner_authentication_candidate(evidence: _ProtocolEvidence, *, owner_scoped: bool) -> _ProtocolEvidence:
-    if evidence.status in _AUTHENTICATION_ERROR_STATUSES:
+def _owner_authentication_candidate(
+    evidence: _ProtocolEvidence, *, owner_scoped: bool, is_control: bool = False,
+) -> _ProtocolEvidence:
+    if (owner_scoped or is_control) and evidence.status in _AUTHENTICATION_ERROR_STATUSES:
         return replace(evidence, authentication=_AuthenticationEvidence.REJECTED)
     if (
         owner_scoped
@@ -619,8 +621,19 @@ def _owner_authentication_candidate(evidence: _ProtocolEvidence, *, owner_scoped
     return evidence
 
 
+def _control_api_key(secret: str) -> str:
+    # Preserve the existing prefix, length and ASCII character class where
+    # possible, without ever reusing punctuation-only or other opaque keys.
+    for index in range(len(secret) - 1, -1, -1):
+        for first, last in (("0", "9"), ("a", "z"), ("A", "Z")):
+            if first <= secret[index] <= last:
+                changed = chr(ord(first) + 1) if secret[index] == first else first
+                return secret[:index] + changed + secret[index + 1:]
+    return secret[:-1] + ("?" if secret.endswith("!") else "!")
+
+
 async def _authenticate_protected_inventory(
-    *, vendor: str, protocol: str, base_url: str | None, secret: str, control_secret: str,
+    *, vendor: str, protocol: str, base_url: str | None, secret: str, control_secret: str, owner_scoped: bool,
 ) -> _AuthenticationEvidence:
     # A public model list proves neither key validity nor protocol identity.
     try:
@@ -633,7 +646,7 @@ async def _authenticate_protected_inventory(
     try:
         await probe_models(vendor=vendor, protocol=protocol, base_url=base_url, secret=secret)
     except EngineClientError as exc:
-        if exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
+        if owner_scoped and exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
             return _AuthenticationEvidence.REJECTED
         return _AuthenticationEvidence.UNKNOWN
     return _AuthenticationEvidence.ACCEPTED
@@ -674,7 +687,7 @@ async def _probe_protocol_response(
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async def request(probe_headers: dict[str, str]) -> _ProtocolEvidence:
+            async def request(probe_headers: dict[str, str], *, is_control: bool = False) -> _ProtocolEvidence:
                 async with session.post(
                     url,
                     headers=probe_headers,
@@ -687,33 +700,25 @@ async def _probe_protocol_response(
                             protocol, response.status, body, vendor=vendor, request_root=root,
                         ),
                         owner_scoped=owner_scoped,
+                        is_control=is_control,
                     )
 
             evidence = await request(headers)
             if evidence.authentication is not _AuthenticationEvidence.ACCEPTED:
                 return evidence
-            # Keep presence, prefix, length and character class for gateways
-            # that reject malformed keys before validating the request body.
-            control_secret = secret
-            for index in range(len(secret) - 1, -1, -1):
-                for first, last in (("0", "9"), ("a", "z"), ("A", "Z")):
-                    if first <= secret[index] <= last:
-                        changed = chr(ord(first) + 1) if secret[index] == first else first
-                        control_secret = secret[:index] + changed + secret[index + 1:]
-                        break
-                if control_secret != secret:
-                    break
+            control_secret = _control_api_key(secret)
             control_headers = dict(headers)
             if protocol == "anthropic":
                 control_headers["x-api-key"] = control_secret
             else:
                 control_headers["Authorization"] = f"Bearer {control_secret}"
-            control = await request(control_headers)
+            control = await request(control_headers, is_control=True)
             if control.authentication is _AuthenticationEvidence.REJECTED:
                 return evidence
             authentication = await _authenticate_protected_inventory(
                 vendor=vendor, protocol=protocol, base_url=base_url,
                 secret=secret, control_secret=control_secret,
+                owner_scoped=owner_scoped,
             )
             return replace(evidence, authentication=authentication)
 
@@ -905,7 +910,7 @@ def _probe_oauth_protocol_response(
             "OAuth credential does not support this protocol path",
             status_code=404,
         )
-    def request(probe_headers: dict[str, str]) -> _ProtocolEvidence:
+    def request(probe_headers: dict[str, str], *, is_control: bool = False) -> _ProtocolEvidence:
         payload = client.management_request(
             "POST",
             "/api-call",
@@ -929,11 +934,14 @@ def _probe_oauth_protocol_response(
                 protocol, status, body if isinstance(body, str) else "", vendor=vendor,
             ),
             owner_scoped=False,
+            is_control=is_control,
         )
 
     evidence = request(headers)
     if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
-        control = request({**headers, "Authorization": f"Bearer avibe-control-{secrets.token_hex(16)}"})
+        control = request(
+            {**headers, "Authorization": f"Bearer avibe-control-{secrets.token_hex(16)}"}, is_control=True,
+        )
         if control.authentication is not _AuthenticationEvidence.REJECTED:
             return replace(evidence, authentication=_AuthenticationEvidence.UNKNOWN)
     if (

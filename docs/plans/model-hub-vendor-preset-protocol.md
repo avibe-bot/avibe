@@ -172,12 +172,21 @@ observation can instead verify that the existing model-list path rejects the
 control and accepts the supplied key. Public or indeterminate inventory cannot
 prove authentication, and `accept_unavailable_inventory` cannot waive it.
 Explicit credential rejection is never overridden by a vendor pin/declaration.
-The API-key control preserves key presence, prefix and length; all requests
-remain model-free, non-redirecting, and bounded by the observation deadline.
+The API-key control is always distinct, including punctuation-only credentials.
+It changes one character while preserving length and the preceding prefix, and
+retains the ASCII character class where possible. All requests remain model-free,
+non-redirecting, and bounded by the observation deadline.
+Status-only rejection applies only to catalog/declaration-owned candidates or
+deliberately changed control credentials. Unrecognized primary 401/403 responses
+remain unknown for Auto and OAuth, including the API-key inventory fallback;
+they must not reject the credential or exclude a competing protocol.
 
 `AUTH-SETUP-112` covers both authentication-before-validation and
-validation-before-authentication, with both protected and public model lists.
+validation-before-authentication, with both protected and public model lists,
+for alphanumeric and punctuation-only credentials.
 Only credential-sensitive evidence allows observe and confirm to succeed.
+`AUTH-SETUP-114` covers unrecognized Auto policy responses through observe and
+confirm, including a competing protocol that must not win by false exclusion.
 
 OpenAI/Codex Hub OAuth has a fixed, allowlisted Responses endpoint and an
 engine-bound credential. A structured request error accepted by the existing
