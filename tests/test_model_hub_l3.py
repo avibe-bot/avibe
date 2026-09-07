@@ -6741,8 +6741,13 @@ def test_qwen_catalog_pin_validation_remains_unverified(
                     clear=False,
                 ),
                 patch(
+                    # This interface publishes no model listing, so nothing on
+                    # it can speak for the credential the wrapperless
+                    # validation error left unknown.
                     "vibe.model_hub_runtime.adapter.probe_models",
-                    new=AsyncMock(return_value=(DiscoveredModel(id="qwen-plus"),)),
+                    new=AsyncMock(
+                        side_effect=EngineClientError("no listing", status_code=404)
+                    ),
                 ) as inventory_probe,
             ):
                 observed = await adapter.observe_source(
@@ -6751,8 +6756,7 @@ def test_qwen_catalog_pin_validation_remains_unverified(
                     credential_ref,
                     SOURCE_PROTOCOLS,
                 )
-                inventory_probe.assert_not_awaited()
-                inventory_kwargs = {}
+                inventory_kwargs = dict(inventory_probe.await_args.kwargs)
         finally:
             await runner.cleanup()
         return requests, observed, inventory_kwargs
@@ -6767,7 +6771,7 @@ def test_qwen_catalog_pin_validation_remains_unverified(
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
         for protocol in SOURCE_PROTOCOLS
     ]
-    assert inventory_kwargs == {}
+    assert inventory_kwargs["protocol"] == "openai_chat"
 
 
 def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
@@ -6821,8 +6825,13 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
                     clear=False,
                 ),
                 patch(
+                    # This interface publishes no model listing, so nothing on
+                    # it can speak for the credential the numeric validation
+                    # error left unknown.
                     "vibe.model_hub_runtime.adapter.probe_models",
-                    new=AsyncMock(return_value=(DiscoveredModel(id="openrouter/auto"),)),
+                    new=AsyncMock(
+                        side_effect=EngineClientError("no listing", status_code=404)
+                    ),
                 ) as inventory_probe,
             ):
                 observed = await adapter.observe_source(
@@ -6831,8 +6840,7 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
                     credential_ref,
                     SOURCE_PROTOCOLS,
                 )
-                inventory_probe.assert_not_awaited()
-                inventory_kwargs = {}
+                inventory_kwargs = dict(inventory_probe.await_args.kwargs)
         finally:
             await runner.cleanup()
         return requests, observed, inventory_kwargs
@@ -6847,7 +6855,7 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
         for protocol in SOURCE_PROTOCOLS
     ]
-    assert inventory_kwargs == {}
+    assert inventory_kwargs["protocol"] == "openai_chat"
 
 
 def _catalog_owner_status_body(vendor: str, status: int) -> dict[str, object]:
@@ -6887,10 +6895,21 @@ def _run_catalog_pin_observation(
     protocol: str,
     status: int,
     body: dict[str, object],
-) -> tuple[list[str], object, dict[str, object] | None]:
+    listing: str,
+) -> tuple[list[tuple[str, str]], object]:
+    """Observe a pinned vendor whose probe answers `status` and whose model
+    listing behaves as `listing`.
+
+    ``listing`` names what the interface does with ``GET /v1/models``:
+    ``gated`` answers the stored credential and refuses an uncredentialed
+    caller, ``open`` answers anybody, ``rejects`` refuses every caller, and
+    ``absent`` publishes no listing at all.
+    """
+
+    key = f"test-{vendor}-{status}"
     state_store = EngineStateStore(tmp_path / f"engine-state-{vendor}-{status}")
     credential_ref = state_store.store_api_key(
-        f"test-{vendor}-{status}",
+        key,
         vendor=vendor,
         protocol=protocol,
         base_url=None,
@@ -6900,17 +6919,33 @@ def _run_catalog_pin_observation(
         state_store=state_store,
     )
 
-    async def scenario() -> tuple[list[str], object, dict[str, object] | None]:
-        requests: list[str] = []
+    def supplied_credential(request: web.Request) -> str:
+        return request.headers.get("x-api-key") or request.headers.get(
+            "Authorization", ""
+        ).removeprefix("Bearer ")
+
+    async def scenario() -> tuple[list[tuple[str, str]], object]:
+        requests: list[tuple[str, str]] = []
 
         async def capture_probe(request: web.Request) -> web.Response:
-            requests.append(request.path)
-            supplied = request.headers.get("x-api-key") or request.headers.get("Authorization", "").removeprefix("Bearer ")
-            if supplied != f"test-{vendor}-{status}":
+            requests.append((request.method, request.path))
+            if supplied_credential(request) != key:
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             return web.json_response(body, status=status)
 
+        async def capture_listing(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path))
+            if listing == "absent":
+                return web.json_response({"error": "unknown route"}, status=404)
+            refused = listing == "rejects" or (
+                listing == "gated" and supplied_credential(request) != key
+            )
+            if refused:
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            return web.json_response({"data": [{"id": f"{vendor}/listed"}]})
+
         app = web.Application()
+        app.router.add_get("/v1/models", capture_listing)
         app.router.add_post("/{tail:.*}", capture_probe)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -6920,16 +6955,10 @@ def _run_catalog_pin_observation(
         port = site._server.sockets[0].getsockname()[1]
         origin = f"http://127.0.0.1:{port}"
         try:
-            with (
-                patch.dict(
-                    "vibe.model_hub_runtime.adapter._OFFICIAL_BASE_URLS",
-                    {vendor: origin},
-                    clear=False,
-                ),
-                patch(
-                    "vibe.model_hub_runtime.adapter.probe_models",
-                    new=AsyncMock(return_value=(DiscoveredModel(id=f"{vendor}/auto"),)),
-                ) as inventory_probe,
+            with patch.dict(
+                "vibe.model_hub_runtime.adapter._OFFICIAL_BASE_URLS",
+                {vendor: origin},
+                clear=False,
             ):
                 observed = await adapter.observe_source(
                     vendor,
@@ -6937,60 +6966,58 @@ def _run_catalog_pin_observation(
                     credential_ref,
                     (protocol,),
                 )
-                inventory_kwargs = (
-                    dict(inventory_probe.await_args.kwargs)
-                    if inventory_probe.await_args is not None
-                    else None
-                )
         finally:
             await runner.cleanup()
-        return requests, observed, inventory_kwargs
+        return requests, observed
 
     return asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("listing", ["gated", "open", "rejects", "absent"])
+@pytest.mark.parametrize("status", [400, 401])
 @pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_json_400_does_not_prove_authentication(
+def test_catalog_pin_authentication_comes_from_a_credential_gated_listing(
     tmp_path: Path,
     vendor: str,
     protocol: str,
+    status: int,
+    listing: str,
 ) -> None:
-    requests, observed, inventory_kwargs = _run_catalog_pin_observation(
+    """A pin's authentication is whatever its model listing attests.
+
+    The model-less probe cannot speak for the credential: neither its request
+    error nor a bare authentication status without a shaped identifier decides
+    anything, for any vendor. So the listing on the pinned interface answers
+    instead, and only a listing that is gated by the credential attests to it --
+    an open catalogue answers whoever asks and therefore names no key.
+    """
+
+    requests, observed = _run_catalog_pin_observation(
         tmp_path,
         vendor=vendor,
         protocol=protocol,
-        status=400,
-        body=_catalog_owner_status_body(vendor, 400),
+        status=status,
+        body=_catalog_owner_status_body(vendor, status),
+        listing=listing,
     )
 
-    assert observed.outcome.value == "ambiguous"
-    assert observed.protocol is None
-    assert observed.authenticated is None
-    assert observed.model_ids == ()
-    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
-    assert inventory_kwargs is None
-
-
-@pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_unknown_json_401_is_not_credential_rejection(
-    tmp_path: Path,
-    vendor: str,
-    protocol: str,
-) -> None:
-    requests, observed, inventory_kwargs = _run_catalog_pin_observation(
-        tmp_path,
-        vendor=vendor,
-        protocol=protocol,
-        status=401,
-        body=_catalog_owner_status_body(vendor, 401),
-    )
-
-    assert observed.outcome.value == "ambiguous"
-    assert observed.protocol is None
-    assert observed.authenticated is None
-    assert observed.model_ids == ()
-    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
-    assert inventory_kwargs is None
+    if listing == "gated":
+        assert observed.outcome.value == "observed"
+        assert observed.protocol == protocol
+        assert observed.authenticated is True
+        assert observed.model_ids == (f"{vendor}/listed",)
+    elif listing == "rejects":
+        assert observed.outcome.value == "authentication_failed"
+        assert observed.protocol is None
+        assert observed.authenticated is False
+        assert observed.model_ids == ()
+    else:
+        assert observed.outcome.value == "ambiguous"
+        assert observed.protocol is None
+        assert observed.authenticated is None
+        assert observed.model_ids == ()
+    assert requests[0] == ("POST", _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path)
+    assert set(requests[1:]) <= {("GET", "/v1/models")}
 
 
 def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(
@@ -7166,6 +7193,8 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
             new=AsyncMock(return_value=parser_evidence),
         ) as protocol_probe,
         patch(
+            # This listing answers with or without a credential, so it attests
+            # to nobody and cannot repair an unknown verdict.
             "vibe.model_hub_runtime.adapter.probe_models",
             new=AsyncMock(return_value=(DiscoveredModel(id="declared-model"),)),
         ) as inventory_probe,
@@ -7189,7 +7218,127 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
         assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
     else:
         assert observed.protocol is None
-        inventory_probe.assert_not_awaited()
+        # An unknown verdict is the only one the listing may still answer: a
+        # rejection is already decided, so nothing further is asked.
+        asked_listing = initial_authentication is _AuthenticationEvidence.UNKNOWN
+        assert (inventory_probe.await_count > 0) is asked_listing
+
+
+@pytest.mark.parametrize("stored_key", ["relay-live-key", "relay-wrong-key"])
+def test_declared_custom_anthropic_relay_verifies_from_its_models_listing(
+    tmp_path: Path,
+    stored_key: str,
+) -> None:
+    """The reported relay, recorded from a live one: a declared `anthropic`
+    endpoint that answers the model-less probe with Anthropic's own 400
+    envelope -- which proves the interface and says nothing about the key --
+    and gates `GET /v1/models` on that key.
+
+    The listing is therefore what separates the working credential from the
+    wrong one, on an interface whose probe can only ever be a request error.
+    """
+
+    live_key = "relay-live-key"
+    state_store = EngineStateStore(tmp_path / f"engine-state-relay-{stored_key}")
+    adapter = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+
+    async def scenario() -> tuple[list[tuple[str, str, str]], list[dict], object]:
+        requests: list[tuple[str, str, str]] = []
+        probe_bodies: list[dict] = []
+
+        def supplied(request: web.Request) -> str:
+            return request.headers.get("x-api-key", "")
+
+        async def relay_messages(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path, supplied(request)))
+            probe_bodies.append(await request.json())
+            if supplied(request) != live_key:
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "authentication_error",
+                            "message": "invalid x-api-key",
+                        },
+                    },
+                    status=401,
+                )
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "model: Field required",
+                    },
+                },
+                status=400,
+            )
+
+        async def relay_models(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path, supplied(request)))
+            if supplied(request) != live_key:
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "authentication_error",
+                            "message": "invalid x-api-key",
+                        },
+                    },
+                    status=401,
+                )
+            return web.json_response(
+                {"data": [{"id": "claude-sonnet-4-5"}, {"id": "claude-opus-4-6"}]}
+            )
+
+        app = web.Application()
+        app.router.add_get("/v1/models", relay_models)
+        app.router.add_post("/{tail:.*}", relay_messages)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        origin = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        credential_ref = state_store.store_api_key(
+            stored_key,
+            vendor="custom",
+            protocol="anthropic",
+            base_url=origin,
+        )
+        try:
+            observed = await adapter.observe_source(
+                "custom",
+                origin,
+                credential_ref,
+                ("anthropic",),
+            )
+        finally:
+            await runner.cleanup()
+        return requests, probe_bodies, observed
+
+    requests, probe_bodies, observed = asyncio.run(scenario())
+
+    probe_path = _PROTOCOL_OBSERVATION_TAXONOMY["anthropic"].request_path
+    assert all("model" not in body for body in probe_bodies)
+    if stored_key == live_key:
+        assert observed.outcome.value == "observed"
+        assert observed.protocol == "anthropic"
+        assert observed.authenticated is True
+        assert observed.model_ids == ("claude-sonnet-4-5", "claude-opus-4-6")
+        assert requests == [
+            ("POST", probe_path, live_key),
+            ("GET", "/v1/models", live_key),
+            # The control carries no credential at all, which is how an
+            # answered listing is told apart from a published one.
+            ("GET", "/v1/models", ""),
+        ]
+    else:
+        assert observed.outcome.value == "authentication_failed"
+        assert observed.authenticated is False
+        assert observed.protocol is None
+        assert observed.model_ids == ()
+        assert requests == [("POST", probe_path, stored_key)]
 
 
 def test_auth_setup_executable_scenarios_are_registered() -> None:

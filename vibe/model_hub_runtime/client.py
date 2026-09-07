@@ -743,10 +743,16 @@ async def probe_models(
     vendor: str,
     protocol: str,
     base_url: str | None,
-    secret: str,
+    secret: str | None,
     timeout: float = 15.0,
 ) -> tuple[DiscoveredModel, ...]:
-    """Probe the one allowlisted models path without redirecting credentials."""
+    """Probe the one allowlisted models path without redirecting credentials.
+
+    ``secret=None`` sends no credential at all. It is not an altered or
+    fabricated one -- there is no token to guess wrong and no other valid key to
+    collide with -- so what it answers is unambiguous: a listing that still
+    arrives belongs to anyone who asks and therefore attests to no credential.
+    """
     normalized_vendor = vendor.strip().lower()
     root = base_url or _OFFICIAL_BASE_URLS.get(normalized_vendor)
     if not root:
@@ -756,13 +762,16 @@ async def probe_models(
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
-    headers = {"Authorization": f"Bearer {secret}", "Accept": "application/json"}
+    headers = {"Accept": "application/json"}
     if protocol == "anthropic":
-        headers = {
-            "x-api-key": secret,
-            "anthropic-version": "2023-06-01",
-            "Accept": "application/json",
-        }
+        # The version header is part of the interface, not the credential, so it
+        # stays on the uncredentialed request: it must differ in exactly one way.
+        headers["anthropic-version"] = "2023-06-01"
+    if secret is not None:
+        if protocol == "anthropic":
+            headers["x-api-key"] = secret
+        else:
+            headers["Authorization"] = f"Bearer {secret}"
     deadline = time.monotonic() + timeout
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:

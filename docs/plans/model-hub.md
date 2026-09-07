@@ -369,14 +369,34 @@ The three owners above still determine the interface, but explicit API-key
 `save_unverified: true` no longer requires a successful observation. It saves only
 a catalog-pinned or user-declared protocol, with canonical validation, credential
 custody, nonce reconciliation and rollback unchanged. Custom Auto without a
-declaration is refused before credential work. No upstream probe or model discovery
-is performed by this explicit save path; supplied manual models remain manual.
+declaration is refused before credential work. No upstream probe gates this explicit
+save path. It attempts one bounded inventory discovery with the provisioned
+credential, which fills the Source without answering the credential question and
+never blocks the save or replaces manual entries; supplied manual models remain
+manual.
 
 Schema errors may precede authentication and never authenticate a key. There is no
 synthetic credential control: unknown grammar/checksums and other valid credentials
 make both rejection and acceptance of an altered token inconclusive. Bare 401/403
 statuses likewise do not prove credential rejection. The ordinary non-persisting
 observation still reports response-backed evidence without inventing certainty.
+
+**Owner ruling 2026-09-07, later the same day, superseding the paragraph above
+wherever the two conflict: an owned interface's model listing is the authentication
+witness.** A model-less probe cannot succeed by construction, so the ruling above
+left rungs 1 and 3 with no add-time verification at all and funnelled every API-key
+add into the explicit unverified save. When a probe leaves authentication unknown on
+an API-key candidate whose protocol already has an owner — a catalog pin or a
+concrete `custom` declaration — observation reads that protocol's `GET /v1/models`.
+A listing that answers the credential and refuses the identical request carrying no
+credential authenticates it, and is reused as the discovered inventory rather than
+fetched twice. `401`/`403` there rejects the candidate: the shaped-evidence rule
+guards protocol claims, and this rung's protocol comes from its owner, so the refusal
+speaks only about the credential. Every other answer — no listing, a non-JSON body, a
+timeout, a listing open to anyone — leaves the outcome the paragraph above would have
+produced, unverified-save exit included. There is still no synthetic credential
+control: the control request carries no credential at all, and a public list still
+repairs no proof. Custom Auto is never asked, because a listing names no protocol.
 
 Completed Hub OAuth consent may retain its bound credential as an unverified Source
 under the fixed vendor protocol. The engine retains OAuth token custody; optional
@@ -385,8 +405,11 @@ substitution, not private-token reads. Explicit upstream credential rejection re
 the existing needs-action state. Native CLI OAuth is unchanged.
 
 `Source.verification_pending` is one optional persisted opaque identity, independent
-of health and routing eligibility. Every newly stored Hub credential gets a marker,
-including observed creates and native-config imports. Source list/detail use the
+of health and routing eligibility. It marks a credential nothing upstream has
+accepted yet, so an API-key create whose add-time observation authenticated the
+credential stores none — superseding, for that path only, the earlier rule that every
+observed create is marked. Native-config imports, Hub OAuth admission and every
+credential or endpoint replacement still get one. Source list/detail use the
 existing advisory treatment instead of healthy/in-use copy. Inventory never clears it.
 A call captures the marker before invocation; any successful same-credential call
 with that marker, including the existing backend probe, clears it in a fresh shared

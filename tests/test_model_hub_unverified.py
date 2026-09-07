@@ -11,7 +11,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config.v2_config import ModelHubSourceConfig, V2Config, config_write_transaction
-from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind, SOURCE_PROTOCOLS
+from core.handlers.model_hub.adapter import (
+    ObservationDiscovery,
+    ObservationOutcome,
+    RawCallOutcome,
+    RawOutcomeKind,
+    SOURCE_PROTOCOLS,
+    SourceObservation,
+)
 from core.handlers.model_hub.service import ModelHubError, V2ModelHubConfigStore
 from tests.test_model_hub_api import _assert_valid, _service
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
@@ -169,12 +176,34 @@ def test_model_call_consumers_retire_pending_verification(tmp_path, path):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("unverified", [False, True])
-def test_new_api_key_credentials_always_start_pending(tmp_path, unverified):
-    service, _store, _adapter = _service(tmp_path)
-    created = asyncio.run(service.create_source(_draft(save_unverified=unverified)))["source"]
+@pytest.mark.parametrize(
+    "add", ["save_unverified", "observed_with_inventory", "observed_without_inventory"]
+)
+def test_pending_verification_marks_only_what_no_observation_accepted(tmp_path, add):
+    """The marker records that nothing has accepted this credential yet.
+
+    An add-time observation that authenticated it is that acceptance, whatever
+    the observation went on to discover, so re-asking would make the marker mean
+    something else. An explicit unverified save asks nothing upstream and
+    therefore always carries it.
+    """
+    service, store, adapter = _service(tmp_path)
+    draft = _draft(save_unverified=add == "save_unverified")
+    if add == "observed_without_inventory":
+        adapter.observation = SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol=draft["protocol"],
+            discovery=ObservationDiscovery.FAILED,
+            models=(),
+        )
+        draft["accept_unavailable_inventory"] = True
+    created = asyncio.run(service.create_source(draft))["source"]
     _assert_valid("source.schema.json", created)
-    assert created["verification_pending"]
+    unaccepted = add == "save_unverified"
+    assert ("verification_pending" in created) is unaccepted
+    assert (store.config.sources[0].verification_pending is None) is not unaccepted
 
 
 def _settle_in_controller(config_home, captured, attempted, done):

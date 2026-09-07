@@ -25,7 +25,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
-| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. On `custom`, omitted `protocol` auto-detects and still requires matching response proof. A shipped vendor catalog pin collapses omission to that one protocol. A supplied value restricts observation to one interface and is established when authentication succeeds and either `vendor` has a shipped catalog pin, the client declared the protocol on `custom`, or a matching protocol-shaped response proves it. No credential reference is returned. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. On `custom`, omitted `protocol` auto-detects and still requires matching response proof. A shipped vendor catalog pin collapses omission to that one protocol. A supplied value restricts observation to one interface and is established when authentication succeeds and either `vendor` has a shipped catalog pin, the client declared the protocol on `custom`, or a matching protocol-shaped response proves it. On a catalog pin or a `custom` declaration, an `api_key` whose probe left authentication unknown is settled by that protocol's model listing: authenticated when the listing answers the credential and refuses the identical uncredentialed request, in which case the same response is the reported inventory; rejected on `401`/`403`; otherwise unchanged. Auto is never offered the listing. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Default placement is committed before effective adoption is projected; manual overrides are unchanged. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated observation that established a protocol owner but whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
@@ -121,8 +121,9 @@ is rejected before credential provisioning. Manual models remain manual; no inve
 is invented. The Source carries an opaque `verification_pending` marker, independently of its
 routing health, and may be configured and invoked. List/detail surfaces label it
 unverified, not healthy/in use. Successful inventory discovery never clears this flag.
-Every newly stored Hub credential starts pending, including observed creates and
-native-config imports. A call captures the persisted marker before invocation; any
+A newly stored Hub credential starts pending unless an add-time observation
+authenticated it, so an explicit unverified save and a native-config import always
+start pending while an observed api-key create does not. A call captures the persisted marker before invocation; any
 successful call using the same current credential and marker clears it through a
 fresh cross-process config transaction. Newer same-credential attempts do not negate
 success. Credential/endpoint replacement generates a new marker, including same-handle
@@ -211,9 +212,12 @@ The observation result has six terminal outcomes: `observed`, `ambiguous`,
 `protocol` is non-null only when authentication succeeds and one rung establishes the
 transport contract for the attempted path: a shipped vendor catalog pin, an explicit
 `custom` declaration, or a matching upstream response shape. Authentication is accepted only by a
-shaped success or a shaped request-level error that occurs after authentication;
-shaped authentication errors are rejected. Shaped server and rate-limit errors
-prove reachability but not authentication, so they settle as `adapter_error` with
+shaped success, a shaped request-level error that occurs after authentication, or —
+where a pin or declaration already owns the protocol — a model listing that answers
+the credential and refuses the identical uncredentialed request;
+shaped authentication errors are rejected, as is that listing answering `401`/`403`.
+Shaped server and rate-limit errors
+prove reachability but not authentication, so absent an accepting listing they settle as `adapter_error` with
 `reachable: true`, `authenticated: unknown`, and `protocol: null`. A local adapter
 failure may use the same outcome with `reachable: null`. A bare HTTP status proves
 reachability, but proves neither protocol nor authentication. Consequently,

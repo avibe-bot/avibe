@@ -3266,12 +3266,30 @@ outline footer action with the Save icon; enter the existing persisting phase wi
 Unknown-write reconciliation retains this consent and the nonce. Draft edits retire
 held evidence as before. The footer wraps on narrow screens. This supersedes the
 observation prerequisite in the earlier state tables, not cancellation, settlement
-or focus ownership. No upstream observation or inventory request occurs on this exit.
+or focus ownership. No upstream observation gates this exit; the bounded inventory
+request it attempts fills the model list and can never admit the Source.
 Source list/detail show `sourceDetail.status.unverified` in existing advisory ink;
 error/cooldown states retain visual precedence. Adoption and model discovery cannot
 replace this label with healthy/in-use copy. Only an actual successful model call
 retires verification as defined by the Source contract. Ambiguity copy must not
 claim authentication success.
+
+**2026-09-07 owner ruling, later the same day — ①″ is reachable again under a pin or
+a declaration.** The model-independent probe the ruling above introduced cannot
+succeed by construction, so a pinned or declared draft could only land in ③/④/⑤ or
+leave through 未验证保存, a valid key and a healthy relay included. 检测 now reads the
+established interface's own model list whenever the probe leaves the credential
+unknown: a list that answers this key while refusing the identical request carrying
+no key authenticates it, and that same response is the inventory ①″ reports — one
+request, both facts. A list that refuses this key lands ③ on `addKey.fail.auth`.
+Anything else — no list, an unreadable body, a list open to anyone — lands exactly
+where it landed before, 未验证保存 included. This adds no state, no string and no
+footer action: `addKey.protocol.catalogPinned.hint` still says the pin is not
+credential proof, `addKey.pull.result` counts the models that list returned, and the
+unverified exit becomes the fallback rather than the only way out. A Source that left
+through ①″ has nothing pending, so list/detail do not label it
+`sourceDetail.status.unverified`; that label keeps its meaning — nothing upstream has
+accepted this credential yet.
 
 **Element inventory**
 
