@@ -85,6 +85,13 @@ export const VENDOR_MARKS: Record<string, VendorMark | undefined> = {
     path: 'M17.143 3.429v3.428h-3.429v3.429h-3.428V6.857H6.857V3.43H3.43v13.714H0v3.428h10.286v-3.428H6.857v-3.429h3.429v3.429h3.429v-3.429h3.428v3.429h-3.428v3.428H24v-3.428h-3.43V3.429z',
     ink: [0, 3.43, 24, 17.14],
   },
+  // The four-pointed spark, whose tips ARE the corners of the box it was
+  // authored in — so its recorded ink is the whole 24 units, and the rule scales
+  // it down to the same 19 of ink every other mark shows.
+  gemini: {
+    path: 'M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81',
+    ink: [0, 0, 24, 24],
+  },
   openai: OPENAI_MARK,
   anthropic: ANTHROPIC_MARK,
 };
