@@ -68,7 +68,7 @@ prefix map in `vibe/data/model_vendors.json` is a different document
 | `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openai_chat` |
 | `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
 | `mistral` | Mistral | `https://api.mistral.ai/v1` | `openai_chat` |
-| `xai` | xAI | `https://api.x.ai/v1` | `openai_chat` |
+| `xai` | xAI | `https://api.x.ai/v1` | `openai_responses` |
 | `together` | Together | `https://api.together.xyz/v1` | `openai_chat` |
 | `fireworks` | Fireworks | `https://api.fireworks.ai/inference/v1` | `openai_chat` |
 

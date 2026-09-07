@@ -15,7 +15,7 @@
     "id": "xai",
     "label": "xAI",
     "official_base_url": "https://api.x.ai/v1",
-    "protocol": "openai_chat"
+    "protocol": "openai_responses"
   },
   {
     "id": "gemini",

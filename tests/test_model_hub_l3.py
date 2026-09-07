@@ -45,6 +45,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
     SOURCE_PROTOCOLS,
+    SourceBinding,
 )
 from core.handlers.model_hub.classification import ResolutionDecision, classify_outcome
 from core.handlers.model_hub.events import (
@@ -7467,16 +7468,48 @@ def test_hub_subscription_observation_binds_on_the_engine_declared_protocol(
 
 
 @pytest.mark.parametrize("vendor", sorted(_HUB_SUBSCRIPTION_PROTOCOLS))
-def test_hub_subscription_pin_agrees_with_the_same_vendors_api_key_pin(vendor: str) -> None:
-    """One vendor, one protocol, whichever channel holds the credential.
+def test_hub_subscription_projects_on_its_pin_whatever_the_api_key_pin_is(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    """A pinned subscription projects on its own protocol, with no base URL.
 
-    `_validate_source_target` admits a Source with no base URL by consulting the
-    api-key catalog pin, so a subscription pinned to a protocol its api-key
-    sibling contradicts would need that validator taught about a second pin.
-    Asserting the agreement here is cheaper than carrying that second pin.
+    The engine holds the credential and serves it on the surface this table
+    names, so nothing about the projection depends on the api-key catalog: that
+    describes the other channel, Avibe calling the vendor's public API with a
+    key it holds, and the two may legitimately disagree for one vendor id.
+    Seeding the whole pin table asserts every row projects on its own terms
+    rather than by agreeing with its sibling — and because the projection is
+    atomic, a row that stopped being admissible would take every other Source
+    down with it rather than fail alone.
     """
 
-    assert hub_subscription_serving_protocol(vendor) == pinned_api_key_protocol(vendor)
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.bind_oauth_credential(
+        "src_hubsubscript",
+        vendor,
+        f"{vendor}-test.json",
+    )
+    protocol = hub_subscription_serving_protocol(vendor)
+    assert protocol in SOURCE_PROTOCOLS
+
+    projected = state_store.sync_sources(
+        [
+            SourceBinding(
+                source_id="src_hubsubscript",
+                vendor=vendor,
+                protocol=protocol,
+                base_url=None,
+                credential_ref=credential_ref,
+                allowed_origins=("main",),
+                model_ids=(f"{vendor}-model",),
+            )
+        ]
+    )
+
+    assert [(record.vendor, record.protocol, record.base_url) for record in projected] == [
+        (vendor, protocol, None)
+    ]
 
 
 @pytest.mark.parametrize("vendor", sorted(_OAUTH_ENDPOINTS))

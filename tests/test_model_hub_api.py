@@ -8487,11 +8487,11 @@ def test_source_edit_validation_contract_fixture(tmp_path, field, case):
 )
 def test_source_empty_target_contract_fixture(case):
     if case["server_valid"]:
-        _validate_source_target(case["vendor"], case["protocol"], None)
+        _validate_source_target(case["vendor"], case["protocol"], None, credential_kind="api_key")
         return
 
     with pytest.raises(EngineStateError):
-        _validate_source_target(case["vendor"], case["protocol"], None)
+        _validate_source_target(case["vendor"], case["protocol"], None, credential_kind="api_key")
 
 
 def test_source_display_names_reject_credential_material(tmp_path):

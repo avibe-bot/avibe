@@ -236,7 +236,12 @@ class EngineStateStore:
                     raise EngineStateError("unsupported source protocol")
                 vendor = str(binding.vendor).strip().lower()
                 base_url = _validated_base_url(binding.base_url)
-                _validate_source_target(vendor, protocol, base_url)
+                _validate_source_target(
+                    vendor,
+                    protocol,
+                    base_url,
+                    credential_kind=credential["kind"],
+                )
                 if credential["kind"] == "api_key":
                     if (
                         credential.get("vendor") != vendor
@@ -596,7 +601,27 @@ def _validated_base_url(value: str | None) -> str | None:
         raise EngineStateError("invalid source base URL")
 
 
-def _validate_source_target(vendor: str, protocol: str, base_url: str | None) -> None:
+def _validate_source_target(
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    *,
+    credential_kind: str,
+) -> None:
+    """Reject a Source whose upstream this runtime cannot resolve.
+
+    The base-URL requirement is a fact about an api-key Source: the credential is
+    rendered into the engine YAML against a URL, so a Source that omits one is
+    only reachable when the shipped api-key catalog pins an official URL for that
+    protocol. An engine-held credential has no upstream to resolve — the auth file
+    stays inside the engine, `_append_source` never renders it, and `sync_sources`
+    already requires ``base_url is None`` — so the api-key pin says nothing about
+    it, and a subscription served on its own protocol is admitted here whatever
+    the same vendor's api-key channel is pinned to.
+    """
+
+    if credential_kind != "api_key":
+        return
     pinned_protocol = pinned_api_key_protocol(vendor)
     if (
         protocol == "anthropic"

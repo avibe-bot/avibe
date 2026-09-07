@@ -123,11 +123,15 @@ The native upstream differs per vendor — Gemini's own wire format, Moonshot's
 OpenAI-compatible endpoint, xAI's Responses API — and for gemini it is not in
 Avibe's `SOURCE_PROTOCOLS` vocabulary at all. The pin therefore names the
 **served** surface rather than the upstream one, and picking the surface the
-gateway's engine client already speaks is what makes all three converge. Each
-pin equals what `api_key_vendors.json` pins for the same vendor id: one
-vendor, one protocol, whichever channel holds the credential. Keep the two
-tables in agreement — a subscription pinned against its api-key sibling would
-need `_validate_source_target` taught about a second pin.
+gateway's engine client already speaks is what makes all three converge.
+
+This table is independent of `api_key_vendors.json`, and since 2026-09-08 the
+two disagree for `xai`: the catalog pins the protocol Avibe speaks to a
+vendor's *public* API with a key it holds, while this one names the surface the
+engine serves a credential it holds itself. `_validate_source_target` no longer
+reads the catalog pin for an engine-held credential — that Source has no
+upstream URL to resolve, so the requirement it enforces was never about this
+channel — and each pin is now admitted on its own terms.
 
 **Semantics.** These rungs prove no response shape. Reachability and
 authentication follow the engine-managed flow that just completed: the engine
