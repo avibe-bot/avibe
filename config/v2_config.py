@@ -1278,7 +1278,6 @@ def _reset_recoverable_config_section(
         "include_time_info",
         "include_user_info",
         "reply_enhancements",
-        "show_pages_prompt",
         "setup_completed",
     }:
         payload[section] = {
@@ -1286,7 +1285,6 @@ def _reset_recoverable_config_section(
             "include_time_info": True,
             "include_user_info": True,
             "reply_enhancements": True,
-            "show_pages_prompt": True,
             "setup_completed": False,
         }[section]
         return True
@@ -3867,7 +3865,6 @@ class V2Config:
     include_time_info: bool = True  # Prepend current local time to agent messages
     include_user_info: bool = True  # Prepend user identity to agent messages
     reply_enhancements: bool = True  # Enable quick-reply buttons
-    show_pages_prompt: bool = True  # Inject Show Pages capability guidance into agent prompts
     language: str = "en"  # Global language setting (see vibe/i18n)
     # Progress UX for editing platforms (Slack/Discord):
     #   "off" (default) no process bubble, "concise" one self-updating bubble,
@@ -4316,7 +4313,6 @@ class V2Config:
         include_user_info = _declared_bool("include_user_info", True)
         include_time_info = _declared_bool("include_time_info", True)
         reply_enhancements = _declared_bool("reply_enhancements", True)
-        show_pages_prompt = _declared_bool("show_pages_prompt", True)
 
         language = normalize_language(payload.get("language"), default="en")
 
@@ -4373,7 +4369,6 @@ class V2Config:
             include_time_info=include_time_info,
             include_user_info=include_user_info,
             reply_enhancements=reply_enhancements,
-            show_pages_prompt=show_pages_prompt,
             language=language,
             agent_progress_style=agent_progress_style,
             agent_status_heartbeat_ms=agent_status_heartbeat_ms,
@@ -4482,7 +4477,6 @@ class V2Config:
             "include_time_info": self.include_time_info,
             "include_user_info": self.include_user_info,
             "reply_enhancements": self.reply_enhancements,
-            "show_pages_prompt": self.show_pages_prompt,
             "language": self.language,
             "agent_progress_style": self.agent_progress_style,
             "agent_status_heartbeat_ms": self.agent_status_heartbeat_ms,

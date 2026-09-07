@@ -97,7 +97,6 @@ def _full_config_payload() -> dict:
         "include_time_info": True,
         "include_user_info": True,
         "reply_enhancements": True,
-        "show_pages_prompt": True,
         "language": "en",
     }
 
@@ -561,18 +560,19 @@ def test_config_payload_default_instance_name_ignores_malformed_remote_url(monke
     assert payload["ui"]["default_instance_name"] == "macbook"
 
 
-def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path, sqlite_schema_db_factory):
+@pytest.mark.parametrize("legacy_value", [False, True])
+def test_save_config_discards_retired_show_pages_prompt(monkeypatch, tmp_path, sqlite_schema_db_factory, legacy_value):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
 
-    created = api.save_config(_full_config_payload())
-    assert created.show_pages_prompt is True
+    api.save_config(_full_config_payload())
 
-    updated = api.save_config({"show_pages_prompt": False})
+    updated = api.save_config({"show_pages_prompt": legacy_value})
     payload = api.config_to_payload(updated)
 
-    assert updated.show_pages_prompt is False
-    assert payload["show_pages_prompt"] is False
+    assert not hasattr(updated, "show_pages_prompt")
+    assert "show_pages_prompt" not in payload
+    assert "show_pages_prompt" not in json.loads((tmp_path / "config" / "config.json").read_text())
 
 
 def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatch, tmp_path, sqlite_schema_db_factory):
@@ -662,13 +662,18 @@ def test_show_page_api_timeout_rejects_values_that_do_not_name_a_deadline(value)
         V2Config.from_payload(payload)
 
 
-def test_config_load_defaults_missing_show_pages_prompt_to_enabled():
+@pytest.mark.parametrize("legacy_fields", [{}, {"show_pages_prompt": False}, {"show_pages_prompt": True}])
+def test_config_load_ignores_retired_show_pages_prompt(tmp_path, legacy_fields):
     payload = _full_config_payload()
-    payload.pop("show_pages_prompt")
+    payload.update(legacy_fields)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    created = V2Config.from_payload(payload)
+    created = V2Config.load(config_path)
 
-    assert created.show_pages_prompt is True
+    assert created.load_warnings == ()
+    assert not hasattr(created, "show_pages_prompt")
+    assert api.config_to_payload(created) == api.config_to_payload(V2Config.from_payload(_full_config_payload()))
 
 
 def test_config_load_preserves_pre_upgrade_audio_asr_false_as_opt_out():
@@ -1438,9 +1443,7 @@ def _settings_write_paths() -> list[tuple[str, ...]]:
             paths += [("audio_asr", sub) for sub in sorted(api._EDITOR_AUDIO_ASR_WRITE_FIELDS)]
         else:
             paths.append((key,))
-    # ``show_pages_prompt`` is Owner-only, so it is absent from the Editor
-    # allowlist while sharing the same validation block.
-    return [*paths, ("show_pages_prompt",)]
+    return paths
 
 
 def _nested_patch(path: tuple[str, ...], value: object) -> dict:
@@ -1574,6 +1577,9 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
                     path[0]
                 ]
             ), label
+        assert {key: value for key, value in recovered.items() if key != path[0]} == {
+            key: value for key, value in healthy.items() if key != path[0]
+        }, label
 
     # A number that names no setting reaches the file by a route none of the
     # shapes above take. ``json`` reads a hand-edited ``1e309`` and the
@@ -1610,16 +1616,12 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
             config = V2Config.load(config_path)
 
             assert any(path[0] in warning for warning in config.load_warnings), (label, number)
-            assert (
-                api.config_to_payload(config, include_secrets=True, include_internal=True)
-                == like_any_other
-            ), (label, number)
-        # Everything outside the corrupted section survives. Without this the
-        # test would pass just as well for a recovery that threw the whole file
-        # away, which for a scalar looks identical to repairing that scalar.
-        assert {key: value for key, value in recovered.items() if key != path[0]} == {
-            key: value for key, value in healthy.items() if key != path[0]
-        }, label
+            recovered = api.config_to_payload(config, include_secrets=True, include_internal=True)
+            assert recovered == like_any_other, (label, number)
+            # Every recovery preserves all sections outside the corrupted one.
+            assert {key: value for key, value in recovered.items() if key != path[0]} == {
+                key: value for key, value in healthy.items() if key != path[0]
+            }, (label, number)
 
 
 def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_path, monkeypatch):
@@ -1843,7 +1845,6 @@ def test_editor_config_write_payload_keeps_messaging_fields_only():
         {"ui": {"setup_host": "0.0.0.0"}},
         {"ui": {"instance_name": "renamed"}},
         {"ui": {"default_instance_name": "owned"}},
-        {"show_pages_prompt": False},
     ],
 )
 def test_editor_config_write_payload_rejects_owner_fields(payload):
