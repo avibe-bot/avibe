@@ -355,32 +355,40 @@ rungs, documented in `docs/plans/model-hub-vendor-preset-protocol.md`:
    prove reachability and authentication on that protocol's path. Shape proof
    is not required. A wrong declaration fails on a later real call.
 
-Authentication must be credential-sensitive (2026-09-07): a validation error
-alone can precede authorization. The model-free probe must reject a control
-credential, or a protected API-key model-list endpoint must reject that control
-and accept the supplied key. Public inventory and the inventory waiver never
-establish authentication; protocol owners cannot override explicit rejection.
-The control must preserve the candidate's credential structure, not merely its
-presence. JWT controls retain the header, claims and signature length, changing
-signature bytes; opaque controls retain the preceding prefix and length.
+**Owner ruling 2026-09-07: configuration and verification are independent.**
+The three owners above still determine the interface, but explicit API-key
+`save_unverified: true` no longer requires a successful observation. It saves only
+a catalog-pinned or user-declared protocol, with canonical validation, credential
+custody, nonce reconciliation and rollback unchanged. Custom Auto without a
+declaration is refused before credential work. No upstream probe or model discovery
+is performed by this explicit save path; supplied manual models remain manual.
 
-For OpenAI/Codex Hub subscriptions, the bound OAuth transport owns the fixed
-official Responses endpoint. Model-free observation may combine that endpoint
-with a structured request error confirmed by the rejected-control check, including a
-missing-model error, to establish `openai_responses` (2026-09-07). Login success
-alone, unknown authentication, and credential rejection do not establish it.
-This does not grant endpoint ownership to user-supplied API-key URLs or relax
-`custom` Auto detection.
-Inside the private runtime, OAuth probes read the bound managed access-token
-file after path and permission checks. Candidate and control use the same
-ephemeral snapshot on the existing allowlisted engine transport and auth index;
-neither is written back or exposed through Model Hub API results, events, logs,
-or Agent configuration. Missing or unsafe material cannot establish proof.
+Schema errors may precede authentication and never authenticate a key. There is no
+synthetic credential control: unknown grammar/checksums and other valid credentials
+make both rejection and acceptance of an altered token inconclusive. Bare 401/403
+statuses likewise do not prove credential rejection. The ordinary non-persisting
+observation still reports response-backed evidence without inventing certainty.
+
+Completed Hub OAuth consent may retain its bound credential as an unverified Source
+under the fixed vendor protocol. The engine retains OAuth token custody; optional
+model-free observation uses the existing allowlisted auth-index transport and token
+substitution, not private-token reads. Explicit upstream credential rejection retains
+the existing needs-action state. Native CLI OAuth is unchanged.
+
+`Source.verification_pending` is optional persisted metadata, independent of health
+and routing eligibility. Source list/detail use the existing advisory treatment for
+this marker instead of healthy/in-use copy. Inventory discovery never clears it.
+Only an actual successful current-credential model call, including the existing
+backend probe, clears it; superseded attempts cannot verify replacement material.
+Credential/endpoint replacement sets it again. Legacy Sources retain their existing
+state without retroactive verification claims. Successful verification of one call
+does not promise that every model or operation is supported.
 
 The form exposes a vendor select first (V4 06r / 模型网关 05). Auto detect plus
-the three supported protocols remain on `custom`. A failed observation still
-stores nothing rather than guessing. Unreachable, rejected, timeout, and
-adapter-error paths still cannot save.
+the three supported protocols remain on `custom`. Observation alone never saves
+anything. The explicit unverified-save exit is available after an observation failure
+or directly from a valid declared/pinned draft; it does not turn that failure into
+proof or silently select the first Auto candidate.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use

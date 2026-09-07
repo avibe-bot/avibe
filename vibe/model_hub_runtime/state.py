@@ -418,19 +418,6 @@ class EngineStateStore:
         value = payload.get("auth_name") if payload.get("kind") == "oauth" else None
         return str(value) if value else None
 
-    def read_oauth_access_token(self, credential_ref: str) -> str:
-        """Read one bound managed token for an ephemeral runtime probe pair."""
-        with self._lock:
-            name = _validated_oauth_auth_name(self.oauth_auth_name(credential_ref) or "")
-            self.audit_auth_permissions()
-            path = self.auth_dir / name
-            self._assert_private_file(path, "OAuth credential permissions are unsafe")
-            payload = self._read_json(path) or {}
-            token = payload.get("access_token")
-            if not isinstance(token, str) or not token.strip():
-                raise EngineStateError("OAuth access token is unavailable")
-            return token.strip()
-
     def oauth_credential_ref(self, auth_name: str) -> str | None:
         normalized = auth_name.strip()
         with self._lock:
@@ -445,7 +432,15 @@ class EngineStateStore:
 
     def delete_oauth_auth_file(self, auth_name: str) -> None:
         """Delete one managed OAuth file without requiring a running engine."""
-        normalized = _validated_oauth_auth_name(auth_name)
+        normalized = auth_name.strip()
+        if (
+            not normalized
+            or "\x00" in normalized
+            or "\\" in normalized
+            or Path(normalized).name != normalized
+            or not normalized.lower().endswith(".json")
+        ):
+            raise EngineStateError("invalid OAuth auth file name")
         with self._lock:
             self.audit_auth_permissions(enforce=True)
             path = self.auth_dir / normalized
@@ -581,19 +576,6 @@ class EngineStateStore:
             return
         if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
             raise EngineStateError(message)
-
-
-def _validated_oauth_auth_name(value: str) -> str:
-    normalized = value.strip()
-    if (
-        not normalized
-        or "\x00" in normalized
-        or "\\" in normalized
-        or Path(normalized).name != normalized
-        or not normalized.lower().endswith(".json")
-    ):
-        raise EngineStateError("invalid OAuth auth file name")
-    return normalized
 
 
 def _safe_identifier(value: str) -> str:

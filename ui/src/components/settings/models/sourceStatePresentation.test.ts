@@ -21,6 +21,20 @@ const state = (status: SourceStatus, over: Partial<SourceState> = {}): SourceSta
 });
 
 describe('sourceStatePresentation', () => {
+  it.each(['card', 'detail'] as const)('keeps unverified %s sources distinct from adopted healthy sources', (surface) => {
+    for (const status of SOURCE_STATUSES) {
+      const current = state(status);
+      const adoption = { known: true, backends: ['Codex'], native: false };
+      const presentation = sourceStatePresentation(current, surface, 'en', 0, { ...adoption, verificationPending: true });
+      if (status === 'active' || status === 'standby') {
+        expect(presentation.key).toBe('settings.models.sourceDetail.status.unverified');
+        expect(presentation.dotClass).toBe('bg-gold');
+      } else {
+        expect(presentation).toEqual(sourceStatePresentation(current, surface, 'en', 0, adoption));
+      }
+    }
+  });
+
   it('omits attribution when the source projection does not carry it', () => {
     expect(sourceStatePresentation(state('active'), 'card', 'en', 0).key).toBeNull();
     expect(sourceStatePresentation(state('active'), 'detail', 'en', 0).key).toBeNull();

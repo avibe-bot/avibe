@@ -13,7 +13,6 @@ from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
 
 import aiohttp
-import jwt
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
@@ -142,8 +141,8 @@ class _ProtocolObservationTaxonomy:
 
     The request path and body are part of the same authority as the response
     taxonomy. Every probe omits ``model`` so observation does not request model
-    scheduling. A validation error supplies only provisional authentication;
-    the transport must independently establish credential-sensitive evidence.
+    scheduling. Schema validation never proves authentication, regardless of
+    whether the interface has a catalog owner or a user declaration.
     """
 
     request_path: str
@@ -254,13 +253,13 @@ def _openai_evidence_rules(
             error_identifiers=_REQUEST_ERROR_IDENTIFIERS,
             error_params=request_params,
             protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.ACCEPTED,
+            authentication=_AuthenticationEvidence.UNKNOWN,
         ),
         _ProtocolEvidenceRule(
             statuses=_REQUEST_ERROR_STATUSES,
             error_identifiers=_MODEL_ERROR_IDENTIFIERS,
             protocol=_ProtocolProof.UNPROVEN,
-            authentication=_AuthenticationEvidence.ACCEPTED,
+            authentication=_AuthenticationEvidence.UNKNOWN,
             shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
         ),
         _ProtocolEvidenceRule(
@@ -317,7 +316,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 top_level_values=frozenset({"error"}),
                 error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
             ),
             _ProtocolEvidenceRule(
                 statuses=_AUTHENTICATION_ERROR_STATUSES,
@@ -496,14 +495,10 @@ def _parse_protocol_authenticated_evidence(
     vendor: str | None = None,
     request_root: str | None = None,
 ) -> _ProtocolEvidence:
-    """Classify protocol shape and provisional authentication evidence.
+    """Classify protocol shape without treating schema validation as login.
 
-    This parser never upgrades a generic response into a protocol owner on its
-    own. ``observe_source()`` may later apply the September 4, 2026 owner-based
-    ladder for shipped vendor pins and concrete `custom` declarations after the
-    constrained path has responded. The transport still requires a rejected
-    control before accepting authentication. `custom` Auto detect relies on
-    this parser's protocol evidence, never a caller-owned endpoint identity.
+    A missing-model error can precede authentication. Neither a declaration nor
+    a differently rejected credential can upgrade it into authentication proof.
     """
 
     def evidence(
@@ -554,7 +549,7 @@ def _parse_protocol_authenticated_evidence(
         if wrapperless == "accepted":
             return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
         if wrapperless == "rejected":
@@ -581,7 +576,7 @@ def _parse_protocol_authenticated_evidence(
         if wrapperless == "accepted":
             return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
         if isinstance(error, dict):
@@ -593,7 +588,7 @@ def _parse_protocol_authenticated_evidence(
             ):
                 return evidence(
                     protocol=_ProtocolProof.UNPROVEN,
-                    authentication=_AuthenticationEvidence.ACCEPTED,
+                    authentication=_AuthenticationEvidence.UNKNOWN,
                     shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
                 )
     if _response_shape_proves_protocol(protocol, payload):
@@ -608,68 +603,12 @@ def _parse_protocol_authenticated_evidence(
     )
 
 
-def _owner_authentication_candidate(
-    evidence: _ProtocolEvidence, *, owner_scoped: bool, is_control: bool = False,
-) -> _ProtocolEvidence:
-    if (owner_scoped or is_control) and evidence.status in _AUTHENTICATION_ERROR_STATUSES:
-        return replace(evidence, authentication=_AuthenticationEvidence.REJECTED)
-    if (
-        owner_scoped
-        and evidence.authentication is _AuthenticationEvidence.UNKNOWN
-        and evidence.status in (_SUCCESS_STATUSES | _REQUEST_ERROR_STATUSES)
-    ):
-        return replace(evidence, authentication=_AuthenticationEvidence.ACCEPTED)
-    return evidence
-
-
-def _control_credential(secret: str) -> str:
-    prefix, separator, signature = secret.rpartition(".")
-    if separator and signature:
-        try:
-            jwt.decode(secret, options={"verify_signature": False})
-        except jwt.PyJWTError:
-            pass
-        else:
-            # Preserve JWT header, claims and signature length. Change the first
-            # sextet so this cannot alter only unused base64 padding bits.
-            return prefix + "." + ("B" if signature[0] == "A" else "A") + signature[1:]
-    # Preserve the existing prefix, length and ASCII character class where
-    # possible, without ever reusing punctuation-only or other opaque keys.
-    for index in range(len(secret) - 1, -1, -1):
-        for first, last in (("0", "9"), ("a", "z"), ("A", "Z")):
-            if first <= secret[index] <= last:
-                changed = chr(ord(first) + 1) if secret[index] == first else first
-                return secret[:index] + changed + secret[index + 1:]
-    return secret[:-1] + ("?" if secret.endswith("!") else "!")
-
-
-async def _authenticate_protected_inventory(
-    *, vendor: str, protocol: str, base_url: str | None, secret: str, control_secret: str, owner_scoped: bool,
-) -> _AuthenticationEvidence:
-    # A public model list proves neither key validity nor protocol identity.
-    try:
-        await probe_models(vendor=vendor, protocol=protocol, base_url=base_url, secret=control_secret)
-    except EngineClientError as exc:
-        if exc.status_code not in _AUTHENTICATION_ERROR_STATUSES:
-            return _AuthenticationEvidence.UNKNOWN
-    else:
-        return _AuthenticationEvidence.UNKNOWN
-    try:
-        await probe_models(vendor=vendor, protocol=protocol, base_url=base_url, secret=secret)
-    except EngineClientError as exc:
-        if owner_scoped and exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
-            return _AuthenticationEvidence.REJECTED
-        return _AuthenticationEvidence.UNKNOWN
-    return _AuthenticationEvidence.ACCEPTED
-
-
 async def _probe_protocol_response(
     *,
     vendor: str,
     protocol: str,
     base_url: str | None,
     secret: str,
-    owner_scoped: bool = False,
     timeout: float = 15.0,
 ) -> _ProtocolEvidence:
     """Require a response from the candidate protocol's distinct request path."""
@@ -698,40 +637,16 @@ async def _probe_protocol_response(
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async def request(probe_headers: dict[str, str], *, is_control: bool = False) -> _ProtocolEvidence:
-                async with session.post(
-                    url,
-                    headers=probe_headers,
-                    json=dict(taxonomy.request_body),
-                    allow_redirects=False,
-                ) as response:
-                    body = await response.content.read(64 * 1024)
-                    return _owner_authentication_candidate(
-                        _parse_protocol_authenticated_evidence(
-                            protocol, response.status, body, vendor=vendor, request_root=root,
-                        ),
-                        owner_scoped=owner_scoped,
-                        is_control=is_control,
-                    )
-
-            evidence = await request(headers)
-            if evidence.authentication is not _AuthenticationEvidence.ACCEPTED:
-                return evidence
-            control_secret = _control_credential(secret)
-            control_headers = dict(headers)
-            if protocol == "anthropic":
-                control_headers["x-api-key"] = control_secret
-            else:
-                control_headers["Authorization"] = f"Bearer {control_secret}"
-            control = await request(control_headers, is_control=True)
-            if control.authentication is _AuthenticationEvidence.REJECTED:
-                return evidence
-            authentication = await _authenticate_protected_inventory(
-                vendor=vendor, protocol=protocol, base_url=base_url,
-                secret=secret, control_secret=control_secret,
-                owner_scoped=owner_scoped,
-            )
-            return replace(evidence, authentication=authentication)
+            async with session.post(
+                url,
+                headers=headers,
+                json=dict(taxonomy.request_body),
+                allow_redirects=False,
+            ) as response:
+                body = await response.content.read(64 * 1024)
+                return _parse_protocol_authenticated_evidence(
+                    protocol, response.status, body, vendor=vendor, request_root=root,
+                )
 
     try:
         return await asyncio.wait_for(observe(), timeout=timeout)
@@ -890,8 +805,6 @@ def _probe_oauth_protocol_response(
     auth: _AuthRecord,
     vendor: str,
     protocol: str,
-    state_store: EngineStateStore,
-    credential_ref: str,
 ) -> _ProtocolEvidence:
     """Probe one allowlisted OAuth upstream through the engine-held credential."""
 
@@ -921,14 +834,8 @@ def _probe_oauth_protocol_response(
             "OAuth credential does not support this protocol path",
             status_code=404,
         )
-    try:
-        token = state_store.read_oauth_access_token(credential_ref)
-    except EngineStateError:
-        raise EngineClientError("OAuth probe credential is unavailable", error_type="credential_unavailable") from None
-    # Both requests must use one snapshot; engine substitution could refresh or
-    # replace the candidate between deriving the control and sending the probe.
-    headers["Authorization"] = f"Bearer {token}"
-    def request(probe_headers: dict[str, str], *, is_control: bool = False) -> _ProtocolEvidence:
+    headers["Authorization"] = "Bearer $TOKEN$"
+    def request(probe_headers: dict[str, str]) -> _ProtocolEvidence:
         payload = client.management_request(
             "POST",
             "/api-call",
@@ -947,32 +854,11 @@ def _probe_oauth_protocol_response(
                 error_type="invalid_json",
             )
         body = payload.get("body")
-        return _owner_authentication_candidate(
-            _parse_protocol_authenticated_evidence(
-                protocol, status, body if isinstance(body, str) else "", vendor=vendor,
-            ),
-            owner_scoped=False,
-            is_control=is_control,
+        return _parse_protocol_authenticated_evidence(
+            protocol, status, body if isinstance(body, str) else "", vendor=vendor,
         )
 
-    evidence = request(headers)
-    if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
-        control = request(
-            {**headers, "Authorization": f"Bearer {_control_credential(token)}"}, is_control=True,
-        )
-        if control.authentication is not _AuthenticationEvidence.REJECTED:
-            return replace(evidence, authentication=_AuthenticationEvidence.UNKNOWN)
-    if (
-        protocol == "openai_responses"
-        and evidence.protocol is _ProtocolProof.UNPROVEN
-        and evidence.authentication is _AuthenticationEvidence.ACCEPTED
-        and evidence.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
-    ):
-        # The bound OAuth credential reaches only the fixed Codex Responses
-        # endpoint above. Its authenticated missing-model error need not name
-        # a Responses-specific field; custom API-key URLs have no such proof.
-        return replace(evidence, protocol=_ProtocolProof.PROVEN)
-    return evidence
+    return request(headers)
 
 
 @dataclass
@@ -1689,10 +1575,9 @@ class CLIProxyEngineAdapter:
         ``protocol_order`` orders attempts only. A protocol-specific response
         with accepted authentication proves the current attempt and terminates
         observation. A shipped vendor catalog pin or a concrete `custom`
-        declaration also terminates observation once the transport establishes
-        credential-sensitive authentication. A validation response is only a
-        candidate until a control credential is rejected on that path or a
-        protected model-list path accepts the candidate. A shaped rejection is
+        declaration also terminates observation after a shaped success.
+        Schema errors remain unverified; explicit unverified saving belongs to
+        Source creation, not this observation. A shaped rejection is
         recorded while later candidates continue on Auto detect. Vendor, URL,
         and order never create a conclusion on their own; `custom` Auto still requires response-backed
         proof, and exhausting that path without one remains ambiguous.
@@ -1752,7 +1637,6 @@ class CLIProxyEngineAdapter:
                         protocol=protocol,
                         base_url=base_url,
                         secret=secret or "",
-                        owner_scoped=owner_scoped_protocol,
                     )
                 else:
                     assert oauth_auth is not None
@@ -1762,8 +1646,6 @@ class CLIProxyEngineAdapter:
                         auth=oauth_auth,
                         vendor=normalized_vendor,
                         protocol=protocol,
-                        state_store=self.state_store,
-                        credential_ref=credential_ref,
                     )
             except EngineClientError as exc:
                 failures.append(exc)
@@ -1870,15 +1752,6 @@ class CLIProxyEngineAdapter:
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 models=(),
             )
-        if received_rejection:
-            return make_source_observation(
-                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
-                reachable=True,
-                authenticated=False,
-                protocol=None,
-                discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                models=(),
-            )
         if received_proven_unknown:
             return make_source_observation(
                 outcome=ObservationOutcome.ADAPTER_ERROR,
@@ -1888,11 +1761,20 @@ class CLIProxyEngineAdapter:
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 models=(),
             )
-        if received_unproven_response:
+        if received_unproven_response and not considered_protocols.issubset(ruled_out_protocols):
             return make_source_observation(
                 outcome=ObservationOutcome.AMBIGUOUS,
                 reachable=True,
                 authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                models=(),
+            )
+        if received_rejection:
+            return make_source_observation(
+                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+                reachable=True,
+                authenticated=False,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 models=(),

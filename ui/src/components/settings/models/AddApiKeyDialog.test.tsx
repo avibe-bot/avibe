@@ -212,6 +212,42 @@ afterEach(() => {
 });
 
 describe('AddApiKeyDialog', () => {
+  it('saves only a selected interface as unverified without observing', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: { ...source, verification_pending: true }, added_to: [], adopted_by: [],
+    });
+    const { onAdded } = renderDialog();
+    const user = await fillCredentials();
+    expect(screen.queryByRole('button', { name: 'Save unverified' })).toBeNull();
+    await openManualProtocol(user);
+    await user.click(screen.getByRole('button', { name: 'OpenAI Chat Completions' }));
+    await user.click(screen.getByRole('button', { name: 'Save unverified' }));
+    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      protocol: 'openai_chat', save_unverified: true, key: 'secret-key',
+    }));
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it('retains unverified consent and nonce while reconciling an unknown write', async () => {
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValueOnce(new Error('Connection interrupted'))
+      .mockResolvedValue({ source: { ...source, verification_pending: true }, added_to: [], adopted_by: [] });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
+    const { onAdded } = renderDialog();
+    const user = await fillCredentials();
+    await selectVendor(user, preset('openai_chat').id);
+    await user.click(screen.getByRole('button', { name: 'Save unverified' }));
+    await user.click(await screen.findByRole('button', { name: RETRY }));
+    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1][0]).toEqual(create.mock.calls[0][0]);
+    expect(create.mock.calls[1][0].save_unverified).toBe(true);
+    expect(observe).not.toHaveBeenCalled();
+  });
+
   it('detects without persisting, names the protocol, and drops the report when credentials change', async () => {
     vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
     const create = vi.spyOn(modelsApi, 'createApiKeySource');
@@ -353,7 +389,7 @@ describe('AddApiKeyDialog', () => {
     await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
+    expect(await screen.findByText(i18n.t('settings.models.addKey.undetermined.title'))).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Add anyway|仍要添加/i })).toBeNull();
   });
 
@@ -722,7 +758,7 @@ describe('AddApiKeyDialog', () => {
     await clickDetect(user);
     await clickConfirm(user);
 
-    expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
+    expect(await screen.findByText(i18n.t('settings.models.addKey.undetermined.title'))).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
   });
 
@@ -1232,7 +1268,7 @@ describe('AddApiKeyDialog · vendor', () => {
     const hint = row?.querySelector('.model-hub-add-key-hint');
     expect(statement?.textContent).toMatch(/Anthropic Messages/);
     expect(statement?.textContent).toMatch(/Built-in catalog/);
-    expect(hint?.textContent).toMatch(/no longer has to prove the interface|不再需要靠返回结构证明接口/);
+    expect(hint?.textContent).toBe(i18n.t('settings.models.addKey.protocol.catalogPinned.hint'));
     // A sibling of the statement's line, not a child of it.
     expect(hint?.parentElement).toBe(row);
     expect(statement?.contains(hint ?? null)).toBe(false);

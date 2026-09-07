@@ -19,6 +19,11 @@
   ],
   "additionalProperties": false,
   "properties": {
+    "verification_pending": {
+      "type": "boolean",
+      "default": false,
+      "description": "Saved without model-call verification. Independent of routing health: configuration may be invoked, but UI must not present it as verified. Inventory discovery does not clear this marker; only a successful invocation of the same current credential does. Omission preserves legacy behavior and makes no retrospective verification claim."
+    },
     "id": {
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"

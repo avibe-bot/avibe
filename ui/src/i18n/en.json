@@ -1422,7 +1422,7 @@
       },
       "addKey": {
         "title": "Add API key",
-        "subtitle": "Detect the connection and interface first, then confirm to add",
+        "subtitle": "API key and model interface",
         "field": {
           "vendor": "Vendor",
           "vendor.custom": "Custom · compatible endpoint",
@@ -1431,7 +1431,7 @@
           "vendor.empty": "No vendor by that name",
           "name": "Name (optional)",
           "protocol": "Interface type",
-          "protocol.hint": "Use Auto detect when unsure; choose a type to declare that interface. If authentication succeeds it can be added, a wrong choice can fail at runtime, and the saved type cannot be changed",
+          "protocol.hint": "A declared interface is not proof of credential validity or model compatibility",
           "baseUrl": "Base URL",
           "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
           "apiKey": "API key",
@@ -1450,7 +1450,7 @@
         "saving": "Saving…",
         "saving.detail": "Saving this source",
         "fail": {
-          "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
+          "subtitle": "Model-call verification is still pending",
           "auth": "The upstream rejected this credential",
           "auth.detail": "Check the API key, interface type, and the Base URL's API root path",
           "address": "Wrong address: 404 Not Found",
@@ -1463,8 +1463,8 @@
         },
         "retry": "Retry",
         "undetermined": {
-          "title": "Connected and authenticated — but we cannot tell which interface it speaks",
-          "detail": "This response shape matches no interface we know. Choose a concrete type and retry: if authentication succeeds on that path it can be added, but a wrong choice can fail at runtime and the saved type cannot be changed"
+          "title": "Connected, but not fully verified",
+          "detail": "The response does not establish both the interface and credential validity"
         },
         "protocol": {
           "auto": "Auto detect",
@@ -1475,13 +1475,14 @@
           "detecting": "Identifying the interface…",
           "manual": "Manually specify interface type",
           "catalogPinned": "Built-in catalog",
-          "catalogPinned.hint": "Detection authenticates the key and fetches models; it no longer has to prove the interface by its response shape",
+          "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
           "declared": "Manually specified"
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"
         },
         "addAnyway": "Add anyway",
+        "saveUnverified": "Save unverified",
         "success": {
           "title": "Done → the dialog closes and you land on Source details · Models",
           "detail": "The model list, refetch and reasoning tiers are all maintained there"
@@ -1669,6 +1670,7 @@
           "error": "Error",
           "standbyHintLabel": "What this status means",
           "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
+          "unverified": "Not yet verified",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",

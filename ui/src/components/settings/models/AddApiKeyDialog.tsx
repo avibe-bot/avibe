@@ -8,6 +8,7 @@ import {
   EyeOff,
   Info,
   LoaderCircle,
+  Save,
   TriangleAlert,
   X,
 } from 'lucide-react';
@@ -66,11 +67,13 @@ type Phase =
       messageKey: string | null;
       protocol: SourceProtocol | undefined;
       acceptUnavailableInventory: boolean;
+      saveUnverified: boolean;
     }
   | {
       kind: 'save_unconfirmed';
       protocol: SourceProtocol | undefined;
       acceptUnavailableInventory: boolean;
+      saveUnverified: boolean;
     };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
@@ -361,6 +364,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const draft = React.useCallback((
     protocol?: SourceProtocol,
     acceptUnavailableInventory = false,
+    saveUnverified = false,
   ): ApiKeySourceCreate => ({
     kind: 'api_key',
     vendor,
@@ -373,16 +377,18 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     client_nonce: clientNonce.current,
     ...(protocol ? { protocol } : {}),
     ...(acceptUnavailableInventory ? { accept_unavailable_inventory: true } : {}),
+    ...(saveUnverified ? { save_unverified: true } : {}),
   }), [apiKey, baseUrl, displayName, vendor]);
 
   const persist = React.useCallback(async (
     seq: ContinuationTicket,
     protocol?: SourceProtocol,
     acceptUnavailableInventory = false,
+    saveUnverified = false,
   ) => {
     if (continuation.settle(seq, () => setPhase({ kind: 'working', origin: 'add', stage: 'persist' })) === 'stale') return;
     try {
-      const created = await modelsApi.createApiKeySource(draft(protocol, acceptUnavailableInventory));
+      const created = await modelsApi.createApiKeySource(draft(protocol, acceptUnavailableInventory, saveUnverified));
       createdDelivery.settle(continuation, seq, created);
     } catch (error) {
       const failure = apiFailure(error);
@@ -409,8 +415,9 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               messageKey: failureMessageKey(failure),
               protocol,
               acceptUnavailableInventory,
+              saveUnverified,
             }
-          : { kind: 'save_unconfirmed', protocol, acceptUnavailableInventory });
+          : { kind: 'save_unconfirmed', protocol, acceptUnavailableInventory, saveUnverified });
       });
     }
   }, [continuation, createdDelivery, draft]);
@@ -594,7 +601,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         return;
       }
       if (reconciliation.kind === 'absent') {
-        await persist(seq, phase.protocol, phase.acceptUnavailableInventory);
+        await persist(seq, phase.protocol, phase.acceptUnavailableInventory, phase.saveUnverified);
       }
       return;
     }
@@ -603,6 +610,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         continuation.begin(),
         phase.protocol,
         phase.acceptUnavailableInventory,
+        phase.saveUnverified,
       );
       return;
     }
@@ -985,7 +993,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           </div>
         )}
 
-        <footer className="model-hub-add-key-foot model-hub-fill-05 flex flex-row items-center justify-end border-t border-border">
+        <footer className="model-hub-add-key-foot model-hub-fill-05 flex flex-row flex-wrap items-center justify-end border-t border-border">
           {replaceMode ? (
             <>
               <Button
@@ -1034,6 +1042,18 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               {phase.kind === 'inventory' && (
                 <Button type="button" variant="outline" className="model-hub-add-key-action" onClick={() => void addAnyway()}>
                   {t('settings.models.addKey.addAnyway')}
+                </Button>
+              )}
+              {constrainedProtocol && (phase.kind === 'undetermined' || phase.kind === 'failure' || (phase.kind === 'form' && !phase.report)) && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="model-hub-add-key-action"
+                  disabled={!canSubmit}
+                  onClick={() => void persist(continuation.begin(), constrainedProtocol, false, true)}
+                >
+                  <Save className="size-3 shrink-0" />
+                  {t('settings.models.addKey.saveUnverified')}
                 </Button>
               )}
               {phase.kind === 'form' && !phase.report && (

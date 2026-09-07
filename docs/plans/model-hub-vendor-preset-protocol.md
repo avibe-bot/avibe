@@ -155,60 +155,42 @@ validation, making valid credentials impossible to add. A model-free request
 keeps observation independent of model availability and generation. The shared
 request taxonomy applies to API-key and OAuth observation alike.
 
-The protocol-owner ladder above remains unchanged: catalog pins and declarations
-still require authentication; Auto still requires response
-evidence. Inventory discovery follows successful observation, and confirmation
-repeats the same model-free check before persisting the Source.
+The owner's 2026-09-07 ruling separates configuration from verification. The
+protocol owners remain catalog pins, custom declarations and response evidence;
+explicit `save_unverified: true` may save either of the first two without an
+upstream request. Custom Auto cannot invent an owner. Canonical input validation,
+credential custody, nonce reconciliation and rollback remain unchanged.
 
-`AUTH-SETUP-112` exercises observe, confirm, and invalid-key rejection against a
-local HTTP relay with model scheduling unavailable. It covers every catalog
-preset and every concrete custom interface without using real user state.
+Schema errors never authenticate: they can precede key lookup. Synthetic controls
+were removed because unknown token grammar/checksums and collisions with another
+valid key make their results inconclusive. A public model list cannot repair
+that proof, and the inventory waiver does not waive authentication. Bare 401/403
+responses remain unknown for every owner; only shaped authentication evidence
+rejects a candidate. An unknown Auto sibling is not eliminated by another
+candidate's rejection. API-key observation remains model-free, non-redirecting
+and bounded by its deadline.
 
-Authentication is credential-sensitive (2026-09-07 amendment to the status
-ladder): schema validation may run before authorization. A successful or
-request-error response is only a candidate until the same model-free path
-rejects a control credential. If validation hides authentication, API-key
-observation can instead verify that the existing model-list path rejects the
-control and accepts the supplied key. Public or indeterminate inventory cannot
-prove authentication, and `accept_unavailable_inventory` cannot waive it.
-Explicit credential rejection is never overridden by a vendor pin/declaration.
-The shared credential control is always distinct, including punctuation-only
-credentials. It preserves length and the preceding prefix, retaining the ASCII
-character class where possible. For JWTs it preserves the header and claims and
-changes signature bytes without changing signature length. All API-key requests remain model-free,
-non-redirecting, and bounded by the observation deadline.
-Status-only rejection applies only to catalog/declaration-owned candidates or
-deliberately changed control credentials. Unrecognized primary 401/403 responses
-remain unknown for Auto and OAuth, including the API-key inventory fallback;
-they must not reject the credential or exclude a competing protocol.
+Explicit unverified saves carry `verification_pending: true` independently of
+routing health. Inventory refresh never clears it; only an actual successful
+current-credential invocation does. Credential/endpoint replacement sets it again.
+The Source remains configurable and invokable, but list/detail surfaces do not
+claim healthy/in-use status while verification is pending. The normal verified
+save path still requires response-backed authentication and protocol ownership.
 
-`AUTH-SETUP-112` covers both authentication-before-validation and
-validation-before-authentication, with both protected and public model lists,
-for alphanumeric and punctuation-only credentials.
-Only credential-sensitive evidence allows observe and confirm to succeed.
-`AUTH-SETUP-114` covers unrecognized Auto policy responses through observe and
-confirm, including a competing protocol that must not win by false exclusion.
+Completed Hub OAuth consent may retain its engine-bound credential under the fixed
+vendor protocol with verification pending. Explicit upstream authentication
+rejection keeps the existing needs-action state. The existing allowlisted
+auth-index transport substitutes the engine-held token; no private-token reader
+or fabricated OAuth control is needed. Native CLI OAuth is unchanged.
 
-OpenAI/Codex Hub OAuth has a fixed, allowlisted Responses endpoint and an
-engine-bound credential. A structured request error accepted by the existing
-authentication parser and rejected-control check can therefore confirm that protocol even when it names
-only the missing `model`. This ownership applies inside the OAuth transport,
-not the API-key catalog ladder or generic response parser. Rejected or unknown
-authentication and unstructured responses remain insufficient.
-
-`AUTH-SETUP-113` exercises consent completion through the real OAuth observation
-and discovery path to Source creation, including idempotent terminal polling.
-Missing-model validation succeeds; credential rejection, rate limiting, upstream
-errors, and unstructured success responses create no Source.
-Identical validation responses for candidate/control credentials also create no
-Source; the engine's local OAuth inventory is not an upstream authentication probe.
-The scenario also covers syntax checks before schema checks before signature
-verification, with valid and expired JWTs and valid/invalid opaque OAuth tokens.
-OAuth candidate/control requests share one private managed-token snapshot; no
-fabricated token format or engine-local model list can substitute for proof.
-The runtime never rewrites the token file or surfaces its content through Model
-Hub API results, events, logs or Agent configuration. Unsafe or unavailable
-managed material leaves observation unverified.
+`AUTH-SETUP-112` covers every catalog pin and concrete custom protocol against
+isolated HTTP middleware with both authentication/schema orders, public/protected
+inventory and alphanumeric/punctuation-only credentials. Unknown validation cannot
+authenticate, while explicit saving performs no additional upstream requests.
+`AUTH-SETUP-113` covers completed Hub OAuth admission, fixed protocol ownership,
+pending verification and idempotent polling across credential shapes and upstream
+outcomes. `AUTH-SETUP-114` covers Auto policy responses that must remain unknown
+and cannot permit unverified saving without a concrete protocol declaration.
 
 ## Acceptance
 

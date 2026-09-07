@@ -510,15 +510,14 @@ class EngineAdapter(Protocol):
         ``protocol_order`` either enumerates Auto-detect probes or names one
         owner-constrained protocol. A returned protocol may be established by
         a protocol-shaped upstream response, by a shipped API-key vendor pin,
-        or by a concrete `custom` declaration. Authentication requires a
-        credential-sensitive response, not schema validation alone: a control
-        credential must be rejected on the protocol path, or on a protected
-        model-list path that accepts the candidate. Public inventory and the
-        inventory waiver cannot establish authentication. `custom` Auto still
+        or by a concrete `custom` declaration. Schema-validation errors,
+        altered-credential controls and public inventory cannot establish
+        authentication. A shaped success can; a bare status cannot. Auto still
         requires response-backed proof; order alone never proves a protocol.
-        OpenAI/Codex Hub OAuth can combine its bound, fixed Responses endpoint
-        with an authenticated structured request error; neither OAuth success
-        alone nor an unknown/rejected authentication response establishes it.
+        Explicit unverified API-key saving and completed Hub OAuth admission
+        belong to Source creation, not this non-persisting evidence result.
+        They retain a fixed protocol owner with verification pending and do
+        not turn an unknown/rejected observation into authentication proof.
         """
         ...
 

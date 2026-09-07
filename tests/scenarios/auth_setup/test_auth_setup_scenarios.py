@@ -2717,6 +2717,7 @@ def test_api_key_setup_does_not_schedule_a_model(
 
     async def scenario():
         requests = []
+        observed_credentials = set()
         key_syntax = r"[a-z-]+" if valid_key[0].isalpha() else r"[^\w\s]+"
         paths = {
             "anthropic": "/v1/messages",
@@ -2732,6 +2733,7 @@ def test_api_key_setup_does_not_schedule_a_model(
                 if protocol == "anthropic"
                 else request.headers.get("Authorization", "").removeprefix("Bearer ")
             )
+            observed_credentials.add(supplied_key)
             if not re.fullmatch(key_syntax, supplied_key):
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.method == "POST" and not auth_before_validation and "model" not in body:
@@ -2769,35 +2771,26 @@ def test_api_key_setup_does_not_schedule_a_model(
         }
         harness = SimpleNamespace()
         runner = ScenarioRunner(harness)
-        authentication_observable = auth_before_validation or not public_inventory
-
         async def observe(h):
             result = await service.observe_source(draft)
             observation = result["observation"]
-            if authentication_observable:
-                assert observation["outcome"] == "observed"
-                assert observation["protocol"] == protocol
-                assert observation["authenticated"] == "authenticated"
-                assert observation["models"] == ["relay-model"]
-            else:
-                assert observation["outcome"] != "observed"
-                assert observation["authenticated"] != "authenticated"
+            assert observation["outcome"] != "observed"
+            assert observation["authenticated"] == "unknown"
             assert not store.config.sources
 
         async def confirm(h):
-            if not authentication_observable:
-                with pytest.raises(ModelHubError):
-                    await service.create_source({
-                        "kind": "api_key", **draft, "accept_unavailable_inventory": True,
-                    })
-                assert not store.config.sources
-                h.source = None
-                return
-            await service.create_source({"kind": "api_key", **draft})
+            with pytest.raises(ModelHubError):
+                await service.create_source({
+                    "kind": "api_key", **draft, "accept_unavailable_inventory": True,
+                })
+            before = len(requests)
+            await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+            assert len(requests) == before
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
-            assert h.source["models"][0]["id"] == "relay-model"
+            assert h.source["models"] == []
+            assert h.source["verification_pending"] is True
             assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
 
         async def reject_invalid_key(h):
@@ -2818,6 +2811,9 @@ def test_api_key_setup_does_not_schedule_a_model(
                 ScenarioStep("reject_invalid_key", reject_invalid_key),
             )
             ScenarioExpect.step_history(runner, ["observe", "confirm", "reject_invalid_key"])
+            assert observed_credentials == {
+                valid_key, "invalid-test-key" if valid_key[0].isalpha() else "!!??",
+            }
             assert all(
                 path == (paths[protocol] if method == "POST" else "/v1/models")
                 for method, path, _ in requests
@@ -2830,21 +2826,21 @@ def test_api_key_setup_does_not_schedule_a_model(
 
 
 @pytest.mark.parametrize(
-    ("status", "body", "creates_source"),
+    ("status", "body"),
     [
-        (400, {"error": {"type": "invalid_request_error", "param": "model"}}, True),
-        (401, {"error": {"code": "invalid_api_key"}}, False),
-        (403, {"message": "Request blocked by regional policy"}, False),
-        (429, {"error": {"type": "rate_limit_error"}}, False),
-        (502, {"error": {"type": "upstream_error"}}, False),
-        (200, {"ok": True}, False),
+        (400, {"error": {"type": "invalid_request_error", "param": "model"}}),
+        (401, {"error": {"code": "invalid_api_key"}}),
+        (403, {"message": "Request blocked by regional policy"}),
+        (429, {"error": {"type": "rate_limit_error"}}),
+        (502, {"error": {"type": "upstream_error"}}),
+        (200, {"ok": True}),
     ],
 )
 @pytest.mark.parametrize("validation_before_auth", [False, True])
 @pytest.mark.parametrize("vendor", ["openai", "anthropic"])
 @pytest.mark.parametrize("credential_valid", [True, False])
 def test_hub_oauth_model_free_observation_closed_loop(
-    monkeypatch, tmp_path, caplog, status, body, creates_source, validation_before_auth, vendor, credential_valid,
+    monkeypatch, tmp_path, caplog, status, body, validation_before_auth, vendor, credential_valid,
 ):
     """Scenario: AUTH-SETUP-113"""
     from tests.test_model_hub_api import _service
@@ -2855,7 +2851,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
     state_store = EngineStateStore(tmp_path / "engine-state")
     api_calls = []
     inventory_calls = []
-    creates_source = creates_source and not validation_before_auth and credential_valid
+    rejected = status == 401 or (not credential_valid and not (validation_before_auth and status == 400))
     protocol = "openai_responses" if vendor == "openai" else "anthropic"
     if vendor == "anthropic" and "error" in body:
         body = {"type": "error", **body}
@@ -2919,6 +2915,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
     # Simulate consent and engine lifecycle, but run the actual bound-credential
     # probe, evidence parser, discovery, and terminal Source materialization.
     monkeypatch.setattr(adapter, "observe_source", transport.observe_source)
+    monkeypatch.setattr(adapter, "discover_models", transport.discover_models)
     harness = SimpleNamespace()
     runner = ScenarioRunner(harness)
 
@@ -2933,25 +2930,22 @@ def test_hub_oauth_model_free_observation_closed_loop(
         adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
 
     async def materialize_source(h):
-        if creates_source:
-            terminal = await service.oauth_status(h.flow_id)
-            source = terminal["source"]
-            assert terminal["flow"]["state"] == "success"
-            assert source["protocol"] == protocol
-            assert source["supply_channel"] == "hub"
-            assert source["credential_ref"] == h.credential_ref
-            assert [model["id"] for model in source["models"]] == ["gpt-5.6"]
-            assert service.list_sources() == [source]
-            assert bound_token not in json.dumps(terminal)
-            assert (await service.oauth_status(h.flow_id))["source"] == source
-            assert adapter.revoked == []
-        else:
-            with pytest.raises(ModelHubError):
-                await service.oauth_status(h.flow_id)
-            assert not store.config.sources
-            assert adapter.revoked == [h.credential_ref]
-        assert len(api_calls) == (2 if status == 400 and (credential_valid or validation_before_auth) else 1)
-        assert len(inventory_calls) == int(creates_source)
+        terminal = await service.oauth_status(h.flow_id)
+        source = terminal["source"]
+        assert terminal["flow"]["state"] == "success"
+        assert source["protocol"] == protocol
+        assert source["supply_channel"] == "hub"
+        assert source["credential_ref"] == h.credential_ref
+        assert source["verification_pending"] is True
+        assert source["state"]["status"] == ("needs_action" if rejected else "standby")
+        assert [model["id"] for model in source["models"]] == ([] if rejected else ["gpt-5.6"])
+        assert service.list_sources() == [source]
+        assert bound_token not in json.dumps(terminal)
+        assert (await service.oauth_status(h.flow_id))["source"] == source
+        assert adapter.revoked == []
+        assert len(api_calls) == 1
+        assert api_calls[0]["header"]["Authorization"] == "Bearer $TOKEN$"
+        assert len(inventory_calls) == int(not rejected)
         assert json.loads((state_store.auth_dir / auth_name).read_text())["access_token"] == bound_token
         assert bound_token not in caplog.text
 
@@ -3014,12 +3008,16 @@ def test_custom_auto_policy_response_cannot_reject_or_exclude_credentials(
             observation = result["observation"]
             assert observation["outcome"] == "ambiguous"
             assert observation["protocol"] is None
-            assert observation["authenticated"] == ("authenticated" if competing_protocol else "unknown")
+            assert observation["authenticated"] == "unknown"
             assert not store.config.sources
 
         async def confirm(h):
             with pytest.raises(ModelHubError):
                 await service.create_source({"kind": "api_key", **draft, "accept_unavailable_inventory": True})
+            before = len(paths)
+            with pytest.raises(ModelHubError):
+                await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+            assert len(paths) == before
             assert not store.config.sources
 
         try:

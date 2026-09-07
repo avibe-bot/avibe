@@ -69,16 +69,15 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    api-key vendor catalog pin, a user declaration on `custom`, or a matching
    protocol-shaped upstream response. `POST /api/models/sources/observe` is the
    non-persisting API-key observation surface; API-key `POST /api/models/sources`
-   performs the same observation before its independent committed credential
-   provisioning, while subscription OAuth uses its vendor-specific observation flow.
-   OpenAI/Codex Hub OAuth may combine its bound official Responses endpoint with
-   an authenticated structured request error, as defined in the protocol-observation
-   ruling in `docs/plans/model-hub.md`; login success alone is insufficient.
-   A typed Base URL never creates a saved protocol value. Catalog pin and declaration
-   still require reachability and authentication; they never bypass those failures.
-   Model-free validation alone does not authenticate: the transport requires
-   credential-sensitive proof as defined in the same protocol-observation ruling.
-   Neither a public model list nor the inventory waiver can supply that proof.
+   normally repeats observation before committed credential provisioning. Explicit
+   `save_unverified: true` permits a catalog pin or declaration without observation;
+   custom Auto still cannot be guessed. Completed Hub OAuth consent can retain its
+   bound credential under the fixed vendor protocol. These Sources carry the
+   independent `verification_pending` marker until an actual current-credential
+   model call succeeds; model discovery does not clear it. A typed Base URL never
+   supplies protocol ownership. Model-free validation, altered-credential controls
+   and public model lists do not prove authentication. See the 2026-09-07 ruling
+   in `docs/plans/model-hub.md` and the create/Source schemas for the complete policy.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs
    must validate Source existence/eligibility, canonical identifiers and explicit retirement.

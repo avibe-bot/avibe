@@ -99,11 +99,8 @@ from modules.agents.model_hub import (
 from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
-    _authenticate_protected_inventory,
     _AuthenticationEvidence,
     CLIProxyEngineAdapter,
-    _control_credential,
-    _owner_authentication_candidate,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
@@ -6681,7 +6678,7 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
     assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
 
 
-def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validation_response(
+def test_qwen_catalog_pin_validation_remains_unverified(
     tmp_path: Path,
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state")
@@ -6740,28 +6737,26 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
                     credential_ref,
                     SOURCE_PROTOCOLS,
                 )
-                assert inventory_probe.await_args is not None
-                inventory_kwargs = dict(inventory_probe.await_args.kwargs)
+                inventory_probe.assert_not_awaited()
+                inventory_kwargs = {}
         finally:
             await runner.cleanup()
         return requests, observed, inventory_kwargs
 
     requests, observed, inventory_kwargs = asyncio.run(scenario())
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == "openai_chat"
-    assert observed.authenticated is True
-    assert observed.model_ids == ("qwen-plus",)
+    assert observed.outcome.value == "ambiguous"
+    assert observed.protocol is None
+    assert observed.authenticated is None
+    assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in (*SOURCE_PROTOCOLS, "openai_chat")
+        for protocol in SOURCE_PROTOCOLS
     ]
-    assert inventory_kwargs["vendor"] == "qwen"
-    assert inventory_kwargs["protocol"] == "openai_chat"
-    assert inventory_kwargs["base_url"] is None
+    assert inventory_kwargs == {}
 
 
-def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated_validation_response(
+def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
     tmp_path: Path,
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state")
@@ -6822,25 +6817,23 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
                     credential_ref,
                     SOURCE_PROTOCOLS,
                 )
-                assert inventory_probe.await_args is not None
-                inventory_kwargs = dict(inventory_probe.await_args.kwargs)
+                inventory_probe.assert_not_awaited()
+                inventory_kwargs = {}
         finally:
             await runner.cleanup()
         return requests, observed, inventory_kwargs
 
     requests, observed, inventory_kwargs = asyncio.run(scenario())
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == "openai_chat"
-    assert observed.authenticated is True
-    assert observed.model_ids == ("openrouter/auto",)
+    assert observed.outcome.value == "ambiguous"
+    assert observed.protocol is None
+    assert observed.authenticated is None
+    assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in (*SOURCE_PROTOCOLS, "openai_chat")
+        for protocol in SOURCE_PROTOCOLS
     ]
-    assert inventory_kwargs["vendor"] == "openrouter"
-    assert inventory_kwargs["protocol"] == "openai_chat"
-    assert inventory_kwargs["base_url"] is None
+    assert inventory_kwargs == {}
 
 
 def _catalog_owner_status_body(vendor: str, status: int) -> dict[str, object]:
@@ -6943,7 +6936,7 @@ def _run_catalog_pin_observation(
 
 
 @pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_observation_accepts_credential_sensitive_json_400_response(
+def test_catalog_pin_json_400_does_not_prove_authentication(
     tmp_path: Path,
     vendor: str,
     protocol: str,
@@ -6956,19 +6949,16 @@ def test_catalog_pin_observation_accepts_credential_sensitive_json_400_response(
         body=_catalog_owner_status_body(vendor, 400),
     )
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == protocol
-    assert observed.authenticated is True
-    assert observed.model_ids == (f"{vendor}/auto",)
-    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path] * 2
-    assert inventory_kwargs is not None
-    assert inventory_kwargs["vendor"] == vendor
-    assert inventory_kwargs["protocol"] == protocol
-    assert inventory_kwargs["base_url"] is None
+    assert observed.outcome.value == "ambiguous"
+    assert observed.protocol is None
+    assert observed.authenticated is None
+    assert observed.model_ids == ()
+    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
+    assert inventory_kwargs is None
 
 
 @pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_observation_rejects_any_json_401_response(
+def test_catalog_pin_unknown_json_401_is_not_credential_rejection(
     tmp_path: Path,
     vendor: str,
     protocol: str,
@@ -6981,9 +6971,9 @@ def test_catalog_pin_observation_rejects_any_json_401_response(
         body=_catalog_owner_status_body(vendor, 401),
     )
 
-    assert observed.outcome.value == "authentication_failed"
+    assert observed.outcome.value == "ambiguous"
     assert observed.protocol is None
-    assert observed.authenticated is False
+    assert observed.authenticated is None
     assert observed.model_ids == ()
     assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
     assert inventory_kwargs is None
@@ -7188,42 +7178,6 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
         inventory_probe.assert_not_awaited()
 
 
-@pytest.mark.parametrize("secret", [chr(code) * 3 for code in range(33, 127)] + ["", "\u00e9\u00e9", "\u4e2d\u6587", "sk-proj-!A!"])
-def test_api_key_control_is_distinct_for_the_complete_opaque_input_domain(secret: str) -> None:
-    control = _control_credential(secret)
-    assert control != secret
-    assert control
-    if secret:
-        assert len(control) == len(secret)
-        changes = [(before, after) for before, after in zip(secret, control) if before != after]
-        assert len(changes) == 1
-        before, after = changes[0]
-        for first, last in (("0", "9"), ("a", "z"), ("A", "Z")):
-            if first <= before <= last:
-                assert first <= after <= last
-
-
-@pytest.mark.parametrize("expired", [False, True])
-@pytest.mark.parametrize("algorithm", ["HS256", "RS256"])
-def test_structured_credential_control_changes_signature_not_claims(expired: bool, algorithm: str) -> None:
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    signing_key = (
-        rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        if algorithm == "RS256" else "test-credential-control-key-with-32-bytes"
-    )
-    verification_key = signing_key.public_key() if algorithm == "RS256" else signing_key
-    claims = {"sub": "account-test", "exp": 1 if expired else 4000000000, "scope": "model.read"}
-    token = jwt.encode(claims, signing_key, algorithm=algorithm, headers={"kid": "test-key"})
-    control = _control_credential(token)
-    assert jwt.get_unverified_header(control) == jwt.get_unverified_header(token)
-    assert jwt.decode(control, options={"verify_signature": False}) == claims
-    assert len(control) == len(token)
-    assert control.rpartition(".")[0] == token.rpartition(".")[0]
-    with pytest.raises(jwt.InvalidSignatureError):
-        jwt.decode(control, verification_key, algorithms=[algorithm], options={"verify_exp": False})
-
-
 def test_auth_setup_executable_scenarios_are_registered() -> None:
     root = Path(__file__).parent / "scenarios/auth_setup"
     catalog = yaml.safe_load((root / "catalog.yaml").read_text())
@@ -7242,38 +7196,17 @@ def test_auth_setup_executable_scenarios_are_registered() -> None:
 
 @pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
 @pytest.mark.parametrize("status", [401, 403])
-@pytest.mark.parametrize("owner_scoped", [False, True])
-@pytest.mark.parametrize("is_control", [False, True])
 @pytest.mark.parametrize("body", ['{"message":"Regional policy"}', '{"error":{"code":"invalid_api_key"}}'])
 def test_authentication_status_interpretation_preserves_evidence_role(
-    protocol, status, owner_scoped, is_control, body,
+    protocol, status, body,
 ) -> None:
-    parsed = _parse_protocol_authenticated_evidence(protocol, status, body)
-    evidence = _owner_authentication_candidate(parsed, owner_scoped=owner_scoped, is_control=is_control)
+    evidence = _parse_protocol_authenticated_evidence(protocol, status, body)
     expected = (
         _AuthenticationEvidence.REJECTED
-        if owner_scoped or is_control or "invalid_api_key" in body
+        if "invalid_api_key" in body
         else _AuthenticationEvidence.UNKNOWN
     )
     assert evidence.authentication is expected
-
-
-@pytest.mark.parametrize("owner_scoped", [False, True])
-@pytest.mark.parametrize("status", [401, 403])
-def test_inventory_primary_status_requires_a_protocol_owner(owner_scoped, status) -> None:
-    with patch(
-        "vibe.model_hub_runtime.adapter.probe_models",
-        new=AsyncMock(side_effect=[
-            EngineClientError("Control rejected", status_code=401),
-            EngineClientError("Unknown primary response", status_code=status),
-        ]),
-    ) as inventory:
-        evidence = asyncio.run(_authenticate_protected_inventory(
-            vendor="custom", protocol="openai_responses", base_url="https://relay.example",
-            secret="test-key", control_secret="test-control", owner_scoped=owner_scoped,
-        ))
-    assert evidence is (_AuthenticationEvidence.REJECTED if owner_scoped else _AuthenticationEvidence.UNKNOWN)
-    assert [call.kwargs["secret"] for call in inventory.await_args_list] == ["test-control", "test-key"]
 
 
 @pytest.mark.parametrize("vendor", ["openai", "codex"])
@@ -7289,7 +7222,6 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         vendor,
         "codex-test.json",
     )
-    state_store._secure_write_json(state_store.auth_dir / "codex-test.json", {"access_token": "test-oauth-token"})
     client = Mock()
     api_calls: list[dict] = []
 
@@ -7308,8 +7240,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
             }
         if path == "/api-call":
             api_calls.append(payload)
-            if payload["header"]["Authorization"] != "Bearer test-oauth-token":
-                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
+            assert payload["header"]["Authorization"] == "Bearer $TOKEN$"
             return {
                 "status_code": 400,
                 "header": {},
@@ -7344,10 +7275,11 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         )
     )
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == "openai_responses"
-    assert observed.model_ids == ("gpt-5.6",)
-    assert len(api_calls) == 2
+    assert observed.outcome.value == ("adapter_error" if error_param == "input" else "ambiguous")
+    assert observed.authenticated is None
+    assert observed.protocol is None
+    assert observed.model_ids == ()
+    assert len(api_calls) == 1
     assert api_calls[0]["auth_index"] == "auth-index-test"
     assert api_calls[0]["header"]["Chatgpt-Account-Id"] == "account-test"
     assert api_calls[0]["url"].endswith("/responses")
@@ -7525,7 +7457,7 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
         json.dumps(request_error_body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
     )
     assert _parse_protocol_authenticated_evidence(
         protocol,
@@ -7554,7 +7486,7 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
             ANTHROPIC_RELAY_REQUEST_ERROR_PAYLOAD,
             _ProtocolEvidence(
                 protocol=_ProtocolProof.UNPROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             ),
         ),
@@ -7663,7 +7595,7 @@ def test_protocol_evidence_table_defaults_shaped_non_auth_rows_to_unknown(
         ),
     ],
 )
-def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
+def test_anthropic_protocol_model_errors_leave_authentication_unknown(
     protocol: str,
     status: int,
     body: dict,
@@ -7674,7 +7606,7 @@ def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
         json.dumps(body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
     )
 
 
@@ -7713,7 +7645,7 @@ def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
         ),
     ],
 )
-def test_openai_model_errors_without_family_param_record_accepted_but_unproven_evidence(
+def test_openai_model_errors_without_family_param_leave_authentication_unknown(
     protocol: str,
     status: int,
     body: dict,
@@ -7724,13 +7656,13 @@ def test_openai_model_errors_without_family_param_record_accepted_but_unproven_e
         json.dumps(body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
 
 @pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
-def test_openai_request_error_without_family_param_records_accepted_but_unproven_evidence(
+def test_openai_request_error_without_family_param_leaves_authentication_unknown(
     protocol: str,
 ) -> None:
     assert _parse_protocol_authenticated_evidence(
@@ -7746,12 +7678,12 @@ def test_openai_request_error_without_family_param_records_accepted_but_unproven
         ),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
 
-def test_qwen_wrapperless_invalid_parameter_request_error_counts_as_authenticated_openai_chat() -> None:
+def test_qwen_wrapperless_validation_leaves_authentication_unknown() -> None:
     assert _parse_protocol_authenticated_evidence(
         "openai_chat",
         400,
@@ -7763,7 +7695,7 @@ def test_qwen_wrapperless_invalid_parameter_request_error_counts_as_authenticate
         ),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
@@ -7997,8 +7929,6 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name not in {
             "_parse_protocol_authenticated_evidence",
-            "_owner_authentication_candidate",
-            "_authenticate_protected_inventory",
         }
     ):
         for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):

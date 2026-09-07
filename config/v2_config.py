@@ -2829,6 +2829,7 @@ class ModelHubSourceConfig:
     credential_ref: Optional[str] = None
     account_label: Optional[str] = None
     masked_credential: Optional[str] = None
+    verification_pending: bool = False
 
     @classmethod
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
@@ -2852,6 +2853,7 @@ class ModelHubSourceConfig:
             "credential_ref",
             "account_label",
             "masked_credential",
+            "verification_pending",
         }
         if set(payload) - allowed_fields:
             raise ValueError("Config 'model_hub.sources' contains unknown fields")
@@ -2899,6 +2901,9 @@ class ModelHubSourceConfig:
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
+        verification_pending = payload.get("verification_pending", False)
+        if not isinstance(verification_pending, bool):
+            raise ValueError("Config 'model_hub.sources.verification_pending' must be boolean")
         created_at = payload.get("created_at")
         client_nonce = (
             validate_model_hub_source_client_nonce(payload.get("client_nonce"))
@@ -2952,6 +2957,7 @@ class ModelHubSourceConfig:
             credential_ref=credential_ref,
             account_label=account_label,
             masked_credential=masked_credential,
+            verification_pending=verification_pending,
         )
 
     def to_payload(self) -> dict:
@@ -2974,6 +2980,8 @@ class ModelHubSourceConfig:
         }
         if self.client_nonce is not None:
             payload["client_nonce"] = self.client_nonce
+        if self.verification_pending:
+            payload["verification_pending"] = True
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
         return payload

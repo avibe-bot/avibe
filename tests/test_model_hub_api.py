@@ -7564,7 +7564,7 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
     assert adapter.revoked == []
 
 
-def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_path):
+def test_completed_hub_oauth_saves_fixed_protocol_as_unverified(tmp_path):
     service, store, adapter = _service(tmp_path)
     flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
@@ -7583,14 +7583,12 @@ def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_pa
         models=(),
     )
 
-    with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.oauth_status(flow["flow_id"]))
-
-    assert exc_info.value.code == "discovery_failed"
-    assert exc_info.value.status == 422
-    assert store.config.sources == []
-    assert adapter.revoked == ["cred_oauth_unproven"]
-    assert service.oauth_flows.binding(flow["flow_id"]) is None
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    assert result["source"]["protocol"] == "openai_responses"
+    assert result["source"]["verification_pending"] is True
+    assert store.config.sources[0].credential_ref == "cred_oauth_unproven"
+    assert adapter.revoked == []
+    assert asyncio.run(service.oauth_status(flow["flow_id"]))["source"] == result["source"]
 
 
 def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_path):

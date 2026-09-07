@@ -2,15 +2,20 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. It extends the unsaved observation request with display, reconciliation, and explicit unavailable-inventory consent data; the server still owns Source identity, protocol, discovered inventory, health, usage, custody metadata, and timestamps. Optional protocol restricts observation to one interface; omission selects the shipped vendor pin when one exists, otherwise only custom omission auto-detects across the supported interfaces. A supplied protocol is persisted when observation is authenticated and either vendor has a shipped catalog pin for that protocol, the client declared it on custom, or a matching protocol-shaped upstream response proves it. Auto-detect without a catalog pin still requires matching response proof. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
+  "description": "API-key Source creation input. The default path requires authenticated observation and a protocol established by a shipped catalog pin, a declaration on custom, or matching response proof. Explicit save_unverified consent instead persists configuration with verification pending, without observation or discovery, and requires a catalog pin or a concrete custom declaration. The server owns Source identity, discovered inventory, health, usage, custody metadata and timestamps. Both paths use canonical validation and the same custody, rollback and reconciliation lifecycle. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
   "properties": {
+    "save_unverified": {
+      "type": "boolean",
+      "default": false,
+      "description": "Explicit consent to save configuration without upstream observation or discovery. Requires a catalog-pinned or explicitly declared protocol; custom Auto cannot be guessed. Canonical input validation, credential custody, rollback and nonce reconciliation are unchanged. Sets Source.verification_pending, preserves manual models and does not claim usability."
+    },
     "vendor": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
-      "description": "Vendor id used by the response-backed observation."
+      "description": "Vendor id used for catalog ownership and optional observation."
     },
     "display_name": {
       "type": "string",
@@ -29,7 +34,7 @@
     },
     "protocol": {
       "enum": ["anthropic", "openai_responses", "openai_chat"],
-      "description": "Optional user-selected interface. When present, observation probes exactly this protocol. Omission selects the shipped vendor pin when one exists; otherwise on vendor custom it auto-detects across the authoritative protocol vocabulary and still requires matching response proof. Persistence requires authentication plus one of: a shipped vendor catalog pin for this protocol, a declaration on vendor custom, or matching protocol-shaped upstream response proof."
+      "description": "Optional user-selected interface. When present, observation probes exactly this protocol. Omission selects the shipped vendor pin when one exists; otherwise custom Auto requires matching response proof. Explicit unverified saving requires a catalog pin or a concrete custom declaration and never guesses a protocol."
     },
     "client_nonce": {
       "type": "string",
@@ -56,7 +61,7 @@
       "base_url": "https://relay.example/v1",
       "key": "<transient plaintext key>",
       "protocol": "openai_chat",
-      "accept_unavailable_inventory": true
+      "save_unverified": true
     }
   ]
 }
