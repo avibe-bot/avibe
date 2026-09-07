@@ -13,7 +13,10 @@ The existing project service owns the order in `state_meta` under
 `expected_order`, both arrays of visible active project ids. The new order is
 a permutation of the baseline. A changed baseline returns 409. Instance
 members and owners may reorder; hidden and archived projects keep their slots.
-Responses contain the normal authorized project list. `projects.changed`
+Responses contain the authorized project list in navigation order. Generic
+`GET /api/projects` retains recency order; only navigation bootstrap and the
+reorder response opt into saved positions. Consumers choosing a default project
+from the navigation tree select by recency explicitly. `projects.changed`
 broadcasts only an invalidation, never private project ids.
 
 Desktop and mobile share one sortable-list component. The existing project
@@ -54,3 +57,16 @@ with an empty-payload policy, the existing order record during creation, and
 the backend translation catalogs. Regression tests cover the real SSE generator
 for every non-owner instance role, creation under a fixed/backwards clock with
 adversarial ids, and every error branch in both supported languages.
+
+Head `caaa2b7e02`, review `5129127836`: one finding, two findings-bearing heads
+in total. The new class is navigation ordering leaking into operation defaults;
+none of the first head's three classes recurred. All 17 exact-head lint checks
+passed and the first three threads are resolved. The orchestrator inspected
+both list routes and all first-project consumers: Skills uses the generic API,
+Files and FilePicker use the navigation provider, and new-session creation
+already explicitly sorts by recency. The smallest complete fix restores generic
+list recency, opts navigation reads into saved order, and reuses the new-session
+recency helper for both file surfaces. This preserves the storage/API payload
+contract without an architecture or data-model rewrite. HTTP and rendered
+consumer tests prove navigation permutations cannot change operation defaults,
+while explicit picker paths and home-directory fallbacks retain precedence.

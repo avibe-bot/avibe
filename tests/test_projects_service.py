@@ -73,7 +73,7 @@ def test_project_creation_appends_independently_of_clock_and_random_id(engine, t
         with engine.begin() as conn:
             created.append(projects_service.create_project(conn, str(folder))["id"])
         with engine.connect() as conn:
-            assert [p["id"] for p in projects_service.list_projects(conn)] == created
+            assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == created
         # Even a backwards wall-clock adjustment cannot insert the next row ahead.
         if index == 1:
             clock = "2025-12-31T23:59:59Z"
@@ -84,33 +84,33 @@ def test_first_creation_preserves_legacy_project_order(engine, tmp_path):
         rows = _ordered_projects(conn, tmp_path)
         ids = [row["id"] for row in rows]
         conn.execute(state_meta.delete().where(state_meta.c.key == projects_service.PROJECT_ORDER_KEY))
-        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
         folder = tmp_path / "post-upgrade"
         folder.mkdir()
         new = projects_service.create_project(conn, str(folder))
-        assert [p["id"] for p in projects_service.list_projects(conn)] == [*ids, new["id"]]
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [*ids, new["id"]]
 
 
 def test_project_positions_survive_activity_metadata_and_restoration(engine, tmp_path):
     with engine.begin() as conn:
         rows = _ordered_projects(conn, tmp_path)
         ids = [row["id"] for row in rows]
-        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
         for row in rows:
             projects_service.update_project(conn, row["id"], display_name="Renamed")
             projects_service.create_project(conn, row["folder_path"])
-        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
         saved = list(reversed(ids))
         projects_service.reorder_projects(conn, saved, expected_order=ids)
     with engine.begin() as conn:
         projects_service.archive_project(conn, rows[1]["id"])
-        assert [p["id"] for p in projects_service.list_projects(conn)] == [i for i in saved if i != ids[1]]
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [i for i in saved if i != ids[1]]
         projects_service.create_project(conn, rows[1]["folder_path"])
-        assert [p["id"] for p in projects_service.list_projects(conn)] == saved
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == saved
         fresh = tmp_path / "fresh-project"
         fresh.mkdir()
         new = projects_service.create_project(conn, str(fresh))
-        assert [p["id"] for p in projects_service.list_projects(conn)] == [*saved, new["id"]]
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [*saved, new["id"]]
 
 
 def test_project_reorder_preserves_hidden_and_archived_slots(engine, tmp_path):
@@ -124,7 +124,7 @@ def test_project_reorder_preserves_hidden_and_archived_slots(engine, tmp_path):
             conn, [ids[3], ids[0]], expected_order=[ids[0], ids[3]], authorization_context=context
         )
         assert [p["id"] for p in result] == [ids[3], ids[0]]
-        assert [p["id"] for p in projects_service.list_projects(conn, include_archived=True)] == [
+        assert [p["id"] for p in projects_service.list_projects(conn, include_archived=True, navigation_order=True)] == [
             ids[3], ids[1], ids[2], ids[0]
         ]
 
@@ -136,7 +136,7 @@ def test_project_reorder_rejects_stale_view_without_changing_saved_order(engine,
         projects_service.reorder_projects(conn, saved, expected_order=ids)
         with pytest.raises(projects_service.ProjectOrderConflict):
             projects_service.reorder_projects(conn, ids[1:] + ids[:1], expected_order=ids)
-        assert [p["id"] for p in projects_service.list_projects(conn)] == saved
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == saved
 
 
 @pytest.mark.parametrize("role", ["viewer", "editor"])
@@ -145,7 +145,7 @@ def test_project_reorder_requires_project_management(engine, tmp_path, role):
         ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
         with pytest.raises(InstanceAuthorizationError):
             projects_service.reorder_projects(conn, ids[::-1], expected_order=ids, authorization_context=_remote_context(role))
-        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
 
 
 @pytest.mark.parametrize("order,expected", [(None, []), ([1], [1]), (["x", "x"], ["x", "x"]), (["x"], []), ([], ["x"])])
@@ -174,6 +174,38 @@ def test_project_reorder_http_roundtrip_and_invalidation(engine, tmp_path, monke
     assert stale.status_code == 409
     malformed = client.put("/api/projects/order", json=["project"], headers=csrf_headers(client))
     assert malformed.status_code == 400
+
+
+@pytest.mark.parametrize("include_archived", [False, True])
+@pytest.mark.parametrize("reordered", [False, True])
+def test_generic_project_list_retains_recency_independently_of_navigation(engine, tmp_path, include_archived, reordered):
+    from vibe.ui_server import app
+
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        for row, day in zip(rows, [2, 4, 1, 3]):
+            conn.execute(scopes.update().where(scopes.c.id == row["scope_id"]).values(
+                last_seen_at=f"2026-02-0{day}T00:00:00Z"
+            ))
+        navigation = [ids[2], ids[0], ids[3], ids[1]] if reordered else ids
+        if reordered:
+            projects_service.reorder_projects(conn, navigation, expected_order=ids)
+        projects_service.archive_project(conn, ids[3])
+
+    client = app.test_client()
+    suffix = "?include_archived=1" if include_archived else ""
+    generic = client.get(f"/api/projects{suffix}").get_json()["projects"]
+    tree = client.get(f"/api/workbench/projects-bootstrap{suffix}").get_json()["projects"]
+    expected_navigation = navigation if include_archived else [p for p in navigation if p != ids[3]]
+    assert [p["id"] for p in tree] == expected_navigation
+    assert generic == sorted(tree, key=lambda p: p["last_active_at"], reverse=True)
+    assert generic[0]["id"] == ids[1]
+
+    with engine.begin() as conn:
+        projects_service.create_project(conn, rows[0]["folder_path"])
+    assert client.get(f"/api/projects{suffix}").get_json()["projects"][0]["id"] == ids[0]
+    assert [p["id"] for p in client.get(f"/api/workbench/projects-bootstrap{suffix}").get_json()["projects"]] == expected_navigation
 
 
 @pytest.mark.parametrize("lang", ["en", "zh"])

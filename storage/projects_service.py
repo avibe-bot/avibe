@@ -321,9 +321,10 @@ def list_projects(
     conn: Connection,
     *,
     include_archived: bool = False,
+    navigation_order: bool = False,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return projects in saved order, appending unsorted projects by creation."""
+    """Return projects by recency unless a navigation consumer requests saved order."""
 
     query = (
         select(*_PROJECT_COLUMNS)
@@ -332,7 +333,10 @@ def list_projects(
             .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
         )
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
+        .order_by(
+            scopes.c.first_seen_at.asc() if navigation_order else scopes.c.last_seen_at.desc(),
+            scopes.c.id.asc(),
+        )
     )
     rows = conn.execute(query).mappings().all()
     out: list[dict[str, Any]] = []
@@ -342,8 +346,9 @@ def list_projects(
             continue
         out.append(_project_dict(row))
     context = require_instance_role(authorization_context, "viewer")
-    positions = {project_id: index for index, project_id in enumerate(_saved_project_order(conn))}
-    out.sort(key=lambda project: positions.get(project["id"], len(positions)))
+    if navigation_order:
+        positions = {project_id: index for index, project_id in enumerate(_saved_project_order(conn))}
+        out.sort(key=lambda project: positions.get(project["id"], len(positions)))
     return [
         _project_for_context(conn, context, project)
         for project in project_access_service.filter_accessible_projects(conn, context, out)
@@ -367,7 +372,7 @@ def reorder_projects(
     if set(order) != set(expected_order):
         raise ValueError("Project order must contain the same projects as its baseline.")
     reserve_write_lock(conn)
-    visible = list_projects(conn, authorization_context=context)
+    visible = list_projects(conn, navigation_order=True, authorization_context=context)
     if expected_order != [project["id"] for project in visible]:
         raise ProjectOrderConflict("Project order changed. Refresh the list and try again.")
 
@@ -378,7 +383,7 @@ def reorder_projects(
     replacement = iter(order)
     merged = [next(replacement) if project_id in visible_ids else project_id for project_id in complete]
     _save_project_order(conn, merged)
-    return list_projects(conn, authorization_context=context)
+    return list_projects(conn, navigation_order=True, authorization_context=context)
 
 
 def _require_visible_project(

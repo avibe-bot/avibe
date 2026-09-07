@@ -8933,6 +8933,7 @@ def workbench_projects_bootstrap():
         projects = projects_service.list_projects(
             conn,
             include_archived=include_archived,
+            navigation_order=True,
             authorization_context=authorization_context,
         )
         project_id_set = {project["id"] for project in projects}

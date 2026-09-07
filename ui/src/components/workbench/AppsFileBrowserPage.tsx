@@ -39,6 +39,7 @@ import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { sortProjectsByRecent } from '../../lib/projectOrder';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
@@ -294,7 +295,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   useEffect(() => {
     if (cwd) return;
     if (projects === null) return;
-    const initial = projects?.[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
+    const initial = sortProjectsByRecent(projects)[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
     if (initial) navigate(initial);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, sysFavs]);
