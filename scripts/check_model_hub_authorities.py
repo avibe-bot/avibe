@@ -8,7 +8,9 @@ import ast
 import fnmatch
 import hashlib
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,20 +22,59 @@ REGISTRY = CONTRACTS / "mirror-registry.json"
 
 class AuthorityInput:
     def __init__(self, root: Path) -> None:
-        self.root = root
+        self.root = root.resolve()
         self.files: dict[Path, bytes] = {}
+        self._trees: dict[str, ast.Module] = {}
+        self._globs: dict[str, tuple[Path, ...]] = {}
+        self._checkout_verified = False
+
+    def _path(self, relative: str) -> Path:
+        path = self.root / relative
+        if not path.resolve().is_relative_to(self.root):
+            raise ValueError(f"authority input escapes checkout: {relative}")
+        return path
 
     def bytes(self, relative: str) -> bytes:
-        path = self.root / relative
-        payload = path.read_bytes()
-        self.files[path] = payload
-        return payload
+        path = self._path(relative)
+        if path not in self.files:
+            self.files[path] = path.read_bytes()
+        return self.files[path]
 
     def text(self, relative: str) -> str:
         return self.bytes(relative).decode("utf-8")
 
     def json(self, relative: str) -> Any:
         return json.loads(self.text(relative))
+
+    def python_tree(self, relative: str, *, retain: bool = True) -> ast.Module:
+        if relative not in self._trees:
+            tree = ast.parse(self.bytes(relative), filename=relative)
+            if not retain:
+                return tree
+            self._trees[relative] = tree
+        return self._trees[relative]
+
+    def _git(self, *args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+
+    def glob(self, pattern: str) -> tuple[Path, ...]:
+        if not self._checkout_verified:
+            checkout = Path(os.fsdecode(self._git("rev-parse", "--show-toplevel")).rstrip("\n"))
+            if checkout.resolve() != self.root:
+                raise ValueError("authority source root must be the Git checkout root")
+            self._checkout_verified = True
+        if pattern not in self._globs:
+            # Git owns ignore/pathspec semantics; include unstaged new consumers.
+            names = self._git(
+                "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+                "--", f":(glob){pattern}",
+            ).split(b"\0")
+            paths = (self._path(os.fsdecode(name)) for name in sorted(set(names)) if name)
+            self._globs[pattern] = tuple(path for path in paths if path.is_file())
+        return self._globs[pattern]
 
     def fingerprint(self) -> str:
         digest = hashlib.sha256()
@@ -233,7 +274,7 @@ def _literal_strings(node: ast.AST) -> set[str]:
 
 
 def _python_test_literals(source: AuthorityInput, relative: str, name: str) -> set[str]:
-    tree = ast.parse(source.text(relative), filename=relative)
+    tree = source.python_tree(relative)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return _literal_strings(node)
@@ -241,7 +282,7 @@ def _python_test_literals(source: AuthorityInput, relative: str, name: str) -> s
 
 
 def _python_literal_annotation(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
-    tree = ast.parse(source.text(spec["file"]), filename=spec["file"])
+    tree = source.python_tree(spec["file"])
     for node in tree.body:
         if not isinstance(node, ast.ClassDef) or node.name != spec["class"]:
             continue
@@ -256,7 +297,7 @@ def _python_literal_annotation(source: AuthorityInput, spec: dict[str, Any]) -> 
 
 
 def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
-    tree = ast.parse(source.text(spec["file"]), filename=spec["file"])
+    tree = source.python_tree(spec["file"])
     for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
@@ -485,12 +526,12 @@ def _binding_lane_rows(source: AuthorityInput, check: dict[str, Any]) -> list[st
 
 def _python_importers(source: AuthorityInput, check: dict[str, Any]) -> set[str]:
     importers: set[str] = set()
-    for path in sorted(source.root.rglob("*.py")):
+    for path in source.glob("**/*.py"):
         relative = path.relative_to(source.root).as_posix()
         if any(fnmatch.fnmatch(relative, pattern) for pattern in check.get("exclude_globs", ())):
             continue
         try:
-            tree = ast.parse(source.bytes(relative), filename=relative)
+            tree = source.python_tree(relative, retain=False)
         except (SyntaxError, UnicodeDecodeError):
             continue
         if any(
@@ -503,6 +544,7 @@ def _python_importers(source: AuthorityInput, check: dict[str, Any]) -> set[str]
 
 def check(root: Path = ROOT) -> dict[str, Any]:
     source = AuthorityInput(root)
+    root = source.root
     registry = source.json("docs/plans/model-hub-contracts/mirror-registry.json")
     findings: list[dict[str, Any]] = []
 
@@ -606,7 +648,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
         )
         matched_literal_files: set[str] = set()
         for pattern in version_closure.get("literal_globs", ()):
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 if not path.is_file():
                     continue
                 relative = path.relative_to(root).as_posix()
@@ -662,7 +704,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
     for absence in registry.get("schema_absence_checks", ()):
         terms = _normative_absence_terms(source, absence)
         for pattern in absence["scope_globs"]:
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 relative = path.relative_to(root).as_posix()
                 tokens = _schema_decision_tokens(source, relative)
                 for term in sorted(terms & tokens):
@@ -711,7 +753,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
                     }
                 )
         for pattern in boundary["forbidden_ui_globs"]:
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 relative = path.relative_to(root).as_posix()
                 if value in source.text(relative):
                     findings.append(
@@ -721,7 +763,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
     for absence in registry.get("repo_absence_checks", ()):
         term = "-".join(absence["term_parts"])
         for pattern in absence["scope_globs"]:
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 if not path.is_file():
                     continue
                 relative = path.relative_to(root).as_posix()
