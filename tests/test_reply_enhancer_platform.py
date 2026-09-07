@@ -1884,7 +1884,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Personal Memory", human_prompt)
         self.assertNotIn("## User Preferences and Project Context", human_prompt)
 
-    def test_show_page_runtime_state_selects_one_history_contract(self):
+    def test_show_page_history_is_skill_scoped_and_does_not_change_prompt(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1906,17 +1906,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ):
                 self_managed = build_system_prompt_injection(include_quick_replies=True, context=context)
 
-        self.assertIn("History is saved automatically around each turn", managed)
-        self.assertNotIn("Avibe's shadow history continues automatically", managed)
-        self.assertIn("Avibe's shadow history continues automatically", self_managed)
-        self.assertNotIn("History is saved automatically around each turn", self_managed)
+        self.assertEqual(managed, self_managed)
+        self.assertEqual(managed, unavailable)
         self.assertNotIn("History contract:", unavailable)
-        self.assertNotIn("History is saved automatically around each turn", unavailable)
+        self.assertIn("Before creating, updating, or restoring a Show Page", managed)
         skill = (Path(__file__).resolve().parents[1] / "skills" / "use-show-pages" / "SKILL.md").read_text()
-        self.assertNotIn("History is saved automatically around each turn", skill)
-        self.assertNotIn("Avibe's shadow history continues automatically in the background", skill)
-        self.assertNotIn("Automatic Show Page history is unavailable", skill)
-        self.assertIn("Follow the History contract in the current System Prompt", skill)
+        self.assertIn("### Show Page workspace history", skill)
+        self.assertIn("These rules apply only to this Session's Show Page workspace", skill)
+        self.assertIn("`history.mode` is `managed`", skill)
+        self.assertIn("`history.mode` is `self-managed`", skill)
+        self.assertIn("Separately entrusted repository work follows the user's mandate", skill)
+        self.assertNotIn("Follow the History contract in the current System Prompt", skill)
         self.assertIn("`vibe show status`", skill)
 
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):

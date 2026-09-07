@@ -165,13 +165,10 @@ def test_exported_sources_cover_all_rendered_branches(monkeypatch):
     assert visited == {module.id for module in PROMPT_MODULES}
 
 
-@pytest.mark.parametrize("history", ["managed", "self-managed"])
-def test_history_and_pagination_keep_their_own_source_provenance(monkeypatch, history):
-    _environment(monkeypatch, history=history)
-    rendered = render_prompt_context(_inputs(history=history))
+def test_pagination_keeps_its_own_source_provenance(monkeypatch):
+    _environment(monkeypatch)
+    rendered = render_prompt_context(_inputs())
     blocks = {block["id"]: block for block in rendered["blocks"]}
-    assert blocks["show-history-heading"]["text"] == prompt_text("show-history-heading")
-    assert "History contract:" not in blocks[f"show-history-{history}"]["text"]
     rows = "\n".join(f"- skill-{index:02}: Description skill-{index:02}" for index in range(25))
     assert blocks["skills-catalog-heading"]["text"] == "\n\n## Available skills\n"
     assert blocks["skills-catalog"]["text"] == prompt_text("skills-catalog").format(skill_rows=rows)
@@ -181,6 +178,21 @@ def test_history_and_pagination_keep_their_own_source_provenance(monkeypatch, hi
         "text": "\n" + prompt_text("skills-more-notice").format(next_page=2),
     }
     assert "| Agent Name | Backend | Agent Description |" in prompt_text("harness-agents-prompt")
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_history_state_is_not_a_prompt_dependency(monkeypatch, backend):
+    _environment(monkeypatch)
+    request = _inputs(backend)
+    before = render_prompt_context(request)
+
+    def unexpected_probe(*_args):
+        raise AssertionError("Prompt composition must not inspect Show history")
+
+    monkeypatch.setattr(show_git, "show_git_checkpointing_active", unexpected_probe)
+    monkeypatch.setattr(show_git, "_workspace_is_self_managed", unexpected_probe)
+    assert render_prompt_context(request) == before
+    assert not any(block["id"].startswith("show-history-") for block in before["blocks"])
 
 
 def test_rendered_revision_changes_only_when_rendered_bytes_change(monkeypatch):
@@ -373,33 +385,19 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
     assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
 
 
-def test_working_principles_addition_preserves_all_other_injection_bytes(monkeypatch):
+def test_companion_principles_and_history_move_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
+    changed = {
+        "agent-working-principles", "show-pages-prompt",
+        "show-history-heading", "show-history-managed", "show-history-self-managed",
+    }
     for backend, memory, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
         blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
-        # Undo the usage move and independent heading boundaries, never prose changes.
-        blocks = [dict(block) for block in blocks if block["id"] != "skills-catalog-heading"]
-        for block in blocks:
-            if block["id"] == "skills-catalog":
-                block["text"] = "### Available skills\n" + block["text"]
-            elif block["id"] == "codex-generated-images":
-                block["text"] = block["text"].replace("\n## Codex-generated images\n", "\n### Codex-generated images\n", 1)
-        usage = next((block for block in blocks if block["id"] == "skills-prompt"), None)
-        if usage:
-            blocks.remove(usage)
-            catalog_start = next(
-                index for index, block in enumerate(blocks)
-                if block["id"] in {"skills-pagination-prompt", "skills-catalog"}
-            )
-            blocks.insert(catalog_start, usage)
-        rendered = "".join(block["text"] for block in blocks)
-        principles = prompt_text("agent-working-principles")
-        assert rendered.count(principles) == 1
-        outputs.append(rendered.replace(principles, "", 1))
+        outputs.append("".join(block["text"] for block in blocks if block["id"] not in changed))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
-    # Captured from the pre-migration renderer at 928924dd82bb48c7eea67ff06ddd844d442cb2a1.
-    # Only working principles, Skills Usage placement, and heading boundaries differ.
-    assert digest == "adbf608248e0b0a03d6646f57d31816cdb520c86113225e281b2aa007b100bc5"
+    # Captured independently from 627ed97aebe26f4cc01cca3ffe159433d721ebdf,
+    # omitting only this change's approved principles, routing, and history blocks.
+    assert digest == "6dae9db6263a2dd4aec5e6be5b545ea5ed3daeb7140a4f228dc749f8247b3915"

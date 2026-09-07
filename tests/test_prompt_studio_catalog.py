@@ -105,6 +105,17 @@ def test_skill_sections_ignore_heading_like_lines_inside_code_fences() -> None:
     assert blocks[1]["source_line"] == 14
 
 
+def test_show_history_is_source_addressable_only_in_its_skill() -> None:
+    catalog = export_prompt_studio_catalog()
+    runtime = next(document for document in catalog["documents"] if document["id"] == "runtime-core")
+    assert not any("show-history" in block["id"] for block in runtime["blocks"])
+    show = next(document for document in catalog["documents"] if document.get("name") == "use-show-pages")
+    history = next(block for block in show["blocks"] if block["heading"] == "Show Page workspace history")
+    assert history["source_path"] == "skills/use-show-pages/SKILL.md"
+    assert "history.mode" in history["source"]
+    assert "--git-dir=<shadow-git-dir>" in history["source"]
+
+
 def test_debug_prompt_export_cli_contract(capsys) -> None:
     args = cli.build_parser().parse_args(["debug", "prompt", "export", "--format", "json"])
 

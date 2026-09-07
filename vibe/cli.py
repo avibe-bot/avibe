@@ -1871,6 +1871,8 @@ def _show_status_examples_text() -> str:
 
         Fields include:
           path, visibility, active_url, private_url, public_url, share_id, offline, created_at, updated_at.
+          JSON includes history.mode (managed or self-managed), history.checkpointing_active,
+          and history.git_dir (Avibe's history directory, not the user's repository).
 
         Use --json when another program or agent will consume the result.
         """
@@ -13941,6 +13943,8 @@ def _prewarm_show_page_session_best_effort(
 
 
 def cmd_show_status(args):
+    from core.show_git import show_history_status
+
     store = _load_show_page_store()
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show status --help")
@@ -13964,7 +13968,10 @@ def cmd_show_status(args):
         payload = _show_page_result(
             page,
             message=f"Show Page is {page.visibility}.",
-            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+            extra={
+                "history": show_history_status(session_id),
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+            },
         )
         if getattr(args, "json", False):
             _print_json(payload)

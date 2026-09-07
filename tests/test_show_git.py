@@ -23,7 +23,7 @@ from core.show_git import (
     ShowGitCheckpointService,
     ShowGitRepository,
     TurnCheckpointContext,
-    format_agent_contract,
+    show_history_status,
     sanitize_checkpoint_subject,
 )
 
@@ -104,17 +104,24 @@ def test_missing_workspace_never_creates_checkpoint_paths(resolved_git):
     assert not repo.gitdir.parent.exists()
 
 
-def test_agent_contract_ownership_probe_never_creates_workspace():
+def test_history_status_never_creates_workspace_or_repository():
     session_id = "ses_guidance_missing"
     workspace = paths.get_show_page_dir(session_id)
     gitdir = paths.get_show_git_dir(session_id)
 
-    contract = format_agent_contract(checkpointing_available=True, session_id=session_id)
+    status = show_history_status(session_id)
 
-    assert "History is saved automatically around each turn" in contract
+    assert status["mode"] == "managed"
+    assert status["git_dir"] == str(gitdir)
     assert not workspace.exists()
     assert not gitdir.exists()
     assert not gitdir.parent.exists()
+
+
+@pytest.mark.parametrize("session_id", ["", "../other", "ses/name", "ses\\name"])
+def test_history_status_rejects_invalid_session_ids(session_id):
+    with pytest.raises(ValueError, match="Invalid Show Page session id"):
+        show_history_status(session_id)
 
 
 def test_lazy_adoption_is_idempotent_and_native_git_works(resolved_git):
@@ -251,8 +258,10 @@ def test_existing_user_git_pointer_with_managed_path_shape_is_never_overwritten(
     assert pointer.read_bytes() == before
     assert repo.gitdir != user_gitdir
     assert _commit_count(repo) == 1
-    contract = format_agent_contract(checkpointing_available=True, session_id=session_id)
-    assert "addresses the **user's repo**, not Avibe history" in contract
+    status = show_history_status(session_id)
+    assert status["mode"] == "self-managed"
+    assert status["git_dir"] == str(repo.gitdir)
+    assert pointer.read_bytes() == before
 
 
 def test_pre_and_post_turn_commit_only_when_dirty_with_frozen_messages(resolved_git):
@@ -303,6 +312,43 @@ def test_native_restore_is_recorded_as_a_forward_post_turn_commit(resolved_git):
     assert target.read_text(encoding="utf-8") == "v1\n"
     assert _platform_git(repo, "rev-parse", "HEAD^").stdout.strip() == v2_head
     assert _platform_git(repo, "log", "-1", "--format=%s").stdout.strip() == "restore v1"
+
+
+@pytest.mark.parametrize("self_managed", [False, True])
+def test_skill_status_drives_native_restore_without_changing_user_history(resolved_git, self_managed):
+    session_id = "ses_skill_restore"
+    workspace = _workspace(session_id)
+    target = workspace / "page.txt"
+    target.write_text("first\n")
+    if self_managed:
+        _native_git(workspace, "init", "--initial-branch=trunk")
+        _native_git(workspace, "add", "page.txt")
+        _native_git(workspace, "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "baseline")
+    user_git = workspace / ".git"
+    before = {str(path.relative_to(user_git)): path.read_bytes() for path in user_git.rglob("*") if path.is_file()} if self_managed else None
+    repo = _repo(session_id, resolved_git)
+    assert repo.checkpoint(PRE_TURN)
+    target.write_text("second\n")
+    assert repo.checkpoint(POST_TURN, message="second")
+    head = _platform_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    status = show_history_status(session_id)
+    assert status["mode"] == ("self-managed" if self_managed else "managed")
+    assert Path(status["git_dir"]).resolve() == repo.gitdir.resolve()
+    if self_managed:
+        _platform_git(repo, "log", "-1")
+        _platform_git(repo, "restore", "--source=HEAD~1", "--", "page.txt")
+    else:
+        actual_git = _native_git(workspace, "rev-parse", "--absolute-git-dir").stdout.strip()
+        assert Path(actual_git).resolve() == Path(status["git_dir"]).resolve()
+        _native_git(workspace, "log", "-1")
+        _native_git(workspace, "restore", "--source=HEAD~1", "--", "page.txt")
+    assert target.read_text() == "first\n"
+    assert _platform_git(repo, "rev-parse", "HEAD").stdout.strip() == head
+    assert repo.checkpoint(POST_TURN, message="restore first")
+    assert _platform_git(repo, "rev-parse", "HEAD^").stdout.strip() == head
+    if self_managed:
+        assert {str(path.relative_to(user_git)): path.read_bytes() for path in user_git.rglob("*") if path.is_file()} == before
 
 
 def test_main_rewind_is_converted_to_a_forward_commit(resolved_git):
@@ -710,26 +756,26 @@ def test_agent_initiated_turn_reuses_fsm_bus_lifecycle(resolved_git, monkeypatch
     ]
 
 
-def test_agent_contract_uses_startup_latched_checkpoint_service_state(resolved_git, monkeypatch):
+def test_history_status_uses_startup_latched_checkpoint_service_state(resolved_git, monkeypatch):
     bus = InboxEventBus()
     unavailable_service = ShowGitCheckpointService(None)
     unavailable_service.start(bus)
     monkeypatch.setattr(show_git, "resolve_git", lambda: resolved_git)
 
-    unavailable = format_agent_contract(session_id="ses_latched_unavailable")
+    unavailable = show_history_status("ses_latched_unavailable")
     unavailable_status = json.loads(paths.get_show_git_runtime_status_path().read_text(encoding="utf-8"))
     unavailable_service.stop()
 
     active_service = ShowGitCheckpointService(resolved_git)
     active_service.start(bus)
     monkeypatch.setattr(show_git, "resolve_git", lambda: None)
-    available = format_agent_contract(session_id="ses_latched_available")
+    available = show_history_status("ses_latched_available")
     active_status = json.loads(paths.get_show_git_runtime_status_path().read_text(encoding="utf-8"))
     active_service.stop()
 
-    assert unavailable == ""
+    assert unavailable["checkpointing_active"] is False
     assert unavailable_status["active"] is False
-    assert "History is saved automatically around each turn" in available
+    assert available["checkpointing_active"] is True
     assert active_status["active"] is True
     assert active_status["service_pid"] == os.getpid()
 
