@@ -1764,7 +1764,6 @@ class SessionHandler(BaseHandler):
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
             include_quick_replies=quick_replies_on and platform != "wechat",
-            include_show_pages=getattr(self.config, "show_pages_prompt", True),
             memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
             context=context,
             fallback_platform=platform,

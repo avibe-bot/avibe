@@ -1514,7 +1514,6 @@ def config_to_payload(
         "include_time_info": config.include_time_info,
         "include_user_info": config.include_user_info,
         "reply_enhancements": config.reply_enhancements,
-        "show_pages_prompt": config.show_pages_prompt,
         "agent_progress_style": config.agent_progress_style,
         "agent_status_heartbeat_ms": config.agent_status_heartbeat_ms,
         "agent_status_no_output_ms": config.agent_status_no_output_ms,

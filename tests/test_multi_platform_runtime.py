@@ -956,7 +956,6 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
                 {
                     "platform": "avibe",
                     "reply_enhancements": True,
-                    "show_pages_prompt": True,
                     "remote_access": None,
                     "language": "en",
                     "memory": type("MemoryConfig", (), {"enabled": True})(),
@@ -1360,7 +1359,6 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
                 {
                     "platform": "avibe",
                     "reply_enhancements": True,
-                    "show_pages_prompt": True,
                     "remote_access": None,
                     "language": "en",
                     "opencode": type(
@@ -1558,7 +1556,6 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
                 {
                     "platform": "slack",
                     "reply_enhancements": True,
-                    "show_pages_prompt": True,
                     "remote_access": None,
                     "language": "en",
                 },

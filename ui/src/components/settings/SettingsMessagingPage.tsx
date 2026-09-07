@@ -476,26 +476,6 @@ export const SettingsMessagingPage: React.FC = () => {
             />
           }
         />
-        {canShowProtectedMessagingControl('show_pages_prompt') && (
-          <SettingsRow
-            title={t('dashboard.showPagesPrompt')}
-            description={t('dashboard.showPagesPromptHint')}
-            control={
-              <ToggleSwitch
-                enabled={config.show_pages_prompt !== false}
-                onClick={() =>
-                  void persist(
-                    {
-                      ...config,
-                      show_pages_prompt: !(config.show_pages_prompt !== false),
-                    },
-                    { show_pages_prompt: !(config.show_pages_prompt !== false) },
-                  )
-                }
-              />
-            }
-          />
-        )}
         {/* ``slack.*`` is outside the Editor write allowlist, so this control
             is only offered to roles that may manage the instance — a remote
             Owner included, which is why it carries its own field patch. */}

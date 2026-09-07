@@ -1052,7 +1052,6 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -1232,7 +1231,6 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -1364,7 +1362,6 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(

@@ -2523,7 +2523,6 @@ class CodexAgent(BaseAgent):
                 build_system_prompt_injection,
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
-                include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
                 include_codex_generated_images=True,
                 memory_enabled=bool(
                     getattr(getattr(self.controller.config, "memory", None), "enabled", False)
