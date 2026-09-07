@@ -8,6 +8,8 @@ project is restored after archiving, without a dedicated unarchive endpoint.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,7 @@ from storage import (
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import scope_settings, scopes
+from storage.models import scope_settings, scopes, state_meta
 from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
 
 
@@ -44,6 +46,222 @@ def _ensure_agent(name: str, backend: str) -> str:
         return agent.id
     finally:
         store.close()
+
+
+def _ordered_projects(conn, tmp_path, count=4):
+    rows = []
+    for index in range(count):
+        folder = tmp_path / f"ordered-{index}"
+        folder.mkdir()
+        row = projects_service.create_project(conn, str(folder))
+        conn.execute(scopes.update().where(scopes.c.id == row["scope_id"]).values(
+            first_seen_at=f"2026-01-0{index + 1}T00:00:00Z"
+        ))
+        rows.append(row)
+    return rows
+
+
+def test_project_creation_appends_independently_of_clock_and_random_id(engine, tmp_path, monkeypatch):
+    clock = "2026-01-01T00:00:00Z"
+    monkeypatch.setattr(projects_service, "_utc_now_iso", lambda: clock)
+    generated = iter(["proj_z", "proj_a", "proj_m"])
+    monkeypatch.setattr(projects_service, "_new_project_id", lambda: next(generated))
+    created = []
+    for index in range(3):
+        folder = tmp_path / f"same-second-{index}"
+        folder.mkdir()
+        with engine.begin() as conn:
+            created.append(projects_service.create_project(conn, str(folder))["id"])
+        with engine.connect() as conn:
+            assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == created
+        # Even a backwards wall-clock adjustment cannot insert the next row ahead.
+        if index == 1:
+            clock = "2025-12-31T23:59:59Z"
+
+
+def test_first_creation_preserves_legacy_project_order(engine, tmp_path):
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        conn.execute(state_meta.delete().where(state_meta.c.key == projects_service.PROJECT_ORDER_KEY))
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
+        folder = tmp_path / "post-upgrade"
+        folder.mkdir()
+        new = projects_service.create_project(conn, str(folder))
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [*ids, new["id"]]
+
+
+def test_project_positions_survive_activity_metadata_and_restoration(engine, tmp_path):
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
+        for row in rows:
+            projects_service.update_project(conn, row["id"], display_name="Renamed")
+            projects_service.create_project(conn, row["folder_path"])
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
+        saved = list(reversed(ids))
+        projects_service.reorder_projects(conn, saved, expected_order=ids)
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, rows[1]["id"])
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [i for i in saved if i != ids[1]]
+        projects_service.create_project(conn, rows[1]["folder_path"])
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == saved
+        fresh = tmp_path / "fresh-project"
+        fresh.mkdir()
+        new = projects_service.create_project(conn, str(fresh))
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [*saved, new["id"]]
+
+
+def test_project_reorder_preserves_hidden_and_archived_slots(engine, tmp_path):
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        _restrict_project_to(conn, ids[1], "insider@example.com")
+        projects_service.archive_project(conn, ids[2])
+        context = _acl_context("member", email="outsider@example.com")
+        result = projects_service.reorder_projects(
+            conn, [ids[3], ids[0]], expected_order=[ids[0], ids[3]], authorization_context=context
+        )
+        assert [p["id"] for p in result] == [ids[3], ids[0]]
+        assert [p["id"] for p in projects_service.list_projects(conn, include_archived=True, navigation_order=True)] == [
+            ids[3], ids[1], ids[2], ids[0]
+        ]
+
+
+def test_project_reorder_rejects_stale_view_without_changing_saved_order(engine, tmp_path):
+    with engine.begin() as conn:
+        ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
+        saved = list(reversed(ids))
+        projects_service.reorder_projects(conn, saved, expected_order=ids)
+        with pytest.raises(projects_service.ProjectOrderConflict):
+            projects_service.reorder_projects(conn, ids[1:] + ids[:1], expected_order=ids)
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == saved
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor"])
+def test_project_reorder_requires_project_management(engine, tmp_path, role):
+    with engine.begin() as conn:
+        ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
+        with pytest.raises(InstanceAuthorizationError):
+            projects_service.reorder_projects(conn, ids[::-1], expected_order=ids, authorization_context=_remote_context(role))
+        assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == ids
+
+
+@pytest.mark.parametrize("order,expected", [(None, []), ([1], [1]), (["x", "x"], ["x", "x"]), (["x"], []), ([], ["x"])])
+def test_project_reorder_accepts_only_a_permutation(engine, order, expected):
+    with engine.begin() as conn:
+        with pytest.raises(ValueError):
+            projects_service.reorder_projects(conn, order, expected_order=expected)
+
+
+def test_project_reorder_http_roundtrip_and_invalidation(engine, tmp_path, monkeypatch):
+    from vibe.ui_server import app
+    from tests.ui_server_test_helpers import csrf_headers
+
+    events = []
+    monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda *args: events.append(args))
+    with engine.begin() as conn:
+        ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
+    client = app.test_client()
+    response = client.put("/api/projects/order", json={"order": ids[::-1], "expected_order": ids}, headers=csrf_headers(client))
+    assert response.status_code == 200
+    assert [p["id"] for p in response.get_json()["projects"]] == ids[::-1]
+    assert ("projects.changed", {}) in events
+    bootstrap = client.get("/api/workbench/projects-bootstrap").get_json()
+    assert [p["id"] for p in bootstrap["projects"]] == ids[::-1]
+    stale = client.put("/api/projects/order", json={"order": ids, "expected_order": ids}, headers=csrf_headers(client))
+    assert stale.status_code == 409
+    malformed = client.put("/api/projects/order", json=["project"], headers=csrf_headers(client))
+    assert malformed.status_code == 400
+
+
+@pytest.mark.parametrize("include_archived", [False, True])
+@pytest.mark.parametrize("reordered", [False, True])
+def test_generic_project_list_retains_recency_independently_of_navigation(engine, tmp_path, include_archived, reordered):
+    from vibe.ui_server import app
+
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        for row, day in zip(rows, [2, 4, 1, 3]):
+            conn.execute(scopes.update().where(scopes.c.id == row["scope_id"]).values(
+                last_seen_at=f"2026-02-0{day}T00:00:00Z"
+            ))
+        navigation = [ids[2], ids[0], ids[3], ids[1]] if reordered else ids
+        if reordered:
+            projects_service.reorder_projects(conn, navigation, expected_order=ids)
+        projects_service.archive_project(conn, ids[3])
+
+    client = app.test_client()
+    suffix = "?include_archived=1" if include_archived else ""
+    generic = client.get(f"/api/projects{suffix}").get_json()["projects"]
+    tree = client.get(f"/api/workbench/projects-bootstrap{suffix}").get_json()["projects"]
+    expected_navigation = navigation if include_archived else [p for p in navigation if p != ids[3]]
+    assert [p["id"] for p in tree] == expected_navigation
+    assert generic == sorted(tree, key=lambda p: p["last_active_at"], reverse=True)
+    assert generic[0]["id"] == ids[1]
+
+    with engine.begin() as conn:
+        projects_service.create_project(conn, rows[0]["folder_path"])
+    assert client.get(f"/api/projects{suffix}").get_json()["projects"][0]["id"] == ids[0]
+    assert [p["id"] for p in client.get(f"/api/workbench/projects-bootstrap{suffix}").get_json()["projects"]] == expected_navigation
+
+
+@pytest.mark.parametrize("lang", ["en", "zh"])
+@pytest.mark.parametrize("payload,key,code,status", [
+    (["invalid"], "orderInvalid", "invalid_project_order", 400),
+    ({}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": [1], "expected_order": [1]}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": ["x", "x"], "expected_order": ["x", "x"]}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": ["x"], "expected_order": []}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": [], "expected_order": []}, "orderConflict", "project_order_conflict", 409),
+])
+def test_project_order_api_errors_keep_codes_and_localized_fallbacks(engine, tmp_path, lang, payload, key, code, status):
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe.i18n import t
+    from vibe.ui_server import app
+
+    with engine.begin() as conn:
+        _ordered_projects(conn, tmp_path, count=1)
+    client = app.test_client()
+    response = client.put("/api/projects/order", json=payload, headers={
+        **csrf_headers(client), "Accept-Language": lang,
+    })
+    assert response.status_code == status
+    expected = t(f"projects.{key}", lang)
+    assert expected != f"projects.{key}"
+    assert t(f"projects.{key}", "en") != t(f"projects.{key}", "zh")
+    assert response.get_json()["error"] == {"code": code, "message": expected}
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor", "member"])
+def test_remote_project_order_invalidation_reaches_the_real_event_stream(role):
+    from vibe import ui_server
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    async def collect():
+        with ui_server.app.test_request_context("/api/events"):
+            g.authorization_context = _remote_context(role)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                broker.publish("projects.changed", {"project_ids": ["hidden-project"]})
+                broker.publish("projects.changed", {})
+                return await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+
+    frame = asyncio.run(collect())
+    if isinstance(frame, bytes):
+        frame = frame.decode("utf-8")
+    assert "event: projects.changed\n" in frame
+    assert "hidden-project" not in frame
+    data = next(line.removeprefix("data: ") for line in frame.splitlines() if line.startswith("data: "))
+    assert json.loads(data)["data"] == {}
 
 
 def _remote_context(role: str) -> AuthorizationContext:

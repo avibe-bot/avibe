@@ -8,6 +8,10 @@
     "steps": "{count} st",
     "tokens": "{count} tok"
   },
+  "projects": {
+    "orderInvalid": "Project order could not be saved. Refresh the list and try again.",
+    "orderConflict": "Project order changed elsewhere. Refresh the list and move the project again."
+  },
   "fork": {
     "title": "Fork {title}",
     "titleUntitled": "Fork"

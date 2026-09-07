@@ -21,12 +21,16 @@
     "e2e:headed": "playwright test --headed",
     "test:chat-paging": "tsc -p e2e/chat-paging/tsconfig.json --noEmit && playwright test --config playwright.chat-paging.config.ts",
     "test:inbox-return": "tsc -p e2e/inbox-return/tsconfig.json --noEmit && playwright test --config playwright.inbox-return.config.ts",
+    "test:project-order": "tsc -p e2e/project-order/tsconfig.json --noEmit && playwright test --config playwright.project-order.config.ts",
     "test:model-catalog": "tsc -p e2e/model-catalog/tsconfig.json --noEmit && playwright test --config playwright.model-catalog.config.ts",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.8",
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@hpke/core": "^1.9.0",
     "@hpke/dhkem-x25519": "^1.8.0",
     "@lexical/react": "^0.45.0",

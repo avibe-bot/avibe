@@ -4,6 +4,7 @@ import { ChevronRight, File as FileIcon, Folder, FolderPlus, Loader2, X } from '
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { sortProjectsByRecent } from '../../lib/projectOrder';
 import {
   fileBrowserErrorMessage,
   isPlainEntryName,
@@ -31,7 +32,7 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
 // (dark-locked) Editor window, so it inherits that theme and stays scoped to the window.
 export const FilePicker: React.FC<{
   mode: FilePickerMode;
-  /** Folder to start in; falls back to the first project, then the home favorite. */
+  /** Folder to start in; falls back to the most recent project, then the home favorite. */
   initialPath?: string | null;
   /** save-file: pre-filled filename. */
   defaultName?: string;
@@ -82,7 +83,7 @@ export const FilePicker: React.FC<{
     [showHidden, t],
   );
 
-  // Pick a sensible starting folder once: the caller's initial path, else the first project, else
+  // Pick a sensible starting folder once: the caller's initial path, else the most recent project, else
   // the home favorite.
   useEffect(() => {
     let cancelled = false;
@@ -94,7 +95,7 @@ export const FilePicker: React.FC<{
       .then((favs) => {
         if (cancelled) return;
         setSysFavs(favs);
-        const start = projects?.[0]?.folder_path || favs.find((f) => f.key === 'home')?.path;
+        const start = sortProjectsByRecent(projects ?? [])[0]?.folder_path || favs.find((f) => f.key === 'home')?.path;
         if (start) navigate(start);
       })
       .catch(() => {});

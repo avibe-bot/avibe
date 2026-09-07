@@ -8,6 +8,10 @@
     "steps": "{count} 步",
     "tokens": "{count} tok"
   },
+  "projects": {
+    "orderInvalid": "无法保存项目顺序。请刷新列表后重试。",
+    "orderConflict": "项目顺序已在其他地方修改。请刷新列表后重新拖动。"
+  },
   "fork": {
     "title": "复刻 {title}",
     "titleUntitled": "复刻"

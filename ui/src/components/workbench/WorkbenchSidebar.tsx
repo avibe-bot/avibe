@@ -45,6 +45,7 @@ import { Markdown } from '../ui/markdown';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
+import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 
 interface CapabilityNavItem {
   to: string;
@@ -399,6 +400,7 @@ const ProjectRow: React.FC<{
   canEditAgentsMd: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
+  dragHandle?: ProjectDragHandle;
   onArchive: () => Promise<void>;
 }> = ({
   project,
@@ -419,6 +421,7 @@ const ProjectRow: React.FC<{
   canEditAgentsMd,
   unreadBySession,
   onRename,
+  dragHandle,
   onArchive,
 }) => {
   const { t } = useTranslation();
@@ -483,9 +486,10 @@ const ProjectRow: React.FC<{
           </div>
         ) : (
           <button
+            {...dragHandle}
             type="button"
             onClick={onToggle}
-            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            className="project-drag-header flex min-w-0 flex-1 items-center gap-1.5 text-left"
           >
             <Chevron className="size-3 shrink-0 text-muted" />
             {expanded ? (
@@ -685,6 +689,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     createSessionForProject,
     renameProject,
     archiveProject,
+    reorderProjects,
+    isReorderingProjects,
   } = useWorkbenchProjectsTree();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
@@ -896,12 +902,17 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <div className="text-[11px] text-muted">{t('workbench.projectsEmpty')}</div>
             </div>
           )}
-          {projects !== null &&
-            projects.map((project) => {
+          {projects !== null && <SortableProjectList
+            projects={projects}
+            disabled={!canManageProjects || isReorderingProjects}
+            onReorder={reorderProjects}
+          >
+            {(project, dragHandle) => {
               const state = sessionsOf(project.id);
               return (
                 <ProjectRow
                   key={project.id}
+                  dragHandle={dragHandle}
                   project={project}
                   expanded={isExpanded(project.id)}
                   sessions={state.sessions}
@@ -932,7 +943,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   onArchive={() => archiveProject(project.id)}
                 />
               );
-            })}
+            }}
+          </SortableProjectList>}
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApi } from '../context/ApiContext';
 import { useWorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
 import type { ApiContextType, VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
+import { sortProjectsByRecent } from './projectOrder';
 
 interface UseNewSessionOptions {
   /** Re-run the per-open reset on the rising edge — sheets pass their `open`. Default true. */
@@ -80,11 +81,6 @@ export function projectDefaultAgentRoute(
     : {};
 }
 
-const sortByRecent = (list: WorkbenchProject[]) =>
-  list
-    .slice()
-    .sort((a, b) => (b.last_active_at || b.created_at).localeCompare(a.last_active_at || a.created_at));
-
 type AgentProjectionResponse = Awaited<ReturnType<ApiContextType['listVibeAgents']>>;
 
 export function createLatestAgentProjectionLoader(
@@ -148,7 +144,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   const [userPick, setUserPick] = useState<AgentRouteSelection>({});
 
   const projects = useMemo(
-    () => (rawProjects ? sortByRecent(rawProjects.filter((project) => project.capabilities.can_chat)) : []),
+    () => (rawProjects ? sortProjectsByRecent(rawProjects.filter((project) => project.capabilities.can_chat)) : []),
     [rawProjects],
   );
   const projectsLoaded = rawProjects !== null;
