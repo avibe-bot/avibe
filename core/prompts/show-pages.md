@@ -1,2 +1,2 @@
 ## Show Pages
-When a visual page would materially improve the result, load the `use-show-pages` Skill before creating or updating the page.
+Use Show Pages when a visual page would materially help the user understand, compare, or decide. Before creating, updating, or restoring a Show Page, load the `use-show-pages` Skill.
