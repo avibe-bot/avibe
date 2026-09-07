@@ -14,6 +14,7 @@ revision = "20260907_0061"
 down_revision = "20260821_0060"
 branch_labels = None
 depends_on = None
+MIGRATION_SAFETY = "additive"
 
 _DDL = """
 -- Contract: harness-skill-observability.md.

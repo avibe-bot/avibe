@@ -460,6 +460,64 @@ async def test_internal_observation_boundary(engine):
     await recorder.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_mode", ["return", "error", "cancel", "recovery_cancel", "bind_error"])
+async def test_internal_server_owns_recorder_cleanup(engine, monkeypatch, tmp_path, exit_mode):
+    from core import internal_server
+
+    controller = SimpleNamespace(_delivery_recovery_complete=asyncio.Event())
+    started = asyncio.Event()
+    listener = SimpleNamespace(close=Mock())
+
+    async def serve(*, sockets):
+        assert sockets == [listener]
+        recorder = controller.skill_observability
+        recorder.engine = engine
+        recorder.enabled = lambda: True
+        assert recorder.enqueue(load(instant=store.utc_now())) == "queued"
+        await recorder.queue.join()
+        started.set()
+        if exit_mode == "error":
+            raise RuntimeError("server failed")
+        if exit_mode == "cancel":
+            await asyncio.Event().wait()
+
+    def bind_socket(_path):
+        if exit_mode == "bind_error":
+            raise OSError("socket unavailable")
+        return listener, tmp_path / "dispatch.sock"
+
+    monkeypatch.setattr(internal_server, "_create_controller_loop_server", lambda _config: SimpleNamespace(serve=serve))
+    monkeypatch.setattr(internal_server, "_bind_socket", bind_socket)
+    monkeypatch.setattr(internal_server, "_write_internal_server_status", Mock())
+    monkeypatch.setattr(internal_server, "_remove_owned_socket", Mock())
+    if exit_mode != "recovery_cancel":
+        controller._delivery_recovery_complete.set()
+    task = asyncio.create_task(internal_server.serve(controller))
+    if exit_mode == "cancel":
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+    elif exit_mode == "recovery_cancel":
+        await asyncio.sleep(0)
+        task.cancel()
+    if exit_mode in {"cancel", "recovery_cancel"}:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif exit_mode in {"error", "bind_error"}:
+        with pytest.raises((RuntimeError, OSError)):
+            await task
+    else:
+        await task
+
+    recorder = controller.skill_observability
+    assert recorder.closed
+    assert recorder.worker is None or recorder.worker.done()
+    assert recorder.enqueue(load()) == "dropped"
+    if exit_mode not in {"recovery_cancel", "bind_error"}:
+        assert counts(engine) == (1, 1)
+        listener.close.assert_called_once()
+
+
 def test_config_flag_is_strict_and_serialized():
     from config.v2_config import RuntimeConfig, V2Config
 
@@ -508,3 +566,43 @@ def test_clear_command_requires_explicit_confirmation(engine, capsys):
     assert counts(engine) == (1, 1)
     assert cmd_data_skill_usage(SimpleNamespace(clear=True, yes=True)) == 0
     assert counts(engine) == (0, None)
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize(
+    "owner,clear,yes,code,key",
+    [
+        (False, False, False, "forbidden", "ownerRequired"),
+        (True, True, False, "confirmation_required", "confirmationRequired"),
+        (True, False, True, "invalid_arguments", "clearRequired"),
+    ],
+)
+def test_skill_usage_errors_follow_cli_language(monkeypatch, capsys, language, owner, clear, yes, code, key):
+    from vibe import cli
+    from vibe.i18n import t
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(
+        "storage.resource_access_service.resolve_resource_access_context",
+        lambda _caller: SimpleNamespace(is_instance_owner=owner),
+    )
+    assert cli.cmd_data_skill_usage(SimpleNamespace(clear=clear, yes=yes)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["code"] == code
+    assert payload["error"] == t(f"data.skillUsage.{key}", language)
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_skill_usage_help_follows_cli_language(monkeypatch, capsys, language):
+    from vibe import cli
+    from vibe.i18n import t
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.build_parser().parse_args(["data", "skill-usage", "--help"])
+    assert exit_info.value.code == 0
+    output = capsys.readouterr().out
+    for key in ("helpCommand", "helpClear", "helpYes"):
+        assert t(f"data.skillUsage.{key}", language) in output

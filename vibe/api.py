@@ -1471,6 +1471,7 @@ def config_to_payload(
             # here would revert a user's retention opt-out on unrelated saves.
             "agent_events_trace_retention_enabled": config.runtime.agent_events_trace_retention_enabled,
             "agent_events_trace_retention_days": config.runtime.agent_events_trace_retention_days,
+            "skill_observability_enabled": config.runtime.skill_observability_enabled,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,

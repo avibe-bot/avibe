@@ -7301,13 +7301,14 @@ def cmd_data_skill_usage(args):
         from core.skill_observability import collection_enabled
         from storage.db import get_cached_sqlite_engine
 
+        language = _configured_cli_language()
         caller = caller_resource_user_context(caller_context_from_env())
         if not resolve_resource_access_context(caller).is_instance_owner:
-            raise TaskCliError("Instance Owner access is required.", code="forbidden")
+            raise TaskCliError(i18n_t("data.skillUsage.ownerRequired", language), code="forbidden")
         if args.clear and not args.yes:
-            raise TaskCliError("Clearing Skill statistics requires --yes.", code="confirmation_required")
+            raise TaskCliError(i18n_t("data.skillUsage.confirmationRequired", language), code="confirmation_required")
         if args.yes and not args.clear:
-            raise TaskCliError("--yes requires --clear.", code="invalid_arguments")
+            raise TaskCliError(i18n_t("data.skillUsage.clearRequired", language), code="invalid_arguments")
         enabled = collection_enabled()
         from storage.importer import ensure_sqlite_state
 
@@ -16984,11 +16985,12 @@ def build_parser():
     data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention,skill-usage}")
     data_subparsers.required = True
     skill_usage_parser = data_subparsers.add_parser(
-        "skill-usage", help="Inspect or clear local Skill statistics (Instance Owner only)",
+        "skill-usage", help=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
+        description=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
         error_help_command="vibe data skill-usage --help",
     )
-    skill_usage_parser.add_argument("--clear", action="store_true", help="Clear Skill events and daily statistics.")
-    skill_usage_parser.add_argument("--yes", action="store_true", help="Confirm clearing Skill statistics.")
+    skill_usage_parser.add_argument("--clear", action="store_true", help=i18n_t("data.skillUsage.helpClear", _data_help_lang))
+    skill_usage_parser.add_argument("--yes", action="store_true", help=i18n_t("data.skillUsage.helpYes", _data_help_lang))
     _add_json_noop(skill_usage_parser)
     data_query_parser = data_subparsers.add_parser(
         "query",

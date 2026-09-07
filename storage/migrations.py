@@ -60,6 +60,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "message_deliveries",
     "session_turns",
     "agent_events",
+    "skill_usage_daily",
     "show_session_events",
     "media_objects",
     "media_object_references",

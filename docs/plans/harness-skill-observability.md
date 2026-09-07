@@ -435,9 +435,13 @@ replay, models/migration parity, concurrent duplicate receipts, atomic rollback,
 nullable buckets, UTC retention boundaries, indexed pruning, narrow clear with
 a watermark, physical Session purge versus archive, owner-only SQL, strict
 configuration, bounded IPC/queue behavior, and backend acceptance boundaries.
-The combined targeted suite passes 1,069 tests and 28 subtests (one platform
+The combined targeted suite passes 1,908 tests and 28 subtests (one platform
 capability skip). This includes the installed Codex binary's three loopback
-prompt-contract tests. Ruff and whitespace validation also pass.
+prompt-contract tests, release migration guards, unrelated settings saves that
+preserve the collection opt-out, localized CLI errors/help, and recorder cleanup
+on server exit, cancellation, or startup failure. The expanded suite also passes
+with the CI-resolved FastAPI 0.141.1 and Starlette 1.6.0 versions. Ruff and
+whitespace validation also pass.
 No production database or runtime configuration was migrated or deployed.
 Container regression is unverified: the workstation's Incus client has no
 configured Linux daemon. No remote operational environment was substituted.
