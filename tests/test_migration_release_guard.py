@@ -14,6 +14,7 @@ properties through the CLI with the full history fetched.
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import sqlite3
 from pathlib import Path
@@ -990,25 +991,23 @@ def test_current_schema_gets_valid_rows_in_every_table(tmp_path):
 
 
 @pytest.mark.parametrize("minimum", [0, 4])
-def test_shape_repairs_follow_constraints_not_column_names(tmp_path, minimum):
+@pytest.mark.parametrize("order", list(itertools.permutations(range(4))))
+@pytest.mark.parametrize("mixed_case", [False, True])
+@pytest.mark.parametrize("source_check", ["a glob 'R-[A-C][0-9]'", "a in ('R-A0')"])
+def test_shape_repairs_follow_constraints_not_column_names(tmp_path, minimum, order, mixed_case, source_check):
     db_path = tmp_path / "vibe.sqlite"
+    columns = "id integer primary key, a text not null, b text not null, c text not null, d integer not null, e integer not null"
+    if mixed_case:
+        columns = columns.upper()
+    checks = (
+        f"constraint ck_a check ({source_check})",
+        "constraint ck_b check (length(b) = 12 and b not glob '*[^0-9a-f]*')",
+        "constraint ck_c check (length(c) = 9 and substr(c, 1, 4) = a)",
+        f"constraint ck_counts check (typeof(d) = 'integer' and d >= 0 "
+        f"and typeof(e) = 'integer' and e >= 0 and d + e > {minimum} and (d = 0 or c = ''))",
+    )
     with sqlite3.connect(db_path) as connection:
-        connection.execute(f"""
-            create table shaped (
-                id integer primary key,
-                a text not null,
-                b text not null,
-                c text not null,
-                d integer not null,
-                e integer not null,
-                constraint ck_a check (a glob 'R-[A-C][0-9]'),
-                constraint ck_b check (length(b) = 12 and b not glob '*[^0-9a-f]*'),
-                constraint ck_c check (length(c) = 9 and substr(c, 1, 4) = a),
-                constraint ck_counts check (typeof(d) = 'integer' and d >= 0
-                    and typeof(e) = 'integer' and e >= 0 and d + e > {minimum}
-                    and (d = 0 or c = ''))
-            )
-        """)
+        connection.execute(f"create table shaped ({columns}, {', '.join(checks[index] for index in order)})")
 
     short, _ = guard.seed_representative_rows(db_path)
 
@@ -1025,12 +1024,83 @@ def test_numeric_candidates_use_the_column_affinity():
         assert ("n", -1) not in proposals
 
 
-def test_unsupported_shapes_remain_a_visible_seed_failure(tmp_path):
+@pytest.mark.parametrize("reverse", [False, True])
+def test_prefix_sources_can_be_derived_from_json_checks(tmp_path, reverse):
+    db_path = tmp_path / "vibe.sqlite"
+    checks = [
+        "constraint ck_source check (json_valid(a) = 1 and json_extract(a, '$.version') = 1)",
+        "constraint ck_prefix check (length(b) = 20 and substr(b, 1, 13) = a)",
+    ]
+    if reverse:
+        checks.reverse()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (id integer primary key, a text not null, b text not null, {', '.join(checks)})")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize(
+    "comparison",
+    ["> 9223372036854775807", "< -9223372036854775808", "> " + "9" * 5000],
+    ids=["above-int64", "below-int64", "arbitrary-precision-literal"],
+)
+def test_unbindable_numeric_boundaries_are_reported_not_raised(tmp_path, comparison):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table extreme (id integer primary key, n integer not null, constraint ck_n check (n {comparison}))")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert "ck_n" in short["extreme"]
+
+
+@pytest.mark.parametrize("value", [-(2**63), 2**63 - 1])
+def test_integer_variations_remain_sqlite_bindable(value):
+    with sqlite3.connect(":memory:") as connection:
+        variants = [guard.varied(value, step) for step in range(1, guard.SEED_ATTEMPTS + 1)]
+        assert len(set(variants)) == len(variants)
+        assert value not in variants
+        for varied in variants:
+            assert connection.execute("select ?", (varied,)).fetchone()[0] == varied
+
+
+def test_literal_and_json_repairs_use_sqlite_identifier_case_rules(tmp_path):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""
+            create table named (id integer primary key, Kind text not null, Payload text not null,
+                constraint ck_kind check (kIND in ('ready')),
+                constraint ck_payload check (json_valid(PAYLOAD) = 1 and json_extract(payload, '$.CaseSensitive') = 1))
+        """)
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from named where Kind = 'ready' and json_extract(Payload, '$.CaseSensitive') = 1").fetchone()[0] >= guard.SEED_ROWS
+
+
+def test_identifier_folding_matches_sqlite_without_changing_unicode():
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute('create table names ("A" text, "\u00c4" text, "\u00e4" text)')
+        connection.execute('insert into names values (\'ascii\', \'upper\', \'lower\')')
+        assert connection.execute('select a, "\u00c4", "\u00e4" from names').fetchone() == ("ascii", "upper", "lower")
+    assert guard.identifier_key("A") == guard.identifier_key("a")
+    assert guard.identifier_key("\u00c4") != guard.identifier_key("\u00e4")
+
+
+@pytest.mark.parametrize("width", [str(guard.SEED_TEXT_LIMIT + 1), "9" * 5000], ids=["width-limit", "huge-width"])
+def test_unsupported_shapes_remain_a_visible_seed_failure(tmp_path, width):
     db_path = tmp_path / "vibe.sqlite"
     with sqlite3.connect(db_path) as connection:
         connection.execute(f"""
             create table oversized (id integer primary key, value text not null,
-                constraint ck_width check (length(value) = {guard.SEED_TEXT_LIMIT + 1}))
+                constraint ck_width check (length(value) = {width}))
         """)
 
     short, _ = guard.seed_representative_rows(db_path)
@@ -1038,6 +1108,31 @@ def test_unsupported_shapes_remain_a_visible_seed_failure(tmp_path):
     assert "ck_width" in short["oversized"]
     with sqlite3.connect(db_path) as connection:
         assert connection.execute("select count(*) from oversized").fetchone()[0] == 0
+
+
+def test_bounded_numeric_tokens_ignore_leading_zeroes():
+    assert guard.bounded_integer("0" * 5000 + "12", 0, 4096) == 12
+    assert guard.bounded_integer("-" + "0" * 5000 + "12", -4096, 0) == -12
+    with sqlite3.connect(":memory:") as connection:
+        assert guard.shape_proposals(connection, "substr(a, " + "9" * 5000 + ", 1) = b", [("a", "TEXT"), ("b", "TEXT")], {"a": "x", "b": "y"}) == []
+
+
+@pytest.mark.parametrize("literal", ["9223372036854775808", "0001", "1.0", "-0001.5"])
+def test_json_numeric_candidates_are_parsed_by_sqlite_without_integer_binding(tmp_path, literal):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"""
+            create table shaped (id integer primary key, payload text not null,
+                constraint ck_payload check (json_valid(payload) = 1 and json_extract(payload, '$.large') = {literal}
+                    and typeof(json_extract(payload, '$.large')) = typeof({literal})))
+        """)
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
 @requires_release_history

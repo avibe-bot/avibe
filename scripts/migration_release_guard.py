@@ -67,6 +67,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -801,6 +802,8 @@ CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
 SEED_ATTEMPTS = 60
 # Shape proposals are witnesses, not an invitation to allocate arbitrary declared widths.
 SEED_TEXT_LIMIT = 4096
+SQLITE_INT_MIN = -(2**63)
+SQLITE_INT_MAX = 2**63 - 1
 
 # Where `varied` records a row's step inside a JSON document. Nothing reads it back; it is
 # there so the document differs while staying a document, and it is namespaced so it cannot
@@ -814,6 +817,10 @@ JSON_VARIED_MEMBER = "__seed_step__"
 JSON_REQUIREMENT = re.compile(
     r"json_(extract|type)\s*\(\s*\"?(\w+)\"?\s*,\s*'([^']*)'\s*\)\s*(?:==|=|is)\s*"
     r"('[^']*'|-?[0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+SUBSTRING_REQUIREMENT = re.compile(
+    r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*"?(\w+)"?',
     re.IGNORECASE,
 )
 
@@ -887,6 +894,20 @@ def check_expression(ddl: str, name: str) -> str:
     return ""
 
 
+def identifier_key(value: str) -> str:
+    """SQLite folds ASCII identifier case, not Unicode or JSON member names."""
+    return value.translate(str.maketrans(string.ascii_uppercase, string.ascii_lowercase))
+
+
+def bounded_integer(literal: str, lower: int, upper: int) -> int | None:
+    """Reject oversized decimal tokens before Python parsing or SQLite binding."""
+    digits = literal.lstrip("-").lstrip("0") or "0"
+    if len(digits) > len(str(max(abs(lower), abs(upper)))):
+        return None
+    value = int(digits) * (-1 if literal.startswith("-") else 1)
+    return value if lower <= value <= upper else None
+
+
 def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, str]]:
     """``(column, value)`` pairs ``expression`` itself suggests, for the columns it names.
 
@@ -900,7 +921,8 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     than producing a row the schema would have refused.
     """
     literals = re.findall(r"'([^']*)'", expression)
-    named = [column for column in columns if re.search(rf"\b{re.escape(column)}\b", expression)]
+    folded = identifier_key(expression)
+    named = [column for column in columns if re.search(rf"\b{re.escape(identifier_key(column))}\b", folded)]
     return [(column, literal) for column in named for literal in literals]
 
 
@@ -914,10 +936,11 @@ def json_proposals(
     one column are folded into a single document, because a constraint requiring two paths
     is not satisfied by a document carrying either one.
     """
-    wanted = set(columns)
+    wanted = {identifier_key(column): column for column in columns}
     required: dict[str, list[tuple[str, str, object]]] = {}
     for function, column, path, literal in JSON_REQUIREMENT.findall(expression):
-        if column not in wanted:
+        column = wanted.get(identifier_key(column))
+        if column is None:
             continue
         if function.lower() == "type":
             named = literal.strip("'").lower()
@@ -931,7 +954,7 @@ def json_proposals(
         elif literal.startswith("'"):
             required.setdefault(column, []).append((path, "?", literal[1:-1]))
         else:
-            required.setdefault(column, []).append((path, "?", float(literal) if "." in literal else int(literal)))
+            required.setdefault(column, []).append((path, "json(?)", str(Decimal(literal))))
 
     proposals = []
     for column, clauses in required.items():
@@ -969,21 +992,28 @@ def shape_proposals(
     expression: str,
     required: list[tuple[str, str]],
     values: dict[str, object],
+    *,
+    text_constraints: str | None = None,
 ) -> list[tuple[str, object]]:
     """Derive bounded text-shape and numeric candidates from the rejected CHECK.
 
     This extends the literal/JSON proposals, not the seeder's coverage claim. Unsupported
     expressions still fail visibly; every proposed value must survive a real insert.
     """
+    names = {identifier_key(name): name for name in values}
     text = {name: value for name, value in values.items() if isinstance(value, str)}
-    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', expression, re.IGNORECASE):
-        if name in text and int(width) <= SEED_TEXT_LIMIT:
-            text[name] = text[name][: int(width)].ljust(int(width), "0")
+    shapes = text_constraints if text_constraints is not None else expression
+    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', shapes, re.IGNORECASE):
+        name = names.get(identifier_key(name), name)
+        size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
+        if name in text and size is not None:
+            text[name] = text[name][:size].ljust(size, "0")
     for name, negated, quoted in re.findall(
         r"\b\"?(\w+)\"?\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
-        expression,
+        shapes,
         re.IGNORECASE,
     ):
+        name = names.get(identifier_key(name), name)
         if name not in text:
             continue
         pattern = quoted.replace("''", "'")
@@ -999,25 +1029,30 @@ def shape_proposals(
             ]
             if allowed:
                 text[name] = "".join(char if char in allowed else allowed[0] for char in text[name])
-    for name, start, width, other in re.findall(
-        r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*"?(\w+)"?',
-        expression,
-        re.IGNORECASE,
-    ):
-        if name in text and isinstance(values.get(other), str) and 0 < int(start) <= SEED_TEXT_LIMIT:
-            offset, size = int(start) - 1, int(width)
+    for name, start, width, other in SUBSTRING_REQUIREMENT.findall(shapes):
+        name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
+        position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
+        size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
+        if name in text and isinstance(values.get(other), str) and position is not None and size is not None:
+            offset = position - 1
             source = text.get(other, str(values[other]))
             if len(source) == size:
                 text[name] = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
     proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
-    bounds = {int(value) for value in re.findall(r"(?<![\w.])-?\d+(?![\w.])", expression)}
+    bounds = {
+        bound
+        for token in re.findall(r"(?<![\w.])-?[0-9]+(?![\w.])", expression)
+        if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None
+    }
     projection = ", ".join(
         f'cast(? as {declared}) as "{name}"' if declared else f'? as "{name}"'
         for name, declared in required
     )
     for name, declared in required:
-        if "INT" in declared.upper() and re.search(rf"\b{re.escape(name)}\b", expression):
+        if "INT" in declared.upper() and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)):
             for candidate in dict.fromkeys(value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)):
+                if not SQLITE_INT_MIN <= candidate <= SQLITE_INT_MAX:
+                    continue
                 parameters = [candidate if column == name else values[column] for column, _ in required]
                 try:
                     accepted = connection.execute(f"select ({expression}) from (select {projection})", parameters).fetchone()[0]
@@ -1196,7 +1231,7 @@ def varied(value: object, step: int) -> object:
     if isinstance(value, bool):
         return not value
     if isinstance(value, int):
-        return value + step
+        return (value + step - SQLITE_INT_MIN) % (SQLITE_INT_MAX - SQLITE_INT_MIN + 1) + SQLITE_INT_MIN
     if isinstance(value, float):
         return value + float(step)
     if isinstance(value, bytes):
@@ -1303,6 +1338,14 @@ def insert_seed_row(
     placeholders = ", ".join("?" for _ in required)
     statement = f'insert into "{table}" ({columns}) values ({placeholders})'
     names = [column for column, _ in required]
+    # Related columns may be constrained by a later CHECK. Derive their text shapes
+    # together so declaration order does not decide whether a prefix can be offered.
+    constraints = [
+        check_expression(ddl, name)
+        for name in re.findall(r'\bconstraint\s+"?(\w+)"?\s+check\s*\(', ddl, re.IGNORECASE)
+    ]
+    text_constraints = "\n".join(constraints)
+    prefix_sources = {identifier_key(other) for _, _, _, other in SUBSTRING_REQUIREMENT.findall(text_constraints)}
     proposed: set[tuple[str, object]] = set()
     objection = ""
     for _ in range(SEED_ATTEMPTS):
@@ -1320,12 +1363,21 @@ def insert_seed_row(
             untried = [
                 pair
                 for pair in [
-                    *shape_proposals(connection, expression, required, values),
+                    *shape_proposals(connection, expression, required, values, text_constraints=text_constraints),
                     *check_proposals(expression, names),
                     *json_proposals(connection, expression, names),
                 ]
                 if pair not in proposed and values[pair[0]] != pair[1]
             ]
+            if not untried:
+                # Follow only prefix-source dependencies into other CHECKs. Unrelated
+                # literals must not overwrite columns that already satisfy their checks.
+                untried = [
+                    pair
+                    for related in constraints
+                    for pair in [*check_proposals(related, names), *json_proposals(connection, related, names)]
+                    if identifier_key(pair[0]) in prefix_sources and pair not in proposed and values[pair[0]] != pair[1]
+                ]
             if not untried:
                 return objection, True
             column, literal = untried[0]
