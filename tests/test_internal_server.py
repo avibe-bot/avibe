@@ -4390,41 +4390,77 @@ def test_cancel_resumes_the_oldest_queued_segment(monkeypatch, tmp_path):
     session_id = session["id"]
 
     started = asyncio.Event()
+    stop_requested = asyncio.Event()
+    terminal_ready = asyncio.Event()
+    queued_started = asyncio.Event()
+    tasks: list[asyncio.Task] = []
     seen: list[str] = []
 
     async def long_handler(ctx, text):
         _bind_test_native_start(engine, ctx)
+        tasks.append(asyncio.current_task())
         seen.append(text)
         if text == "first":
             started.set()
-            await asyncio.sleep(5)  # held until the test cancels it
+            await stop_requested.wait()
+            await terminal_ready.wait()
+            Controller.mark_turn_complete(controller, ctx, settled_by=SETTLED_BY_STOPPED)
         else:
-            controller.mark_turn_complete(ctx)
-        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+            Controller.mark_turn_complete(controller, ctx, settled_by=SETTLED_BY_TERMINAL_RESULT)
+            queued_started.set()
+
+    async def stop_backend(ctx):
+        assert ctx is app.state.in_flight_dispatches[session_id].context
+        stop_requested.set()
+        return True
 
     controller = _build_controller_double(handler=long_handler)
+    controller.command_handler.handle_stop = AsyncMock(side_effect=stop_backend)
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
 
     async def _go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            await client.post(
-                "/internal/dispatch_async",
-                json={
-                    "session_id": session_id,
-                    "text": "first",
-                    "user_message_id": first["id"],
-                },
-            )
-            await asyncio.wait_for(started.wait(), timeout=3)
-            # Queue a message while the turn runs, then Stop.
-            with engine.begin() as conn:
-                message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
-            await client.post(f"/internal/cancel/{session_id}")
-            for _ in range(300):
-                if seen == ["first", "q1"] and session_id not in app.state.in_flight_dispatches:
-                    break
-                await asyncio.sleep(0.02)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.post(
+                    "/internal/dispatch_async",
+                    json={
+                        "session_id": session_id,
+                        "text": "first",
+                        "user_message_id": first["id"],
+                    },
+                )
+                assert response.status_code == 202
+                await asyncio.wait_for(started.wait(), timeout=3)
+                turn = app.state.in_flight_dispatches[session_id]
+                # A receipt alone cannot retire the active owner or start q1.
+                with engine.begin() as conn:
+                    message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
+                response = await client.post(f"/internal/cancel/{session_id}")
+                assert response.status_code == 200
+                assert response.json()["status"] == "cancel_requested"
+                controller.command_handler.handle_stop.assert_awaited_once_with(turn.context)
+                assert stop_requested.is_set()
+                assert not turn.task.done()
+                assert app.state.in_flight_dispatches[session_id] is turn
+                assert seen == ["first"]
+
+                terminal_ready.set()
+                await asyncio.wait_for(asyncio.shield(turn.task), timeout=3)
+                await asyncio.wait_for(queued_started.wait(), timeout=3)
+                await asyncio.wait_for(asyncio.shield(tasks[-1]), timeout=3)
+                assert all(task.done() and not task.cancelled() for task in tasks)
+                assert session_id not in app.state.in_flight_dispatches
+                with engine.connect() as conn:
+                    stopped_turn = message_deliveries.get_turn(conn, turn.logical_turn_id)
+                assert stopped_turn["terminal_outcome"] == "canceled"
+        finally:
+            # Failure cleanup must not manufacture the completion asserted above.
+            pending = set(tasks) | {entry.task for entry in app.state.in_flight_dispatches.values()}
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     asyncio.run(_go())
     with engine.connect() as conn:
@@ -7157,18 +7193,27 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     session_id = session["id"]
 
     started = asyncio.Event()
+    stop_requested = asyncio.Event()
+    terminal_ready = asyncio.Event()
 
     async def _long_dispatch_turn(
         ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
     ):
         _bind_test_native_start(engine, ctx)
         started.set()
-        await asyncio.sleep(5)  # held until the test cancels it
-        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+        await stop_requested.wait()
+        await terminal_ready.wait()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_STOPPED)
+
+    async def stop_backend(stop_context):
+        assert stop_context is app.state.in_flight_dispatches[session_id].context
+        stop_requested.set()
+        return True
 
     monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _long_dispatch_turn)
 
     controller = _build_controller_double()
+    controller.command_handler.handle_stop = AsyncMock(side_effect=stop_backend)
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
     ctx = MessageContext(user_id="workbench", channel_id=session_id, platform="avibe")
@@ -7176,15 +7221,37 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     async def _go():
         # Start the scheduled run in the background (it holds in_flight open).
         run = asyncio.create_task(controller.session_turn_gate.submit_scheduled(session_id, ctx, "scheduled run"))
-        await asyncio.wait_for(started.wait(), timeout=3)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            resp = await client.post(f"/internal/cancel/{session_id}")
-        for _ in range(200):
-            if session_id not in app.state.in_flight_dispatches:
-                break
-            await asyncio.sleep(0.02)
-        run.cancel()
-        return resp
+        turn = None
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            turn = app.state.in_flight_dispatches[session_id]
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await client.post(f"/internal/cancel/{session_id}")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "cancel_requested"
+            controller.command_handler.handle_stop.assert_awaited_once_with(turn.context)
+            assert stop_requested.is_set()
+            assert not turn.task.done()
+            assert app.state.in_flight_dispatches[session_id] is turn
+
+            terminal_ready.set()
+            # Submission is admission, not completion: join the real dispatch too.
+            await asyncio.wait_for(asyncio.shield(turn.task), timeout=3)
+            await asyncio.wait_for(asyncio.shield(run), timeout=3)
+            assert turn.task.done() and not turn.task.cancelled()
+            assert session_id not in app.state.in_flight_dispatches, "slot released after the scheduled run was stopped"
+            with engine.connect() as conn:
+                stopped_turn = message_deliveries.get_turn(conn, turn.logical_turn_id)
+            assert stopped_turn["terminal_outcome"] == "canceled"
+            return resp
+        finally:
+            pending = {run} | {entry.task for entry in app.state.in_flight_dispatches.values()}
+            if turn is not None:
+                pending.add(turn.task)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     resp = asyncio.run(_go())
     assert resp.status_code == 200
