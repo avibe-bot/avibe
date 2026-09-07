@@ -165,14 +165,14 @@ const vendorOptionName = (id: string) => (id === CUSTOM_VENDOR
   ? i18n.t('settings.models.addKey.field.vendor.custom')
   : apiKeyVendorPreset(id)?.label ?? id);
 
-/** The order the menu should read in: the shipped catalog A–Z by the name on the
- *  row, then the entry that is not a vendor. Derived from the file rather than
- *  listed, so a vendor added to the catalog is expected in its alphabetical
- *  place instead of wherever the file happens to put it. */
+/** The order the menu should read in: the shipped catalog verbatim, then the
+ *  entry that is not a vendor. The property is menu order == file order, so the
+ *  ranking itself is asserted nowhere — it is a product decision that belongs in
+ *  `vibe/data/api_key_vendors.json` alone, and a list restated here would make
+ *  every reordering a two-file edit while proving nothing the file cannot say.
+ *  What this does catch is the menu re-deriving an order of its own. */
 const offeredInOrder = (): string[] => [
-  ...API_KEY_VENDOR_PRESETS
-    .map((row) => row.id)
-    .sort((one, other) => vendorOptionName(one).localeCompare(vendorOptionName(other), 'en', { sensitivity: 'base' })),
+  ...API_KEY_VENDOR_PRESETS.map((row) => row.id),
   CUSTOM_VENDOR,
 ];
 
@@ -1070,8 +1070,8 @@ describe('AddApiKeyDialog · vendor', () => {
 
     await user.click(vendorField());
     const rows = await screen.findAllByRole('option');
-    // A–Z by the name on the row, with 自定义 at the bottom: it is the absence of
-    // a vendor, so it belongs after them rather than sorted among them.
+    // The catalog's own order, with 自定义 at the bottom: it is the absence of a
+    // vendor, so it belongs after them rather than ranked among them.
     const offered = offeredInOrder();
     expect(rows).toHaveLength(offered.length);
     expect(offered.map((id) => rows.indexOf(screen.getByRole('option', { name: vendorOptionName(id) }))))
