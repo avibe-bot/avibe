@@ -1,5 +1,29 @@
 [
   {
+    "id": "openai",
+    "label": "OpenAI",
+    "official_base_url": "https://api.openai.com/v1",
+    "protocol": "openai_responses"
+  },
+  {
+    "id": "anthropic",
+    "label": "Anthropic",
+    "official_base_url": "https://api.anthropic.com",
+    "protocol": "anthropic"
+  },
+  {
+    "id": "xai",
+    "label": "xAI",
+    "official_base_url": "https://api.x.ai/v1",
+    "protocol": "openai_chat"
+  },
+  {
+    "id": "gemini",
+    "label": "Gemini",
+    "official_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "protocol": "openai_chat"
+  },
+  {
     "id": "deepseek",
     "label": "DeepSeek",
     "official_base_url": "https://api.deepseek.com",
@@ -18,33 +42,15 @@
     "protocol": "openai_chat"
   },
   {
-    "id": "zhipuai",
-    "label": "Zhipu AI",
-    "official_base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "protocol": "openai_chat"
-  },
-  {
-    "id": "openai",
-    "label": "OpenAI",
-    "official_base_url": "https://api.openai.com/v1",
-    "protocol": "openai_responses"
-  },
-  {
-    "id": "anthropic",
-    "label": "Anthropic",
-    "official_base_url": "https://api.anthropic.com",
-    "protocol": "anthropic"
-  },
-  {
     "id": "openrouter",
     "label": "OpenRouter",
     "official_base_url": "https://openrouter.ai/api/v1",
     "protocol": "openai_chat"
   },
   {
-    "id": "groq",
-    "label": "Groq",
-    "official_base_url": "https://api.groq.com/openai/v1",
+    "id": "zhipuai",
+    "label": "Zhipu AI",
+    "official_base_url": "https://open.bigmodel.cn/api/paas/v4",
     "protocol": "openai_chat"
   },
   {
@@ -54,9 +60,9 @@
     "protocol": "openai_chat"
   },
   {
-    "id": "xai",
-    "label": "xAI",
-    "official_base_url": "https://api.x.ai/v1",
+    "id": "groq",
+    "label": "Groq",
+    "official_base_url": "https://api.groq.com/openai/v1",
     "protocol": "openai_chat"
   },
   {

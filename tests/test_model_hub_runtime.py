@@ -1971,6 +1971,45 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
 
 
 @pytest.mark.parametrize(
+    ("official_base_url", "protocol"),
+    [
+        pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
+        for entry in api_key_vendor_catalog()
+    ],
+)
+def test_catalog_official_base_url_composes_one_probe_endpoint(
+    official_base_url: str,
+    protocol: str,
+) -> None:
+    """Every shipped row probes its own API root plus exactly one endpoint.
+
+    A vendor documents its root however it likes: an origin (DeepSeek), an
+    origin plus ``/v1`` (most of them), or a versioned compatibility prefix
+    (Gemini's ``/v1beta/openai``). The protocol taxonomy states its path from
+    the origin instead, so composition has to reach the endpoint without
+    repeating a version segment or dropping part of the root — and a row whose
+    root shape nobody checked would silently probe an address the vendor 404s.
+    """
+
+    taxonomy = runtime_adapter_module._PROTOCOL_OBSERVATION_TAXONOMY[protocol]
+    composed = client_module.upstream_api_url(official_base_url, taxonomy.request_path)
+
+    # The root is carried verbatim — nothing rewritten, nothing dropped.
+    assert composed.startswith(f"{official_base_url}/")
+    # The endpoint's resource is reached: the taxonomy path past its version.
+    resource = f"/{taxonomy.request_path.strip('/').split('/', 1)[1]}"
+    assert composed.endswith(resource)
+    # And one version segment in the whole path, whichever side supplied it.
+    segments = urlsplit(composed).path.strip("/").split("/")
+    versions = [
+        segment
+        for segment in segments
+        if segment.startswith("v") and segment[1:2].isdigit()
+    ]
+    assert len(versions) == 1, composed
+
+
+@pytest.mark.parametrize(
     ("vendor", "protocol", "expected_base_url"),
     API_KEY_VENDOR_RUNTIME_CASES,
 )

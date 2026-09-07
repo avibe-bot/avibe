@@ -127,15 +127,17 @@ const ProtocolSegments: React.FC<{
 };
 
 /**
- * The 服务商 field's rows: the shipped catalog A–Z by label, then the one entry
- * that is not a vendor at all, each carrying its mark.
+ * The 服务商 field's rows: the shipped catalog in the order the file ships, then
+ * the one entry that is not a vendor at all, each carrying its mark.
  *
- * A–Z because the file's order is the backend's business — whatever it means
- * there, on screen it reads as arbitrary, and a name is what a user scans for.
- * The comparison is base-sensitivity English so case and accents do not split
- * the alphabet. 自定义 sorts nowhere: it is the absence of a vendor, so it sits
- * at the end of the vendors rather than inside them, while staying the value the
- * field opens on.
+ * File order because that order is a curated ranking, not an accident of how the
+ * rows were appended: the vendors most users are here to add sit at the top, and
+ * a name is only what you scan for once the list is long enough to have lost you.
+ * Re-sorting here would put the ranking in a second place and make the catalog's
+ * own order unobservable — so this reads the file verbatim, and moving a vendor
+ * up the list is an edit to `vibe/data/api_key_vendors.json` and to nothing else.
+ * 自定义 ranks nowhere: it is the absence of a vendor, so it sits after all of
+ * them rather than inside them, while staying the value the field opens on.
  *
  * The mark is why the field is no longer a `<select>`. A vendor is recognised by
  * its logo long before its name is read, and an `<option>` holds text only — so
@@ -148,9 +150,7 @@ const ProtocolSegments: React.FC<{
 const useVendorOptions = (): ComboboxOption[] => {
   const { t } = useTranslation();
   return React.useMemo(() => ([
-    ...API_KEY_VENDOR_PRESETS
-      .map((preset) => ({ value: preset.id, label: preset.label }))
-      .sort((one, other) => one.label.localeCompare(other.label, 'en', { sensitivity: 'base' })),
+    ...API_KEY_VENDOR_PRESETS.map((preset) => ({ value: preset.id, label: preset.label })),
     { value: CUSTOM_VENDOR, label: t('settings.models.addKey.field.vendor.custom') },
   ].map((option) => ({ ...option, icon: <VendorGlyph vendor={option.value} /> }))), [t]);
 };
