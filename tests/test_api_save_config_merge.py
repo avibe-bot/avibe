@@ -1220,6 +1220,24 @@ def test_save_config_preserves_ui_fields_on_unrelated_partial_save(monkeypatch, 
     assert updated.ui.instance_name == "OwnerBox"
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("patch", [{"show_duration": False}, {"runtime": {"log_level": "DEBUG"}}])
+def test_partial_save_preserves_skill_observability_policy(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, enabled, patch
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    full = _full_config_payload()
+    full["runtime"]["skill_observability_enabled"] = enabled
+    api.save_config(full)
+
+    updated = api.save_config(patch)
+
+    assert updated.runtime.skill_observability_enabled is enabled
+    assert api.config_to_payload(updated)["runtime"]["skill_observability_enabled"] is enabled
+    assert V2Config.load().runtime.skill_observability_enabled is enabled
+
+
 def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path, sqlite_schema_db_factory):
     """Mechanism guard for the whole class: both full-config serializers
     (``V2Config.save`` on disk and ``config_to_payload``, the save merge base)

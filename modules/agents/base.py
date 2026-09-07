@@ -81,6 +81,7 @@ class AgentRequest:
     # settled after delivery. The shared dispatcher sees only ``output``.
     output_activities: List[Any] = field(default_factory=list)
     input_metadata: AgentInputMetadata | None = None
+    skill_catalog_observation: Optional[dict[str, Any]] = None
 
 
 @dataclass

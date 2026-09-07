@@ -214,6 +214,10 @@ class ClaudeAgent(BaseAgent):
                 self._remove_native_input_receipt(runtime_session_key, input_receipt)
                 raise
             input_receipt.state = "accepted"
+            from core.skill_observability import accept_catalog
+
+            accept_catalog(self.controller, context, getattr(client, "_vibe_pending_skill_catalog", None), backend="claude")
+            setattr(client, "_vibe_pending_skill_catalog", None)
             if (
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()

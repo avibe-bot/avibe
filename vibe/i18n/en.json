@@ -1470,6 +1470,14 @@
   "data": {
     "helpCommand": "Inspect Avibe data, and run explicit trace-retention maintenance",
     "helpDescription": "Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
+    "skillUsage": {
+      "ownerRequired": "Instance Owner access is required.",
+      "confirmationRequired": "Clearing Skill statistics requires --yes.",
+      "clearRequired": "--yes requires --clear.",
+      "helpCommand": "Inspect or clear local Skill statistics (Instance Owner only)",
+      "helpClear": "Clear Skill events and daily statistics.",
+      "helpYes": "Confirm clearing Skill statistics."
+    },
     "retention": {
       "invalidDays": "--days must be between {minimum} and {maximum}; refusing to run instead of silently clamping the window.",
       "helpCommand": "Show or run bounded retention for internal agent trace events",

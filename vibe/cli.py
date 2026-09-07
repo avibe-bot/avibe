@@ -849,13 +849,17 @@ def cmd_skill(args) -> int:
         render_skill_list,
         resolve_skills,
     )
+    from core.skill_observability import finish_cli_catalog, finish_cli_load
 
     language = _configured_cli_language()
 
     if args.skill_command == "list":
+        resolved = []
+        observation_error = "internal_error"
         try:
+            resolved = resolve_skills()
             output = render_skill_list(
-                resolve_skills(),
+                resolved,
                 page=args.page,
                 more_notice=i18n_t(
                     "skill.cli.more",
@@ -863,24 +867,45 @@ def cmd_skill(args) -> int:
                     page=args.page + 1,
                 ),
             )
+            if output:
+                print(output, flush=True)
+            observation_error = None
+            return 0
         except ValueError:
+            observation_error = "invalid_page"
             print(i18n_t("skill.cli.error.invalidPage", language), file=sys.stderr)
             return 1
-        if output:
-            print(output)
-        return 0
+        except BrokenPipeError:
+            observation_error = "output_interrupted"
+            raise
+        finally:
+            finish_cli_catalog(resolved, args.page, observation_error)
 
     if args.skill_command == "load":
-        allowed = resolve_skills()
-        if args.name not in {skill.name for skill in allowed}:
-            print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
-            return 1
-        skill = load_skill(args.name, resolved_skills=allowed)
-        if skill is None:
-            print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
-            return 1
-        print(render_skill_content(skill))
-        return 0
+        started_at = time.monotonic()
+        skill = None
+        observation_error = "internal_error"
+        try:
+            allowed = resolve_skills()
+            skill = next((entry for entry in allowed if entry.name == args.name), None)
+            if skill is None:
+                observation_error = "not_found"
+                print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+                return 1
+            loaded = load_skill(args.name, resolved_skills=allowed)
+            if loaded is None:
+                observation_error = "unreadable_or_invalid"
+                print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+                return 1
+            skill = loaded
+            print(render_skill_content(skill), flush=True)
+            observation_error = None
+            return 0
+        except BrokenPipeError:
+            observation_error = "output_interrupted"
+            raise
+        finally:
+            finish_cli_load(args.name, skill, started_at, observation_error)
 
     return 1
 
@@ -7268,6 +7293,35 @@ def _print_data_retention_human(payload: dict, language: str) -> None:
         print(f"retention status: {status}")
 
 
+def cmd_data_skill_usage(args):
+    """Instance-owner maintenance; statistics remain off the user-facing UI."""
+    try:
+        from storage.resource_access_service import resolve_resource_access_context
+        from storage import skill_observability
+        from core.skill_observability import collection_enabled
+        from storage.db import get_cached_sqlite_engine
+
+        language = _configured_cli_language()
+        caller = caller_resource_user_context(caller_context_from_env())
+        if not resolve_resource_access_context(caller).is_instance_owner:
+            raise TaskCliError(i18n_t("data.skillUsage.ownerRequired", language), code="forbidden")
+        if args.clear and not args.yes:
+            raise TaskCliError(i18n_t("data.skillUsage.confirmationRequired", language), code="confirmation_required")
+        if args.yes and not args.clear:
+            raise TaskCliError(i18n_t("data.skillUsage.clearRequired", language), code="invalid_arguments")
+        enabled = collection_enabled()
+        from storage.importer import ensure_sqlite_state
+
+        ensure_sqlite_state()
+        with get_cached_sqlite_engine().begin() as conn:
+            result = skill_observability.clear(conn) if args.clear else skill_observability.status(conn)
+        _print_cli_payload("skill_usage", enabled=enabled, **result)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe data skill-usage --help")
+        return 1
+
+
 def cmd_data_query(args):
     try:
         sql = getattr(args, "sql", None)
@@ -7275,7 +7329,10 @@ def cmd_data_query(args):
         if sql_file:
             sql = sys.stdin.read() if sql_file == "-" else Path(sql_file).read_text(encoding="utf-8")
         page_request = _page_request_from_args(args, help_command="vibe data query --help")
-        result = run_read_only_query(sql or "", page_request=page_request)
+        result = run_read_only_query(
+            sql or "", page_request=page_request,
+            user_context=caller_resource_user_context(caller_context_from_env()),
+        )
         command = ["vibe", "data", "query"]
         if getattr(args, "sql", None):
             _add_optional_arg(command, "--sql", getattr(args, "sql", None))
@@ -16925,8 +16982,16 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
-    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention}")
+    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention,skill-usage}")
     data_subparsers.required = True
+    skill_usage_parser = data_subparsers.add_parser(
+        "skill-usage", help=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
+        description=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
+        error_help_command="vibe data skill-usage --help",
+    )
+    skill_usage_parser.add_argument("--clear", action="store_true", help=i18n_t("data.skillUsage.helpClear", _data_help_lang))
+    skill_usage_parser.add_argument("--yes", action="store_true", help=i18n_t("data.skillUsage.helpYes", _data_help_lang))
+    _add_json_noop(skill_usage_parser)
     data_query_parser = data_subparsers.add_parser(
         "query",
         help="Run one read-only SQL query",
@@ -17935,6 +18000,8 @@ def main():
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))
+        if args.data_command == "skill-usage":
+            sys.exit(cmd_data_skill_usage(args))
         if args.data_command == "retention":
             sys.exit(cmd_data_retention(args))
         parser.error("data command is required")

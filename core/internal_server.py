@@ -192,6 +192,34 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    from core.skill_observability import SkillObservationRecorder
+
+    skill_recorder = SkillObservationRecorder()
+    controller.skill_observability = skill_recorder
+
+    @app.post("/internal/skill-observations", status_code=202)
+    async def _skill_observation(request: Request) -> Any:
+        from storage.skill_observability import ObservationError, utc_now, validate
+
+        # Bounded payloads contain descriptors only, never Skill bodies.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 32 * 1024:
+                skill_recorder.counts["rejected"] += 1
+                raise HTTPException(status_code=413, detail="observation_too_large")
+        try:
+            event = validate(json.loads(body), now=utc_now())
+            if event["metadata"]["observation_channel"] != "avibe_cli":
+                raise ObservationError("runtime_observation_required")
+        except (ValueError, TypeError, RecursionError):
+            skill_recorder.counts["rejected"] += 1
+            raise HTTPException(status_code=400, detail="invalid_observation") from None
+        return {"status": skill_recorder.enqueue(event)}
+
+    @app.get("/internal/skill-observations/health")
+    async def _skill_observation_health() -> Any:
+        return skill_recorder.health()
 
     # In-flight ``dispatch_turn`` tasks per session, each a ``Turn`` holding the
     # task + the routing ``MessageContext`` the turn STARTED under. The cancel
@@ -2158,28 +2186,34 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
     import uvicorn
 
     app = create_app(controller)
-    recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
-    if recovery_complete is not None:
-        await recovery_complete.wait()
-    config = uvicorn.Config(
-        app,
-        log_config=None,
-        access_log=False,
-        loop="asyncio",
-        lifespan="off",
-    )
-    server = _create_controller_loop_server(config)
-
-    listener, target = _bind_socket(socket_path)
-    _write_internal_server_status("ready")
+    skill_recorder = controller.skill_observability
     try:
-        await server.serve(sockets=[listener])
-    finally:
+        recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
+        if recovery_complete is not None:
+            await recovery_complete.wait()
+        config = uvicorn.Config(
+            app,
+            log_config=None,
+            access_log=False,
+            loop="asyncio",
+            lifespan="off",
+        )
+        server = _create_controller_loop_server(config)
+
+        listener, target = _bind_socket(socket_path)
         try:
-            listener.close()
-        except OSError:
-            pass
-        _remove_owned_socket(target)
+            _write_internal_server_status("ready")
+            await server.serve(sockets=[listener])
+        finally:
+            try:
+                listener.close()
+            except OSError:
+                pass
+            _remove_owned_socket(target)
+    finally:
+        # Lifespan is disabled: this server task owns the recorder's cleanup,
+        # including cancellation during controller recovery or socket setup.
+        await skill_recorder.close()
 
 
 def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Path]:

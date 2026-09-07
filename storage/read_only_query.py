@@ -38,7 +38,11 @@ def run_read_only_query(
     page_request: PageRequest | None,
     db_path: Path | None = None,
     step_limit: int = DEFAULT_QUERY_STEP_LIMIT,
+    user_context=None,
 ) -> QueryResult:
+    from storage.resource_access_service import resolve_resource_access_context
+
+    allow_skill_statistics = resolve_resource_access_context(user_context).is_instance_owner
     statement = _validate_single_statement(sql)
     resolved_db_path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -55,7 +59,15 @@ def run_read_only_query(
 
     try:
         conn.execute("PRAGMA query_only = ON")
-        conn.set_authorizer(_authorizer)
+        def authorize(action, arg1, arg2, db_name, source):
+            # SQL has no resource-row filter. Raw Skill observations share
+            # agent_events, so non-owners cannot query that table wholesale.
+            if (not allow_skill_statistics and action == sqlite3.SQLITE_READ
+                    and arg1 in {"skill_usage_daily", "agent_events"}):
+                return sqlite3.SQLITE_DENY
+            return _authorizer(action, arg1, arg2, db_name, source)
+
+        conn.set_authorizer(authorize)
         conn.set_progress_handler(progress, 1000)
         cursor = conn.execute(statement)
         columns = [item[0] for item in cursor.description or []]

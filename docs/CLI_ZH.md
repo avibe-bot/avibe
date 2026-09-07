@@ -134,6 +134,64 @@ Codex 自带的默认项；已启用的 Claude 插件 Skill 排在四个静态�
 因此新增、修改或删除 Skill 后，已有 Session 无需重启 Avibe，也无需新建 Session；
 历史对话内容不会被重写。
 
+#### 本地 Skill 统计与隐私
+
+Skill 统计**默认开启**；升级后，若配置中没有
+`runtime.skill_observability_enabled`，也会采用开启状态。Avibe 在本地记录
+Catalog 提供情况及加载结果，用于未来的 Harness 优化；提供或加载过某个 Skill，
+并不能证明 Agent 遵循了它，也不能证明任务已经完成。
+
+记录包括 Skill 名称（含私有项目及全局 Skill）、来源类别、SHA-256 身份/描述/
+内容版本哈希、时间戳、加载结果、耗时、正文的字节数，以及可确认的 Session/
+项目/Turn、backend/platform 和 Avibe 版本关联。名称与 Session 关联仍可识别，
+哈希并不使这些统计成为匿名数据；无法确认的执行归属保持未知。统计保存在本地
+SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面板，也不
+上传云端。此功能不会额外保存 Skill 正文、描述、prompt、凭据或明文文件路径。
+正常向已配置的 Agent/model 提供所加载 Skill 的行为不变。
+
+若要停止新增记录，请在当前 Avibe 状态根目录下的 `config/config.json` 中，将
+`runtime.skill_observability_enabled` 设为 JSON 布尔值 `false`。显式配置了
+`AVIBE_HOME` 时，根目录为 `$AVIBE_HOME`；否则为 `$HOME/.avibe`（新目录不存在
+时兼容旧的 `$HOME/.vibe_remote`）。请把下面的字段合并到现有配置中，不要用
+这个片段覆盖整个文件：
+
+```json
+{
+  "runtime": {
+    "skill_observability_enabled": false
+  }
+}
+```
+
+记录器每次写入前都会重新读取此设置，无需重启。关闭统计不影响 Skill 发现或
+加载，也不会删除已有历史。若希望既不再记录，也不保留历史，请先关闭，再清除。
+
+### `vibe data skill-usage`
+
+仅限实例所有者使用的本地维护命令，返回 JSON 诊断信息，不是 Skill 热度排名。
+通过 `vibe data query` 读取这些统计也受相同的所有者权限限制。
+
+```bash
+vibe data skill-usage --json
+vibe data skill-usage --clear --yes --json
+```
+
+第一条命令返回 `enabled`、原始事件及每日统计行数、保留窗口、首次记录标记和
+`cleared_through`。关闭后应确认 `enabled` 为 `false`。清除命令必须同时提供
+`--clear` 和 `--yes`，仅删除 Skill 统计，保留对话及其他事件类型，并返回删除
+行数。清除水位会拒绝延迟到达的清除前记录。清除不会关闭统计：设置仍开启时，
+后续活动可以立即产生新记录。
+
+原始 Skill 事件的保留窗口为 90 天；每日统计保留含当天在内的 365 个 UTC 日期。
+每日统计仍关联 Session，并不是匿名的全局汇总。控制器运行期间会在后台分批清理，
+因此过期数据可能要等维护任务追上后才被删除。这些窗口不受 Skill 统计开关或
+工具 trace 保留开关影响。归档 Session 不删除其统计；物理清除 Session 会删除
+与它关联的 Skill 事件及每日统计。
+
+清除与保留清理都是逻辑删除，不代表安全擦除或保证释放磁盘空间；旧数据可能
+仍存在于 SQLite WAL、空闲页或备份中。恢复数据库备份也会恢复其中的历史统计
+及清除水位，必要时应在恢复后再次清除。此功能不会扫描或回填历史对话。
+
 ### `vibe memory`
 
 通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或提交内容进行尽力而为的进程内捕获——既包括用户明确要求记住的内容，也包括 Agent 从对话以及在本机工作中主动提炼的结论（含在文件或工具输出中遇到的持久环境、账户事实）。接受请求不保证提供方投递或持久化。该命令不会启动服务，也没有清空、配置、导出或删除子命令。

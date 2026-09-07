@@ -1138,7 +1138,7 @@ def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
     return pages
 
 
-def _page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[ManagedSkill], int | None]:
+def catalog_page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[ManagedSkill], int | None]:
     if isinstance(page, bool) or page < 1:
         raise ValueError("page must be a positive integer")
     pages = _catalog_pages(skills)
@@ -1153,7 +1153,7 @@ def render_skill_list(
     page: int = 1,
     more_notice: str | None = None,
 ) -> str:
-    entries, next_page = _page(skills, page)
+    entries, next_page = catalog_page(skills, page)
     lines = _skill_list_rows(entries)
     if next_page is not None:
         lines.append(
@@ -1171,7 +1171,7 @@ def render_skill_catalog_prompt(skills: Sequence[ManagedSkill]) -> str:
 
 
 def render_skill_catalog_blocks(skills: Sequence[ManagedSkill]) -> list[RenderedPromptBlock]:
-    entries, next_page = _page(skills, 1)
+    entries, next_page = catalog_page(skills, 1)
     rows = "\n".join(_skill_list_rows(entries))
     if not rows:
         if any(skill.disable_model_invocation for skill in skills):

@@ -2518,6 +2518,7 @@ class CodexAgent(BaseAgent):
         # that write.
         configure_memory_cli_access(self.controller, request.context)
 
+        skill_catalog_sink: list[dict] = []
         instruction_parts.append(
             await asyncio.to_thread(
                 build_system_prompt_injection,
@@ -2535,9 +2536,11 @@ class CodexAgent(BaseAgent):
                 skills_claude_cli_path=managed_skill_claude_cli_path(
                     getattr(getattr(self, "controller", None), "config", None)
                 ),
+                skill_catalog_sink=skill_catalog_sink,
             )
         )
 
+        request.skill_catalog_observation = skill_catalog_sink[0] if skill_catalog_sink else None
         return "".join(part for part in instruction_parts if part) or None
 
     async def _inject_forked_session_correction(
@@ -2884,6 +2887,11 @@ class CodexAgent(BaseAgent):
             raise CodexPromptRefreshUnavailableError(
                 "Codex rejected developer prompt injection; check app-server API compatibility"
             ) from exc
+        from core.skill_observability import accept_catalog
+
+        candidate = getattr(request, "skill_catalog_observation", None)
+        if candidate is not None:
+            accept_catalog(self.controller, request.context, candidate, backend="codex")
         if not self._persist_prompt_strategy(
             request,
             thread_id,

@@ -30,6 +30,7 @@ from storage.agent_session_rows import (
 )
 from storage.models import (
     agents,
+    agent_events,
     agent_runs,
     agent_sessions,
     message_deliveries,
@@ -2587,6 +2588,14 @@ def _delete_agent_session_rows(
                 )
             deleted += 1
             continue
+        # Skill traces must not survive as unassociated rows after FK SET NULL.
+        from storage.skill_observability import EVENT_TYPES
+
+        conn.execute(agent_events.delete().where(
+            agent_events.c.session_id == session_id,
+            agent_events.c.visibility == "trace",
+            agent_events.c.event_type.in_(EVENT_TYPES),
+        ))
         removed = bool(
             conn.execute(
                 agent_sessions.delete().where(agent_sessions.c.id == session_id)
