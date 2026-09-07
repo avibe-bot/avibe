@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -2694,7 +2695,11 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
     [(entry.id, entry.protocol) for entry in api_key_vendor_catalog()]
     + [("custom", protocol) for protocol in SOURCE_PROTOCOLS],
 )
-def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, protocol):
+@pytest.mark.parametrize("auth_before_validation", [True, False])
+@pytest.mark.parametrize("public_inventory", [False, True])
+def test_api_key_setup_does_not_schedule_a_model(
+    monkeypatch, tmp_path, vendor, protocol, auth_before_validation, public_inventory,
+):
     """Scenario: AUTH-SETUP-112"""
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -2726,7 +2731,14 @@ def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, 
                 if protocol == "anthropic"
                 else request.headers.get("Authorization", "").removeprefix("Bearer ")
             )
-            if supplied_key != valid_key:
+            if not re.fullmatch(r"[a-z-]+", supplied_key):
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            if request.method == "POST" and not auth_before_validation and "model" not in body:
+                return web.json_response(
+                    {"error": {"type": "invalid_request_error", "message": "model is required"}},
+                    status=400,
+                )
+            if supplied_key != valid_key and not (request.method == "GET" and public_inventory):
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.method == "GET":
                 return web.json_response({"data": [{"id": "relay-model"}]})
@@ -2756,17 +2768,30 @@ def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, 
         }
         harness = SimpleNamespace()
         runner = ScenarioRunner(harness)
+        authentication_observable = auth_before_validation or not public_inventory
 
         async def observe(h):
             result = await service.observe_source(draft)
             observation = result["observation"]
-            assert observation["outcome"] == "observed"
-            assert observation["protocol"] == protocol
-            assert observation["authenticated"] == "authenticated"
-            assert observation["models"] == ["relay-model"]
+            if authentication_observable:
+                assert observation["outcome"] == "observed"
+                assert observation["protocol"] == protocol
+                assert observation["authenticated"] == "authenticated"
+                assert observation["models"] == ["relay-model"]
+            else:
+                assert observation["outcome"] != "observed"
+                assert observation["authenticated"] != "authenticated"
             assert not store.config.sources
 
         async def confirm(h):
+            if not authentication_observable:
+                with pytest.raises(ModelHubError):
+                    await service.create_source({
+                        "kind": "api_key", **draft, "accept_unavailable_inventory": True,
+                    })
+                assert not store.config.sources
+                h.source = None
+                return
             await service.create_source({"kind": "api_key", **draft})
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
@@ -2777,10 +2802,13 @@ def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, 
         async def reject_invalid_key(h):
             invalid = {**draft, "key": "invalid-test-key"}
             result = await service.observe_source(invalid)
-            assert result["observation"]["outcome"] == "authentication_failed"
+            assert result["observation"]["outcome"] != "observed"
+            assert result["observation"]["authenticated"] != "authenticated"
             with pytest.raises(ModelHubError):
-                await service.create_source({"kind": "api_key", **invalid})
-            assert [source.to_payload() for source in store.config.sources] == [h.source]
+                await service.create_source({
+                    "kind": "api_key", **invalid, "accept_unavailable_inventory": True,
+                })
+            assert [source.to_payload() for source in store.config.sources] == ([h.source] if h.source else [])
 
         try:
             await runner.run(
@@ -2789,11 +2817,10 @@ def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, 
                 ScenarioStep("reject_invalid_key", reject_invalid_key),
             )
             ScenarioExpect.step_history(runner, ["observe", "confirm", "reject_invalid_key"])
-            assert [(method, path) for method, path, _ in requests] == [
-                ("POST", paths[protocol]), ("GET", "/v1/models"),
-                ("POST", paths[protocol]), ("GET", "/v1/models"),
-                ("POST", paths[protocol]), ("POST", paths[protocol]),
-            ]
+            assert all(
+                path == (paths[protocol] if method == "POST" else "/v1/models")
+                for method, path, _ in requests
+            )
             assert all("model" not in body for _, _, body in requests if body is not None)
         finally:
             await web_runner.cleanup()
@@ -2811,7 +2838,10 @@ def test_api_key_setup_does_not_schedule_a_model(monkeypatch, tmp_path, vendor, 
         (200, {"ok": True}, False),
     ],
 )
-def test_hub_oauth_model_free_observation_closed_loop(monkeypatch, tmp_path, status, body, creates_source):
+@pytest.mark.parametrize("validation_before_auth", [False, True])
+def test_hub_oauth_model_free_observation_closed_loop(
+    monkeypatch, tmp_path, status, body, creates_source, validation_before_auth,
+):
     """Scenario: AUTH-SETUP-113"""
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -2821,6 +2851,7 @@ def test_hub_oauth_model_free_observation_closed_loop(monkeypatch, tmp_path, sta
     state_store = EngineStateStore(tmp_path / "engine-state")
     api_calls = []
     inventory_calls = []
+    creates_source = creates_source and not validation_before_auth
 
     def management_request(method, path, *, query=None, payload=None):
         if path == "/auth-files":
@@ -2836,6 +2867,8 @@ def test_hub_oauth_model_free_observation_closed_loop(monkeypatch, tmp_path, sta
             assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
             assert "model" not in json.loads(payload["data"])
             api_calls.append(payload)
+            if not validation_before_auth and payload["header"]["Authorization"] != "Bearer $TOKEN$":
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
             return {"status_code": status, "body": json.dumps(body)}
         if path == "/auth-files/models":
             assert creates_source
@@ -2883,7 +2916,7 @@ def test_hub_oauth_model_free_observation_closed_loop(monkeypatch, tmp_path, sta
                 await service.oauth_status(h.flow_id)
             assert not store.config.sources
             assert adapter.revoked == [h.credential_ref]
-        assert len(api_calls) == 1
+        assert len(api_calls) == (2 if status == 400 else 1)
         assert len(inventory_calls) == int(creates_source)
 
     asyncio.run(runner.run(

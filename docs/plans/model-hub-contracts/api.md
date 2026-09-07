@@ -92,7 +92,11 @@ response. A supplied protocol is established when authentication succeeds and ei
 `vendor` has a shipped catalog pin, the client declared that protocol on `custom`, or
 a matching protocol-shaped response proves it. The protocol probe is deliberately
 schema-invalid and names no synthetic model, so a relay can authenticate and classify it
-without selecting or invoking an upstream model. A bare-origin Base URL uses the
+without selecting or invoking an upstream model. Schema validation alone does not
+prove authentication: the model-free protocol path must reject a control credential,
+or the existing model-list path must reject the control and accept the candidate.
+Public inventory and `accept_unavailable_inventory` never supply that proof.
+A bare-origin Base URL uses the
 standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
 root. The endpoint provisions an unbound engine credential only for this operation,
 returns `observation-result.schema.json`, then revokes the transient reference before

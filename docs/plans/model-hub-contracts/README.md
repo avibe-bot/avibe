@@ -76,6 +76,9 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    ruling in `docs/plans/model-hub.md`; login success alone is insufficient.
    A typed Base URL never creates a saved protocol value. Catalog pin and declaration
    still require reachability and authentication; they never bypass those failures.
+   Model-free validation alone does not authenticate: the transport requires
+   credential-sensitive proof as defined in the same protocol-observation ruling.
+   Neither a public model list nor the inventory waiver can supply that proof.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs
    must validate Source existence/eligibility, canonical identifiers and explicit retirement.

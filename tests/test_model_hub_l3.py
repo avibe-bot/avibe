@@ -6695,6 +6695,8 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
 
         async def capture_probe(request: web.Request) -> web.Response:
             requests.append(request.path)
+            if request.headers.get("Authorization") != "Bearer test-qwen-key":
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.path == _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_path:
                 return web.json_response(
                     {
@@ -6746,7 +6748,7 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
     assert observed.model_ids == ("qwen-plus",)
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in SOURCE_PROTOCOLS
+        for protocol in (*SOURCE_PROTOCOLS, "openai_chat")
     ]
     assert inventory_kwargs["vendor"] == "qwen"
     assert inventory_kwargs["protocol"] == "openai_chat"
@@ -6773,6 +6775,8 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
 
         async def capture_probe(request: web.Request) -> web.Response:
             requests.append(request.path)
+            if request.headers.get("Authorization") != "Bearer test-openrouter-key":
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.path == _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_path:
                 return web.json_response(
                     {
@@ -6826,7 +6830,7 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
     assert observed.model_ids == ("openrouter/auto",)
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in SOURCE_PROTOCOLS
+        for protocol in (*SOURCE_PROTOCOLS, "openai_chat")
     ]
     assert inventory_kwargs["vendor"] == "openrouter"
     assert inventory_kwargs["protocol"] == "openai_chat"
@@ -6852,7 +6856,7 @@ def _catalog_owner_status_body(vendor: str, status: int) -> dict[str, object]:
         return {
             "error": {
                 "code": 400,
-                "message": "invalid API key",
+                "message": "messages is required",
             }
         }
     return {
@@ -6888,6 +6892,9 @@ def _run_catalog_pin_observation(
 
         async def capture_probe(request: web.Request) -> web.Response:
             requests.append(request.path)
+            supplied = request.headers.get("x-api-key") or request.headers.get("Authorization", "").removeprefix("Bearer ")
+            if supplied != f"test-{vendor}-{status}":
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             return web.json_response(body, status=status)
 
         app = web.Application()
@@ -6930,7 +6937,7 @@ def _run_catalog_pin_observation(
 
 
 @pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_observation_accepts_any_nonempty_json_400_response(
+def test_catalog_pin_observation_accepts_credential_sensitive_json_400_response(
     tmp_path: Path,
     vendor: str,
     protocol: str,
@@ -6947,7 +6954,7 @@ def test_catalog_pin_observation_accepts_any_nonempty_json_400_response(
     assert observed.protocol == protocol
     assert observed.authenticated is True
     assert observed.model_ids == (f"{vendor}/auto",)
-    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
+    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path] * 2
     assert inventory_kwargs is not None
     assert inventory_kwargs["vendor"] == vendor
     assert inventory_kwargs["protocol"] == protocol
@@ -7110,17 +7117,19 @@ def test_source_observation_catalog_pin_and_declaration_still_require_authentica
 @pytest.mark.parametrize(
     ("status", "initial_authentication", "expected_outcome", "expected_authenticated"),
     [
-        (400, _AuthenticationEvidence.REJECTED, "observed", True),
-        (401, _AuthenticationEvidence.ACCEPTED, "authentication_failed", False),
+        (400, _AuthenticationEvidence.REJECTED, "authentication_failed", False),
+        (400, _AuthenticationEvidence.UNKNOWN, "ambiguous", None),
+        (401, _AuthenticationEvidence.REJECTED, "authentication_failed", False),
+        (400, _AuthenticationEvidence.ACCEPTED, "observed", True),
     ],
-    ids=("request_error_accepts", "auth_error_rejects"),
+    ids=("explicit_rejection", "unverified_validation", "auth_error_rejects", "verified_validation"),
 )
-def test_custom_declared_observation_uses_owner_status_before_parser_verdict(
+def test_custom_declared_observation_preserves_transport_authentication_verdict(
     tmp_path: Path,
     status: int,
     initial_authentication: _AuthenticationEvidence,
     expected_outcome: str,
-    expected_authenticated: bool,
+    expected_authenticated: bool | None,
 ) -> None:
     base_url = "https://relay.example/v1"
     state_store = EngineStateStore(tmp_path / f"engine-state-custom-declared-{status}")
@@ -7204,6 +7213,8 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
             }
         if path == "/api-call":
             api_calls.append(payload)
+            if payload["header"]["Authorization"] != "Bearer $TOKEN$":
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
             return {
                 "status_code": 400,
                 "header": {},
@@ -7241,7 +7252,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
     assert observed.outcome.value == "observed"
     assert observed.protocol == "openai_responses"
     assert observed.model_ids == ("gpt-5.6",)
-    assert len(api_calls) == 1
+    assert len(api_calls) == 2
     assert api_calls[0]["auth_index"] == "auth-index-test"
     assert api_calls[0]["header"]["Chatgpt-Account-Id"] == "account-test"
     assert api_calls[0]["url"].endswith("/responses")
@@ -7884,7 +7895,11 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
         node
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name != "_parse_protocol_authenticated_evidence"
+        and node.name not in {
+            "_parse_protocol_authenticated_evidence",
+            "_owner_authentication_candidate",
+            "_authenticate_protected_inventory",
+        }
     ):
         for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):
             condition = ast.unparse(branch.test)

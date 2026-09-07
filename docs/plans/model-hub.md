@@ -355,9 +355,15 @@ rungs, documented in `docs/plans/model-hub-vendor-preset-protocol.md`:
    prove reachability and authentication on that protocol's path. Shape proof
    is not required. A wrong declaration fails on a later real call.
 
+Authentication must be credential-sensitive (2026-09-07): a validation error
+alone can precede authorization. The model-free probe must reject a control
+credential, or a protected API-key model-list endpoint must reject that control
+and accept the supplied key. Public inventory and the inventory waiver never
+establish authentication; protocol owners cannot override explicit rejection.
+
 For OpenAI/Codex Hub subscriptions, the bound OAuth transport owns the fixed
 official Responses endpoint. Model-free observation may combine that endpoint
-with a structured request error classified as authenticated, including a
+with a structured request error confirmed by the rejected-control check, including a
 missing-model error, to establish `openai_responses` (2026-09-07). Login success
 alone, unknown authentication, and credential rejection do not establish it.
 This does not grant endpoint ownership to user-supplied API-key URLs or relax

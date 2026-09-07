@@ -155,8 +155,8 @@ validation, making valid credentials impossible to add. A model-free request
 keeps observation independent of model availability and generation. The shared
 request taxonomy applies to API-key and OAuth observation alike.
 
-The proof ladder above remains unchanged: catalog pins and declarations still
-require authentication on their protocol path; Auto still requires response
+The protocol-owner ladder above remains unchanged: catalog pins and declarations
+still require authentication; Auto still requires response
 evidence. Inventory discovery follows successful observation, and confirmation
 repeats the same model-free check before persisting the Source.
 
@@ -164,9 +164,24 @@ repeats the same model-free check before persisting the Source.
 local HTTP relay with model scheduling unavailable. It covers every catalog
 preset and every concrete custom interface without using real user state.
 
+Authentication is credential-sensitive (2026-09-07 amendment to the status
+ladder): schema validation may run before authorization. A successful or
+request-error response is only a candidate until the same model-free path
+rejects a control credential. If validation hides authentication, API-key
+observation can instead verify that the existing model-list path rejects the
+control and accepts the supplied key. Public or indeterminate inventory cannot
+prove authentication, and `accept_unavailable_inventory` cannot waive it.
+Explicit credential rejection is never overridden by a vendor pin/declaration.
+The API-key control preserves key presence, prefix and length; all requests
+remain model-free, non-redirecting, and bounded by the observation deadline.
+
+`AUTH-SETUP-112` covers both authentication-before-validation and
+validation-before-authentication, with both protected and public model lists.
+Only credential-sensitive evidence allows observe and confirm to succeed.
+
 OpenAI/Codex Hub OAuth has a fixed, allowlisted Responses endpoint and an
 engine-bound credential. A structured request error accepted by the existing
-authentication parser can therefore confirm that protocol even when it names
+authentication parser and rejected-control check can therefore confirm that protocol even when it names
 only the missing `model`. This ownership applies inside the OAuth transport,
 not the API-key catalog ladder or generic response parser. Rejected or unknown
 authentication and unstructured responses remain insufficient.
@@ -175,6 +190,8 @@ authentication and unstructured responses remain insufficient.
 and discovery path to Source creation, including idempotent terminal polling.
 Missing-model validation succeeds; credential rejection, rate limiting, upstream
 errors, and unstructured success responses create no Source.
+Identical validation responses for candidate/control credentials also create no
+Source; the engine's local OAuth inventory is not an upstream authentication probe.
 
 ## Acceptance
 

@@ -510,10 +510,11 @@ class EngineAdapter(Protocol):
         ``protocol_order`` either enumerates Auto-detect probes or names one
         owner-constrained protocol. A returned protocol may be established by
         a protocol-shaped upstream response, by a shipped API-key vendor pin,
-        or by a concrete `custom` declaration. The latter two require a
-        response from that exact path plus the September 4, 2026 auth ladder:
-        401/403 reject, while 2xx and request-error 400/404/422 accept even
-        if the response shape itself stays generic. `custom` Auto detect still
+        or by a concrete `custom` declaration. Authentication requires a
+        credential-sensitive response, not schema validation alone: a control
+        credential must be rejected on the protocol path, or on a protected
+        model-list path that accepts the candidate. Public inventory and the
+        inventory waiver cannot establish authentication. `custom` Auto still
         requires response-backed proof; order alone never proves a protocol.
         OpenAI/Codex Hub OAuth can combine its bound, fixed Responses endpoint
         with an authenticated structured request error; neither OAuth success
