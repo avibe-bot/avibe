@@ -2,6 +2,7 @@ import * as React from 'react';
 import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { Check, Copy } from 'lucide-react';
@@ -212,7 +213,10 @@ export const Markdown: React.FC<{
   // never reaches here to begin with — this is defence in depth + correctness for
   // the editor-preview caller that lacks that wrapper.)
   const remarkPlugins = React.useMemo(
-    () => (softBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]),
+    // CJK punctuation can touch emphasis markers without spaces between words.
+    () => (softBreaks
+      ? [remarkGfm, remarkCjkFriendly, remarkBreaks]
+      : [remarkGfm, remarkCjkFriendly]),
     [softBreaks],
   );
   const components = React.useMemo<Components>(
