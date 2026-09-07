@@ -215,7 +215,7 @@ describe('AddApiKeyDialog', () => {
   it('saves only a selected interface as unverified without observing', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
-      source: { ...source, verification_pending: true }, added_to: [], adopted_by: [],
+      source: { ...source, verification_pending: 'vp_0123456789abcdef0123456789abcdef' }, added_to: [], adopted_by: [],
     });
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
@@ -233,7 +233,7 @@ describe('AddApiKeyDialog', () => {
   it('retains unverified consent and nonce while reconciling an unknown write', async () => {
     const create = vi.spyOn(modelsApi, 'createApiKeySource')
       .mockRejectedValueOnce(new Error('Connection interrupted'))
-      .mockResolvedValue({ source: { ...source, verification_pending: true }, added_to: [], adopted_by: [] });
+      .mockResolvedValue({ source: { ...source, verification_pending: 'vp_0123456789abcdef0123456789abcdef' }, added_to: [], adopted_by: [] });
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
     const { onAdded } = renderDialog();

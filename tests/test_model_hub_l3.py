@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import inspect
 import json
 import re
@@ -743,6 +744,11 @@ class MemoryStore:
 
     def requested_model(self, backend: str) -> str:
         return self.requested_models.get(backend, "")
+
+    def mutate(self, mutator):
+        config = copy.deepcopy(self.config)
+        if mutator(config):
+            self.save(config)
 
 
 class _EngineObservation:

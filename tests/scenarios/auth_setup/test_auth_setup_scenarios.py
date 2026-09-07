@@ -63,6 +63,7 @@ from vibe.claude_config import (
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -2790,7 +2791,7 @@ def test_api_key_setup_does_not_schedule_a_model(
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
             assert h.source["models"] == []
-            assert h.source["verification_pending"] is True
+            assert h.source["verification_pending"]
             assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
 
         async def reject_invalid_key(h):
@@ -2837,7 +2838,7 @@ def test_api_key_setup_does_not_schedule_a_model(
     ],
 )
 @pytest.mark.parametrize("validation_before_auth", [False, True])
-@pytest.mark.parametrize("vendor", ["openai", "anthropic"])
+@pytest.mark.parametrize("vendor", tuple(_OAUTH_ENDPOINTS))
 @pytest.mark.parametrize("credential_valid", [True, False])
 def test_hub_oauth_model_free_observation_closed_loop(
     monkeypatch, tmp_path, caplog, status, body, validation_before_auth, vendor, credential_valid,
@@ -2852,13 +2853,14 @@ def test_hub_oauth_model_free_observation_closed_loop(
     api_calls = []
     inventory_calls = []
     rejected = status == 401 or (not credential_valid and not (validation_before_auth and status == 400))
-    protocol = "openai_responses" if vendor == "openai" else "anthropic"
+    is_openai = vendor in {"openai", "codex"}
+    protocol = "openai_responses" if is_openai else "anthropic"
     if vendor == "anthropic" and "error" in body:
         body = {"type": "error", **body}
     signing_key = "test-oauth-signature-key-with-32-bytes"
     bound_token = (
         jwt.encode({"sub": "account-test", "exp": time.time() + (3600 if credential_valid else -3600)}, signing_key)
-        if vendor == "openai"
+        if is_openai
         else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
     )
     auth_name = "oauth-test.json"
@@ -2868,23 +2870,23 @@ def test_hub_oauth_model_free_observation_closed_loop(
         if path == "/auth-files":
             return {"files": [{
                 "id": "codex-test", "auth_index": "auth-index-test",
-                "name": auth_name, "provider": "codex" if vendor == "openai" else "claude",
+                "name": auth_name, "provider": "codex" if is_openai else "claude",
                 "id_token": {"chatgpt_account_id": "account-test"},
             }]}
         if path == "/api-call":
             assert method == "POST"
             assert payload["auth_index"] == "auth-index-test"
             assert payload["url"] == (
-                "https://chatgpt.com/backend-api/codex/responses" if vendor == "openai"
+                "https://chatgpt.com/backend-api/codex/responses" if is_openai
                 else "https://api.anthropic.com/v1/messages?beta=true"
             )
-            if vendor == "openai":
+            if is_openai:
                 assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
             assert "model" not in json.loads(payload["data"])
             api_calls.append(payload)
             token = payload["header"]["Authorization"].removeprefix("Bearer ").replace("$TOKEN$", bound_token)
             try:
-                if vendor == "openai":
+                if is_openai:
                     jwt.decode(token, options={"verify_signature": False})
                 elif not re.fullmatch(r"sk-ant-oat01-[a-z-]+", token):
                     raise ValueError("Malformed opaque token")
@@ -2893,7 +2895,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
             if validation_before_auth and status == 400:
                 return {"status_code": status, "body": json.dumps(body)}
             try:
-                if vendor == "openai":
+                if is_openai:
                     jwt.decode(token, signing_key, algorithms=["HS256"])
                 elif token != "sk-ant-oat01-test-valid":
                     raise ValueError("Invalid opaque token")
@@ -2936,7 +2938,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
         assert source["protocol"] == protocol
         assert source["supply_channel"] == "hub"
         assert source["credential_ref"] == h.credential_ref
-        assert source["verification_pending"] is True
+        assert source["verification_pending"]
         assert source["state"]["status"] == ("needs_action" if rejected else "standby")
         assert [model["id"] for model in source["models"]] == ([] if rejected else ["gpt-5.6"])
         assert service.list_sources() == [source]

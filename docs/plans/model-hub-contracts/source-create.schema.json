@@ -61,6 +61,13 @@
       "base_url": "https://relay.example/v1",
       "key": "<transient plaintext key>",
       "protocol": "openai_chat",
+      "accept_unavailable_inventory": true
+    },
+    {
+      "vendor": "custom",
+      "base_url": "https://relay.example/v1",
+      "key": "<transient plaintext key>",
+      "protocol": "openai_chat",
       "save_unverified": true
     }
   ]

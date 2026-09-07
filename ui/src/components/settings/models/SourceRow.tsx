@@ -33,7 +33,7 @@ export const SourceRow: React.FC<{
     known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
-    verificationPending: source.verification_pending,
+    verificationPending: Boolean(source.verification_pending),
   });
   const kindKey = source.supply_channel === 'native_cli'
     ? 'nativeCredential'

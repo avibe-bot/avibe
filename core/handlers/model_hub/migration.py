@@ -67,6 +67,9 @@ class MigrationHost(Protocol):
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig: ...
 
+    @staticmethod
+    def _mark_source_unverified(source: ModelHubSourceConfig) -> None: ...
+
     async def _engine_call(self, awaitable: Awaitable[Any]) -> Any: ...
 
     async def _commit_synced(
@@ -824,6 +827,8 @@ async def apply_native_migration(
                         )
                     except (TypeError, ValueError):
                         raise MigrationConflictError from None
+                if source.supply_channel == "hub":
+                    host._mark_source_unverified(source)
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
 

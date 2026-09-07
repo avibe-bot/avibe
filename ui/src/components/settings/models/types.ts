@@ -130,8 +130,8 @@ export type Source = {
   supply_channel: SupplyChannel;
   billing: 'monthly' | 'metered';
   state: SourceState;
-  /** Saved configuration whose current credential has not completed a model call. */
-  verification_pending?: boolean;
+  /** Opaque pending-verification identity; presence means no successful model call yet. */
+  verification_pending?: string | null;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */

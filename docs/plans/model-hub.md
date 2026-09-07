@@ -375,12 +375,16 @@ model-free observation uses the existing allowlisted auth-index transport and to
 substitution, not private-token reads. Explicit upstream credential rejection retains
 the existing needs-action state. Native CLI OAuth is unchanged.
 
-`Source.verification_pending` is optional persisted metadata, independent of health
-and routing eligibility. Source list/detail use the existing advisory treatment for
-this marker instead of healthy/in-use copy. Inventory discovery never clears it.
-Only an actual successful current-credential model call, including the existing
-backend probe, clears it; superseded attempts cannot verify replacement material.
-Credential/endpoint replacement sets it again. Legacy Sources retain their existing
+`Source.verification_pending` is one optional persisted opaque identity, independent
+of health and routing eligibility. Every newly stored Hub credential gets a marker,
+including observed creates and native-config imports. Source list/detail use the
+existing advisory treatment instead of healthy/in-use copy. Inventory never clears it.
+A call captures the marker before invocation; any successful same-credential call
+with that marker, including the existing backend probe, clears it in a fresh shared
+config transaction. Later same-credential attempts do not invalidate success.
+Credential/endpoint replacement generates a new marker even when OAuth reuses the
+same handle, so old calls cannot verify replacement material across processes.
+Legacy Sources retain their existing
 state without retroactive verification claims. Successful verification of one call
 does not promise that every model or operation is supported.
 

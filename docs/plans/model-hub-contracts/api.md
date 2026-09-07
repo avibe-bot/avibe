@@ -115,12 +115,16 @@ existing uncertain health projection.
 Explicit `save_unverified: true` instead saves the catalog-pinned or user-declared
 interface without upstream observation or discovery. Custom Auto without a declaration
 is rejected before credential provisioning. Manual models remain manual; no inventory
-is invented. The Source carries `verification_pending: true`, independently of its
+is invented. The Source carries an opaque `verification_pending` marker, independently of its
 routing health, and may be configured and invoked. List/detail surfaces label it
 unverified, not healthy/in use. Successful inventory discovery never clears this flag.
-Only a successful actual invocation of the same current credential clears it; stale
-attempts and failed calls cannot verify a replacement. Credential/endpoint replacement
-sets it again. Existing Sources lacking the optional flag retain their existing state.
+Every newly stored Hub credential starts pending, including observed creates and
+native-config imports. A call captures the persisted marker before invocation; any
+successful call using the same current credential and marker clears it through a
+fresh cross-process config transaction. Newer same-credential attempts do not negate
+success. Credential/endpoint replacement generates a new marker, including same-handle
+OAuth reauthentication; old calls and failed calls cannot verify that replacement.
+Existing Sources lacking the optional marker retain their existing state.
 
 Completed Hub OAuth consent can likewise retain its bound credential under the fixed
 vendor protocol with verification pending. An explicit authentication rejection keeps

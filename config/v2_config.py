@@ -2829,7 +2829,7 @@ class ModelHubSourceConfig:
     credential_ref: Optional[str] = None
     account_label: Optional[str] = None
     masked_credential: Optional[str] = None
-    verification_pending: bool = False
+    verification_pending: Optional[str] = None
 
     @classmethod
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
@@ -2901,9 +2901,12 @@ class ModelHubSourceConfig:
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
-        verification_pending = payload.get("verification_pending", False)
-        if not isinstance(verification_pending, bool):
-            raise ValueError("Config 'model_hub.sources.verification_pending' must be boolean")
+        verification_pending = payload.get("verification_pending")
+        if verification_pending is not None and (
+            not isinstance(verification_pending, str)
+            or re.fullmatch(r"vp_[0-9a-f]{32}", verification_pending) is None
+        ):
+            raise ValueError("Config 'model_hub.sources.verification_pending' must be a verification marker")
         created_at = payload.get("created_at")
         client_nonce = (
             validate_model_hub_source_client_nonce(payload.get("client_nonce"))
@@ -2981,7 +2984,7 @@ class ModelHubSourceConfig:
         if self.client_nonce is not None:
             payload["client_nonce"] = self.client_nonce
         if self.verification_pending:
-            payload["verification_pending"] = True
+            payload["verification_pending"] = self.verification_pending
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
         return payload

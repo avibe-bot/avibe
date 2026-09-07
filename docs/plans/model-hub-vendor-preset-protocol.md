@@ -170,9 +170,12 @@ rejects a candidate. An unknown Auto sibling is not eliminated by another
 candidate's rejection. API-key observation remains model-free, non-redirecting
 and bounded by its deadline.
 
-Explicit unverified saves carry `verification_pending: true` independently of
-routing health. Inventory refresh never clears it; only an actual successful
-current-credential invocation does. Credential/endpoint replacement sets it again.
+Every newly stored Hub credential carries an opaque `verification_pending` marker
+independently of routing health, including observed creates and native-config imports.
+Inventory refresh never clears it. Any actual successful invocation whose captured
+marker and credential still match the fresh Source clears it inside the shared config
+transaction. Later same-credential attempts do not negate proof. Credential/endpoint
+replacement generates a new marker, including same-handle OAuth reauthentication.
 The Source remains configurable and invokable, but list/detail surfaces do not
 claim healthy/in-use status while verification is pending. The normal verified
 save path still requires response-backed authentication and protocol ownership.
