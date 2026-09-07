@@ -159,6 +159,7 @@ class _OpenCodeSteerState:
     reasoning_effort: Optional[str]
     system: Optional[str]
     baseline_message_ids: set[str]
+    catalog_accepted: Any = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closing: bool = False
     awaiting_after_message_ids: set[str] | None = None
@@ -685,6 +686,8 @@ class _SteeringAwareOpenCodeServer:
                 self._state.awaiting_active_status_observed = False
                 self._state.awaiting_result_confirmation_deadline = None
             await self._server.prompt_async(*args, **{k: v for k, v in kwargs.items() if k != "awaiting_after_ids"})
+            if kwargs.get("system") == self._state.system and self._state.catalog_accepted:
+                self._state.catalog_accepted()
             if snapshot_ids is not None:
                 self._state.awaiting_prompt_accepted = True
                 self._state.awaiting_prompt_activity_deadline = (
@@ -1555,6 +1558,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 )
             )
 
+            skill_catalog_sink: list[dict] = []
             system_prompt_injection = await asyncio.to_thread(
                 build_system_prompt_injection,
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
@@ -1571,6 +1575,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 skills_claude_cli_path=managed_skill_claude_cli_path(
                     getattr(getattr(self, "controller", None), "config", None)
                 ),
+                skill_catalog_sink=skill_catalog_sink,
             )
             if request.vibe_agent_system_prompt:
                 from core.prompt_registry import render_prompt
@@ -1660,6 +1665,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system=system_prompt_injection,
                 tools={"question": False, "skill": False},
             )
+            from core.skill_observability import accept_catalog
+
+            accept_catalog(self.controller, request.context, skill_catalog_sink[0] if skill_catalog_sink else None, backend="opencode")
             try:
                 read_prompt_started_at = getattr(server, "get_last_prompt_started_at", None)
                 prompt_started_at = (
@@ -1701,6 +1709,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort=reasoning_effort,
                 system=system_prompt_injection,
                 baseline_message_ids=set(baseline_message_ids),
+                catalog_accepted=lambda: accept_catalog(
+                    self.controller, request.context, skill_catalog_sink[0] if skill_catalog_sink else None,
+                    backend="opencode",
+                ),
                 awaiting_after_message_ids=set(baseline_message_ids),
                 awaiting_user_text=prompt_text,
                 awaiting_prompt_accepted=True,
@@ -2093,6 +2105,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 state.awaiting_after_message_ids = before_insert
                 state.awaiting_user_text = prompt_text
                 state.awaiting_prompt_accepted = True
+                if state.catalog_accepted:
+                    state.catalog_accepted()
                 state.awaiting_prompt_activity_deadline = (
                     time.monotonic()
                     + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS

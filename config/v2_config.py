@@ -1014,7 +1014,7 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
         if not path.startswith(prefix):
             return None
         field_name = path[len(prefix) :].split(".", 1)[0]
-        return field_name if field_name in _RUNTIME_RETENTION_FIELDS else None
+        return field_name if field_name in _RUNTIME_RETENTION_FIELDS or field_name == "skill_observability_enabled" else None
     if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return None
     match = re.search(r"Config '([^']+)'", str(error))
@@ -1181,13 +1181,16 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
 
 
 def _recover_runtime_field(payload: dict, field_name: Optional[str]) -> bool:
-    """Repair one retention field without discarding the runtime section."""
+    """Repair one retention or collection field without discarding runtime."""
 
-    if field_name not in _RUNTIME_RETENTION_FIELDS:
+    if field_name not in _RUNTIME_RETENTION_FIELDS and field_name != "skill_observability_enabled":
         return False
     runtime = payload.get("runtime")
     if not isinstance(runtime, dict):
         return False
+    if field_name == "skill_observability_enabled":
+        runtime[field_name] = False
+        return True
     # A recovered policy is disabled even if the other retention field looked
     # valid. The warning attached by ``V2Config.load`` keeps all automatic and
     # status consumers fail-closed until the operator repairs the file.
@@ -2417,8 +2420,11 @@ class RuntimeConfig:
     # ``vibe data retention`` section of the CLI reference (avibe-docs).
     agent_events_trace_retention_enabled: bool = True
     agent_events_trace_retention_days: int = 30
+    skill_observability_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.skill_observability_enabled, bool):
+            raise ValueError("Config 'runtime.skill_observability_enabled' must be a boolean")
         self.show_page_api_timeout_seconds = _named_value(
             "runtime.show_page_api_timeout_seconds",
             float,
@@ -4449,6 +4455,7 @@ class V2Config:
                 "harness_prompt_echo": self.runtime.harness_prompt_echo,
                 "agent_events_trace_retention_enabled": self.runtime.agent_events_trace_retention_enabled,
                 "agent_events_trace_retention_days": self.runtime.agent_events_trace_retention_days,
+                "skill_observability_enabled": self.runtime.skill_observability_enabled,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,

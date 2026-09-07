@@ -24,6 +24,35 @@ from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock, UserMessage
 
 
+async def test_skill_catalog_is_offered_once_per_accepted_claude_client(monkeypatch):
+    controller = _StubController()
+    client = SimpleNamespace(query=AsyncMock(), _vibe_pending_skill_catalog={"entries": []})
+    controller.session_handler.get_or_create_claude_session = AsyncMock(return_value=client)
+    agent = ClaudeAgent(controller)
+    agent._prepare_message_with_files = lambda request: request.message
+    agent._delete_ack = AsyncMock()
+    agent._receive_messages = AsyncMock()
+    accepted = Mock()
+    monkeypatch.setattr("core.skill_observability.accept_catalog", accepted)
+    context = SimpleNamespace(platform_specific={"agent_session_id": "ses"})
+    request = SimpleNamespace(
+        context=context, message="hello", working_path="/fixture", base_session_id="ses",
+        composite_session_id="runtime", session_key="scope", subagent_name=None,
+        subagent_model=None, subagent_reasoning_effort=None, ack_message_id=None,
+        ack_reaction_message_id=None, ack_reaction_emoji=None, files=None,
+    )
+    await agent.handle_message(request)
+    await asyncio.sleep(0)
+    assert accepted.call_args.args[2] == {"entries": []}
+    assert client._vibe_pending_skill_catalog is None
+    await agent.handle_message(request)
+    await asyncio.sleep(0)
+    # The helper gets no candidate on reuse and therefore cannot enqueue an event.
+    assert accepted.call_args.args[2] is None
+    for task in controller.receiver_tasks.values():
+        await task
+
+
 class _StubSessions:
     @staticmethod
     def list_agent_sessions(settings_key, agent_name):

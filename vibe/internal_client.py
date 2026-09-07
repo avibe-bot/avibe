@@ -298,6 +298,26 @@ def publish_event_sync(
         raise InternalServerUnavailable(str(exc)) from exc
 
 
+def record_skill_observation_sync(
+    observation: dict[str, Any], *, socket_path: Optional[Path] = None,
+    timeout: float = 0.25,
+) -> dict[str, Any]:
+    """Best-effort queue submission; the response is not a durable receipt."""
+    target = _verified_socket_path(socket_path)
+    try:
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(target)),
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout),
+        ) as client:
+            response = client.post("/internal/skill-observations", json=observation)
+            if response.status_code != 202:
+                raise InternalServerUnavailable("Skill observation rejected")
+            return response.json()
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable("Skill observation transport unavailable") from exc
+
+
 async def dispatch_async(
     payload: dict[str, Any],
     *,

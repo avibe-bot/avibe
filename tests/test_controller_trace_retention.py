@@ -208,6 +208,11 @@ def test_retention_pass_never_vacuums(monkeypatch) -> None:
 
     class _FakeRetention:
         @staticmethod
+        def run_skill_retention(engine, **kwargs):
+            captured["skill_retention"] = True
+            return {"events": 0, "daily_rows": 0}
+
+        @staticmethod
         def run_once(engine, *, retention_days, compact=True, **kwargs):
             captured["compact"] = compact
             captured["days"] = retention_days

@@ -1522,12 +1522,14 @@ class SessionHandler(BaseHandler):
         # Always append avibe system prompt injection so transport
         # capabilities remain available; reply_enhancements only controls
         # quick-reply button instructions.
+        skill_catalog_sink: list[dict] = []
         final_system_prompt = await self._build_claude_system_prompt(
             context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            skill_catalog_sink=skill_catalog_sink,
             working_path=working_path,
         )
 
@@ -1636,6 +1638,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_pending_skill_catalog", skill_catalog_sink[0] if skill_catalog_sink else None)
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(
@@ -1744,6 +1747,7 @@ class SessionHandler(BaseHandler):
         session_anchor: str,
         agent_system_prompt: Optional[str],
         working_path: Optional[str] = None,
+        skill_catalog_sink: list[dict] | None = None,
     ) -> str | Dict[str, str]:
         base_prompt = agent_system_prompt or self.config.claude.system_prompt
         quick_replies_on = getattr(self.config, "reply_enhancements", True)
@@ -1772,6 +1776,7 @@ class SessionHandler(BaseHandler):
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
             skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
+            skill_catalog_sink=skill_catalog_sink,
         )
 
         if base_prompt:

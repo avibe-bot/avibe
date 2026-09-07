@@ -202,6 +202,7 @@ def build_system_prompt_blocks(
     skills_cwd: str | Path | None = None,
     skills_project_base: str | Path | None = None,
     skills_claude_cli_path: str | None = None,
+    skill_catalog_sink: list[dict[str, Any]] | None = None,
 ) -> list[RenderedPromptBlock]:
     """The production composition, also exported by the debug command."""
 
@@ -255,6 +256,13 @@ def build_system_prompt_blocks(
         from core.managed_skills import render_skill_catalog_blocks
 
         blocks.extend(render_skill_catalog_blocks(skills))
+        if skill_catalog_sink is not None:
+            try:
+                from core.skill_observability import catalog_result
+
+                skill_catalog_sink.append(catalog_result(skills, entry_point="runtime_prompt"))
+            except Exception:
+                logger.info("Skill catalog observation unavailable during prompt preparation")
     if context is not None:
         platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
         if _is_web_platform(platform):

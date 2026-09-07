@@ -1,17 +1,16 @@
 """Bounded retention for internal agent trace events (avibe#1506 lane B).
 
-This module is the single owner of ``agent_events`` deletion policy. The
-eligibility property, defined once here and shared by planning, execution,
-and tests:
+This module owns automatic ``agent_events`` retention. Tool-trace retention
+and Skill retention have independent allowlists and time windows. The tool
+eligibility property, shared by planning, execution, and tests:
 
     Only parseable rows with ``event_type='tool_call'`` AND
     ``visibility='trace'`` AND ``created_at`` strictly older than the retention
     cutoff are ever removable. Unparseable timestamps are preserved.
 
-Everything else — user messages (a separate table), message deliveries,
-session/run records, Vault audit data, non-trace events, and newer traces —
-is preserved by construction: no code path in this module deletes a row
-outside the predicate, regardless of caller.
+``run_skill_retention`` separately removes only the two Skill trace types and
+expired Skill daily buckets. User messages, deliveries, session/run records,
+Vault audit data, non-trace events, and newer traces remain untouched.
 
 Operational shape:
 
@@ -42,7 +41,7 @@ from sqlalchemy import Engine, LargeBinary, delete, func, select, cast
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.engine import Connection
 
-from storage.models import agent_events, state_meta
+from storage.models import agent_events, skill_usage_daily, state_meta
 from vibe.trace_retention_policy import (
     MAX_RETENTION_DAYS,
     MIN_RETENTION_DAYS,
@@ -64,6 +63,37 @@ VACUUM_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
 
 RETENTION_MARKER_KEY = "agent_events_trace_retention.last_run"
 RETENTION_LEASE_KEY = "agent_events_trace_retention.lease"
+
+
+def run_skill_retention(engine: Engine, *, now=None, cancel_event=None, max_batches: int = 10) -> dict:
+    """Independent fixed retention, on the existing maintenance worker.
+
+    Each pass is bounded; concurrent passes are harmless because selection and
+    deletion share one statement. No rebuild from raw events and no VACUUM.
+    """
+    from storage.skill_observability import DAILY_RETENTION_DAYS, RAW_RETENTION_DAYS, SKILL_TRACE_FILTER
+
+    instant = now or _utc_now()
+    raw_cutoff = _iso(instant - timedelta(days=RAW_RETENTION_DAYS))
+    daily_cutoff = (instant.astimezone(timezone.utc).date() - timedelta(days=DAILY_RETENTION_DAYS - 1)).isoformat()
+    targets = (
+        (agent_events, SKILL_TRACE_FILTER
+         & func.datetime(agent_events.c.created_at).is_not(None)
+         & (agent_events.c.created_at < raw_cutoff)),
+        (skill_usage_daily, skill_usage_daily.c.day < daily_cutoff),
+    )
+    deleted = {"events": 0, "daily_rows": 0}
+    for key, (table, predicate) in zip(deleted, targets):
+        for _ in range(max_batches):
+            if cancel_event is not None and cancel_event.is_set():
+                return deleted
+            with engine.begin() as conn:
+                ids = select(table.c.id).where(predicate).limit(DELETE_BATCH_ROWS)
+                count = conn.execute(table.delete().where(table.c.id.in_(ids))).rowcount
+            deleted[key] += count
+            if count < DELETE_BATCH_ROWS:
+                break
+    return deleted
 
 
 @dataclass(frozen=True)
