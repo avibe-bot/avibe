@@ -60,6 +60,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import string
 import subprocess
 import sys
 import tempfile
@@ -798,6 +799,8 @@ CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
 # that a table whose constraints cannot be satisfied this way is given up on rather than
 # searched for. Reached only on the tables that refuse the first row at all.
 SEED_ATTEMPTS = 60
+# Shape proposals are witnesses, not an invitation to allocate arbitrary declared widths.
+SEED_TEXT_LIMIT = 4096
 
 # Where `varied` records a row's step inside a JSON document. Nothing reads it back; it is
 # there so the document differs while staying a document, and it is namespaced so it cannot
@@ -938,6 +941,92 @@ def json_proposals(
             document = f"json_set({document}, ?, {term})"
             parameters.extend([path, value])
         proposals.append((column, str(connection.execute(f"select {document}", parameters).fetchone()[0])))
+    return proposals
+
+
+def glob_witness(connection: sqlite3.Connection, pattern: str) -> str | None:
+    """Offer one finite witness, using SQLite itself to interpret character classes."""
+    parts = []
+    for token in re.findall(r"\[[^]]+\]|.", pattern, re.DOTALL):
+        if token == "*":
+            continue
+        if token == "?" or token.startswith("["):
+            accepted = next(
+                (char for char in string.printable if connection.execute("select ? glob ?", (char, token)).fetchone()[0]),
+                None,
+            )
+            if accepted is None:
+                return None
+            parts.append(accepted)
+        else:
+            parts.append(token)
+    witness = "".join(parts)
+    return witness if connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] else None
+
+
+def shape_proposals(
+    connection: sqlite3.Connection,
+    expression: str,
+    required: list[tuple[str, str]],
+    values: dict[str, object],
+) -> list[tuple[str, object]]:
+    """Derive bounded text-shape and numeric candidates from the rejected CHECK.
+
+    This extends the literal/JSON proposals, not the seeder's coverage claim. Unsupported
+    expressions still fail visibly; every proposed value must survive a real insert.
+    """
+    text = {name: value for name, value in values.items() if isinstance(value, str)}
+    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', expression, re.IGNORECASE):
+        if name in text and int(width) <= SEED_TEXT_LIMIT:
+            text[name] = text[name][: int(width)].ljust(int(width), "0")
+    for name, negated, quoted in re.findall(
+        r"\b\"?(\w+)\"?\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
+        expression,
+        re.IGNORECASE,
+    ):
+        if name not in text:
+            continue
+        pattern = quoted.replace("''", "'")
+        if not negated:
+            witness = glob_witness(connection, pattern)
+            if witness is not None:
+                text[name] = witness
+        elif pattern.startswith("*[^") and pattern.endswith("]*"):
+            allowed = [
+                char
+                for char in string.printable
+                if not connection.execute("select ? glob ?", (char, pattern)).fetchone()[0]
+            ]
+            if allowed:
+                text[name] = "".join(char if char in allowed else allowed[0] for char in text[name])
+    for name, start, width, other in re.findall(
+        r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*"?(\w+)"?',
+        expression,
+        re.IGNORECASE,
+    ):
+        if name in text and isinstance(values.get(other), str) and 0 < int(start) <= SEED_TEXT_LIMIT:
+            offset, size = int(start) - 1, int(width)
+            source = text.get(other, str(values[other]))
+            if len(source) == size:
+                text[name] = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
+    proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
+    bounds = {int(value) for value in re.findall(r"(?<![\w.])-?\d+(?![\w.])", expression)}
+    projection = ", ".join(
+        f'cast(? as {declared}) as "{name}"' if declared else f'? as "{name}"'
+        for name, declared in required
+    )
+    for name, declared in required:
+        if "INT" in declared.upper() and re.search(rf"\b{re.escape(name)}\b", expression):
+            for candidate in dict.fromkeys(value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)):
+                parameters = [candidate if column == name else values[column] for column, _ in required]
+                try:
+                    accepted = connection.execute(f"select ({expression}) from (select {projection})", parameters).fetchone()[0]
+                except sqlite3.OperationalError:
+                    # An omitted/defaulted column may prevent evaluating the standalone CHECK.
+                    # Leave that case to the existing insert path and its visible refusal.
+                    continue
+                if accepted:
+                    proposals.append((name, candidate))
     return proposals
 
 
@@ -1214,7 +1303,7 @@ def insert_seed_row(
     placeholders = ", ".join("?" for _ in required)
     statement = f'insert into "{table}" ({columns}) values ({placeholders})'
     names = [column for column, _ in required]
-    proposed: set[tuple[str, str]] = set()
+    proposed: set[tuple[str, object]] = set()
     objection = ""
     for _ in range(SEED_ATTEMPTS):
         try:
@@ -1231,10 +1320,11 @@ def insert_seed_row(
             untried = [
                 pair
                 for pair in [
+                    *shape_proposals(connection, expression, required, values),
                     *check_proposals(expression, names),
                     *json_proposals(connection, expression, names),
                 ]
-                if pair not in proposed
+                if pair not in proposed and values[pair[0]] != pair[1]
             ]
             if not untried:
                 return objection, True

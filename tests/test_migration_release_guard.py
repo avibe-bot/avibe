@@ -966,6 +966,80 @@ def test_a_repeat_the_rows_do_not_carry_is_a_violation_however_it_got_there():
         connection.close()
 
 
+def test_current_schema_gets_valid_rows_in_every_table(tmp_path):
+    """New constrained tables must be seedable even before their first release tag exists."""
+    db_path = tmp_path / "vibe.sqlite"
+    guard.run_migrations(db_path)
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            name
+            for (name,) in connection.execute(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+            )
+            if name != guard.ALEMBIC_BOOKKEEPING_TABLE
+        }
+        assert tables == guard.HEAD_TABLES
+        for table in tables:
+            assert connection.execute(f'select count(*) from "{table}"').fetchone()[0] >= guard.SEED_ROWS, table
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+        assert connection.execute("pragma foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("minimum", [0, 4])
+def test_shape_repairs_follow_constraints_not_column_names(tmp_path, minimum):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"""
+            create table shaped (
+                id integer primary key,
+                a text not null,
+                b text not null,
+                c text not null,
+                d integer not null,
+                e integer not null,
+                constraint ck_a check (a glob 'R-[A-C][0-9]'),
+                constraint ck_b check (length(b) = 12 and b not glob '*[^0-9a-f]*'),
+                constraint ck_c check (length(c) = 9 and substr(c, 1, 4) = a),
+                constraint ck_counts check (typeof(d) = 'integer' and d >= 0
+                    and typeof(e) = 'integer' and e >= 0 and d + e > {minimum}
+                    and (d = 0 or c = ''))
+            )
+        """)
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+def test_numeric_candidates_use_the_column_affinity():
+    with sqlite3.connect(":memory:") as connection:
+        proposals = guard.shape_proposals(connection, "n > '0'", [("n", "INTEGER")], {"n": 0})
+        assert ("n", 1) in proposals
+        assert ("n", -1) not in proposals
+
+
+def test_unsupported_shapes_remain_a_visible_seed_failure(tmp_path):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"""
+            create table oversized (id integer primary key, value text not null,
+                constraint ck_width check (length(value) = {guard.SEED_TEXT_LIMIT + 1}))
+        """)
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert "ck_width" in short["oversized"]
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from oversized").fetchone()[0] == 0
+
+
 @requires_release_history
 def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch):
     """The seeding is only worth anything if the upgrade under test is the thing it precedes.
