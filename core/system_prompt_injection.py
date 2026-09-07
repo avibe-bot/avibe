@@ -192,7 +192,6 @@ def _context_block(
 def build_system_prompt_blocks(
     *,
     include_quick_replies: bool = True,
-    include_show_pages: bool = True,
     include_codex_generated_images: bool = False,
     include_context_guidance: bool = True,
     memory_enabled: bool = False,
@@ -214,8 +213,6 @@ def build_system_prompt_blocks(
             project_base=skills_project_base,
             claude_cli_path=skills_claude_cli_path,
         )
-        if not include_show_pages:
-            skills = [skill for skill in skills if skill.name != "use-show-pages"]
 
     advertisable_skills = [] if skills is None else [skill for skill in skills if not skill.disable_model_invocation]
     vault_skill_available = any(
@@ -234,8 +231,7 @@ def build_system_prompt_blocks(
     blocks.append(render_prompt_block("base-capabilities-body"))
     if include_codex_generated_images:
         blocks.append(_codex_generated_images_block())
-    if include_show_pages and context is not None:
-        blocks.append(render_prompt_block("show-pages-prompt"))
+    blocks.append(render_prompt_block("show-pages-prompt"))
     if include_quick_replies:
         blocks.append(render_prompt_block("quick-replies-prompt"))
     if vault_skill_available:

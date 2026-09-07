@@ -138,7 +138,6 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
         "backend": backend,
         "options": {
             "include_quick_replies": False,
-            "include_show_pages": False,
             "include_codex_generated_images": False,
             "include_context_guidance": False,
         },
@@ -148,7 +147,7 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
     if backend == "codex":
         blocks = blocks[1:-1]
     assert [block["id"] for block in blocks] == [
-        "base-capabilities-intro", "agent-working-principles", "base-capabilities-body",
+        "base-capabilities-intro", "agent-working-principles", "base-capabilities-body", "show-pages-prompt",
     ]
     assert blocks[1]["text"] == prompt_text("agent-working-principles")
     assert rendered == render_prompt_context(request)
@@ -287,7 +286,7 @@ def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys
     ({"context": {"user_id": "u", "channel_id": "c", "unknown": 1}}, "options.context.unknown", "unknownField"),
     ({"context": {"user_id": "u"}}, "options.context.channel_id", "invalidField"),
     ({"memory_enabled": "false"}, "options.memory_enabled", "invalidField"),
-    ({"include_show_pages": []}, "options.include_show_pages", "invalidField"),
+    ({"include_show_pages": False}, "options.include_show_pages", "unknownField"),
     ({"enabled_agents": 123}, "options.enabled_agents", "invalidField"),
     ({"unknown": True}, "options.unknown", "unknownField"),
 ])

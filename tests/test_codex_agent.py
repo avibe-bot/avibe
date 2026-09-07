@@ -1969,7 +1969,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             developer_instructions,
         )
 
-    async def test_start_thread_omits_show_pages_prompt_when_disabled(self):
+    async def test_start_thread_includes_show_pages_despite_legacy_opt_out(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             config=SimpleNamespace(platform="slack", reply_enhancements=True, show_pages_prompt=False)
@@ -2003,7 +2003,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("# Avibe", developer_instructions)
         self.assertIn("## Quick-reply buttons", developer_instructions)
         self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
-        self.assertNotIn("## Show Pages", developer_instructions)
+        self.assertIn("## Show Pages", developer_instructions)
+        self.assertIn("load the `use-show-pages` Skill", developer_instructions)
         self.assertNotIn("vibe show path", developer_instructions)
 
     async def test_resume_thread_refreshes_developer_instructions_without_appending(self):

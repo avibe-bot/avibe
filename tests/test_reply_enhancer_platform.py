@@ -229,7 +229,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("load the `use-avibe-harness` Skill", prompt)
         self.assertNotIn("No enabled Agents", prompt)
 
-    def test_prompt_can_exclude_show_pages(self):
+    def test_show_pages_remain_when_quick_replies_are_disabled(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -242,13 +242,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
         ):
             prompt = build_system_prompt_injection(
-                include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
                 skills_cwd=Path("/tmp/project"),
             )
 
-        self.assertNotIn("## Show Pages", prompt)
+        self.assertIn("## Show Pages", prompt)
+        self.assertNotIn("## Quick-reply buttons", prompt)
         self.assertIn("## Harness", prompt)
         self.assertNotIn("## Scheduled tasks, watches, and hooks", prompt)
         self.assertIn("Current session id: `sesk8m4q2p7x`", prompt)
@@ -1980,7 +1980,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("injects the current Cloud-availability guidance", skill)
         self.assertNotIn("Avibe Cloud is not connected", skill)
 
-    def test_disabled_show_pages_are_not_advertised_through_the_skill_catalog(self):
+    def test_show_pages_guidance_and_skill_catalog_are_advertised_together(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -2007,14 +2007,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             patch("core.managed_skills.resolve_skills", return_value=skills),
         ):
             prompt = build_system_prompt_injection(
-                include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
                 skills_cwd=Path("/tmp/project"),
             )
 
-        self.assertNotIn("load the `use-show-pages` Skill", prompt)
-        self.assertNotIn("- use-show-pages:", prompt)
+        self.assertIn("load the `use-show-pages` Skill", prompt)
+        self.assertIn("- use-show-pages:", prompt)
         self.assertIn("- use-avibe-vault:", prompt)
 
     def test_required_skill_routes_remain_when_catalog_entries_are_manual_only(self):

@@ -629,7 +629,7 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
     assert "Use the release-reviewer Vibe Agent policy." in prompt
 
 
-def test_session_handler_omits_show_pages_prompt_when_disabled(
+def test_session_handler_includes_show_pages_despite_legacy_opt_out(
     monkeypatch, tmp_path: Path
 ) -> None:
     captured: dict[str, Any] = {}
@@ -656,7 +656,8 @@ def test_session_handler_omits_show_pages_prompt_when_disabled(
     assert captured["connected"] is True
     assert "# Avibe" in prompt
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "## Show Pages" not in prompt
+    assert "## Show Pages" in prompt
+    assert "load the `use-show-pages` Skill" in prompt
     assert "vibe show path" not in prompt
 
 
