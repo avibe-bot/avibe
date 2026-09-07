@@ -117,7 +117,6 @@ from vibe.model_hub_runtime.adapter import (
 from vibe.model_hub_runtime.api_key_vendors import (
     api_key_vendor_catalog,
     catalog_api_key_vendor_label,
-    pinned_api_key_protocol,
 )
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore

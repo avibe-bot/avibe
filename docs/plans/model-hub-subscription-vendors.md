@@ -128,10 +128,11 @@ gateway's engine client already speaks is what makes all three converge.
 This table is independent of `api_key_vendors.json`, and since 2026-09-08 the
 two disagree for `xai`: the catalog pins the protocol Avibe speaks to a
 vendor's *public* API with a key it holds, while this one names the surface the
-engine serves a credential it holds itself. `_validate_source_target` no longer
-reads the catalog pin for an engine-held credential — that Source has no
-upstream URL to resolve, so the requirement it enforces was never about this
-channel — and each pin is now admitted on its own terms.
+engine serves a credential it holds itself. Nothing reconciles them when a
+Source is projected. `_validate_source_target` reads no protocol pin at all
+now, from either table — it asks only whether the Source's upstream can be
+resolved, which is the one question the renderer downstream of it asks — so
+each pin is admitted on its own terms.
 
 **Semantics.** These rungs prove no response shape. Reachability and
 authentication follow the engine-managed flow that just completed: the engine

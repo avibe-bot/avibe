@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
-from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
 
 
 logger = logging.getLogger(__name__)
@@ -601,6 +601,16 @@ def _validated_base_url(value: str | None) -> str | None:
         raise EngineStateError("invalid source base URL")
 
 
+# `_append_source` raises these same three strings when it reaches a Source whose
+# upstream it cannot resolve. The check below is the earlier refusal of that one
+# condition, so it answers with the message the renderer would have.
+_MISSING_BASE_URL_ERRORS = {
+    "anthropic": "Anthropic-compatible source requires a base URL",
+    "openai_responses": "Responses API source requires a base URL",
+    "openai_chat": "OpenAI-compatible source requires a base URL",
+}
+
+
 def _validate_source_target(
     vendor: str,
     protocol: str,
@@ -610,37 +620,30 @@ def _validate_source_target(
 ) -> None:
     """Reject a Source whose upstream this runtime cannot resolve.
 
-    The base-URL requirement is a fact about an api-key Source: the credential is
-    rendered into the engine YAML against a URL, so a Source that omits one is
-    only reachable when the shipped api-key catalog pins an official URL for that
-    protocol. An engine-held credential has no upstream to resolve — the auth file
-    stays inside the engine, `_append_source` never renders it, and `sync_sources`
-    already requires ``base_url is None`` — so the api-key pin says nothing about
-    it, and a subscription served on its own protocol is admitted here whatever
-    the same vendor's api-key channel is pinned to.
+    This asks exactly what `_append_source` asks when it renders the YAML: an
+    api-key Source is reachable over its own ``base_url``, or over the official
+    one the shipped catalog holds for its vendor, and over nothing else.
+
+    It deliberately does not compare the Source's protocol against that vendor's
+    catalog pin. Which protocols a vendor may be added as belongs to the create
+    path's proof ladder — a catalog pin, a client declaration on `custom`, or a
+    protocol-shaped response — and that decision was made when the Source was
+    saved. Re-deciding it here would judge a stored Source by a pin that can
+    change under it: a vendor repinned between releases would retroactively
+    invalidate the Sources its own earlier pin admitted. Since `sync_sources`
+    replaces the whole projection atomically, that verdict is not private to the
+    Source it falls on — it would take every other Source down with it.
+
+    An engine-held credential has no upstream to resolve at all: the auth file
+    stays inside the engine, `_append_source` returns before rendering it, and
+    `sync_sources` already requires ``base_url is None``. The requirement does
+    not reach it.
     """
 
     if credential_kind != "api_key":
         return
-    pinned_protocol = pinned_api_key_protocol(vendor)
-    if (
-        protocol == "anthropic"
-        and base_url is None
-        and vendor != "anthropic"
-        and pinned_protocol != "anthropic"
-    ):
-        raise EngineStateError("Anthropic-compatible source requires a base URL")
-    if (
-        protocol == "openai_responses"
-        and base_url is None
-        and vendor not in {"openai", "codex"}
-        and pinned_protocol != "openai_responses"
-    ):
-        raise EngineStateError("Responses API source requires a base URL")
-    if (
-        protocol == "openai_chat"
-        and base_url is None
-        and vendor != "openai"
-        and pinned_protocol != "openai_chat"
-    ):
-        raise EngineStateError("OpenAI-compatible source requires a base URL")
+    if base_url is not None:
+        return
+    if official_api_key_base_url(vendor) is not None:
+        return
+    raise EngineStateError(_MISSING_BASE_URL_ERRORS[protocol])

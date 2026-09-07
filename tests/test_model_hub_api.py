@@ -8494,6 +8494,28 @@ def test_source_empty_target_contract_fixture(case):
         _validate_source_target(case["vendor"], case["protocol"], None, credential_kind="api_key")
 
 
+def test_an_emptied_endpoint_is_judged_by_the_vendor_alone():
+    """Whether an emptied endpoint is admissible cannot depend on the protocol.
+
+    An emptied endpoint asks one question — does this runtime have an upstream to
+    reach the vendor over — and the answer is the official URL the shipped catalog
+    holds for it. Which protocols that vendor may be added as is the create path's
+    proof ladder to decide, and it decided when the Source was saved. A verdict
+    that also read the vendor's current protocol pin would revisit that decision on
+    every projection, so repinning a vendor between releases would invalidate the
+    Sources its own earlier pin admitted.
+
+    Asserted as agreement across each vendor's rows rather than by naming the
+    protocols, so a fourth protocol joins the property instead of escaping it.
+    """
+
+    by_vendor: dict[str, set[bool]] = {}
+    for case in SOURCE_EDIT_VALIDATION_CASES["empty_targets"]:
+        by_vendor.setdefault(case["vendor"], set()).add(case["server_valid"])
+    assert by_vendor
+    assert {vendor: verdicts for vendor, verdicts in by_vendor.items() if len(verdicts) != 1} == {}
+
+
 def test_source_display_names_reject_credential_material(tmp_path):
     service, store, adapter = _service(tmp_path)
     pasted_key = "sk-test-never-persist-this"
